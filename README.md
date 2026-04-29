@@ -36,21 +36,20 @@ bare-Node development, API and worker can still be run as separate processes.
 
 ## Architecture
 
-```
-                                                  +------------------+
-                                                  |  Solana JSON-RPC |
-                                                  +---------+--------+
-                                                            ^
-                                                            |
-  +---------------+      +----------+     +-----------+     |
-  |   Exporter    |      |   API    |     |  Worker   |-----+
-  | (e.g. 0base-) | ---> | (fastify)| <-- |  (jobs)   |
-  |  exporter     |      +----+-----+     +-----+-----+
-  +---------------+           |                 |          +-------------+
-                              v                 |
-                        +-----+-------+         |
-                        |  PostgreSQL | <-------+
-                        +-------------+
+```mermaid
+flowchart TD
+  rpc["Solana JSON-RPC"]
+  worker["Worker jobs<br/>leader schedules, getBlock, reconciliation"]
+  db[("PostgreSQL<br/>processed_blocks, epoch stats, validators")]
+  api["Fastify API<br/>read-only queries"]
+  ui["SvelteKit UI"]
+  consumers["Exporters / API consumers"]
+
+  rpc -->|"leader schedules and blocks"| worker
+  worker -->|"per-slot facts and aggregates"| db
+  api -->|"SQL reads"| db
+  ui -->|"HTTP"| api
+  consumers -->|"HTTP"| api
 ```
 
 ## Features
