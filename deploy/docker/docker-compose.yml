@@ -4,14 +4,14 @@
 # and supervises the api + worker in the same container. Named volume keeps
 # the Postgres data dir between runs; the service listens on :8080.
 
-name: solana-validator-indexer
+name: whoearns-live
 
 services:
   app:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
-    image: solana-validator-indexer:local
+    image: whoearns-live:local
     ports:
       - '8080:8080'
     environment:

@@ -1,0 +1,20 @@
+apiVersion: v2
+name: whoearns-live
+description: Open-source Solana validator income transparency service.
+type: application
+version: 0.3.0
+appVersion: '0.3.0'
+home: https://whoearns.live
+sources:
+  - https://github.com/0base-vc/whoearns-live
+maintainers:
+  - name: 0base.vc contributors
+    url: https://github.com/0base-vc/whoearns-live
+keywords:
+  - solana
+  - validator
+  - indexer
+  - income
+  - open-data
+  - prometheus
+  - block-tips

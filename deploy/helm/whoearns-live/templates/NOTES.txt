@@ -24,20 +24,20 @@ Ingress is enabled. Hosts:
 {{- else }}
 No Ingress was created. Port-forward locally:
 
-  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "svi.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "whoearns.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
   curl -sf http://localhost:{{ .Values.service.port }}/healthz
 {{- end }}
 
 -------------------------------------------------------------------------------
 3. Observe the pod
 -------------------------------------------------------------------------------
-  kubectl -n {{ .Release.Namespace }} get sts {{ include "svi.fullname" . }}
-  kubectl -n {{ .Release.Namespace }} logs sts/{{ include "svi.fullname" . }} -f
+  kubectl -n {{ .Release.Namespace }} get sts {{ include "whoearns.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} logs sts/{{ include "whoearns.fullname" . }} -f
 
 -------------------------------------------------------------------------------
 4. IMPORTANT: Data persistence
 -------------------------------------------------------------------------------
-The PostgreSQL data directory lives on the PVC `data-{{ include "svi.fullname" . }}-0`.
+The PostgreSQL data directory lives on the PVC `data-{{ include "whoearns.fullname" . }}-0`.
 
 * `helm uninstall` does NOT delete this PVC by default — your data is safe.
 * `kubectl delete ns {{ .Release.Namespace }}` WILL delete it. Back up first.

@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "svi.fullname" . }}-config
+  name: {{ include "whoearns.fullname" . }}-config
   labels:
-    {{- include "svi.labels" . | nindent 4 }}
+    {{- include "whoearns.labels" . | nindent 4 }}
 data:
   NODE_ENV: "production"
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}

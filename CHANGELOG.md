@@ -5,7 +5,10 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-No unreleased changes yet.
+### Changed
+
+- Renamed the public Helm chart path, chart name, Docker Compose project,
+  local image name, and logger service name to `whoearns-live`.
 
 ## [0.3.0] - 2026-04-29
 
@@ -48,7 +51,7 @@ No unreleased changes yet.
 - Consistent error envelope (`{ error: { code, message, requestId,
 details? } }`) and per-field freshness timestamps in validator
   responses.
-- Helm chart at `deploy/helm/solana-validator-indexer` with an
+- Helm chart at `deploy/helm/whoearns-live` with an
   all-in-one PostgreSQL/API/worker StatefulSet mode.
 - Docker Compose development stack under `deploy/docker`.
 - GitHub Actions CI: typecheck, lint, prettier, unit / integration /

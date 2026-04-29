@@ -163,6 +163,6 @@ jobs:
         with:
           version: 'v3.16.2'
       - name: Lint chart
-        run: helm lint --strict deploy/helm/solana-validator-indexer
+        run: helm lint --strict deploy/helm/whoearns-live
       - name: Template chart
-        run: helm template svi deploy/helm/solana-validator-indexer > /dev/null
+        run: helm template whoearns-live deploy/helm/whoearns-live > /dev/null

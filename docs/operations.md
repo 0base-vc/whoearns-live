@@ -36,9 +36,9 @@ pnpm run dev:worker
 
 ## Helm
 
-A chart lives at `deploy/helm/solana-validator-indexer`. The chart name and
-path intentionally keep the old runtime slug until the public rename is fully
-rolled out. It deploys:
+A chart lives at `deploy/helm/whoearns-live`. Install it with the
+`whoearns-live` release name when you want Kubernetes objects and pods to use
+the public runtime slug. It deploys:
 
 - One `StatefulSet` with one container running PostgreSQL, migrations, API,
   worker, and the static UI bundle.
@@ -51,8 +51,8 @@ See the chart's own `README.md` for the full value reference.
 ### Install
 
 ```bash
-helm upgrade --install svi deploy/helm/solana-validator-indexer \
-  --namespace svi --create-namespace \
+helm upgrade --install whoearns-live deploy/helm/whoearns-live \
+  --namespace whoearns-live --create-namespace \
   --set config.validatorsWatchList="Vote111...,Vote222..." \
   --set config.solanaRpcUrl="https://your.rpc.endpoint/"
 ```
@@ -60,14 +60,14 @@ helm upgrade --install svi deploy/helm/solana-validator-indexer \
 ### Upgrade
 
 ```bash
-helm upgrade svi deploy/helm/solana-validator-indexer \
-  --namespace svi \
+helm upgrade whoearns-live deploy/helm/whoearns-live \
+  --namespace whoearns-live \
   --reuse-values \
   --set image.tag="0.3.0"
 ```
 
 Migrations run inside the container on start before the API and worker boot.
-If startup fails, inspect `kubectl logs -n svi sts/svi`.
+If startup fails, inspect `kubectl logs -n whoearns-live sts/whoearns-live`.
 
 ## Backup and restore
 
@@ -79,7 +79,7 @@ through RPC quota. Snapshot the database if continuity matters.
 ### `pg_dump`
 
 ```bash
-kubectl -n svi exec -it sts/svi -- \
+kubectl -n whoearns-live exec -it sts/whoearns-live -- \
   pg_dump -h 127.0.0.1 -U indexer -Fc indexer > indexer-$(date +%F).dump
 ```
 
@@ -88,7 +88,7 @@ For an external DB, run `pg_dump` against its URL directly.
 ### `pg_restore`
 
 ```bash
-kubectl -n svi exec -i sts/svi -- \
+kubectl -n whoearns-live exec -i sts/whoearns-live -- \
   pg_restore -h 127.0.0.1 -U indexer -d indexer --clean --if-exists < indexer-YYYY-MM-DD.dump
 ```
 
@@ -202,5 +202,5 @@ anyway).
    worker.
 4. Check `/healthz` on the new pods and tail `kubectl logs` for a
    few minutes.
-5. If something looks wrong, `helm rollback svi <prev-revision>`
+5. If something looks wrong, `helm rollback whoearns-live <prev-revision>`
    before more data lands.

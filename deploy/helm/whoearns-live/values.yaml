@@ -1,4 +1,4 @@
-# Default values for solana-validator-indexer.
+# Default values for whoearns-live.
 #
 # One StatefulSet, one replica. The image bundles Postgres, so the pod
 # runs api + worker + postgres in a single container and keeps the
@@ -8,7 +8,7 @@
 # own registry/repository via `--set image.repository=...` or a local
 # overlay.
 image:
-  repository: your-dockerhub-user/solana-validator-indexer
+  repository: your-dockerhub-user/whoearns-live
   tag: latest
   pullPolicy: Always
 
