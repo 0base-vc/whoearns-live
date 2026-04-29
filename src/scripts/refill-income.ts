@@ -54,7 +54,7 @@
  *   BACKFILL_EPOCHS=2 POSTGRES_URL=... pnpm backfill:income
  *
  *   # Inside a pod (production image ships compiled JS)
- *   kubectl exec -it svi-pod -- node dist/scripts/refill-income.js
+ *   kubectl exec -it whoearns-live-0 -- node dist/scripts/refill-income.js
  */
 
 import pLimit from 'p-limit';

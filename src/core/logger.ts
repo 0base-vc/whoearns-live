@@ -6,7 +6,7 @@ export type { Logger };
 export function createLogger(config: Pick<AppConfig, 'LOG_LEVEL' | 'NODE_ENV'>): Logger {
   const options: LoggerOptions = {
     level: config.LOG_LEVEL,
-    base: { service: 'solana-validator-indexer' },
+    base: { service: 'whoearns-live' },
     timestamp: pino.stdTimeFunctions.isoTime,
     redact: {
       paths: ['req.headers.authorization', 'req.headers.cookie', '*.password', '*.token'],

@@ -232,7 +232,7 @@
     lang="en"><code
       >git clone {GITHUB_URL}.git
 cd whoearns-live
-helm upgrade --install svi deploy/helm/solana-validator-indexer \
+helm upgrade --install whoearns-live deploy/helm/whoearns-live \
   --set config.solanaRpcUrl='https://your-rpc-endpoint/' \
   --set config.validatorsWatchList='Vote111...,Vote222...'</code
     ></pre>
@@ -240,7 +240,7 @@ helm upgrade --install svi deploy/helm/solana-validator-indexer \
     {#if locale === 'ko'}
       Ingress, external-dns, persistence 옵션은 차트의
       <a
-        href={`${GITHUB_URL}/tree/main/deploy/helm/solana-validator-indexer`}
+        href={`${GITHUB_URL}/tree/main/deploy/helm/whoearns-live`}
         target="_blank"
         rel="noopener noreferrer"
         class="font-medium text-[color:var(--color-brand-500)] hover:underline">README</a
@@ -248,7 +248,7 @@ helm upgrade --install svi deploy/helm/solana-validator-indexer \
     {:else}
       See the chart
       <a
-        href={`${GITHUB_URL}/tree/main/deploy/helm/solana-validator-indexer`}
+        href={`${GITHUB_URL}/tree/main/deploy/helm/whoearns-live`}
         target="_blank"
         rel="noopener noreferrer"
         class="font-medium text-[color:var(--color-brand-500)] hover:underline">README</a

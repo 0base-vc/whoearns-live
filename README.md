@@ -316,22 +316,21 @@ docker compose -f deploy/docker/docker-compose.yml up --build
 
 ### Helm (production)
 
-A chart is published at `deploy/helm/solana-validator-indexer`. See that
-chart's [README](./deploy/helm/solana-validator-indexer/README.md) for
+A chart is published at `deploy/helm/whoearns-live`. See that
+chart's [README](./deploy/helm/whoearns-live/README.md) for
 values, upgrade flow, and persistence notes.
 
 Quick install with the bundled StatefulSet Postgres:
 
 ```bash
-helm upgrade --install svi deploy/helm/solana-validator-indexer \
-  --namespace svi --create-namespace \
+helm upgrade --install whoearns-live deploy/helm/whoearns-live \
+  --namespace whoearns-live --create-namespace \
   --set config.validatorsWatchList="Vote111...,Vote222..." \
   --set config.solanaRpcUrl="https://your.rpc.endpoint/"
 ```
 
-The chart name and path still use `solana-validator-indexer` for deployment
-compatibility during the public rename. A future runtime-name migration can
-rename the chart and Kubernetes resources separately.
+With the release name above, Kubernetes objects use the `whoearns-live`
+runtime slug; the StatefulSet pod is `whoearns-live-0`.
 
 ## Development
 

@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "svi.fullname" . }}
+  name: {{ include "whoearns.fullname" . }}
   labels:
-    {{- include "svi.labels" . | nindent 4 }}
+    {{- include "whoearns.labels" . | nindent 4 }}
   {{- with .Values.service.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -19,22 +19,22 @@ spec:
     # Prometheus scrape port — cluster-internal only. Ingress
     # (templates/ingress.yaml) doesn't reference this port, so it
     # never leaves the cluster network. Prometheus pods scrape via
-    # `<svi-svc>.<ns>.svc.cluster.local:<port>/metrics`.
+    # `<whoearns-live-svc>.<ns>.svc.cluster.local:<port>/metrics`.
     - name: metrics
       port: {{ .Values.config.metricsPort }}
       targetPort: metrics
       protocol: TCP
     {{- end }}
   selector:
-    {{- include "svi.selectorLabels" . | nindent 4 }}
+    {{- include "whoearns.selectorLabels" . | nindent 4 }}
 ---
 # Headless service: governs the StatefulSet so pods get stable DNS.
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "svi.fullname" . }}-headless
+  name: {{ include "whoearns.fullname" . }}-headless
   labels:
-    {{- include "svi.labels" . | nindent 4 }}
+    {{- include "whoearns.labels" . | nindent 4 }}
 spec:
   clusterIP: None
   ports:
@@ -46,11 +46,11 @@ spec:
     # Prometheus scrape port — cluster-internal only. Ingress
     # (templates/ingress.yaml) doesn't reference this port, so it
     # never leaves the cluster network. Prometheus pods scrape via
-    # `<svi-svc>.<ns>.svc.cluster.local:<port>/metrics`.
+    # `<whoearns-live-svc>.<ns>.svc.cluster.local:<port>/metrics`.
     - name: metrics
       port: {{ .Values.config.metricsPort }}
       targetPort: metrics
       protocol: TCP
     {{- end }}
   selector:
-    {{- include "svi.selectorLabels" . | nindent 4 }}
+    {{- include "whoearns.selectorLabels" . | nindent 4 }}

@@ -1,10 +1,10 @@
-{{- $fullName := include "svi.fullname" . -}}
+{{- $fullName := include "whoearns.fullname" . -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: {{ $fullName }}
   labels:
-    {{- include "svi.labels" . | nindent 4 }}
+    {{- include "whoearns.labels" . | nindent 4 }}
 spec:
   serviceName: {{ $fullName }}-headless
   replicas: 1
@@ -13,11 +13,11 @@ spec:
     type: RollingUpdate
   selector:
     matchLabels:
-      {{- include "svi.selectorLabels" . | nindent 6 }}
+      {{- include "whoearns.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "svi.selectorLabels" . | nindent 8 }}
+        {{- include "whoearns.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -44,7 +44,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
-      serviceAccountName: {{ include "svi.serviceAccountName" . }}
+      serviceAccountName: {{ include "whoearns.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -56,7 +56,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: app
-          image: {{ include "svi.image" . }}
+          image: {{ include "whoearns.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.containerSecurityContext }}
           securityContext:

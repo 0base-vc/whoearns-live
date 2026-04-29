@@ -1,8 +1,8 @@
 # WhoEarns Helm chart
 
-Runtime chart name: `solana-validator-indexer`. The name is intentionally
-kept stable during the public project rename so existing Kubernetes object
-names, selectors, and PVCs do not change accidentally.
+Runtime chart name: `whoearns-live`. Installing with release name
+`whoearns-live` creates Kubernetes objects with the public runtime slug,
+including StatefulSet `whoearns-live` and pod `whoearns-live-0`.
 
 Chart version: `0.3.0` · App version: `0.3.0`
 
@@ -29,14 +29,14 @@ PostgreSQL state lives on the PVC `data-<rel>-0` created by
 ### Minimal — your own cluster, no ingress
 
 ```bash
-helm --kube-context <your-context> upgrade --install svi \
-  deploy/helm/solana-validator-indexer \
+helm --kube-context <your-context> upgrade --install whoearns-live \
+  deploy/helm/whoearns-live \
   -n <your-ns> --create-namespace \
-  --set image.repository=<your-dockerhub-user>/solana-validator-indexer \
+  --set image.repository=<your-dockerhub-user>/whoearns-live \
   --set config.validatorsWatchList='Vote111...,Vote222...'
 ```
 
-Reach the API via `kubectl port-forward svc/svi 8080:8080`.
+Reach the API via `kubectl port-forward svc/whoearns-live 8080:8080`.
 
 ### Pulling from a private registry
 
@@ -46,8 +46,8 @@ kubectl --context <your-context> -n <your-ns> create secret docker-registry regc
   --docker-username=<user> --docker-password=<pat> \
   --docker-email=<email>
 
-helm --kube-context <your-context> upgrade --install svi \
-  deploy/helm/solana-validator-indexer \
+helm --kube-context <your-context> upgrade --install whoearns-live \
+  deploy/helm/whoearns-live \
   -n <your-ns> --create-namespace \
   --set imagePullSecrets[0].name=regcred \
   ...
@@ -72,7 +72,7 @@ tmp_values=$(mktemp)
 trap 'rm -f "$tmp_values"' EXIT
 cat > "$tmp_values" <<'EOF'
 image:
-  repository: <your-dockerhub-user>/solana-validator-indexer
+  repository: <your-dockerhub-user>/whoearns-live
 imagePullSecrets:
   - name: regcred
 ingress:
@@ -92,8 +92,8 @@ config:
   validatorsWatchList: 'Vote111...,Vote222...'
 EOF
 
-helm --kube-context <your-context> upgrade --install svi \
-  deploy/helm/solana-validator-indexer \
+helm --kube-context <your-context> upgrade --install whoearns-live \
+  deploy/helm/whoearns-live \
   -n default \
   -f "$tmp_values" \
   --set config.solanaRpcUrl="$SOLANA_RPC_URL"
@@ -106,7 +106,7 @@ the script so you don't accidentally commit the provider token.
 
 See `values.yaml` for the full, commented reference. Highlights:
 
-- `image.repository` default is `your-dockerhub-user/solana-validator-indexer`
+- `image.repository` default is `your-dockerhub-user/whoearns-live`
   — override for any real deployment. `image.tag` defaults to `latest` and
   `image.pullPolicy` defaults to `Always` so every `helm upgrade` pulls
   fresh. For audit-grade stability, pin a SHA tag in your overlay.
@@ -152,22 +152,22 @@ To guarantee the PVC survives aggressive cleanup:
 
 ```bash
 kubectl --context <your-context> -n <your-ns> annotate pvc \
-  data-solana-validator-indexer-0 helm.sh/resource-policy=keep
+  data-whoearns-live-0 helm.sh/resource-policy=keep
 ```
 
 ### Backup
 
 ```bash
-kubectl --context <your-context> -n <your-ns> exec solana-validator-indexer-0 -- \
+kubectl --context <your-context> -n <your-ns> exec whoearns-live-0 -- \
   su-exec postgres pg_dump -U indexer -d indexer \
-  | gzip > svi-$(date +%Y%m%dT%H%M%S).sql.gz
+  | gzip > whoearns-live-$(date +%Y%m%dT%H%M%S).sql.gz
 ```
 
 ### Restore
 
 ```bash
-gunzip -c svi-YYYYMMDDTHHMMSS.sql.gz | \
-  kubectl --context <your-context> -n <your-ns> exec -i solana-validator-indexer-0 -- \
+gunzip -c whoearns-live-YYYYMMDDTHHMMSS.sql.gz | \
+  kubectl --context <your-context> -n <your-ns> exec -i whoearns-live-0 -- \
     su-exec postgres psql -U indexer -d indexer
 ```
 
@@ -180,17 +180,17 @@ upgrade path is dump → delete PVC → install new image → restore:
 ```bash
 CTX=--context=<your-context>
 NS=<your-ns>
-POD=solana-validator-indexer-0
+POD=whoearns-live-0
 PVC=data-$POD
 
 kubectl $CTX -n $NS exec $POD -- \
   su-exec postgres pg_dump -U indexer -d indexer -Fc > /tmp/backup.dump
 
-helm --kube-context <your-context> uninstall solana-validator-indexer -n $NS
+helm --kube-context <your-context> uninstall whoearns-live -n $NS
 kubectl $CTX -n $NS delete pvc $PVC
 
-helm --kube-context <your-context> upgrade --install solana-validator-indexer \
-  deploy/helm/solana-validator-indexer -n $NS
+helm --kube-context <your-context> upgrade --install whoearns-live \
+  deploy/helm/whoearns-live -n $NS
 # wait for the new pod to finish initdb
 
 kubectl $CTX -n $NS cp /tmp/backup.dump $POD:/tmp/backup.dump
@@ -201,7 +201,7 @@ kubectl $CTX -n $NS exec $POD -- \
 ## Test
 
 ```bash
-helm --kube-context <your-context> test solana-validator-indexer -n <your-ns>
+helm --kube-context <your-context> test whoearns-live -n <your-ns>
 ```
 
 Runs a Pod that curls `http://<rel>:<port>/healthz`.

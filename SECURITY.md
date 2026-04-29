@@ -51,7 +51,7 @@ credit reporters who wish to be credited.
 In scope:
 
 - The Node.js service (`src/`) — the API and the worker.
-- The Helm chart (`deploy/helm/solana-validator-indexer`) and its
+- The Helm chart (`deploy/helm/whoearns-live`) and its
   default values.
 - The Dockerfile / Docker Compose assets under `deploy/docker`.
 - SQL migrations under `src/storage/migrations`.
