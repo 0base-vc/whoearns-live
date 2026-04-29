@@ -1,0 +1,45 @@
+Thanks for installing {{ .Chart.Name }} ({{ .Chart.AppVersion }}).
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+-------------------------------------------------------------------------------
+1. What this chart installs
+-------------------------------------------------------------------------------
+A single StatefulSet (replica=1) running all of:
+  * API        (HTTP on :{{ .Values.config.httpPort }})
+  * Worker     (background ingestion jobs)
+  * PostgreSQL (embedded, data on a PVC mounted at /var/lib/postgresql/data)
+
+Migrations run automatically on container start.
+
+-------------------------------------------------------------------------------
+2. Reach the API
+-------------------------------------------------------------------------------
+{{- if .Values.ingress.enabled }}
+Ingress is enabled. Hosts:
+{{- range .Values.ingress.hosts }}
+  - http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+No Ingress was created. Port-forward locally:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "svi.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -sf http://localhost:{{ .Values.service.port }}/healthz
+{{- end }}
+
+-------------------------------------------------------------------------------
+3. Observe the pod
+-------------------------------------------------------------------------------
+  kubectl -n {{ .Release.Namespace }} get sts {{ include "svi.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} logs sts/{{ include "svi.fullname" . }} -f
+
+-------------------------------------------------------------------------------
+4. IMPORTANT: Data persistence
+-------------------------------------------------------------------------------
+The PostgreSQL data directory lives on the PVC `data-{{ include "svi.fullname" . }}-0`.
+
+* `helm uninstall` does NOT delete this PVC by default — your data is safe.
+* `kubectl delete ns {{ .Release.Namespace }}` WILL delete it. Back up first.
+* Bumping the image to a new major Postgres version across releases requires
+  a manual `pg_dump` / `pg_restore` cycle. See the chart README.

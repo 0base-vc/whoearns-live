@@ -1,0 +1,17 @@
+dist/
+coverage/
+node_modules/
+*.tgz
+.husky/
+deploy/helm/**/templates/
+pnpm-lock.yaml
+package-lock.json
+# SvelteKit generated output + deps. The ui/ sources themselves ARE
+# format-checked by the root prettier — `prettier-plugin-svelte` is a
+# root devDependency so the plugin referenced by ui/.prettierrc
+# resolves cleanly against root's node_modules during CI (which only
+# runs `npm ci` at the root, not inside ui/).
+ui/.svelte-kit/
+ui/.vercel/
+ui/build/
+ui/node_modules/

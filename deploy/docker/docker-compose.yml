@@ -1,0 +1,36 @@
+# Local development compose file.
+#
+# Single service now — the image bundles Postgres, runs migrations on boot,
+# and supervises the api + worker in the same container. Named volume keeps
+# the Postgres data dir between runs; the service listens on :8080.
+
+name: solana-validator-indexer
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: solana-validator-indexer:local
+    ports:
+      - '8080:8080'
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: info
+      POSTGRES_USER: indexer
+      POSTGRES_PASSWORD: indexer
+      POSTGRES_DB: indexer
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://solana-rpc.publicnode.com}
+      SOLANA_FALLBACK_RPC_URL: ${SOLANA_FALLBACK_RPC_URL:-}
+      YELLOWSTONE_GRPC_URL: ${YELLOWSTONE_GRPC_URL:-}
+      YELLOWSTONE_GRPC_X_TOKEN: ${YELLOWSTONE_GRPC_X_TOKEN:-}
+      # Leave empty to track no validators by default; override in a local
+      # .env or `-e VALIDATORS_WATCH_LIST=...` at run time.
+      VALIDATORS_WATCH_LIST: ${VALIDATORS_WATCH_LIST:-}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    driver: local

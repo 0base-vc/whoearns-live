@@ -1,0 +1,36 @@
+<!--
+  WhoEarns favicon — 8-point starburst with monogram.
+
+  Uses the same 8-point star outline as `VerifiedBadge.svelte` so
+  the favicon and the per-validator verified ✓ badge share a
+  family resemblance: visitors who see the verified badge next to
+  a claimed validator's name then notice the same shape on the
+  browser tab. Brand cohesion at no extra design cost.
+
+  Coordinates are 4× the 16-point original in VerifiedBadge so the
+  per-point positions round to whole pixels at common favicon
+  sizes (16, 32, 48, 64) — keeps the star edges crisp instead of
+  fuzzing under sub-pixel rasterisation.
+
+  brand-violet (#7C3AED) matches `--color-brand-500` in
+  `ui/src/app.css`. If we ever re-skin the brand, the favicon and
+  the verified-badge are the two glyphs that need to update
+  together.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>WhoEarns</title>
+  <path
+    fill="#7C3AED"
+    d="M32 0L39.2 6L48 4.8L52 13.2L60 16.8L58.8 26L64 32L58.8 38L60 47.2L52 50.8L48 59.2L39.2 58L32 64L24.8 58L16 59.2L12 50.8L4 47.2L5.2 38L0 32L5.2 26L4 16.8L12 13.2L16 4.8L24.8 6L32 0Z"
+  />
+  <text
+    x="32"
+    y="42"
+    font-family="-apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif"
+    font-size="30"
+    font-weight="900"
+    fill="#FFFFFF"
+    text-anchor="middle"
+    letter-spacing="-1.5"
+  >W</text>
+</svg>

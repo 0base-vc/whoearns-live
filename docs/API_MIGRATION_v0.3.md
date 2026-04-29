@@ -1,0 +1,55 @@
+# API Migration — v0.3 Solana RPC Income Model
+
+v0.3 removes the delayed Jito Kobe payout model from the public contract.
+Income is now built only from Solana RPC block facts:
+
+- `blockBaseFeesTotal*`
+- `blockPriorityFeesTotal*`
+- `blockTipsTotal*`
+- `totalIncome* = blockFeesTotal* + blockTipsTotal*`
+
+## Removed Fields
+
+These fields are no longer emitted:
+
+- `slotsStatus`
+- `feesStatus`
+- `mevStatus`
+- `mevRewardsLamports`
+- `mevRewardsSol`
+- `sources`
+- `freshness.mevUpdatedAt`
+
+## Replacement Fields
+
+Use these booleans to gate values:
+
+| Field            | Meaning                                                         |
+| ---------------- | --------------------------------------------------------------- |
+| `isCurrentEpoch` | Row belongs to the latest open epoch observed by the indexer.   |
+| `isFinal`        | Epoch is closed and the row should no longer grow.              |
+| `hasSlots`       | Slot counters are present; slot numeric fields are non-null.    |
+| `hasIncome`      | Block fee/tip counters are present; income fields are non-null. |
+
+The current epoch remains a lower bound until `isFinal=true`.
+
+## Client Update
+
+Before:
+
+```ts
+if (row.feesStatus === 'final' || row.feesStatus === 'live') {
+  publish(row.blockFeesTotalLamports);
+}
+```
+
+After:
+
+```ts
+if (row.hasIncome) {
+  publish(row.totalIncomeLamports);
+}
+```
+
+For charting and labels, show `isFinal ? 'Final' : 'Running'`. Do not infer
+missing data from zero values; use `hasSlots` and `hasIncome`.

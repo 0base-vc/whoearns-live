@@ -1,0 +1,131 @@
+{{- $fullName := include "svi.fullname" . -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "svi.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ $fullName }}-headless
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "svi.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "svi.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # Force a rolling restart on every `helm upgrade`. `image.tag: latest`
+        # + `pullPolicy: Always` only takes effect when the pod spec
+        # changes — revision + rollout-at mutate the hash every upgrade so
+        # Kubernetes actually re-creates the pod and pulls the new image.
+        helm.sh/revision: {{ .Release.Revision | quote }}
+        helm.sh/rollout-at: {{ now | quote }}
+        {{- if and .Values.config.metricsPort (gt (int .Values.config.metricsPort) 0) }}
+        # Prometheus auto-discovery — kube-prometheus-stack and most
+        # Prometheus operator setups read these three annotations from
+        # the Pod spec to figure out what to scrape, where, and on
+        # which port. Auto-emitted whenever metricsPort > 0 so the
+        # operator only has to flip the port value to enable scraping
+        # end-to-end.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: {{ .Values.config.metricsPort | quote }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "svi.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: app
+          image: {{ include "svi.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ $fullName }}-config
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: POSTGRES_PASSWORD
+              value: {{ .Values.postgres.password | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.config.httpPort }}
+              protocol: TCP
+            {{- if and .Values.config.metricsPort (gt (int .Values.config.metricsPort) 0) }}
+            # Prometheus scrape target. Cluster-internal only — the
+            # public Ingress (templates/ingress.yaml) routes only the
+            # `http` named port. Prometheus pods reach this via the
+            # Service's `metrics` port (see service.yaml).
+            - name: metrics
+              containerPort: {{ .Values.config.metricsPort }}
+              protocol: TCP
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}

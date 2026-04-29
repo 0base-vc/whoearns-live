@@ -1,0 +1,31 @@
+node_modules
+
+# Output
+.output
+.vercel
+.netlify
+.wrangler
+/.svelte-kit
+/build
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+# `.env` is whitelisted (with `!.env` overriding the root .gitignore's
+# blanket `.env` rule) because it carries empty PUBLIC_* placeholders
+# only — they're required at type-check time so SvelteKit can resolve
+# `$env/static/public` imports without a populated build environment.
+# Real values come from `--build-arg PUBLIC_SITE_URL=...` during Docker
+# build, or from `.env.local` (gitignored) for local development.
+# NEVER add secrets to `.env` — only PUBLIC_* placeholders.
+!.env
+.env.*
+!.env.example
+!.env.test
+.env.local
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*

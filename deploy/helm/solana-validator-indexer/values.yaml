@@ -1,0 +1,251 @@
+# Default values for solana-validator-indexer.
+#
+# One StatefulSet, one replica. The image bundles Postgres, so the pod
+# runs api + worker + postgres in a single container and keeps the
+# database state on a PVC mounted at /var/lib/postgresql/data.
+
+# Container image. Defaults are neutral — fork users should set their
+# own registry/repository via `--set image.repository=...` or a local
+# overlay.
+image:
+  repository: your-dockerhub-user/solana-validator-indexer
+  tag: latest
+  pullPolicy: Always
+
+# Override `imagePullSecrets` only if pulling from a private registry
+# that your cluster can't access without a credential. Empty default
+# works for Docker Hub public images.
+imagePullSecrets: []
+
+nameOverride: ''
+fullnameOverride: ''
+
+serviceAccount:
+  create: true
+  name: ''
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  # alpine `postgres` uid/gid 70. fsGroup recursively chowns the PVC mount
+  # so postgres can write to /var/lib/postgresql/data on first boot.
+  runAsUser: 70
+  runAsGroup: 70
+  fsGroup: 70
+
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 70
+  runAsGroup: 70
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  # readOnlyRootFilesystem is OFF because the image writes to
+  # /run/postgresql/ and a few other paths; flipping it on would require
+  # several emptyDir mounts and the single-pod design isn't worth that.
+
+# Resources cover api + worker + postgres in the same container.
+#
+# Memory sizing history:
+#   - Original 2Gi was sized for `getBlock(accounts)` payloads (~2MB each)
+#     at batch size 50 + ~3 watched validators + modest Postgres state.
+#   - Migration 0010 upgraded to `getBlock(full)` (~3MB per block, +35%
+#     bandwidth) which bumps the in-flight batch memory from ~100MB to
+#     ~150MB pre-GC, ~300-500MB with Node JSON-parse overhead. Combined
+#     with a growing watched set (auto-track flow adds validators at
+#     runtime) and the first-time previous-epoch backfill for a new
+#     tracker (one-shot 400+ block fetch), 2Gi tips into OOMKilled —
+#     confirmed empirically via `kubectl describe pod` showing
+#     `Reason: OOMKilled, Exit Code: 137` with restart count > 0.
+#   - Bumped to 3Gi which leaves ~1-1.5Gi headroom at steady state. If
+#     OOMs return (e.g. after onboarding many more validators) either
+#     bump again OR lower `config.feeIngestBatchSize` to trade ingest
+#     throughput for lower peak memory.
+resources:
+  requests: { cpu: 300m, memory: 1Gi }
+  limits: { cpu: 1500m, memory: 3Gi }
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+# Ingress — disabled by default so `helm install` works out of the box
+# in any cluster (port-forward still reaches the pod). Turn on and
+# configure hostname per your environment.
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: validator-explorer.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+livenessProbe:
+  httpGet: { path: /healthz, port: http }
+  initialDelaySeconds: 30
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet: { path: /healthz, port: http }
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Embedded Postgres persistence. volumeClaimTemplates is driven by this.
+persistence:
+  enabled: true
+  size: 20Gi
+  storageClass: ''
+  accessModes: [ReadWriteOnce]
+  annotations: {}
+
+# Application configuration — rendered into a ConfigMap and consumed as env.
+config:
+  logLevel: info
+  httpPort: 8080
+  httpHost: 0.0.0.0
+  # Public-facing canonical URL for this deployment. Used by:
+  #   - Dynamic SEO routes (sitemap.xml, robots.txt, llms.txt, openapi.yaml)
+  #     to emit absolute URLs without rebuilding the binary per domain.
+  #   - JSON-LD canonical/og:url tags injected into the SPA bundle (also
+  #     read from `PUBLIC_SITE_URL` at UI build time — keep both aligned).
+  # No trailing slash. MUST override in production via `--set config.siteUrl=...`
+  # or a private values overlay. The localhost placeholder is intentionally
+  # broken-looking so a forgotten override surfaces immediately in crawler logs
+  # instead of silently leaking some other operator's brand into your SEO.
+  siteUrl: http://localhost:8080
+
+  # Brand display name. Used by every server-emitted response that
+  # names the site to a reader: OG image headlines, llms.txt /
+  # llms-full.txt headers, ai-plugin.json `name_for_human`, MCP
+  # `instructions`, OpenAPI `info.title`. Keep in sync with the
+  # frontend `SITE_NAME` constant in `ui/src/lib/site.ts` (forks
+  # rebrand both in lockstep).
+  siteName: WhoEarns
+
+  # Port for the Prometheus `/metrics` scrape endpoint.
+  #
+  # `0` (default) → no metrics listener at all.
+  # Any positive port → starts a separate Fastify instance bound
+  # to that port serving only `/metrics`. The chart auto-wires:
+  #   - Service `metrics` port (cluster-internal, not in Ingress)
+  #   - StatefulSet containerPort
+  #   - Pod annotations `prometheus.io/scrape: "true"`,
+  #     `prometheus.io/path: "/metrics"`,
+  #     `prometheus.io/port: <metricsPort>` for kube-prometheus-stack
+  #     auto-discovery — set this value and your in-cluster Prometheus
+  #     starts scraping on the next discovery interval. No additional
+  #     scrape_config edits required.
+  #
+  # 9091 is the conventional choice (Prometheus itself uses 9090,
+  # node exporters land in 9091-9100).
+  metricsPort: 0
+  # Per-IP request cap on /v1/* (excluded: /healthz). 60/min = comfortable
+  # UI traffic, tight enough that cluster-wide scraping trips early.
+  apiRateLimitMax: 60
+  apiRateLimitWindowMs: 60000
+  solanaRpcUrl: https://solana-rpc.publicnode.com
+  solanaRpcTimeoutMs: 30000
+  solanaRpcConcurrency: 4
+  solanaRpcMaxRetries: 3
+  # Optional live-worker fallback RPC. `solanaRpcUrl` is always tried
+  # first; this endpoint is used only after primary retries are
+  # exhausted. Keep it unset unless you have a reliable secondary
+  # provider. A fallback `getBlock` null is treated as ambiguous and
+  # does not permanently mark a leader slot skipped.
+  solanaFallbackRpcUrl: ''
+  # Optional secondary RPC endpoint retained for one-shot/offline refill
+  # scripts. The live worker no longer uses this for `getBlockProduction`
+  # or `getBlock`: slot counters come from local `processed_blocks`, and
+  # block fetches only cover watched validators' leader slots on
+  # `solanaRpcUrl`. Normal deployments should leave this empty.
+  solanaArchiveRpcUrl: ''
+
+  # Optional Yellowstone gRPC endpoint for LIVE block streaming.
+  # When set, the worker subscribes to block updates and processes
+  # them at stream latency — tip/fee data for the running epoch
+  # updates in seconds rather than the 30-60s polling cadence.
+  # JSON-RPC stays the source of truth for backfill + reconnect
+  # gaps, so gRPC is strictly additive / best-effort.
+  #
+  # Recommended free endpoint (no auth required):
+  #   yellowstoneGrpcUrl: 'https://solana-yellowstone-grpc.publicnode.com'
+  # Empirically reliable at small watched-set scale. If you need stronger
+  # replay windows or production SLAs, use a hosted Yellowstone provider.
+  # Leave empty to stay on pure JSON-RPC polling ingestion.
+  yellowstoneGrpcUrl: ''
+  # x-token for hosted gRPC endpoints that require authentication.
+  # publicnode needs no auth so leave empty if pointing there.
+  yellowstoneGrpcXToken: ''
+
+  # Cost-aware rate limit against the upstream RPC. Most paid providers
+  # bill in credits/sec where different methods cost different amounts
+  # (most simple Solana reads are often around 30 credits each, but
+  # providers vary). Set `solanaRpcCreditsPerSec` to the plan's ceiling.
+  # `solanaRpcBurstCredits` is the bucket depth (short-burst headroom);
+  # `0` makes it default to 2× per-sec rate.
+  # Leave both at 0 for local dev / public-RPC deployments — rate
+  # limiter stays disabled.
+  solanaRpcCreditsPerSec: 0
+  solanaRpcBurstCredits: 0
+  # Watched validators. Accepts:
+  #   - ''           — no validators watched (default; pair with an overlay)
+  #   - 'V1,V2,...'  — explicit comma-separated vote pubkeys
+  #   - 'top:N'      — the top N validators by activated stake (resolved
+  #                    dynamically each epoch via getVoteAccounts)
+  #   - '*'          — every active validator (heavy on public RPCs;
+  #                    only enable with a paid provider + rate limiter)
+  #
+  # Override per deployment via `--set` or a local (gitignored) overlay.
+  validatorsWatchList: ''
+  epochWatchIntervalMs: 30000
+  slotIngestIntervalMs: 60000
+  feeIngestIntervalMs: 30000
+  # Peak memory on each tick = `batchSize × sizeof(getBlock(full) response)`
+  # ≈ `batchSize × 3MB` raw + ~2-3× Node JSON-parse overhead. At 50 this
+  # can burst 300-500MB, which combined with baseline Fastify + gRPC
+  # subscriber + Postgres state has already caused OOMKills at a 2Gi
+  # limit (see `resources:` docstring). 25 halves the peak; still
+  # completes within the 30s tick budget for any plausible watch-set
+  # size because each slot is resolved independently and the outer
+  # loop chunks sequentially (not the whole epoch in one pass).
+  feeIngestBatchSize: 25
+  # Recompute cluster-sample medians from already stored block facts.
+  # This job does not call RPC.
+  aggregatesIntervalMs: 300000
+  # Closed-epoch income reconciliation. This only inspects watched
+  # validators' leader slots from the already-known leader schedule,
+  # fills missing processed block rows, then rebuilds aggregate totals
+  # from `processed_blocks`.
+  closedEpochReconcileIntervalMs: 300000
+  slotFinalityBuffer: 32
+  shutdownTimeoutMs: 15000
+
+# Embedded Postgres auth. Picked up by the entrypoint at first boot. Once
+# the PVC is initialised these values are locked in — changing them on a
+# running PVC does NOT rotate the role password.
+postgres:
+  user: indexer
+  password: indexer
+  database: indexer
+
+extraEnv: []
+# - name: SOME_VAR
+#   value: value

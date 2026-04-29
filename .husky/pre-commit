@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+# `pnpm exec` is the pnpm-native way to run a locally-installed binary;
+# it resolves against node_modules/.bin like `npx` but without any
+# registry-fetch fallback. Faster and keeps the hook's behaviour
+# deterministic (no accidental npx package download on a fresh clone).
+pnpm exec lint-staged

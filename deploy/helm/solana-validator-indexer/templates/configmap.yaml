@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "svi.fullname" . }}-config
+  labels:
+    {{- include "svi.labels" . | nindent 4 }}
+data:
+  NODE_ENV: "production"
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  HTTP_PORT: {{ .Values.config.httpPort | quote }}
+  HTTP_HOST: {{ .Values.config.httpHost | quote }}
+  SITE_URL: {{ .Values.config.siteUrl | default "http://localhost:8080" | quote }}
+  SITE_NAME: {{ .Values.config.siteName | default "WhoEarns" | quote }}
+  METRICS_PORT: {{ .Values.config.metricsPort | default 0 | quote }}
+  API_RATE_LIMIT_MAX: {{ .Values.config.apiRateLimitMax | default 60 | quote }}
+  API_RATE_LIMIT_WINDOW_MS: {{ .Values.config.apiRateLimitWindowMs | default 60000 | quote }}
+  SOLANA_RPC_URL: {{ .Values.config.solanaRpcUrl | quote }}
+  SOLANA_RPC_TIMEOUT_MS: {{ .Values.config.solanaRpcTimeoutMs | quote }}
+  SOLANA_RPC_CONCURRENCY: {{ .Values.config.solanaRpcConcurrency | quote }}
+  SOLANA_RPC_MAX_RETRIES: {{ .Values.config.solanaRpcMaxRetries | quote }}
+  SOLANA_RPC_CREDITS_PER_SEC: {{ .Values.config.solanaRpcCreditsPerSec | default 0 | quote }}
+  SOLANA_RPC_BURST_CREDITS: {{ .Values.config.solanaRpcBurstCredits | default 0 | quote }}
+  {{- if .Values.config.solanaFallbackRpcUrl }}
+  SOLANA_FALLBACK_RPC_URL: {{ .Values.config.solanaFallbackRpcUrl | quote }}
+  {{- end }}
+  {{- if .Values.config.solanaArchiveRpcUrl }}
+  SOLANA_ARCHIVE_RPC_URL: {{ .Values.config.solanaArchiveRpcUrl | quote }}
+  {{- end }}
+  {{- if .Values.config.yellowstoneGrpcUrl }}
+  YELLOWSTONE_GRPC_URL: {{ .Values.config.yellowstoneGrpcUrl | quote }}
+  {{- end }}
+  {{- if .Values.config.yellowstoneGrpcXToken }}
+  YELLOWSTONE_GRPC_X_TOKEN: {{ .Values.config.yellowstoneGrpcXToken | quote }}
+  {{- end }}
+  VALIDATORS_WATCH_LIST: {{ .Values.config.validatorsWatchList | quote }}
+  EPOCH_WATCH_INTERVAL_MS: {{ .Values.config.epochWatchIntervalMs | quote }}
+  SLOT_INGEST_INTERVAL_MS: {{ .Values.config.slotIngestIntervalMs | quote }}
+  FEE_INGEST_INTERVAL_MS: {{ .Values.config.feeIngestIntervalMs | quote }}
+  FEE_INGEST_BATCH_SIZE: {{ .Values.config.feeIngestBatchSize | quote }}
+  AGGREGATES_INTERVAL_MS: {{ .Values.config.aggregatesIntervalMs | quote }}
+  CLOSED_EPOCH_RECONCILE_INTERVAL_MS: {{ .Values.config.closedEpochReconcileIntervalMs | quote }}
+  SLOT_FINALITY_BUFFER: {{ .Values.config.slotFinalityBuffer | quote }}
+  SHUTDOWN_TIMEOUT_MS: {{ .Values.config.shutdownTimeoutMs | quote }}

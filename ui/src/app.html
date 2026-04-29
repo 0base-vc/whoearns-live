@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#7c5cff" />
+    %sveltekit.head%
+
+    <!--
+      Theme bootstrap. Toggle a `.dark` class on <html> based on stored
+      preference (future theme-toggle) or system preference BEFORE the
+      first paint so the dashboard doesn't flash light-then-dark.
+      Inlined so it runs synchronously — a few ms of parse time is
+      cheaper than a visible FOUC.
+    -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem('theme');
+          var prefers = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var useDark = stored ? stored === 'dark' : prefers;
+          if (useDark) document.documentElement.classList.add('dark');
+        } catch (e) {
+          /* localStorage blocked; fall back to system via CSS media query */
+        }
+      })();
+    </script>
+  </head>
+  <body data-sveltekit-preload-data="hover">
+    <div style="display: contents">%sveltekit.body%</div>
+  </body>
+</html>

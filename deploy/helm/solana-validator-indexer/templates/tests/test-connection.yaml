@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "svi.fullname" . }}-test-connection"
+  labels:
+    {{- include "svi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: curlimages/curl:8.10.1
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          URL="http://{{ include "svi.fullname" . }}:{{ .Values.service.port }}/healthz"
+          echo "GET $URL"
+          curl -sfS --retry 10 --retry-delay 3 --retry-connrefused "$URL"
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 65534
+        capabilities:
+          drop: [ALL]

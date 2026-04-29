@@ -1,0 +1,797 @@
+openapi: 3.1.0
+info:
+  title: WhoEarns API
+  version: '0.3.0'
+  description: |
+    Read-only HTTP API for WhoEarns, an open-source Solana validator income
+    transparency service. Income is derived from Solana RPC block data only:
+    base fees, priority fees, and on-chain Jito tips found in produced blocks.
+    Numeric fields are `null` when the matching `hasSlots` or `hasIncome`
+    boolean is false.
+
+    **v0.3 breaking change.** Jito Kobe payout fields and per-stream status
+    enums were removed. Current-epoch values are lower bounds and can increase
+    until the epoch closes; closed-epoch rows are marked with `isFinal=true`.
+    See `docs/API_MIGRATION_v0.3.md` for client-side migration notes.
+
+servers:
+  - url: http://localhost:8080
+    description: Placeholder — runtime route rewrites `servers[0].url` to match `SITE_URL` at request time
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness + readiness probe
+      responses:
+        '200':
+          description: Reachable. `status` reflects overall health.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Database probe failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /v1/epoch/current:
+    get:
+      summary: Latest observed epoch metadata
+      responses:
+        '200':
+          description: Current epoch info including chain-tip progress.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentEpoch'
+        '404':
+          description: No epoch row has been written yet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/validators/{idOrVote}/current-epoch:
+    get:
+      summary: Stats for a validator at the current epoch
+      parameters:
+        - $ref: '#/components/parameters/IdOrVotePath'
+      responses:
+        '200':
+          description: Validator is known; body reflects whatever state the indexer has.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidatorEpochRecord'
+        '400':
+          description: Invalid pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Pubkey is unknown to the indexer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Indexer has not observed a current epoch yet.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/validators/{idOrVote}/epochs/{epoch}:
+    get:
+      summary: Stats for a validator at a specific (past or current) epoch
+      parameters:
+        - $ref: '#/components/parameters/IdOrVotePath'
+        - name: epoch
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: |
+            Validator is known. When the indexer never backfilled this epoch, the
+            response body carries `hasSlots=false`, `hasIncome=false`, and null
+            numerics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidatorEpochRecord'
+        '400':
+          description: Invalid pubkey or epoch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Pubkey is unknown to the indexer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/validators/{idOrVote}/history:
+    get:
+      summary: Newest-first per-epoch history for a validator
+      description: |
+        `idOrVote` accepts either a validator vote account pubkey or
+        identity/node pubkey. The response includes public validator metadata,
+        claim/profile state, and newest-first epoch records.
+      parameters:
+        - $ref: '#/components/parameters/IdOrVotePath'
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        '200':
+          description: Validator is known, or was added to the watched set on demand.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidatorHistory' }
+        '400':
+          description: Invalid pubkey or limit.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Pubkey is unknown to the indexer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/leaderboard:
+    get:
+      summary: Top-N cluster leaderboard for a closed epoch
+      description: |
+        Ranks validators by one of five sort modes (see the `sort` query param).
+        Defaults to the most recent closed epoch; clients can force an epoch
+        via `?epoch=N`. Empty-state returns `200` with `items: []` — first-boot
+        clusters and unsupported sort/epoch combinations never 404.
+
+        **Sort modes:**
+          - `performance` (DEFAULT): `(block_fees + block_tips) / slots_assigned`,
+            DESC. Stake-neutral + commission-neutral skill metric — captures
+            block-fee quality, Jito-tip capture, and reliability in one number.
+            Recommended for "who runs their validator well, regardless of
+            size". Mathematically, performance = per-block yield × (1 −
+            skip_rate).
+          - `total_income`: `block_fees + block_tips`, DESC. Stake-biased (bigger
+            validators earn more in absolute terms).
+          - `income_per_stake`: `(block_fees + block_tips) / activated_stake`, DESC.
+            Operator revenue per unit of stake — note: block fees + tips bypass
+            validator commission, so this is NOT a delegator APR.
+            Rows missing a stake snapshot (pre-migration epochs) are
+            filtered out; the endpoint may return an empty list for older
+            epochs.
+          - `skip_rate`: `slots_skipped / slots_assigned`, ASC. Lower = more
+            reliable. Reliability / uptime proxy.
+          - `median_fee`: per-validator median block fee, DESC. Reflects
+            tx-selection / priority-fee capture quality.
+
+        Rows with `slots_assigned < 30` are returned but marked by the UI
+        as low-sample (a single lucky MEV block dominates such rows).
+        Clients that want stricter filtering should apply their own
+        threshold on `slotsAssigned` after the fetch.
+      parameters:
+        - name: epoch
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+          description: Target epoch. Defaults to the most recent closed epoch.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [performance, total_income, income_per_stake, skip_rate, median_fee]
+            default: performance
+      responses:
+        '200':
+          description: Ranked validator list for the target epoch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Leaderboard'
+        '400':
+          description: Invalid query parameter.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Explicit `?epoch=N` references an unknown epoch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/validators/current-epoch/batch:
+    post:
+      summary: Bulk lookup for the current epoch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchRequest'
+      responses:
+        '200':
+          description: Request accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResponse'
+        '400':
+          description: Invalid request body.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Indexer has not observed a current epoch yet.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/claim/challenge:
+    get:
+      summary: Issue a short-lived nonce for validator ownership claims
+      responses:
+        '200':
+          description: Challenge payload to include in the signed message.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaimChallenge' }
+
+  /v1/claim/{vote}/status:
+    get:
+      summary: Public claim/profile status for a validator vote pubkey
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
+      responses:
+        '200':
+          description: Claim and optional public profile state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaimStatus' }
+        '400':
+          description: Invalid vote pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/claim/verify:
+    post:
+      summary: Verify validator ownership without changing profile fields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaimVerifyRequest' }
+      responses:
+        '200':
+          description: Claim verified and stored.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaimVerifyResponse' }
+        '400':
+          description: Malformed body or signature.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Signature rejected, stale, replayed, mismatched, or below stake floor.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Vote pubkey is unknown.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/claim/profile:
+    post:
+      summary: Verify validator ownership and update public profile fields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProfileUpdateRequest' }
+      responses:
+        '200':
+          description: Profile updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProfileUpdateResponse' }
+        '400':
+          description: Malformed body or signature.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Signature rejected, stale, replayed, mismatched, or below stake floor.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Vote pubkey is unknown.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /mcp:
+    get:
+      summary: Streamable HTTP MCP endpoint
+      responses:
+        '200':
+          description: MCP transport response.
+    post:
+      summary: Streamable HTTP MCP endpoint
+      responses:
+        '200':
+          description: MCP transport response.
+    delete:
+      summary: Streamable HTTP MCP session cleanup endpoint
+      responses:
+        '200':
+          description: MCP transport response.
+
+components:
+  parameters:
+    IdOrVotePath:
+      name: idOrVote
+      in: path
+      required: true
+      description: Validator vote account pubkey or identity/node pubkey.
+      schema:
+        type: string
+        minLength: 32
+        maxLength: 44
+        pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
+
+    VotePath:
+      name: vote
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 32
+        maxLength: 44
+        pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code: { type: string, description: Machine-readable stable identifier. }
+            message: { type: string }
+            requestId: { type: string, format: uuid }
+            details: { type: object, additionalProperties: true }
+
+    HealthResponse:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, fail]
+        checks:
+          type: object
+          required: [db, rpcLastSeenAt, lastEpoch]
+          properties:
+            db:
+              type: string
+              enum: [ok, fail]
+            rpcLastSeenAt:
+              type: [string, 'null']
+              format: date-time
+            lastEpoch:
+              type: [integer, 'null']
+
+    CurrentEpoch:
+      type: object
+      required:
+        - epoch
+        - firstSlot
+        - lastSlot
+        - slotCount
+        - currentSlot
+        - slotsElapsed
+        - isClosed
+        - observedAt
+      properties:
+        epoch: { type: integer, minimum: 0 }
+        firstSlot: { type: integer, minimum: 0 }
+        lastSlot: { type: integer, minimum: 0 }
+        slotCount: { type: integer, minimum: 0 }
+        currentSlot:
+          type: [integer, 'null']
+          minimum: 0
+          description: Chain-tip slot last observed by the indexer.
+        slotsElapsed:
+          type: [integer, 'null']
+          minimum: 0
+          description: |
+            min(slotCount, min(currentSlot, lastSlot) - firstSlot + 1).
+            `null` when `currentSlot` is null.
+        isClosed: { type: boolean }
+        observedAt: { type: string, format: date-time }
+
+    ValidatorEpochRecord:
+      type: object
+      required:
+        - vote
+        - identity
+        - epoch
+        - isCurrentEpoch
+        - isFinal
+        - hasSlots
+        - hasIncome
+        - slotsAssigned
+        - slotsProduced
+        - slotsSkipped
+        - blockFeesTotalLamports
+        - blockFeesTotalSol
+        - blockTipsTotalLamports
+        - blockTipsTotalSol
+        - totalIncomeLamports
+        - totalIncomeSol
+        - lastUpdatedAt
+        - freshness
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+        epoch: { type: integer, minimum: 0 }
+        isCurrentEpoch:
+          type: boolean
+          description: True when this row is for the latest open epoch.
+        isFinal:
+          type: boolean
+          description: True once the epoch has closed. Current-epoch values are live lower bounds.
+        hasSlots:
+          type: boolean
+          description: True when slot production counters have been ingested.
+        hasIncome:
+          type: boolean
+          description: True when block fee and on-chain tip income has been ingested.
+        slotsAssigned:
+          type: [integer, 'null']
+          minimum: 0
+          description: |
+            Full leader-schedule total for the validator in this epoch.
+            Stable across the epoch — does NOT grow as blocks are produced.
+            null when hasSlots=false.
+        slotsProduced:
+          type: [integer, 'null']
+          minimum: 0
+          description: |
+            Running count of blocks produced so far in the processed range.
+            null when hasSlots=false.
+        slotsSkipped:
+          type: [integer, 'null']
+          minimum: 0
+          description: |
+            Running count of leader slots within the processed range where
+            no block was produced. null when hasSlots=false.
+            Invariant: slotsAssigned >= slotsProduced + slotsSkipped.
+
+        blockFeesTotalLamports:
+          type: [string, 'null']
+          description: Leader fee reward as decimal lamports. null when hasIncome=false.
+        blockFeesTotalSol:
+          type: [string, 'null']
+          description: Leader fee reward as SOL. null when hasIncome=false.
+        medianBlockFeeLamports: { type: [string, 'null'] }
+        medianBlockFeeSol: { type: [string, 'null'] }
+        blockBaseFeesTotalLamports: { type: [string, 'null'] }
+        blockBaseFeesTotalSol: { type: [string, 'null'] }
+        medianBlockBaseFeeLamports: { type: [string, 'null'] }
+        medianBlockBaseFeeSol: { type: [string, 'null'] }
+        blockPriorityFeesTotalLamports: { type: [string, 'null'] }
+        blockPriorityFeesTotalSol: { type: [string, 'null'] }
+        medianBlockPriorityFeeLamports: { type: [string, 'null'] }
+        medianBlockPriorityFeeSol: { type: [string, 'null'] }
+        blockTipsTotalLamports:
+          type: [string, 'null']
+          description: On-chain Jito MEV tips from produced blocks. null when hasIncome=false.
+        blockTipsTotalSol:
+          type: [string, 'null']
+        medianBlockTipLamports: { type: [string, 'null'] }
+        medianBlockTipSol: { type: [string, 'null'] }
+        medianBlockTotalLamports: { type: [string, 'null'] }
+        medianBlockTotalSol: { type: [string, 'null'] }
+        totalIncomeLamports:
+          type: [string, 'null']
+          description: blockFeesTotalLamports + blockTipsTotalLamports. null when hasIncome=false.
+        totalIncomeSol:
+          type: [string, 'null']
+
+        lastUpdatedAt:
+          type: [string, 'null']
+          format: date-time
+          description: Max of the freshness timestamps; null if all null.
+        freshness:
+          type: object
+          required:
+            [
+              slotsUpdatedAt,
+              feesUpdatedAt,
+              medianFeeUpdatedAt,
+              medianBaseFeeUpdatedAt,
+              medianPriorityFeeUpdatedAt,
+              tipsUpdatedAt,
+              medianTipUpdatedAt,
+              medianTotalUpdatedAt,
+            ]
+          properties:
+            slotsUpdatedAt: { type: [string, 'null'], format: date-time }
+            feesUpdatedAt: { type: [string, 'null'], format: date-time }
+            medianFeeUpdatedAt: { type: [string, 'null'], format: date-time }
+            medianBaseFeeUpdatedAt: { type: [string, 'null'], format: date-time }
+            medianPriorityFeeUpdatedAt: { type: [string, 'null'], format: date-time }
+            tipsUpdatedAt: { type: [string, 'null'], format: date-time }
+            medianTipUpdatedAt: { type: [string, 'null'], format: date-time }
+            medianTotalUpdatedAt: { type: [string, 'null'], format: date-time }
+
+    ValidatorProfile:
+      type: object
+      required: [twitterHandle, hideFooterCta, optedOut, narrativeOverride]
+      properties:
+        twitterHandle:
+          type: [string, 'null']
+          maxLength: 15
+        hideFooterCta: { type: boolean }
+        optedOut: { type: boolean }
+        narrativeOverride:
+          type: [string, 'null']
+          maxLength: 280
+
+    ValidatorHistory:
+      type: object
+      required: [vote, identity, name, iconUrl, website, items, claimed]
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+        name: { type: [string, 'null'] }
+        iconUrl: { type: [string, 'null'] }
+        website: { type: [string, 'null'] }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ValidatorEpochRecord' }
+        tracking:
+          type: boolean
+          description: True when this lookup just added a validator to the watched set.
+        trackingMessage: { type: string }
+        profile:
+          anyOf:
+            - $ref: '#/components/schemas/ValidatorProfile'
+            - type: 'null'
+        claimed: { type: boolean }
+
+    BatchRequest:
+      type: object
+      required: [votes]
+      properties:
+        votes:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            type: string
+            minLength: 32
+            maxLength: 44
+            pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
+
+    BatchResponse:
+      type: object
+      required: [epoch, results, missing]
+      properties:
+        epoch: { type: integer, minimum: 0 }
+        results:
+          type: array
+          description: One record per known vote. Unknown votes go in `missing`.
+          items:
+            $ref: '#/components/schemas/ValidatorEpochRecord'
+        missing:
+          type: array
+          description: Votes the indexer has never seen.
+          items: { type: string }
+
+    ClaimChallenge:
+      type: object
+      required: [nonce, timestampSec, expiresInSec]
+      properties:
+        nonce: { type: string }
+        timestampSec: { type: integer, minimum: 1 }
+        expiresInSec: { type: integer, minimum: 1 }
+
+    ClaimSignedEnvelope:
+      type: object
+      required: [votePubkey, identityPubkey, nonce, timestampSec, signatureBase58]
+      properties:
+        votePubkey: { type: string, minLength: 32, maxLength: 44 }
+        identityPubkey: { type: string, minLength: 32, maxLength: 44 }
+        nonce: { type: string, minLength: 8, maxLength: 128 }
+        timestampSec: { type: integer, minimum: 1 }
+        signatureBase58: { type: string, minLength: 64, maxLength: 128 }
+
+    ClaimVerifyRequest:
+      allOf:
+        - $ref: '#/components/schemas/ClaimSignedEnvelope'
+
+    ClaimVerifyResponse:
+      type: object
+      required: [claimed, votePubkey, claimedAt]
+      properties:
+        claimed: { type: boolean, const: true }
+        votePubkey: { type: string }
+        claimedAt: { type: string, format: date-time }
+
+    ClaimStatus:
+      type: object
+      required: [claimed, profile]
+      properties:
+        claimed: { type: boolean }
+        profile:
+          anyOf:
+            - allOf:
+                - $ref: '#/components/schemas/ValidatorProfile'
+                - type: object
+                  required: [updatedAt]
+                  properties:
+                    updatedAt: { type: string, format: date-time }
+            - type: 'null'
+
+    ProfileUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/ClaimSignedEnvelope'
+        - type: object
+          required: [profile]
+          properties:
+            profile:
+              $ref: '#/components/schemas/ValidatorProfile'
+
+    ProfileUpdateResponse:
+      type: object
+      required: [profile]
+      properties:
+        profile:
+          allOf:
+            - $ref: '#/components/schemas/ValidatorProfile'
+            - type: object
+              required: [updatedAt]
+              properties:
+                updatedAt: { type: string, format: date-time }
+
+    LeaderboardSort:
+      type: string
+      enum: [performance, total_income, income_per_stake, skip_rate, median_fee]
+      description: |
+        Ranking mode for `/v1/leaderboard`. See endpoint doc for semantics.
+        `performance` (default) is the stake-neutral skill metric.
+
+    LeaderboardItem:
+      type: object
+      required:
+        - rank
+        - vote
+        - identity
+        - name
+        - iconUrl
+        - website
+        - slotsAssigned
+        - slotsProduced
+        - slotsSkipped
+        - skipRate
+        - blockFeesTotalLamports
+        - blockFeesTotalSol
+        - blockTipsTotalLamports
+        - blockTipsTotalSol
+        - totalIncomeLamports
+        - totalIncomeSol
+      properties:
+        rank: { type: integer, minimum: 1 }
+        vote: { type: string }
+        identity: { type: string }
+        name:
+          type: [string, 'null']
+          description: |
+            On-chain validator moniker from `solana validator-info
+            publish`. Null when the validator has no info record,
+            or the refresh job hasn't seen the identity yet.
+        iconUrl:
+          type: [string, 'null']
+          description: Validator's registered icon URL. See `name` for null semantics.
+        website:
+          type: [string, 'null']
+          description: |
+            Validator's registered website URL. USER-SUPPLIED — treat
+            as untrusted when rendering as a hyperlink.
+        slotsAssigned: { type: integer, minimum: 0 }
+        slotsProduced: { type: integer, minimum: 0 }
+        slotsSkipped: { type: integer, minimum: 0 }
+        skipRate:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+          description: slotsSkipped / slotsAssigned, null when no slots assigned.
+        blockFeesTotalLamports: { type: string, description: bigint-as-string }
+        blockFeesTotalSol: { type: string }
+        blockTipsTotalLamports:
+          type: string
+          description: On-chain Jito tips derived from produced blocks, bigint-as-string.
+        blockTipsTotalSol: { type: string }
+        totalIncomeLamports:
+          type: string
+          description: blockFees + blockTips, in lamports.
+        totalIncomeSol: { type: string }
+        performanceLamportsPerSlot:
+          type: [string, 'null']
+          description: |
+            Income per assigned slot (lamports). Stake-neutral +
+            commission-neutral skill metric. Null only when
+            `slotsAssigned === 0` (edge case on pre-slot-ingester
+            rows); normally non-null for all listed rows.
+        performanceSolPerSlot: { type: [string, 'null'] }
+        medianFeeLamports: { type: [string, 'null'] }
+        medianFeeSol: { type: [string, 'null'] }
+        activatedStakeLamports:
+          type: [string, 'null']
+          description: |
+            Stake snapshot at the last slot-ingest tick for this epoch.
+            Null for rows ingested before the stake-snapshot migration
+            (pre-migration-0006 epochs).
+        activatedStakeSol: { type: [string, 'null'] }
+        incomePerStake:
+          type: [number, 'null']
+          minimum: 0
+          description: |
+            totalIncome / activatedStake as a dimensionless ratio per
+            epoch. Multiply by 100 for percentage; null when stake
+            data is unavailable.
+
+    Leaderboard:
+      type: object
+      required: [epoch, epochClosedAt, sort, count, limit, items, cluster]
+      properties:
+        epoch: { type: integer, minimum: 0 }
+        epochClosedAt: { type: [string, 'null'], format: date-time }
+        sort: { $ref: '#/components/schemas/LeaderboardSort' }
+        count: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 500 }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/LeaderboardItem' }
+        cluster:
+          type: [object, 'null']
+          description: |
+            Cluster-wide top-N aggregate for this epoch, when published
+            by the aggregates job. Null when the aggregate hasn't been
+            computed yet.
+          required: [topN, sampleValidators, medianBlockFeeLamports, medianBlockTipLamports]
+          properties:
+            topN: { type: integer, minimum: 1 }
+            sampleValidators: { type: integer, minimum: 0 }
+            medianBlockFeeLamports: { type: [string, 'null'] }
+            medianBlockTipLamports: { type: [string, 'null'] }

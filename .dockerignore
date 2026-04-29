@@ -1,0 +1,52 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Build/test outputs
+dist
+coverage
+*.tsbuildinfo
+ui/build
+ui/.svelte-kit
+
+# Dependencies (npm ci in the image rebuilds these)
+node_modules
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Tests and fixtures are not shipped in the image
+test
+
+# Tooling / editor / OS noise
+.husky
+.vscode
+.idea
+.DS_Store
+*.log
+*.tgz
+tmp
+
+# Helm/k8s manifests handled out-of-band
+deploy/helm
+
+# Docs are not needed at build or runtime — except for openapi.yaml,
+# which the build's `copy-assets` step copies into dist/api/assets/
+# so the runtime `seo.route.ts` can read it and patch servers[0].url
+# per deployment. The negation has to be on a glob (`docs/*`), not
+# on the directory itself — `.dockerignore` can't un-ignore a child
+# of a fully-ignored parent directory.
+docs/*
+!docs/openapi.yaml
+*.md
+
+# Local docker-compose stays on disk
+deploy/docker/docker-compose.yml
+
+# Prettier / lint caches
+.prettierignore
+.prettierrc
+eslint.config.js

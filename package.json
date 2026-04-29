@@ -1,0 +1,115 @@
+{
+  "name": "whoearns-live",
+  "version": "0.3.0",
+  "description": "Open-source Solana validator income transparency service: indexer, API, and UI.",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://whoearns.live",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0base-vc/whoearns-live.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0base-vc/whoearns-live/issues"
+  },
+  "keywords": [
+    "solana",
+    "validator",
+    "income",
+    "jito",
+    "mev",
+    "block-fees",
+    "open-data"
+  ],
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10"
+  },
+  "packageManager": "pnpm@10.15.1",
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && pnpm run copy-assets",
+    "build:ui": "pnpm --dir ui install --frozen-lockfile && pnpm --dir ui run build",
+    "build:all": "pnpm run build && pnpm run build:ui",
+    "copy-assets": "mkdir -p dist/api/assets && cp docs/openapi.yaml dist/api/assets/openapi.yaml",
+    "clean": "rm -rf dist coverage",
+    "dev:api": "tsx watch src/entrypoints/api.ts",
+    "dev:worker": "tsx watch src/entrypoints/worker.ts",
+    "start:api": "node dist/entrypoints/api.js",
+    "start:worker": "node dist/entrypoints/worker.js",
+    "migrate:up": "tsx src/scripts/migrate.ts up",
+    "migrate:down": "tsx src/scripts/migrate.ts down",
+    "backfill:income": "tsx src/scripts/refill-income.ts",
+    "lint": "eslint . --max-warnings 0",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run test/unit",
+    "test:integration": "vitest run test/integration",
+    "test:smoke": "vitest run test/smoke",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "prepare": "husky"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "@fastify/rate-limit": "^10.3.0",
+    "@fastify/sensible": "^6.0.1",
+    "@fastify/static": "^9.1.3",
+    "@fontsource/inter": "^5.2.8",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@noble/ed25519": "^3.1.0",
+    "@resvg/resvg-js": "^2.6.2",
+    "@triton-one/yellowstone-grpc": "^5.0.8",
+    "bs58": "^6.0.0",
+    "fastify": "^5.1.0",
+    "js-yaml": "^4.1.1",
+    "p-limit": "^6.1.0",
+    "pg": "^8.20.0",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0",
+    "prom-client": "^15.1.3",
+    "satori": "^0.26.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.16.0",
+    "@testcontainers/postgresql": "^11.14.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "@typescript-eslint/eslint-plugin": "^8.18.0",
+    "@typescript-eslint/parser": "^8.18.0",
+    "@vitest/coverage-v8": "^4.1.4",
+    "eslint": "^9.16.0",
+    "eslint-config-prettier": "^9.1.0",
+    "globals": "^15.13.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.2.11",
+    "msw": "^2.6.6",
+    "prettier": "^3.4.2",
+    "prettier-plugin-svelte": "^3.5.1",
+    "testcontainers": "^11.14.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.4"
+  },
+  "lint-staged": {
+    "*.{ts,js,json,md,yml,yaml}": [
+      "prettier --write"
+    ],
+    "*.{ts,js}": [
+      "eslint --fix"
+    ]
+  },
+  "pnpm": {
+    "overrides": {
+      "dockerode": "4.0.11"
+    }
+  }
+}

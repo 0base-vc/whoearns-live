@@ -1,0 +1,170 @@
+@import 'tailwindcss';
+
+/*
+ * Tailwind v4 defaults to scanning only the project's `src` for utility
+ * classes — it does NOT crawl `node_modules`. LayerChart ships its
+ * components already styled with Tailwind utilities (e.g. `.absolute`,
+ * `.h-full`, `.touch-none` on its TooltipContext wrapper). Without this
+ * @source line, those utilities never make it into the final stylesheet
+ * and LayerChart's internal absolutely-positioned layers fall back to
+ * `position: static`, stacking the tooltip/overlay SVG *below* the main
+ * chart and pushing the chart card's visual height well past its
+ * container — which in turn overlaps whatever follows in the page.
+ */
+@source '../node_modules/layerchart';
+
+/*
+ * Design tokens. Everything downstream (components, pages) references
+ * these via Tailwind's theme arbitrary-value syntax OR via the token
+ * shorthand classes defined in the `@layer utilities` block below.
+ *
+ * Why a brand-accent "violet" instead of the canonical Solana gradient?
+ * The Solana brand uses a magenta→teal gradient that's great for marketing
+ * but poor for dashboard UI (poor contrast on text, hard to anchor charts
+ * to). `#7c5cff` is a single-hue pull from the same family — saturated
+ * enough to read as "crypto-native" without fighting data visualizations.
+ * All accent surfaces inherit from this one token so a future rebrand is
+ * a one-line change.
+ */
+@theme {
+  --color-brand-50: #f4f1ff;
+  --color-brand-100: #ebe5ff;
+  --color-brand-200: #d9cfff;
+  --color-brand-300: #bba8ff;
+  --color-brand-400: #9778ff;
+  --color-brand-500: #7c5cff;
+  --color-brand-600: #6b46e0;
+  --color-brand-700: #5935bf;
+  --color-brand-800: #472a94;
+  --color-brand-900: #352173;
+  --color-brand-950: #1f1245;
+
+  /* Semantic surfaces. `surface` = the card bg, `surface-muted` = the
+     row-striping / header-fill inside a card. Dark counterparts are set
+     via the `.dark` class below (SvelteKit +layout toggles this). */
+  --color-surface: #ffffff;
+  --color-surface-muted: var(--color-zinc-50);
+  --color-surface-elevated: #ffffff;
+  --color-border-default: var(--color-zinc-200);
+  --color-text-default: var(--color-zinc-900);
+  --color-text-muted: var(--color-zinc-600);
+  --color-text-subtle: var(--color-zinc-500);
+
+  /* Status tokens — pill / chart / badge must stay in sync. `-fg` is the
+     on-bg ink color chosen to pass 4.5:1 against the matching bg. */
+  --color-status-ok-bg: var(--color-emerald-100);
+  --color-status-ok-fg: var(--color-emerald-900);
+  --color-status-warn-bg: var(--color-amber-100);
+  --color-status-warn-fg: var(--color-amber-900);
+  --color-status-info-bg: var(--color-sky-100);
+  --color-status-info-fg: var(--color-sky-900);
+  --color-status-neutral-bg: var(--color-zinc-200);
+  --color-status-neutral-fg: var(--color-zinc-700);
+}
+
+/*
+ * Dark-mode overrides. We use the `.dark` class on `<html>` instead of
+ * `prefers-color-scheme` alone so a future theme-toggle component can
+ * flip it without a full reload. Layout sets it on first paint based on
+ * system pref, wrapped in an IIFE to avoid FOUC.
+ */
+:root.dark {
+  --color-surface: var(--color-zinc-950);
+  --color-surface-muted: var(--color-zinc-900);
+  --color-surface-elevated: var(--color-zinc-900);
+  --color-border-default: var(--color-zinc-800);
+  --color-text-default: var(--color-zinc-100);
+  --color-text-muted: var(--color-zinc-300);
+  --color-text-subtle: var(--color-zinc-400);
+
+  --color-status-ok-bg: color-mix(in oklab, var(--color-emerald-900) 40%, transparent);
+  --color-status-ok-fg: var(--color-emerald-100);
+  --color-status-warn-bg: color-mix(in oklab, var(--color-amber-900) 40%, transparent);
+  --color-status-warn-fg: var(--color-amber-100);
+  --color-status-info-bg: color-mix(in oklab, var(--color-sky-900) 40%, transparent);
+  --color-status-info-fg: var(--color-sky-100);
+  --color-status-neutral-bg: var(--color-zinc-800);
+  --color-status-neutral-fg: var(--color-zinc-300);
+}
+
+:root {
+  color-scheme: light dark;
+}
+
+/*
+ * Reduced-motion baseline. One block kills animations across the whole
+ * app (LayerChart's draw-in, our own transitions). Overridden per-element
+ * only when motion genuinely aids comprehension — so far nowhere.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/*
+ * Default focus-visible ring for every interactive element that doesn't
+ * opt out. Tailwind 4 strips the UA focus ring, and sprinkling
+ * `focus-visible:ring-*` across every component is how drift happens —
+ * fix it at the source. Uses brand-accent so a Tab press is immediately
+ * locatable on any surface, light or dark.
+ */
+:where(a, button, input, select, textarea, [tabindex='0']):focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+  border-radius: 0.25rem;
+}
+
+body {
+  background-color: var(--color-surface);
+  color: var(--color-text-default);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/*
+ * Skip-link helper. `sr-only` keeps the element off-screen until it's
+ * focused (Tab from the URL bar) — then it becomes visible and the user
+ * can jump straight to `#main`. Global so every route gets it for free.
+ */
+.skip-link {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /*
+   * `min-height: 44px` so the link clears the WCAG 2.5.5 tap-target
+   * floor when revealed. The original `padding: 0.5rem 1rem` gave a
+   * 40 px-tall surface — close, but technically below the threshold
+   * and routinely flagged by axe / Lighthouse mobile audits.
+   */
+  min-height: 44px;
+  padding: 0.5rem 1rem;
+  display: inline-flex;
+  align-items: center;
+  background: var(--color-brand-600);
+  color: #fff;
+  font-weight: 600;
+  border-radius: 0 0 0.5rem 0;
+  transform: translateY(-100%);
+  transition: transform 150ms ease-out;
+  z-index: 100;
+}
+/*
+ * Reveal on BOTH `:focus` and `:focus-visible`. iOS Safari does not
+ * fire `:focus-visible` when VoiceOver moves focus via the rotor or
+ * when focus is set programmatically — only on physical Tab from a
+ * Bluetooth keyboard. Leaving the trigger as `:focus-visible` only
+ * meant the skip link stayed off-screen for AT users without an
+ * external keyboard, defeating the purpose. `:focus` is broader and
+ * the duplicate selector is cheap.
+ */
+.skip-link:focus,
+.skip-link:focus-visible {
+  transform: translateY(0);
+  outline: none;
+}

@@ -1,0 +1,168 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+# Cancel any in-flight runs for the same ref (PR or branch) when a new one
+# starts. `cancel-in-progress: true` keeps cost and queue latency predictable.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned Node used by every job except the unit-test matrix.
+  NODE_VERSION: '22'
+  # pnpm version MUST match the `packageManager` field in package.json.
+  # corepack reads that field but `pnpm/action-setup` needs the version
+  # declared here to bootstrap the shim before the field is consulted.
+  PNPM_VERSION: '10.15.1'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Lint + format gate. Runs first because it's cheap and catches the most
+  # common PR mistakes before we spend CI minutes on longer jobs.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run lint
+      - run: pnpm run format:check
+
+  # ---------------------------------------------------------------------------
+  # TypeScript typecheck (no emit). Independent of lint so both can fail fast.
+  # ---------------------------------------------------------------------------
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+
+  # ---------------------------------------------------------------------------
+  # Unit tests across supported Node versions. Runs WITHOUT --coverage so
+  # the job only gates on pass/fail — coverage thresholds require the full
+  # suite (unit + integration) to compute accurately.
+  # ---------------------------------------------------------------------------
+  unit:
+    name: Unit tests (node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run test:unit
+
+  # ---------------------------------------------------------------------------
+  # Integration tests + full-suite coverage gate. Uses testcontainers so
+  # the Postgres-backed repositories are exercised; GitHub's `ubuntu-latest`
+  # runner has a Docker daemon available.
+  #
+  # Runs `npm test -- --coverage`, which executes unit + integration + smoke
+  # in one pass so vitest's thresholds (>=80% lines/stmts/functions) are
+  # enforced against the real coverage picture. Running --coverage on only
+  # the unit subset would under-count repository code that integration
+  # tests exercise.
+  # ---------------------------------------------------------------------------
+  integration:
+    name: Integration tests + coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+      - name: Verify Docker is available
+        run: docker version
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test -- --coverage
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Production build — emits dist/ and uploads it as an artifact. Used by
+  # operators who pull the CI artifact directly rather than rebuilding
+  # locally. Image build + Docker Hub push live OUTSIDE CI; see
+  # `deploy/docker/Dockerfile` + the local `deploy.sh` script in the
+  # maintainer's working copy.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build dist
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Helm chart lint + template render against the single values.yaml.
+  # ---------------------------------------------------------------------------
+  helm-lint:
+    name: Helm lint & template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: 'v3.16.2'
+      - name: Lint chart
+        run: helm lint --strict deploy/helm/solana-validator-indexer
+      - name: Template chart
+        run: helm template svi deploy/helm/solana-validator-indexer > /dev/null
