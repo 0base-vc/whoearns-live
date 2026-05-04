@@ -9,12 +9,9 @@
   is what gets cited.
 -->
 <script lang="ts">
+  import { serializeJsonLd } from '$lib/json-ld';
   import { currentLocale } from '$lib/stores/locale.svelte';
   import { SITE_NAME, SITE_URL } from '$lib/site';
-
-  function serializeJsonLd(value: unknown): string {
-    return JSON.stringify(value).replace(/</g, '\\u003c');
-  }
 
   /**
    * Each Q&A is bilingual. Editing tips:

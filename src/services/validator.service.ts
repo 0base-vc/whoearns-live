@@ -27,12 +27,27 @@ function normaliseText(raw: string | undefined): string | null {
 const ON_DEMAND_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 const ON_DEMAND_REFRESH_FAILURE_COOLDOWN_MS = 30 * 1000;
 const ON_DEMAND_NEGATIVE_CACHE_MS = 5 * 60 * 1000;
+/**
+ * Hard ceiling on the per-pubkey negative cache. Each entry costs a
+ * few hundred bytes; at 10k entries the worst case is sub-megabyte.
+ * Lookups already expire entries on read but expired entries that
+ * are never re-read would otherwise live forever — without a cap an
+ * attacker spraying unique pubkeys could grow the Map until the pod
+ * is restarted. FIFO eviction keeps the cap honest with O(1) work.
+ */
+const ON_DEMAND_NEGATIVE_CACHE_MAX_ENTRIES = 10_000;
 
 export interface ValidatorServiceDeps {
   validatorsRepo: ValidatorsRepository;
   watchedDynamicRepo?: WatchedDynamicRepository;
   rpc: SolanaRpcClient;
   logger: Logger;
+  /**
+   * Override for the negative-cache ceiling. Tests lower it to assert
+   * FIFO eviction without iterating 10k+ pubkeys; production callers
+   * should leave it unset and accept the constant.
+   */
+  onDemandNegativeCacheMaxEntries?: number;
 }
 
 /**
@@ -55,12 +70,15 @@ export class ValidatorService {
   private onDemandRefreshPromise: Promise<void> | null = null;
   private nextOnDemandRefreshAllowedAtMs = 0;
   private onDemandMissUntilByPubkey: Map<string, number> = new Map();
+  private readonly onDemandNegativeCacheMaxEntries: number;
 
   constructor(deps: ValidatorServiceDeps) {
     this.validatorsRepo = deps.validatorsRepo;
     this.watchedDynamicRepo = deps.watchedDynamicRepo;
     this.rpc = deps.rpc;
     this.logger = deps.logger;
+    this.onDemandNegativeCacheMaxEntries =
+      deps.onDemandNegativeCacheMaxEntries ?? ON_DEMAND_NEGATIVE_CACHE_MAX_ENTRIES;
   }
 
   /**
@@ -356,12 +374,12 @@ export class ValidatorService {
     let stakeLamports = this.lastStakeByVote.get(vote);
     if (stakeLamports === undefined && requireKnown) {
       // Trigger a refresh so a freshly-registered validator (not yet
-      // in our cache) gets a fair shot.
+      // in our cache) gets a fair shot. Routed through the cooldown +
+      // dedupe wrapper so eligibility probes share the same backoff
+      // budget as `trackOnDemand` — verifying a signed claim against
+      // an unknown vote should not double the upstream RPC pressure.
       try {
-        // 0 is a placeholder epoch — refresh doesn't actually use it
-        // for vote account lookups, only for the UPSERT `firstSeen`
-        // field which is overwritten on next real refresh anyway.
-        await this.refreshFromRpc(0);
+        await this.refreshOnDemandVoteAccounts();
         stakeLamports = this.lastStakeByVote.get(vote);
       } catch (err) {
         this.logger.warn(
@@ -459,14 +477,6 @@ export class ValidatorService {
     seek();
 
     if (matchVote === undefined) {
-      if (this.lastRefresh.length > 0 && nowMs < this.nextOnDemandRefreshAllowedAtMs) {
-        this.onDemandMissUntilByPubkey.set(pubkey, nowMs + ON_DEMAND_NEGATIVE_CACHE_MS);
-        return {
-          ok: false,
-          reason:
-            'Pubkey not found among active Solana vote accounts. Double-check the address, or wait a few minutes if this validator just came online.',
-        };
-      }
       try {
         await this.refreshOnDemandVoteAccounts();
         seek();
@@ -480,7 +490,7 @@ export class ValidatorService {
     }
 
     if (matchVote === undefined || matchIdentity === undefined) {
-      this.onDemandMissUntilByPubkey.set(pubkey, Date.now() + ON_DEMAND_NEGATIVE_CACHE_MS);
+      this.recordOnDemandMiss(pubkey, Date.now() + ON_DEMAND_NEGATIVE_CACHE_MS);
       return {
         ok: false,
         reason:
@@ -533,8 +543,17 @@ export class ValidatorService {
   }
 
   private async refreshOnDemandVoteAccounts(): Promise<void> {
+    // In-flight dedupe: parallel callers share the same RPC fetch.
     if (this.onDemandRefreshPromise !== null) {
       await this.onDemandRefreshPromise;
+      return;
+    }
+    // Cooldown gate: when the cache is already primed, accept stale
+    // data rather than burst the upstream RPC. Cold start (cache
+    // empty) bypasses the gate so a freshly-booted pod can prime its
+    // cache on the first request without waiting for the periodic
+    // epoch-watcher tick.
+    if (this.lastRefresh.length > 0 && Date.now() < this.nextOnDemandRefreshAllowedAtMs) {
       return;
     }
 
@@ -554,5 +573,22 @@ export class ValidatorService {
     })();
 
     await this.onDemandRefreshPromise;
+  }
+
+  /**
+   * Record a negative-cache entry, evicting the oldest insertion when
+   * the cap is reached. `Map` iterates in insertion order, so the
+   * first key returned by `keys()` is the oldest — FIFO eviction is
+   * a single delete + set pair. We re-insert on update to keep the
+   * just-touched key from being evicted next.
+   */
+  private recordOnDemandMiss(pubkey: string, expiresAtMs: number): void {
+    if (this.onDemandMissUntilByPubkey.has(pubkey)) {
+      this.onDemandMissUntilByPubkey.delete(pubkey);
+    } else if (this.onDemandMissUntilByPubkey.size >= this.onDemandNegativeCacheMaxEntries) {
+      const oldest = this.onDemandMissUntilByPubkey.keys().next().value;
+      if (oldest !== undefined) this.onDemandMissUntilByPubkey.delete(oldest);
+    }
+    this.onDemandMissUntilByPubkey.set(pubkey, expiresAtMs);
   }
 }

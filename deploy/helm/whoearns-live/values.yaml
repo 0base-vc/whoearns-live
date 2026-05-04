@@ -162,9 +162,14 @@ config:
   apiRateLimitMax: 60
   apiRateLimitWindowMs: 60000
   # Number of trusted reverse-proxy hops in front of the API.
-  # 0 ignores X-Forwarded-* headers. Set to 1 only when traffic can
-  # reach the pod exclusively through a trusted ingress/LB that appends
-  # X-Forwarded-For.
+  # 0 ignores X-Forwarded-* headers — correct only when traffic
+  # reaches the pod directly (Service-only install, port-forward).
+  # When `ingress.enabled: true` you almost certainly want 1: a single
+  # ingress-nginx hop in front. Leaving this at 0 with an ingress in
+  # play makes the rate limiter see EVERY client as the same IP (the
+  # ingress pod), collapsing the per-IP cap into one shared bucket
+  # and throttling legitimate traffic. NOTES.txt prints a warning when
+  # ingress is on and this value is still 0.
   trustProxyHops: 0
   solanaRpcUrl: https://solana-rpc.publicnode.com
   solanaRpcTimeoutMs: 30000

@@ -15,12 +15,9 @@
   for the resolved page.
 -->
 <script lang="ts">
+  import { serializeJsonLd } from '$lib/json-ld';
   import { currentLocale } from '$lib/stores/locale.svelte';
   import { SITE_NAME, SITE_URL } from '$lib/site';
-
-  function serializeJsonLd(value: unknown): string {
-    return JSON.stringify(value).replace(/</g, '\\u003c');
-  }
 
   /**
    * Each term has English + Korean copy. Edit this array to add /
