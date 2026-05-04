@@ -198,8 +198,9 @@ Sitemap: ${SITE_URL}/sitemap.xml
 > ${SITE_NAME} — AI-assisted Solana validator income intelligence.
 > Open-source explorer tracking per-epoch slot production, block fees
 > (base + priority), and on-chain Jito tips for validators on Solana
-> mainnet. Data is indexed from Solana RPC block data. Maintained by
-> 0base.vc, all data released under CC0.
+> mainnet, with stored leader-slot facts for watched validators. Data
+> is indexed from Solana RPC block data. Maintained by 0base.vc, all
+> data released under CC0.
 
 ## Core pages
 
@@ -347,12 +348,14 @@ the MCP server (no IP-based budget) or run a self-hosted indexer.
 ## MCP tool surface
 
 The MCP server at ${SITE_URL}/mcp (Streamable HTTP, stateless)
-exposes three tools:
+exposes four tools:
 
 - get_current_epoch(): Returns current epoch state.
 - get_leaderboard(sort?, limit?): Ranked validators for the latest
   closed epoch.
 - get_validator(voteOrIdentity, epochLimit?): Per-epoch history.
+- get_validator_leader_slots(voteOrIdentity, epoch): Stored
+  leader-slot facts and data-quality fields for one validator epoch.
 
 Configure in Claude Desktop:
 
@@ -387,7 +390,7 @@ GitHub: https://github.com/0base-vc/whoearns-live (MIT)
       description_for_human:
         'Query AI-assisted Solana validator income intelligence: per-epoch block fees, on-chain Jito tips, and cluster rankings.',
       description_for_model:
-        'Use to look up AI-assisted Solana validator income intelligence from reproducible on-chain data. Provides per-epoch slot production, block-fee earnings (base + priority), on-chain Jito tips, and cluster leaderboard rankings. Accepts both vote and identity pubkeys. Closed-epoch data is final; running-epoch data is a live lower bound. Numeric values are strings (parse lamports as BigInt). Missing slot or income data is represented by null numerics and hasSlots/hasIncome booleans. Do not treat operator income as delegator APY unless commission and distribution policy are explicitly modeled.',
+        'Use to look up AI-assisted Solana validator income intelligence from reproducible on-chain data. Provides per-epoch slot production, block-fee earnings (base + priority), on-chain Jito tips, cluster leaderboard rankings, and stored leader-slot facts for watched validators. Accepts both vote and identity pubkeys. Closed-epoch data is final; running-epoch data is a live lower bound. Numeric values are strings (parse lamports as BigInt). Missing slot or income data is represented by null numerics and hasSlots/hasIncome booleans; leader-slot completeness is represented by quality.complete and pending/fetch-error counts. Do not treat operator income as delegator APY unless commission and distribution policy are explicitly modeled.',
       auth: { type: 'none' },
       api: {
         type: 'openapi',

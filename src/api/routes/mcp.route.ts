@@ -6,6 +6,7 @@ import type { AppConfig } from '../../core/config.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
+import type { ProcessedBlocksRepository } from '../../storage/repositories/processed-blocks.repo.js';
 import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
 import type { LeaderboardSort, StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
@@ -17,6 +18,10 @@ import type {
   Validator,
   VotePubkey,
 } from '../../types/domain.js';
+import {
+  serializeValidatorEpochSlotStats,
+  type ValidatorEpochSlotStatsResponse,
+} from '../serializers/leader-slots-response.js';
 
 export interface McpRoutesDeps {
   config: AppConfig;
@@ -24,19 +29,20 @@ export interface McpRoutesDeps {
     ValidatorsRepository,
     'findByVote' | 'findByIdentity' | 'getInfosByIdentities'
   >;
-  epochsRepo: Pick<EpochsRepository, 'findCurrent'>;
-  statsRepo: Pick<StatsRepository, 'findHistoryByVote' | 'findTopNByEpoch'>;
+  epochsRepo: Pick<EpochsRepository, 'findCurrent' | 'findByEpoch'>;
+  statsRepo: Pick<StatsRepository, 'findHistoryByVote' | 'findTopNByEpoch' | 'findByVoteEpoch'>;
+  processedBlocksRepo: Pick<ProcessedBlocksRepository, 'getValidatorEpochSlotStats'>;
   aggregatesRepo: Pick<AggregatesRepository, 'findByEpochTopN'>;
   profilesRepo: Pick<ProfilesRepository, 'findOptedOutVotes' | 'findByVote'>;
   claimsRepo: Pick<ClaimsRepository, 'findClaimedVotes'>;
 }
 
 /**
- * Streamable-HTTP MCP server in-process at `/mcp`. Exposes three
+ * Streamable-HTTP MCP server in-process at `/mcp`. Exposes four
  * read-only tools (`get_current_epoch`, `get_leaderboard`,
- * `get_validator`) that AI agents — Claude Desktop, Claude Code,
- * custom MCP clients — can call directly without scraping the UI or
- * parsing OpenAPI.
+ * `get_validator`, `get_validator_leader_slots`) that AI agents —
+ * Claude Desktop, Claude Code, custom MCP clients — can call directly
+ * without scraping the UI or parsing OpenAPI.
  *
  * Why in-process Fastify routes instead of a sidecar:
  *   * No new Docker image, no Helm changes, no extra port.
@@ -112,10 +118,11 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
           'block fees (base + priority), and on-chain Jito tips — indexed by',
           `${opts.config.SITE_NAME} at`,
           `${opts.config.SITE_URL}.`,
-          'Three tools:',
+          'Four tools:',
           '  • get_current_epoch — returns the current epoch state (call first).',
           '  • get_leaderboard — top-N validators ranked by performance / income / etc.',
           '  • get_validator — per-epoch history for one validator (vote OR identity).',
+          '  • get_validator_leader_slots — block-level facts for one validator epoch.',
           'Data is read-only. Closed-epoch numbers are final; running-epoch numbers',
           'grow until the epoch closes (~2 days). All lamport amounts are decimal',
           'strings — parse as BigInt to avoid precision loss.',
@@ -233,6 +240,45 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
       async (args) => {
         const limit = args.epochLimit ?? 10;
         const result = await buildValidatorPayload(opts, args.voteOrIdentity, limit);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+          isError: result.found === false,
+        };
+      },
+    );
+
+    server.registerTool(
+      'get_validator_leader_slots',
+      {
+        title: 'Get validator leader-slot facts',
+        description:
+          'Returns one validator epoch of stored watched leader-slot facts. Use this for data-quality checks and insight generation: processed/pending/fetch-error slots, fact capture completeness, failed tx rate, tip-bearing block ratio, max priority fee, max Jito tip, compute units, and best block. ' +
+          'This tool does NOT trigger Solana RPC; it reads the same local slot facts as /v1/validators/{idOrVote}/epochs/{epoch}/leader-slots. Prefer closed epochs and require quality.complete=true before making public claims. ' +
+          SHARED_TOOL_PROVENANCE_NOTE,
+        inputSchema: {
+          voteOrIdentity: z
+            .string()
+            .min(32)
+            .max(44)
+            .describe('Vote pubkey OR identity pubkey (base58, 32-44 chars).'),
+          epoch: z
+            .number()
+            .int()
+            .min(0)
+            .describe('Solana epoch number to inspect. Prefer a closed epoch for final claims.'),
+        },
+      },
+      async (args) => {
+        const result = await buildValidatorLeaderSlotsPayload(
+          opts,
+          args.voteOrIdentity,
+          args.epoch,
+        );
         return {
           content: [
             {
@@ -440,6 +486,22 @@ function serializeCluster(a: EpochAggregate): {
   };
 }
 
+async function resolveValidator(
+  opts: McpRoutesDeps,
+  voteOrIdentity: string,
+): Promise<Validator | null> {
+  // Try vote first, then identity — same dual-lookup pattern the
+  // /income page uses. Operators rotate identities, but the vote
+  // pubkey lives forever, so we query that first.
+  let validator: Validator | null = await opts.validatorsRepo.findByVote(
+    voteOrIdentity as VotePubkey,
+  );
+  if (validator === null) {
+    validator = await opts.validatorsRepo.findByIdentity(voteOrIdentity as IdentityPubkey);
+  }
+  return validator;
+}
+
 async function buildValidatorPayload(
   opts: McpRoutesDeps,
   voteOrIdentity: string,
@@ -464,15 +526,7 @@ async function buildValidatorPayload(
       items: ValidatorHistoryItem[];
     }
 > {
-  // Try vote first, then identity — same dual-lookup pattern the
-  // /income page uses. Operators rotate identities, but the vote
-  // pubkey lives forever, so we query that first.
-  let validator: Validator | null = await opts.validatorsRepo.findByVote(
-    voteOrIdentity as VotePubkey,
-  );
-  if (validator === null) {
-    validator = await opts.validatorsRepo.findByIdentity(voteOrIdentity as IdentityPubkey);
-  }
+  const validator = await resolveValidator(opts, voteOrIdentity);
   if (validator === null) {
     return { found: false, reason: `validator not found: ${voteOrIdentity}` };
   }
@@ -535,6 +589,37 @@ function serializeHistoryItem(stats: EpochValidatorStats): ValidatorHistoryItem 
       stats.activatedStakeLamports === null ? null : stats.activatedStakeLamports.toString(),
     slotsUpdatedAt: stats.slotsUpdatedAt === null ? null : stats.slotsUpdatedAt.toISOString(),
     feesUpdatedAt: stats.feesUpdatedAt === null ? null : stats.feesUpdatedAt.toISOString(),
+  };
+}
+
+type ValidatorLeaderSlotsPayload = { found: true } & ValidatorEpochSlotStatsResponse;
+
+async function buildValidatorLeaderSlotsPayload(
+  opts: McpRoutesDeps,
+  voteOrIdentity: string,
+  epoch: number,
+): Promise<ValidatorLeaderSlotsPayload | { found: false; reason: string }> {
+  const validator = await resolveValidator(opts, voteOrIdentity);
+  if (validator === null) {
+    return { found: false, reason: `validator not found: ${voteOrIdentity}` };
+  }
+
+  const [stats, epochRow] = await Promise.all([
+    opts.statsRepo.findByVoteEpoch(validator.votePubkey, epoch),
+    opts.epochsRepo.findByEpoch(epoch),
+  ]);
+  const slotStats = await opts.processedBlocksRepo.getValidatorEpochSlotStats({
+    epoch,
+    votePubkey: validator.votePubkey,
+    identityPubkey: validator.identityPubkey,
+    slotsAssigned: stats?.slotsAssigned ?? 0,
+    slotsProduced: stats?.slotsProduced ?? 0,
+    slotsSkipped: stats?.slotsSkipped ?? 0,
+  });
+
+  return {
+    found: true,
+    ...serializeValidatorEpochSlotStats(slotStats, epochRow?.isClosed ?? false),
   };
 }
 

@@ -267,19 +267,20 @@ Error envelope:
 
 A read-only Model Context Protocol server is exposed at `/mcp` over
 Streamable HTTP (no auth, stateless). AI agents — Claude Desktop,
-Claude Code, custom MCP clients — can call three tools without
+Claude Code, custom MCP clients — can call four tools without
 scraping the UI or parsing OpenAPI:
 
-| Tool                | Description                                                       |
-| ------------------- | ----------------------------------------------------------------- |
-| `get_current_epoch` | Returns the running epoch number, slot range, and elapsed slots.  |
-| `get_leaderboard`   | Top-N validators for the latest CLOSED epoch (configurable sort). |
-| `get_validator`     | Per-epoch history for one validator (vote OR identity pubkey).    |
+| Tool                         | Description                                                        |
+| ---------------------------- | ------------------------------------------------------------------ |
+| `get_current_epoch`          | Returns the running epoch number, slot range, and elapsed slots.   |
+| `get_leaderboard`            | Top-N validators for the latest CLOSED epoch (configurable sort).  |
+| `get_validator`              | Per-epoch history for one validator (vote OR identity pubkey).     |
+| `get_validator_leader_slots` | Stored leader-slot facts for one validator epoch; no live RPC hit. |
 
 The MCP transport is exempt from the per-IP rate limit on `/v1/*`
 because MCP clients are explicitly configured per-user; tool input
-schemas cap response sizes (`limit ≤ 100`, `epochLimit ≤ 50`) so
-intrinsic cost is bounded.
+schemas cap response sizes (`limit ≤ 100`, `epochLimit ≤ 50`, one
+validator epoch per leader-slot call) so intrinsic cost is bounded.
 
 **Claude Desktop** — add to `~/.claude/claude_desktop_config.json`
 (the `https://whoearns.live` URL below is the 0base.vc reference

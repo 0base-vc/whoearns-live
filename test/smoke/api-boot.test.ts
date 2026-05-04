@@ -267,7 +267,7 @@ describe('smoke: api server boots and routes 200/degraded', () => {
       // JSON-RPC `tools/list` is the cheapest probe: doesn't hit any
       // repo, just enumerates the registered tools. If MCP plumbing
       // is wired wrong this 500s; if the SDK is happy we get back
-      // three tool names. The MCP Inspector and Claude Desktop both
+      // four tool names. The MCP Inspector and Claude Desktop both
       // start with this exact request.
       const res = await app.inject({
         method: 'POST',
@@ -287,7 +287,12 @@ describe('smoke: api server boots and routes 200/degraded', () => {
         result?: { tools: Array<{ name: string }> };
       };
       const toolNames = (body.result?.tools ?? []).map((t) => t.name).sort();
-      expect(toolNames).toEqual(['get_current_epoch', 'get_leaderboard', 'get_validator']);
+      expect(toolNames).toEqual([
+        'get_current_epoch',
+        'get_leaderboard',
+        'get_validator',
+        'get_validator_leader_slots',
+      ]);
     } finally {
       await app.close();
     }

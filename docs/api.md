@@ -392,6 +392,7 @@ different operation.
 
 ## `GET /mcp`, `POST /mcp`, `DELETE /mcp`
 
-Streamable HTTP MCP endpoint for AI agents. The server exposes three read-only
-tools: `get_current_epoch`, `get_leaderboard`, and `get_validator`. MCP calls
-are exempt from the `/v1/*` IP rate limit, but tool schemas cap response sizes.
+Streamable HTTP MCP endpoint for AI agents. The server exposes four read-only
+tools: `get_current_epoch`, `get_leaderboard`, `get_validator`, and
+`get_validator_leader_slots`. MCP calls are exempt from the `/v1/*` IP rate
+limit, but tool schemas cap response sizes.

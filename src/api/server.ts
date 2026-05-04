@@ -277,7 +277,7 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       validatorsRepo: deps.repos.validators,
       statsRepo: deps.repos.stats,
     });
-    // MCP server. Streamable-HTTP transport, stateless mode. Three
+    // MCP server. Streamable-HTTP transport, stateless mode. Four
     // read-only tools backed by the same repos the v1/* routes use
     // (no extra DB queries; the cost ceiling is whatever those repos
     // already charge). See `mcp.route.ts` for the tool catalog and
@@ -287,6 +287,7 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       validatorsRepo: deps.repos.validators,
       epochsRepo: deps.repos.epochs,
       statsRepo: deps.repos.stats,
+      processedBlocksRepo: deps.repos.processedBlocks,
       aggregatesRepo: deps.repos.aggregates,
       profilesRepo: deps.repos.profiles,
       claimsRepo: deps.repos.claims,
