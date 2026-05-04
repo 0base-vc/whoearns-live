@@ -9,20 +9,20 @@
   both inputs are missing, the page falls through to a search form
   that POSTs back to itself with the params populated.
 
-  Per-metric grid below the heroes shows the same 5 metrics the
-  leaderboard ranks on (performance, total income, skip rate,
-  median fee, operator APR) with a "winner" highlight on each row.
-  Stake-neutral metrics (performance, skip rate, APR) are the
-  fairest direct comparison; total-income comparisons are biased by
-  stake size, which we annotate.
+  Per-metric grid below the heroes shows the same comparable metrics
+  as the income page (performance, total income, skip rate, median
+  fee, block fees, tips) with a "winner" highlight on each row.
+  Stake-neutral metrics (performance and skip rate) are the fairest
+  direct comparison; total-income comparisons are biased by stake
+  size, which we annotate.
 
   The compare surface is English-first because its labels are compact
   domain terms and are meant to match the leaderboard/income pages.
 -->
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import AddressDisplay from '$lib/components/AddressDisplay.svelte';
   import Card from '$lib/components/Card.svelte';
-  import EllipsisAddress from '$lib/components/EllipsisAddress.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { formatSol, shortenPubkey } from '$lib/format';
@@ -223,9 +223,9 @@
     if (slotA?.history && slotB?.history) {
       const a = displayName(slotA);
       const b = displayName(slotB);
-      return `Side-by-side comparison of Solana validators ${a} and ${b}: per-epoch income, skip rate, MEV, performance per slot, and operator APR.`;
+      return `Side-by-side comparison of Solana validators ${a} and ${b}: per-epoch income, skip rate, tips, and performance per slot.`;
     }
-    return 'Side-by-side comparison of any two Solana validators — performance, income, skip rate, MEV, and operator APR.';
+    return 'Side-by-side comparison of any two Solana validators — performance, income, skip rate, and on-chain Jito tips.';
   });
 </script>
 
@@ -241,8 +241,8 @@
   </p>
   <h1 class="mt-2 text-4xl font-semibold tracking-tight sm:text-5xl">Compare two validators</h1>
   <p class="mt-4 max-w-2xl text-base text-[color:var(--color-text-muted)]">
-    Paste two vote or identity pubkeys (or monikers tracked by this site) and see them side-by-side.
-    The fairest comparisons are stake-neutral: performance and skip rate.
+    Paste two vote or identity pubkeys and see them side-by-side. The fairest comparisons are
+    stake-neutral: performance and skip rate.
   </p>
 </section>
 
@@ -258,14 +258,14 @@
     <input
       type="text"
       bind:value={inputA}
-      placeholder="Validator A — vote / identity / moniker"
+      placeholder="Validator A — vote or identity pubkey"
       class="min-h-11 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 font-mono text-base sm:text-sm"
       aria-label="Validator A pubkey"
     />
     <input
       type="text"
       bind:value={inputB}
-      placeholder="Validator B — vote / identity / moniker"
+      placeholder="Validator B — vote or identity pubkey"
       class="min-h-11 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 font-mono text-base sm:text-sm"
       aria-label="Validator B pubkey"
     />
@@ -300,19 +300,9 @@
               <VerifiedBadge size={16} />
             {/if}
           </h2>
-          <!--
-            Vote pubkey under the validator name. Elastic single-
-            line via `EllipsisAddress` — full 44-char pubkey when
-            the card is wide enough (desktop ~544 px slot fits
-            comfortably), middle-truncates on stacked-mobile cards
-            without wrapping. Copy-on-select hijacks the clipboard
-            with the full pubkey.
-          -->
-          <p class="mt-1">
-            <EllipsisAddress
-              pubkey={slot.history.vote}
-              class="font-mono text-xs text-[color:var(--color-text-subtle)]"
-            />
+          <!-- Vote pubkey under the validator name with an explicit compact copy target. -->
+          <p class="mt-1 text-[color:var(--color-text-subtle)]">
+            <AddressDisplay pubkey={slot.history.vote} head={8} tail={8} />
           </p>
           <p class="mt-4 text-xs uppercase tracking-wide text-[color:var(--color-text-muted)]">
             Total income (last {slot.history.items.length} epochs)
@@ -346,8 +336,50 @@
       {/if}
     </header>
 
+    <div class="grid gap-3 md:hidden">
+      {#each METRICS as metric (metric.key)}
+        {@const va = metric.extract(rowA)}
+        {@const vb = metric.extract(rowB)}
+        {@const winner = winnerOf(metric)}
+        <article
+          class="rounded-xl border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
+        >
+          <h3 class="inline-flex items-center text-sm font-semibold">
+            {metric.label}
+            <Tooltip label={`About ${metric.label}`} content={metric.tooltip} />
+          </h3>
+          <dl class="mt-3 grid grid-cols-2 gap-2">
+            <div
+              class={winner === 'a'
+                ? 'rounded-lg bg-[color:var(--color-status-ok-bg)] p-3'
+                : 'rounded-lg bg-[color:var(--color-surface-muted)] p-3'}
+            >
+              <dt class="truncate text-xs text-[color:var(--color-text-muted)]">
+                {displayName(slotA)}
+              </dt>
+              <dd class="mt-1 font-mono text-sm font-semibold tabular-nums">
+                {va !== null ? metric.fmt(va) : '—'}
+              </dd>
+            </div>
+            <div
+              class={winner === 'b'
+                ? 'rounded-lg bg-[color:var(--color-status-ok-bg)] p-3'
+                : 'rounded-lg bg-[color:var(--color-surface-muted)] p-3'}
+            >
+              <dt class="truncate text-xs text-[color:var(--color-text-muted)]">
+                {displayName(slotB)}
+              </dt>
+              <dd class="mt-1 font-mono text-sm font-semibold tabular-nums">
+                {vb !== null ? metric.fmt(vb) : '—'}
+              </dd>
+            </div>
+          </dl>
+        </article>
+      {/each}
+    </div>
+
     <div
-      class="overflow-hidden rounded-xl border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)]"
+      class="hidden overflow-hidden rounded-xl border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] md:block"
     >
       <table class="min-w-full divide-y divide-[color:var(--color-border-default)] text-sm">
         <thead
@@ -355,8 +387,8 @@
         >
           <tr>
             <th scope="col" class="px-4 py-3 text-left">Metric</th>
-            <th scope="col" class="px-4 py-3 text-right">{displayName(slotA)}</th>
-            <th scope="col" class="px-4 py-3 text-right">{displayName(slotB)}</th>
+            <th scope="col" class="max-w-56 truncate px-4 py-3 text-right">{displayName(slotA)}</th>
+            <th scope="col" class="max-w-56 truncate px-4 py-3 text-right">{displayName(slotB)}</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-[color:var(--color-border-default)]">
@@ -392,12 +424,11 @@
     </div>
     <p class="mt-3 text-xs text-[color:var(--color-text-subtle)]">
       Highlighted cell wins the row. Total income is biased by stake size — for a stake-neutral
-      read, use Performance, Skip rate, or APR.
+      read, use Performance or Skip rate.
     </p>
   </section>
 {:else}
   <p class="mt-10 text-sm text-[color:var(--color-text-muted)]">
-    Start by entering two validators above. You can paste vote or identity pubkeys, or a moniker
-    that this site already tracks.
+    Start by entering two validators above. You can paste vote or identity pubkeys.
   </p>
 {/if}

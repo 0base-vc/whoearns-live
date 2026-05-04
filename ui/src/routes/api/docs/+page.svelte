@@ -244,13 +244,15 @@
       <li
         class="rounded-xl border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-5"
       >
-        <div class="flex flex-wrap items-baseline gap-2">
+        <div class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
           <span
             class="rounded bg-[color:var(--color-brand-50)] px-1.5 py-0.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-[color:var(--color-brand-600)] dark:bg-[color:var(--color-brand-950)] dark:text-[color:var(--color-brand-300)]"
             >{ep.method}</span
           >
-          <code class="font-mono text-sm font-medium">{ep.path}</code>
-          <span class="ml-auto text-xs text-[color:var(--color-text-subtle)]">{ep.summary}</span>
+          <code class="min-w-0 break-all font-mono text-sm font-medium">{ep.path}</code>
+          <span class="w-full text-xs text-[color:var(--color-text-subtle)] sm:ml-auto sm:w-auto"
+            >{ep.summary}</span
+          >
         </div>
         <p class="mt-3 text-sm leading-relaxed text-[color:var(--color-text-muted)]">
           {ep.description}

@@ -40,8 +40,8 @@
         <span class="text-[color:var(--color-brand-500)]">Delegate SOL to 0base.vc.</span>
       </h3>
       <p class="mt-1 text-sm text-[color:var(--color-text-muted)]">
-        This explorer and the indexer behind it are maintained by the team at 0base.vc. If you find
-        it useful, staking with us keeps the project funded — same way open-source projects accept
+        WhoEarns and the indexer behind it are maintained by the team at 0base.vc. If you find it
+        useful, staking with us keeps the project funded — same way open-source projects accept
         sponsorships.
       </p>
 
@@ -76,7 +76,7 @@
         href={`https://solanacompass.com/validators/${VOTE_PUBKEY}`}
         target="_blank"
         rel="noopener noreferrer"
-        class="inline-flex items-center justify-center rounded-lg bg-[color:var(--color-brand-500)] px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[color:var(--color-brand-600)]"
+        class="inline-flex min-h-11 items-center justify-center rounded-lg bg-[color:var(--color-brand-500)] px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[color:var(--color-brand-600)]"
       >
         Stake now
         <svg
@@ -96,7 +96,7 @@
       </a>
       <a
         href={`/income/${VOTE_PUBKEY}`}
-        class="inline-flex items-center justify-center rounded-lg border border-[color:var(--color-brand-500)] px-4 py-2 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-50)] dark:hover:bg-[color:var(--color-brand-950)]"
+        class="inline-flex min-h-11 items-center justify-center rounded-lg border border-[color:var(--color-brand-500)] px-4 py-2 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-50)] dark:hover:bg-[color:var(--color-brand-950)]"
       >
         View our metrics
       </a>

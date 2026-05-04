@@ -520,7 +520,7 @@
             href={`/claim/${history.vote}`}
             class="text-[color:var(--color-text-subtle)] hover:text-[color:var(--color-brand-500)] hover:underline"
           >
-            {history.profile ? 'Edit profile ›' : 'Are you the operator? Claim this validator ›'}
+            {history.claimed ? 'Edit profile ›' : 'Are you the operator? Claim this validator ›'}
           </a>
         </p>
       </div>

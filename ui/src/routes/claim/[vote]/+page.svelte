@@ -318,7 +318,7 @@
           bind:value={twitterHandle}
           placeholder="alice (no @)"
           maxlength={15}
-          class="mt-1 w-full max-w-xs rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 font-mono text-sm"
+          class="mt-1 w-full max-w-xs rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 font-mono text-base sm:text-sm"
         />
         <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
           Letters, numbers, and underscore. Shown on your income page with a link.
@@ -347,7 +347,7 @@
           class="mt-1 h-4 w-4 rounded border-[color:var(--color-border-default)] text-[color:var(--color-brand-500)]"
         />
         <span class="text-sm">
-          <span class="font-semibold">Opt out of the public explorer</span>
+          <span class="font-semibold">Opt out of the public dashboard</span>
           <span class="block text-xs text-[color:var(--color-text-muted)]">
             Hides this validator from the leaderboard and returns a stub on the income page. The
             indexer keeps ingesting data, so re-opting-in is instant — but external links to your
@@ -378,7 +378,7 @@
           maxlength={NARRATIVE_OVERRIDE_MAX}
           rows={3}
           placeholder={'e.g. "0base.vc — Korean validator running on bare-metal in Seoul. 100% MEV uptime since epoch 800."\n\nLeave blank to hide the note.'}
-          class="mt-1 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-sm leading-relaxed"
+          class="mt-1 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-base leading-relaxed sm:text-sm"
         ></textarea>
         <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
           Optional operator-authored context above the running-epoch card on your income page.
@@ -396,7 +396,7 @@
     <button
       type="button"
       onclick={generateChallenge}
-      class="rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1.5 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-500)] hover:text-white"
+      class="inline-flex min-h-11 items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1.5 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-500)] hover:text-white"
     >
       {challenge === null ? 'Generate signable message' : 'Regenerate'}
     </button>
@@ -410,7 +410,7 @@
         >
           Step 1 · Run on your validator box
         </p>
-        <div class="mt-2 flex items-start gap-2">
+        <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
           <pre
             class="flex-1 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed"><code
               >{cliCommand}</code
@@ -418,7 +418,7 @@
           <button
             type="button"
             onclick={() => copyToClipboard(cliCommand)}
-            class="shrink-0 rounded-lg border border-[color:var(--color-border-default)] px-2.5 py-1 text-xs font-medium"
+            class="inline-flex min-h-11 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
           >
             Copy
           </button>
@@ -440,7 +440,7 @@
             bind:value={signatureBase58}
             rows={3}
             placeholder="e.g. 3nVa7WsjYZG5…"
-            class="mt-1 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-3 font-mono text-xs"
+            class="mt-1 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-3 font-mono text-base sm:text-xs"
           ></textarea>
         </label>
       </div>
@@ -449,7 +449,7 @@
         type="button"
         onclick={handleSubmit}
         disabled={submitting || signatureBase58.trim().length === 0}
-        class="w-full rounded-lg bg-[color:var(--color-brand-500)] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[color:var(--color-brand-600)] disabled:cursor-not-allowed disabled:opacity-50"
+        class="min-h-11 w-full rounded-lg bg-[color:var(--color-brand-500)] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[color:var(--color-brand-600)] disabled:cursor-not-allowed disabled:opacity-50"
       >
         {submitting ? 'Submitting…' : purpose === 'claim' ? 'Verify claim' : 'Save profile changes'}
       </button>
@@ -497,7 +497,7 @@
     </li>
     <li>
       Unlocks profile editing: Twitter handle, hiding the 0base.vc footer on your page, opting out
-      of the public explorer.
+      of the public dashboard.
     </li>
     <li>
       Doesn't change anything on-chain. No transactions, no gas, no token approvals. Just a

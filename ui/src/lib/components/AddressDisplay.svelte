@@ -21,7 +21,9 @@
     in line with what AT users already heard.
 
   Design: uses the brand-accent on copy-hover so users associate the
-  action with the same color as the primary CTA.
+  action with the same color as the primary CTA. Block rows keep the
+  icon directly beside the address instead of pushing a text button to
+  the far edge of the row.
 -->
 <script lang="ts">
   import { shortenPubkey } from '$lib/format';
@@ -79,29 +81,59 @@
         {/if}
       </dt>
     {/if}
-    <dd class="mt-1 flex items-center gap-2">
+    <dd class="mt-1 flex min-w-0 max-w-full items-center gap-1.5">
       <!--
         Block variant uses `EllipsisAddress` for elastic single-
         line rendering. On wide cards (≥ ~320 px) it shows the
         full 44-char pubkey; on narrower cards it middle-truncates
         to fit in one line ("5BAi9Y…C6uBPZ") rather than wrapping
         to two lines. `oncopy` inside `EllipsisAddress` ensures
-        the clipboard always receives the full pubkey regardless
-        of the visible truncation. `flex-1 min-w-0` lets the
-        address consume all width left over after the Copy button
-        is laid out.
+        the clipboard always receives the full pubkey regardless of
+        the visible truncation. `min-w-0` allows the address to shrink
+        before the copy icon is clipped, while avoiding `flex-1` keeps
+        the icon visually attached to the address.
       -->
       <EllipsisAddress
         {pubkey}
-        class="flex-1 rounded bg-[color:var(--color-surface-muted)] px-2 py-1 font-mono text-xs"
+        class="min-w-0 rounded bg-[color:var(--color-surface-muted)] px-2 py-1 font-mono text-xs"
       />
       <button
         type="button"
-        class="rounded-md border border-[color:var(--color-border-default)] px-2 py-1 text-xs text-[color:var(--color-text-muted)] transition-colors hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+        class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[color:var(--color-text-subtle)] transition-colors hover:bg-[color:var(--color-surface-muted)] hover:text-[color:var(--color-brand-500)]"
         onclick={copy}
         aria-label="Copy full pubkey to clipboard"
+        title={copied ? 'Copied' : 'Copy'}
       >
-        {copied ? '✓ Copied' : 'Copy'}
+        {#if copied}
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <polyline points="20 6 9 17 4 12"></polyline>
+          </svg>
+        {:else}
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+        {/if}
       </button>
     </dd>
   </div>
@@ -110,7 +142,7 @@
     <code class="font-mono text-xs" aria-label={pubkey}>{short}</code>
     <button
       type="button"
-      class="text-[color:var(--color-text-subtle)] transition-colors hover:text-[color:var(--color-brand-500)]"
+      class="inline-flex h-7 w-7 items-center justify-center rounded-md text-[color:var(--color-text-subtle)] transition-colors hover:bg-[color:var(--color-surface-muted)] hover:text-[color:var(--color-brand-500)]"
       onclick={copy}
       aria-label="Copy full pubkey to clipboard"
       title={copied ? 'Copied' : 'Copy'}

@@ -197,6 +197,18 @@
           <LocaleSwitcher />
         {/if}
         <a
+          href="/compare"
+          class="hidden min-h-11 items-center text-[color:var(--color-text-muted)] transition-colors hover:text-[color:var(--color-text-default)] sm:inline-flex"
+        >
+          Compare
+        </a>
+        <a
+          href="/api/docs"
+          class="hidden min-h-11 items-center text-[color:var(--color-text-muted)] transition-colors hover:text-[color:var(--color-text-default)] sm:inline-flex"
+        >
+          API
+        </a>
+        <a
           href="https://github.com/0base-vc/whoearns-live"
           target="_blank"
           rel="noopener noreferrer"
@@ -239,7 +251,7 @@
         class="mt-8 flex flex-col items-start justify-between gap-3 text-xs text-[color:var(--color-text-subtle)] sm:flex-row sm:items-center"
       >
         <p>
-          Data from the
+          Data from
           <a
             href={SITE_URL}
             class="font-medium text-[color:var(--color-text-muted)] hover:text-[color:var(--color-brand-500)]"

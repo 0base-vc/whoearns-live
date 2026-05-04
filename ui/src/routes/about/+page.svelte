@@ -35,7 +35,7 @@
       title: t('Open code', '오픈 코드'),
       badge: 'MIT',
       body: t(
-        'Indexer, API, and UI — everything that produces the numbers you see — is source-available under the MIT license. Fork it, self-host it, read the SQL.',
+        'The indexer, API, and UI are open-source under the MIT license. Fork the project, self-host it, read the SQL.',
         '인덱서, API, UI — 화면에 보이는 모든 수치를 만들어내는 코드 전체가 MIT 라이선스로 공개돼 있습니다. 포크해도 되고, 직접 호스팅해도 되고, SQL을 직접 읽어봐도 됩니다.',
       ),
     },
