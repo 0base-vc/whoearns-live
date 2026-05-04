@@ -81,6 +81,14 @@
     },
     {
       method: 'GET',
+      path: '/v1/validators/{idOrVote}/epochs/{epoch}/leader-slots',
+      summary: 'Leader-slot facts for one validator epoch',
+      description:
+        'Aggregates stored facts from watched validator leader slots only. The API call does not trigger Solana RPC; it returns local slot quality fields such as `factCapturedSlots`, `missingFactSlots`, `pendingSlots`, `fetchErrorSlots`, and `complete`, plus block fee, tip, tx, and compute summaries.',
+      example: `${SITE_URL}/v1/validators/9f7dqiYNBZbgPesAnLeWnKCtxYHSfMg5x1EMZCJwVwG7/epochs/966/leader-slots`,
+    },
+    {
+      method: 'GET',
       path: '/v1/validators/{idOrVote}/history',
       summary: 'Per-epoch history for a validator',
       description:
