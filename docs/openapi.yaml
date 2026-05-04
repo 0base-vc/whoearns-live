@@ -13,7 +13,7 @@ info:
     **v0.3 breaking change.** Jito Kobe payout fields and per-stream status
     enums were removed. Current-epoch values are lower bounds and can increase
     until the epoch closes; closed-epoch rows are marked with `isFinal=true`.
-    See `docs/API_MIGRATION_v0.3.md` for client-side migration notes.
+    Repository migration note: `docs/migrations/v0.3-api.md`.
 
 servers:
   - url: http://localhost:8080
@@ -211,8 +211,8 @@ paths:
           - `median_fee`: per-validator median block fee, DESC. Reflects
             tx-selection / priority-fee capture quality.
 
-        Rows with `slots_assigned < 30` are returned but marked by the UI
-        as low-sample (a single lucky MEV block dominates such rows).
+        Rows with `slotsAssigned < 30` are returned but marked by the UI
+        as low-sample (a single tip-heavy block can dominate such rows).
         Clients that want stricter filtering should apply their own
         threshold on `slotsAssigned` after the fetch.
       parameters:
@@ -549,7 +549,7 @@ components:
         medianBlockPriorityFeeSol: { type: [string, 'null'] }
         blockTipsTotalLamports:
           type: [string, 'null']
-          description: On-chain Jito MEV tips from produced blocks. null when hasIncome=false.
+          description: On-chain Jito tips from produced blocks. null when hasIncome=false.
         blockTipsTotalSol:
           type: [string, 'null']
         medianBlockTipLamports: { type: [string, 'null'] }

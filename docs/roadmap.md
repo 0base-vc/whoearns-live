@@ -15,7 +15,7 @@ below, either do it or write it down.
       (`SOLANA_RPC_CREDITS_PER_SEC` config).
 - [x] Removed live `getBlockProduction` from slot counters — counters now
       derive from local `processed_blocks` facts.
-- [x] `/v1/*` Fastify rate limiter.
+- [x] `/v1/*` and `/mcp` Fastify rate limiter.
 - [x] `processed_blocks` partitioning by epoch range (needed before
       watched set grows > 100).
 - [x] Add-time stake/activity filter for any future "add my
@@ -37,13 +37,12 @@ stats" into "anyone can look up any validator + see cluster context."
 
 ## Phase 3 — Validator engagement
 
-Pulls validator operators into a loop where they care about the
-site. Design-reviewed; see agent notes below.
+Pulls validator operators into a loop where they care about the site.
 
 - [x] `/claim/:pubkey` — Ed25519 offchain-message verification
       against validator identity key. Unlocks: moniker + Twitter
-      handle registration, muting the 0base.vc footer CTA on the
-      operator's own page, self-service opt-out.
+      handle registration, footer attribution controls on the
+      operator's own page, and self-service opt-out.
 - [ ] X rank-change bot — posts "validator X moved from #87
       to #45 this week" with an OG card image. Tagging the operator
       makes the site come to them instead of the other way around.
@@ -53,30 +52,30 @@ site. Design-reviewed; see agent notes below.
       closed-epoch API data only, with citations to the exact sample,
       epoch, and fields used before a maintainer publishes anything.
 
-### Phase 3 — block-source abstraction (Yellowstone)
+### Phase 3 — optional Yellowstone live path
 
-Groundwork for sub-second updates. **Not urgent today** because HTTP polling
-now only processes watched validators' leader slots and has enough headroom
-for the current deployment. But worth keeping because:
+Groundwork for lower-latency updates. HTTP polling only processes watched
+validators' leader slots and remains the repair path, but an optional stream
+keeps the current epoch fresher when a Yellowstone endpoint is configured.
 
 - `subscribeBlocks` via gRPC makes the "live" rank-change bot
   responsive in seconds rather than a 30-second tick.
 - Scales O(1) instead of O(watched × slots) — future-proof if
   watched-set explodes.
 
-Work shape:
+Shipped:
 
-1. Refactor `SolanaRpcClient` behind a `BlockSource` interface with
-   two implementations: `RpcPollingBlockSource` (today) and
-   `YellowstoneBlockSource` (new). `fee.service` consumes the
-   interface, not the concrete class.
-2. Wire the endpoint behind
-   `YELLOWSTONE_GRPC_URL` env var. When set, the worker
-   streams `subscribeBlocks` filtered by watched leader identities;
-   HTTP polling becomes the fallback on reconnect / disconnect.
-3. Measure: blocks-per-minute ingest rate vs. HTTP. If the free
-   endpoint is too flaky, the `BlockSource` abstraction lets us
-   swap to a paid provider in one config line.
+- [x] `YELLOWSTONE_GRPC_URL` and optional `YELLOWSTONE_GRPC_X_TOKEN`.
+- [x] Watched-leader-slot gate so streamed blocks are only accepted for
+      validators the indexer is tracking.
+- [x] Polling and closed-epoch reconciliation remain enabled, so stream
+      disconnects are repaired by the same `processed_blocks` fact model.
+
+Remaining:
+
+- [ ] Measure stream latency, reconnect frequency, and polling catch-up time
+      by provider.
+- [ ] Add provider-quality notes once there is enough production data.
 
 ## Phase 4 — Ecosystem distribution
 

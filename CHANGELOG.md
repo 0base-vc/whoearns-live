@@ -17,6 +17,10 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 - Renamed the public Helm chart path, chart name, Docker Compose project,
   local image name, and logger service name to `whoearns-live`.
+- Cleaned up public docs: moved the v0.3 API migration note under
+  `docs/migrations/`, removed the Korean deployment-era API note, and
+  aligned architecture/roadmap/OpenAPI wording with the current ingestion
+  model.
 
 ## [0.3.0] - 2026-04-29
 

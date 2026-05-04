@@ -17,10 +17,10 @@ source of truth remains the PostgreSQL data derived from Solana block data.
 +---------+----------+
           ^
           |
-+---------+----------+     +-----------------+
-| Slot ingester job  |     | Fee ingester    |
-|  (getBlockProd.)   |     | (getBlock)      |
-+---------+----------+     +--------+--------+
++---------+----------+     +-----------------+     +------------------+
+| Slot ingester job  |     | Fee ingester    |<----| Yellowstone gRPC |
+| (schedule + facts) |     | (watched slots) |     |   (optional)     |
++---------+----------+     +--------+--------+     +------------------+
           |                         |
           v                         v
 +---------------------------------------------+
@@ -67,6 +67,8 @@ The worker is single-replica by design: each ingestion job uses a
 row in `ingestion_cursors` as its progress marker, and the cursor is
 not protected by a distributed lock. A second worker writing to the
 same database will re-run already-processed work and waste RPC quota.
+Optional Yellowstone gRPC ingestion runs inside the same worker process
+and is still paired with the polling/reconciliation path for repair.
 
 ## Jobs
 
@@ -106,6 +108,10 @@ It inserts a fact row into `processed_blocks` and applies the same delta
 to `epoch_validator_stats.block_*_total_lamports`. `processed_blocks`
 has `slot` as its primary key, so a duplicate call is a no-op.
 
+When `YELLOWSTONE_GRPC_URL` is configured, a best-effort live subscriber
+can feed current-epoch watched leader blocks into the same persistence path.
+JSON-RPC polling remains enabled and repairs reconnect gaps.
+
 ### Aggregates job (`AGGREGATES_INTERVAL_MS`, default 300s)
 
 Recomputes cluster-sample medians from stored facts for the configured
@@ -136,12 +142,12 @@ client can tell what is stale.
 - **`processed_blocks` as a fact table.** The fee ingester never
   computes a value it has already written; duplicate slot visits are
   ignored by the primary-key conflict.
-- **Delta updates, not setters.** `block_fees_total_lamports` is
-  incremented, never overwritten, so a crash between
-  `INSERT processed_blocks` and `UPDATE stats` cannot rewind the
-  stats total — the row will be retried against the next batch and
-  the `ON CONFLICT DO NOTHING` on `processed_blocks` prevents
-  double-counting.
+- **Aggregate rows are repairable caches.** `epoch_validator_stats`
+  is updated incrementally for low-latency reads, but the accounting
+  authority is `processed_blocks`. If the worker crashes after writing
+  a fact row but before applying the aggregate delta, the fee ingester
+  and closed-epoch reconciler rebuild cached totals from
+  `processed_blocks`.
 - **Cursors are per-job rows.** `ingestion_cursors.job_name` is the
   PK. Resumption is "read cursor, do work up to N blocks, write
   cursor". If the worker dies mid-batch, the next worker run picks
@@ -169,9 +175,10 @@ delete path.
 
 ## Trade-offs
 
-- **No chain stream.** We poll RPC on timers rather than running a
-  Geyser plugin. Simpler to operate; adds 30–60s of lag to the
-  "current epoch" read path.
+- **Optional chain stream, mandatory repair path.** Yellowstone gRPC
+  can reduce live latency when configured, but JSON-RPC polling and
+  reconciliation remain the source of repair for missed slots and
+  provider disconnects.
 - **No Jito payout API.** Income uses block facts only. That gives a
   running-epoch number and removes the delayed/optional Kobe payout
   dependency, but it means `blockTipsTotal*` is the gross on-chain tip

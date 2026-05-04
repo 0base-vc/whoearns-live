@@ -1,6 +1,7 @@
 # HTTP API
 
 Machine-readable version: [`openapi.yaml`](./openapi.yaml).
+Historical client migration note: [`migrations/v0.3-api.md`](./migrations/v0.3-api.md).
 
 WhoEarns is AI-assisted, but the HTTP API is data-first. AI may help
 operators monitor freshness, spot unusual validator-income patterns, and
