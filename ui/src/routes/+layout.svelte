@@ -216,6 +216,14 @@
         >
           GitHub
         </a>
+        <a
+          href="https://x.com/WhoearnsLive"
+          target="_blank"
+          rel="me noopener noreferrer"
+          class="inline-flex min-h-11 items-center text-[color:var(--color-text-muted)] transition-colors hover:text-[color:var(--color-text-default)]"
+        >
+          X
+        </a>
         <!--
           Stake CTA — deep-links to a third-party staking surface for
           0base.vc so the click actually lets the visitor delegate SOL
@@ -297,6 +305,13 @@
             rel="noopener noreferrer"
             class="inline-flex min-h-11 items-center hover:text-[color:var(--color-brand-500)]"
             >GitHub</a
+          >
+          <a
+            href="https://x.com/WhoearnsLive"
+            target="_blank"
+            rel="me noopener noreferrer"
+            class="inline-flex min-h-11 items-center hover:text-[color:var(--color-brand-500)]"
+            >X</a
           >
           <a
             href="https://0base.vc"
