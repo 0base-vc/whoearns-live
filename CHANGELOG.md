@@ -10,6 +10,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - AI-assisted positioning across public docs, SEO metadata, OpenAPI,
   `llms.txt`, and AI-agent guidance. The source-of-truth contract remains
   Solana block data, not AI-written summaries.
+- Block-level slot facts for watched validator leader slots and
+  `GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots` for AI/X analysis.
 
 ### Changed
 

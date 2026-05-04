@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { pino } from 'pino';
 import {
   FeeService,
+  analyzeBlockTransactions,
   decomposeBlockIncome,
   extractLeaderFees,
 } from '../../../src/services/fee.service.js';
@@ -205,6 +206,53 @@ describe('decomposeBlockIncome — type tolerance across RPC shapes', () => {
     };
     const out = decomposeBlockIncome([tx]);
     expect(out.mevTips).toBe(500_000n);
+  });
+
+  it('derives slot facts from the same transaction scan', () => {
+    const TIP = '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5';
+    const txSuccess: RpcFullTransactionEntry = {
+      transaction: {
+        signatures: ['sig1', 'sig2'],
+        message: { accountKeys: ['payer', TIP] },
+      },
+      meta: {
+        err: null,
+        fee: 25_000n,
+        computeUnitsConsumed: 123_000n,
+        preBalances: [10_000_000n, 0n],
+        postBalances: [9_970_000n, 5_000n],
+      },
+    };
+    const txFailed: RpcFullTransactionEntry = {
+      transaction: {
+        signatures: ['sig3'],
+        message: { accountKeys: ['payer2'] },
+      },
+      meta: {
+        err: { InstructionError: [0, 'Custom'] },
+        fee: 9_000n,
+        computeUnitsConsumed: 7_000n,
+        preBalances: [10_000_000n],
+        postBalances: [9_991_000n],
+      },
+    };
+
+    const out = analyzeBlockTransactions([txSuccess, txFailed]);
+
+    expect(out.income.baseFees).toBe(15_000n);
+    expect(out.income.priorityFees).toBe(19_000n);
+    expect(out.income.mevTips).toBe(5_000n);
+    expect(out.slotFacts).toEqual({
+      txCount: 2,
+      successfulTxCount: 1,
+      failedTxCount: 1,
+      unknownMetaTxCount: 0,
+      signatureCount: 3,
+      tipTxCount: 1,
+      maxTipLamports: 5_000n,
+      maxPriorityFeeLamports: 15_000n,
+      computeUnitsConsumed: 130_000n,
+    });
   });
 });
 
@@ -488,6 +536,12 @@ describe('FeeService.ingestPendingBlocks', () => {
         const out = new Set<number>();
         if (rows[0]) out.add(rows[0].slot);
         return out;
+      },
+      async markFetchResolved(): Promise<number> {
+        return 0;
+      },
+      async recordFetchError(): Promise<void> {
+        return undefined;
       },
       async getProcessedSlotsInRange(): Promise<Set<number>> {
         return new Set<number>();

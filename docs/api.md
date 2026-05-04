@@ -99,6 +99,25 @@ post-epoch payout number after TipRouter distribution; this indexer uses the
 raw on-chain tips directly so the running epoch can be displayed without
 waiting for a payout API.
 
+### Leader-slot facts and RPC usage
+
+The leader-slot API reads the same watched-leader-slot facts that power income
+totals. It does **not** scan every Solana slot and does **not** call RPC at
+request time. The worker derives tx counts, failed-tx counts, tip-bearing
+transaction counts, max priority fee, max Jito tip, and compute-unit totals
+from the existing `getBlock(transactionDetails='full')` response.
+
+RPC fetch failures are stored separately from true skipped slots. That lets
+clients distinguish:
+
+- `pendingSlots`: assigned leader slots with no local fact and no unresolved
+  fetch error.
+- `fetchErrorSlots`: assigned leader slots where the last RPC fetch failed and
+  reconciliation has not resolved it yet.
+- `missingFactSlots`: legacy local rows that predate block-fact capture and
+  must not be used for public fact claims.
+- `slotsSkipped`: finalized leader slots confirmed as skipped.
+
 ## `GET /healthz`
 
 ```json
@@ -233,6 +252,68 @@ numeric fields set to `null` — it does **not** 404.
 | 200  | —                  | Validator is known.               |
 | 400  | `validation_error` | Invalid pubkey or epoch.          |
 | 404  | `not_found`        | Pubkey is unknown to the indexer. |
+
+## `GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots`
+
+Returns epoch-level facts aggregated from a validator's assigned leader slots.
+This is not an insight endpoint by itself; AI/MCP/X automation can derive
+public claims from these stored slot facts while the income page stays simple.
+
+```json
+{
+  "epoch": 966,
+  "vote": "Vote111...",
+  "identity": "Node111...",
+  "hasData": true,
+  "isFinal": true,
+  "quality": {
+    "slotsAssigned": 42,
+    "slotsProduced": 41,
+    "slotsSkipped": 1,
+    "processedSlots": 42,
+    "factCapturedSlots": 42,
+    "missingFactSlots": 0,
+    "pendingSlots": 0,
+    "fetchErrorSlots": 0,
+    "complete": true
+  },
+  "summary": {
+    "producedBlocks": 41,
+    "totalIncomeLamports": "1230000000",
+    "totalIncomeSol": "1.23",
+    "totalFeesLamports": "1100000000",
+    "totalFeesSol": "1.1",
+    "totalTipsLamports": "130000000",
+    "totalTipsSol": "0.13",
+    "txCount": 20000,
+    "successfulTxCount": 19800,
+    "failedTxCount": 200,
+    "unknownMetaTxCount": 0,
+    "failedTxRate": 0.01,
+    "signatureCount": 23000,
+    "tipTxCount": 312,
+    "tipBearingBlockCount": 18,
+    "tipBearingBlockRatio": 0.439024,
+    "avgPriorityFeePerProducedBlockLamports": "20000000",
+    "avgPriorityFeePerProducedBlockSol": "0.02",
+    "avgTipPerProducedBlockLamports": "3170731",
+    "avgTipPerProducedBlockSol": "0.003170731",
+    "maxPriorityFeeLamports": "90000000",
+    "maxPriorityFeeSol": "0.09",
+    "maxTipLamports": "50000000",
+    "maxTipSol": "0.05",
+    "computeUnitsConsumed": "1234567890",
+    "bestBlockSlot": 417000123,
+    "bestBlockIncomeLamports": "142000000",
+    "bestBlockIncomeSol": "0.142"
+  },
+  "updatedAt": "2026-05-04T10:00:00.000Z"
+}
+```
+
+Use `isFinal=true` and `quality.complete=true` for public rankings or X posts.
+For running epochs, treat the response as a lower-bound explanation over the
+facts seen so far.
 
 ## `POST /v1/validators/current-epoch/batch`
 

@@ -10,11 +10,13 @@ import type { Logger } from 'pino';
 export {
   FakeAggregatesRepo,
   FakeEpochsRepo,
+  FakeProcessedBlocksRepo,
   FakeStatsRepo,
   FakeValidatorsRepo,
   FakeValidatorService,
   FakeWatchedDynamicRepo,
   makeEpochInfo,
+  makeProcessedBlock,
   makeStats,
 } from '../services/_fakes.js';
 

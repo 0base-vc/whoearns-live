@@ -122,6 +122,12 @@ export interface RpcFullTransactionEntry {
      */
     fee: number | string | bigint;
     /**
+     * Optional provider-supplied compute unit consumption. JSON-RPC and
+     * Yellowstone expose this on recent nodes; older providers may omit it.
+     * We treat absence as unknown/zero in aggregate insight fields.
+     */
+    computeUnitsConsumed?: number | string | bigint;
+    /**
      * Pre-tx balances, parallel to the FULL account list:
      * `accountKeys` (static) ++ `loadedAddresses.writable`
      * ++ `loadedAddresses.readonly`. Index ranges:

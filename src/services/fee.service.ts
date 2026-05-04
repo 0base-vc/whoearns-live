@@ -90,10 +90,27 @@ export interface PerBlockIncome {
   mevTips: bigint;
 }
 
+export interface PerBlockSlotFacts {
+  txCount: number;
+  successfulTxCount: number;
+  failedTxCount: number;
+  unknownMetaTxCount: number;
+  signatureCount: number;
+  tipTxCount: number;
+  maxTipLamports: bigint;
+  maxPriorityFeeLamports: bigint;
+  computeUnitsConsumed: bigint;
+}
+
+export interface PerBlockAnalysis {
+  income: PerBlockIncome;
+  slotFacts: PerBlockSlotFacts;
+}
+
 /**
- * Decompose a block's transaction list into the three revenue
- * categories. Walks each tx ONCE, accumulates into the three buckets
- * in parallel.
+ * Decompose a block's transaction list into income buckets and
+ * slot facts. Walks each tx ONCE, accumulates every derived field
+ * in parallel, and does not make any extra RPC calls.
  *
  * Requires `transactionDetails: 'full'` for the source `getBlock`
  * call — we read `tx.transaction.signatures.length` and
@@ -115,28 +132,54 @@ export interface PerBlockIncome {
  *   - fees: count failed txs (leader still got paid)
  *   - tips: skip failed txs (bundle failure = no tip deposit)
  */
-export function decomposeBlockIncome(
+export function analyzeBlockTransactions(
   transactions: RpcFullTransactionEntry[] | undefined,
-): PerBlockIncome {
-  const out: PerBlockIncome = { baseFees: 0n, priorityFees: 0n, mevTips: 0n };
-  if (!transactions || transactions.length === 0) return out;
+): PerBlockAnalysis {
+  const income: PerBlockIncome = { baseFees: 0n, priorityFees: 0n, mevTips: 0n };
+  const slotFacts: PerBlockSlotFacts = {
+    txCount: transactions?.length ?? 0,
+    successfulTxCount: 0,
+    failedTxCount: 0,
+    unknownMetaTxCount: 0,
+    signatureCount: 0,
+    tipTxCount: 0,
+    maxTipLamports: 0n,
+    maxPriorityFeeLamports: 0n,
+    computeUnitsConsumed: 0n,
+  };
+  if (!transactions || transactions.length === 0) return { income, slotFacts };
 
   for (const tx of transactions) {
-    if (tx.meta === null || tx.meta === undefined) continue;
     const signatureCount = tx.transaction.signatures.length;
+    slotFacts.signatureCount += signatureCount;
+
+    if (tx.meta === null || tx.meta === undefined) {
+      slotFacts.unknownMetaTxCount += 1;
+      continue;
+    }
     const staticKeys = tx.transaction.message.accountKeys;
+    const successful = tx.meta.err === null || tx.meta.err === undefined;
+    if (successful) slotFacts.successfulTxCount += 1;
+    else slotFacts.failedTxCount += 1;
 
     // Fee decomposition — always (failed txs pay fees too).
     const feeLamports = toBigIntLenient(tx.meta.fee);
     if (feeLamports !== null) {
       const { baseFee, priorityFee } = decomposeTransactionFee(feeLamports, signatureCount);
-      out.baseFees += baseFee;
-      out.priorityFees += priorityFee;
+      income.baseFees += baseFee;
+      income.priorityFees += priorityFee;
+      if (priorityFee > slotFacts.maxPriorityFeeLamports) {
+        slotFacts.maxPriorityFeeLamports = priorityFee;
+      }
+    }
+    const computeUnits = toBigIntLenient(tx.meta.computeUnitsConsumed);
+    if (computeUnits !== null) {
+      slotFacts.computeUnitsConsumed += computeUnits;
     }
 
     // Tip extraction — skip failed bundles (they shouldn't have
     // deposited tips; counting them would inflate the total).
-    if (tx.meta.err !== null && tx.meta.err !== undefined) continue;
+    if (!successful) continue;
     const preBalances = tx.meta.preBalances;
     const postBalances = tx.meta.postBalances;
     // Build the FULL account key list (static + ALT-loaded) so the
@@ -164,12 +207,24 @@ export function decomposeBlockIncome(
       ) {
         continue;
       }
-      out.mevTips += extractTipsFromAccountBalances(staticKeys, preBalances, postBalances);
+      const tip = extractTipsFromAccountBalances(staticKeys, preBalances, postBalances);
+      income.mevTips += tip;
+      if (tip > 0n) slotFacts.tipTxCount += 1;
+      if (tip > slotFacts.maxTipLamports) slotFacts.maxTipLamports = tip;
       continue;
     }
-    out.mevTips += extractTipsFromAccountBalances(fullKeys, preBalances, postBalances);
+    const tip = extractTipsFromAccountBalances(fullKeys, preBalances, postBalances);
+    income.mevTips += tip;
+    if (tip > 0n) slotFacts.tipTxCount += 1;
+    if (tip > slotFacts.maxTipLamports) slotFacts.maxTipLamports = tip;
   }
-  return out;
+  return { income, slotFacts };
+}
+
+export function decomposeBlockIncome(
+  transactions: RpcFullTransactionEntry[] | undefined,
+): PerBlockIncome {
+  return analyzeBlockTransactions(transactions).income;
 }
 
 /**
@@ -223,6 +278,23 @@ function toBigIntLenient(value: number | string | bigint | undefined | null): bi
     }
   }
   return null;
+}
+
+function blockTimeFromUnixSeconds(value: number | null | undefined): Date | null {
+  if (value === null || value === undefined) return null;
+  if (!Number.isFinite(value)) return null;
+  return new Date(value * 1000);
+}
+
+function normaliseFetchError(err: unknown): { code: string | null; message: string } {
+  if (err instanceof Error) {
+    const code = (err as { code?: unknown }).code;
+    return {
+      code: typeof code === 'string' ? code : null,
+      message: err.message.slice(0, 500),
+    };
+  }
+  return { code: null, message: String(err).slice(0, 500) };
 }
 
 /**
@@ -384,7 +456,8 @@ export class FeeService {
             // earned — the most intuitive interpretation for users
             // and the one vx.tools publishes.
             const leaderFees = extractLeaderFees(block.rewards, identity);
-            const income = decomposeBlockIncome(block.transactions);
+            const analysis = analyzeBlockTransactions(block.transactions);
+            const { income, slotFacts } = analysis;
             const leaderBase =
               leaderFees > income.priorityFees ? leaderFees - income.priorityFees : 0n;
             return {
@@ -395,8 +468,18 @@ export class FeeService {
               baseFees: leaderBase,
               priorityFees: income.priorityFees,
               tips: income.mevTips,
+              blockTime: blockTimeFromUnixSeconds(block.blockTime),
+              slotFacts,
             };
           } catch (err) {
+            const { code, message } = normaliseFetchError(err);
+            await this.processedBlocksRepo.recordFetchError({
+              epoch,
+              slot,
+              leaderIdentity: identity,
+              errorCode: code,
+              errorMessage: message,
+            });
             this.logger.warn(
               { err, slot, identity },
               'fee.service: getBlock failed, skipping this slot for now',
@@ -435,6 +518,17 @@ export class FeeService {
             priorityFeesLamports: 0n,
             tipsLamports: 0n,
             blockStatus: 'skipped',
+            blockTime: null,
+            txCount: 0,
+            successfulTxCount: 0,
+            failedTxCount: 0,
+            unknownMetaTxCount: 0,
+            signatureCount: 0,
+            tipTxCount: 0,
+            maxTipLamports: 0n,
+            maxPriorityFeeLamports: 0n,
+            computeUnitsConsumed: 0n,
+            factsCapturedAt: now,
             processedAt: now,
           });
           deltaBySlot.set(r.slot, {
@@ -456,6 +550,17 @@ export class FeeService {
           priorityFeesLamports: r.priorityFees,
           tipsLamports: r.tips,
           blockStatus: 'produced',
+          blockTime: r.blockTime,
+          txCount: r.slotFacts.txCount,
+          successfulTxCount: r.slotFacts.successfulTxCount,
+          failedTxCount: r.slotFacts.failedTxCount,
+          unknownMetaTxCount: r.slotFacts.unknownMetaTxCount,
+          signatureCount: r.slotFacts.signatureCount,
+          tipTxCount: r.slotFacts.tipTxCount,
+          maxTipLamports: r.slotFacts.maxTipLamports,
+          maxPriorityFeeLamports: r.slotFacts.maxPriorityFeeLamports,
+          computeUnitsConsumed: r.slotFacts.computeUnitsConsumed,
+          factsCapturedAt: now,
           processedAt: now,
         });
         deltaBySlot.set(r.slot, {
@@ -474,6 +579,10 @@ export class FeeService {
         // writer (or with our own earlier run after a crash) must NOT
         // have its fee / tip added again.
         const insertedSlots = await this.processedBlocksRepo.insertBatch(rows);
+        await this.processedBlocksRepo.markFetchResolved(
+          epoch,
+          rows.map((row) => row.slot),
+        );
         if (insertedSlots.size < rows.length) {
           this.logger.warn(
             { inserted: insertedSlots.size, rows: rows.length },
@@ -573,16 +682,19 @@ export class FeeService {
     slot: Slot;
     epoch: Epoch;
     leaderIdentity: IdentityPubkey;
+    blockTime?: number | null | undefined;
     rewards: RpcBlockReward[] | null | undefined;
     transactions: RpcFullTransactionEntry[] | undefined;
   }): Promise<boolean> {
     const leaderFees = extractLeaderFees(args.rewards, args.leaderIdentity);
-    const income = decomposeBlockIncome(args.transactions);
+    const analysis = analyzeBlockTransactions(args.transactions);
+    const { income, slotFacts } = analysis;
     // See `ingestPendingBlocks` for the derivation — `base_fees_lamports`
     // stores the LEADER'S NET share (rewards - priority), not the gross
     // 5000×sigs amount. Keeps gRPC and polling paths semantically
     // identical so downstream consumers can't tell which produced a row.
     const leaderBase = leaderFees > income.priorityFees ? leaderFees - income.priorityFees : 0n;
+    const processedAt = new Date();
     const row: ProcessedBlock = {
       slot: args.slot,
       epoch: args.epoch,
@@ -592,9 +704,21 @@ export class FeeService {
       priorityFeesLamports: income.priorityFees,
       tipsLamports: income.mevTips,
       blockStatus: 'produced',
-      processedAt: new Date(),
+      blockTime: blockTimeFromUnixSeconds(args.blockTime),
+      txCount: slotFacts.txCount,
+      successfulTxCount: slotFacts.successfulTxCount,
+      failedTxCount: slotFacts.failedTxCount,
+      unknownMetaTxCount: slotFacts.unknownMetaTxCount,
+      signatureCount: slotFacts.signatureCount,
+      tipTxCount: slotFacts.tipTxCount,
+      maxTipLamports: slotFacts.maxTipLamports,
+      maxPriorityFeeLamports: slotFacts.maxPriorityFeeLamports,
+      computeUnitsConsumed: slotFacts.computeUnitsConsumed,
+      factsCapturedAt: processedAt,
+      processedAt,
     };
     const inserted = await this.processedBlocksRepo.insertBatch([row]);
+    await this.processedBlocksRepo.markFetchResolved(args.epoch, [args.slot]);
     if (!inserted.has(args.slot)) {
       // Lost the race with the polling path (or a previous run) — skip
       // the delta so we don't double-count.

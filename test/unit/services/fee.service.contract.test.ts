@@ -139,12 +139,14 @@ function makeService(
 }
 
 /**
- * Strip the wall-clock field before comparison. `processedAt` is
- * always `new Date()` at insert time so the two paths will never
- * be byte-equal on that field — it's orthogonal to the contract.
+ * Strip wall-clock capture fields before comparison. These are always
+ * `new Date()` at insert time, so the two paths will never be
+ * byte-equal there — they are orthogonal to the derivation contract.
  */
-function stripTimestamps(row: ProcessedBlock): Omit<ProcessedBlock, 'processedAt'> {
-  const { processedAt: _ignored, ...rest } = row;
+function stripTimestamps(
+  row: ProcessedBlock,
+): Omit<ProcessedBlock, 'factsCapturedAt' | 'processedAt'> {
+  const { factsCapturedAt: _factsCapturedAt, processedAt: _processedAt, ...rest } = row;
   return rest;
 }
 
@@ -196,6 +198,7 @@ describe('FeeService contract: polling vs gRPC paths produce identical rows', ()
       slot: SLOT,
       epoch: EPOCH,
       leaderIdentity: IDENTITY_A,
+      blockTime: 1_700_000_000,
       rewards,
       transactions,
     });
@@ -318,6 +321,7 @@ describe('FeeService contract: polling vs gRPC paths produce identical rows', ()
       slot: SLOT,
       epoch: EPOCH,
       leaderIdentity: IDENTITY_A,
+      blockTime: 1_700_000_000,
       rewards,
       transactions,
     });
@@ -391,6 +395,7 @@ describe('FeeService contract: polling vs gRPC paths produce identical rows', ()
       slot: SLOT,
       epoch: EPOCH,
       leaderIdentity: IDENTITY_A,
+      blockTime: 1_700_000_000,
       rewards,
       transactions,
     });
@@ -449,6 +454,7 @@ describe('FeeService contract: polling vs gRPC paths produce identical rows', ()
       slot: SLOT,
       epoch: EPOCH,
       leaderIdentity: IDENTITY_A,
+      blockTime: 1_700_000_000,
       rewards,
       transactions,
     });
@@ -537,6 +543,7 @@ describe('FeeService contract: polling vs gRPC paths produce identical rows', ()
       slot: SLOT,
       epoch: EPOCH,
       leaderIdentity: IDENTITY_A,
+      blockTime: 1_700_000_000,
       rewards,
       transactions,
     });

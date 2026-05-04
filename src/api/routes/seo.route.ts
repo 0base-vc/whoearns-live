@@ -279,6 +279,8 @@ CC0 (public domain).
   validator produces blocks.
 - Missing slot or income data is represented by null numerics and the
   hasSlots / hasIncome booleans.
+- Leader-slot endpoints read stored watched-leader-slot facts only. They do
+  not scan every Solana slot and do not call RPC at request time.
 
 ## Unit conventions
 
@@ -317,6 +319,13 @@ totals + medians) and a per-epoch cluster benchmark block.
 
 ### GET /v1/validators/{idOrVote}/current-epoch
 Same as one history item but for the running epoch only. Cheaper.
+
+### GET /v1/validators/{idOrVote}/epochs/{epoch}/leader-slots
+Leader-slot facts for one validator epoch. Returns data
+quality (processed/pending/fetch-error slots), tx counts, failed tx
+rate, tip-bearing block ratio, max priority fee, max Jito tip, compute
+unit total, and best block. Use closed epochs before deriving public
+claims from these facts.
 
 ### POST /v1/validators/current-epoch/batch
 Body: { "votes": ["Vote111...", ...] }. Bulk lookup; returns

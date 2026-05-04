@@ -73,6 +73,9 @@ flowchart TD
 - Per-epoch, per-validator slot production (assigned / produced / skipped).
 - Cumulative block-fee rewards split into base-fee share and priority fees.
 - On-chain Jito tip totals derived from produced block data.
+- Block-level slot facts for watched validator leader slots: tx counts,
+  failed-tx rate, tip-bearing blocks, max priority fee, max Jito tip, and
+  fetch-error visibility without scanning every Solana slot.
 - Current-epoch lower bounds that update as new leader blocks are ingested.
 - Explicit watch list (recommended) or `*` to track all active validators.
 - Crash-safe ingestion: per-slot `processed_blocks` facts make every job

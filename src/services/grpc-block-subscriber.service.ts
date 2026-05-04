@@ -384,6 +384,9 @@ export class GrpcBlockSubscriber {
         meta: {
           err: tx.meta.err ?? null,
           fee: tx.meta.fee,
+          ...(tx.meta.computeUnitsConsumed !== undefined
+            ? { computeUnitsConsumed: tx.meta.computeUnitsConsumed }
+            : {}),
           preBalances: tx.meta.preBalances,
           postBalances: tx.meta.postBalances,
           ...(hasLoaded
