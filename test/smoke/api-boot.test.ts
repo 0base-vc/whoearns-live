@@ -9,6 +9,7 @@ import type { ClaimService } from '../../src/services/claim.service.js';
 import type { ClaimsRepository } from '../../src/storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../src/storage/repositories/epochs.repo.js';
 import type { ProfilesRepository } from '../../src/storage/repositories/profiles.repo.js';
+import type { ProcessedBlocksRepository } from '../../src/storage/repositories/processed-blocks.repo.js';
 import type { StatsRepository } from '../../src/storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../src/storage/repositories/validators.repo.js';
 import type { WatchedDynamicRepository } from '../../src/storage/repositories/watched-dynamic.repo.js';
@@ -16,6 +17,7 @@ import {
   FakeAggregatesRepo,
   FakeEpochsRepo,
   FakePool,
+  FakeProcessedBlocksRepo,
   FakeStatsRepo,
   FakeValidatorService,
   FakeValidatorsRepo,
@@ -74,6 +76,7 @@ function makeDeps(): Parameters<typeof buildServer>[0] {
       validators: new FakeValidatorsRepo() as unknown as ValidatorsRepository,
       epochs: new FakeEpochsRepo() as unknown as EpochsRepository,
       stats: new FakeStatsRepo() as unknown as StatsRepository,
+      processedBlocks: new FakeProcessedBlocksRepo() as unknown as ProcessedBlocksRepository,
       aggregates: new FakeAggregatesRepo() as unknown as AggregatesRepository,
       watchedDynamic: new FakeWatchedDynamicRepo() as unknown as WatchedDynamicRepository,
       // Stub: the smoke test doesn't exercise the claim/profile

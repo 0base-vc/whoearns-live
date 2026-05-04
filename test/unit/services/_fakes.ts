@@ -25,6 +25,7 @@ import type {
   ProcessedBlock,
   Slot,
   Validator,
+  ValidatorEpochSlotStats,
   VotePubkey,
 } from '../../../src/types/domain.js';
 
@@ -740,6 +741,7 @@ export class FakeAggregatesRepo {
 /** Fake ProcessedBlocksRepository. */
 export class FakeProcessedBlocksRepo {
   readonly rows = new Map<Slot, ProcessedBlock>();
+  readonly fetchErrors = new Map<Slot, { epoch: Epoch; leaderIdentity: IdentityPubkey }>();
   /** Number of insert calls for race testing. */
   insertCalls = 0;
 
@@ -753,6 +755,27 @@ export class FakeProcessedBlocksRepo {
       }
     }
     return inserted;
+  }
+
+  async recordFetchError(args: {
+    epoch: Epoch;
+    slot: Slot;
+    leaderIdentity: IdentityPubkey;
+  }): Promise<void> {
+    const existing = this.rows.get(args.slot);
+    if (existing !== undefined && existing.epoch === args.epoch) return;
+    this.fetchErrors.set(args.slot, {
+      epoch: args.epoch,
+      leaderIdentity: args.leaderIdentity,
+    });
+  }
+
+  async markFetchResolved(_epoch: Epoch, slots: Slot[]): Promise<number> {
+    let resolved = 0;
+    for (const slot of slots) {
+      if (this.fetchErrors.delete(slot)) resolved += 1;
+    }
+    return resolved;
   }
 
   async hasSlot(slot: Slot): Promise<boolean> {
@@ -804,6 +827,99 @@ export class FakeProcessedBlocksRepo {
 
   async findBySlot(slot: Slot): Promise<ProcessedBlock | null> {
     return this.rows.get(slot) ?? null;
+  }
+
+  async getValidatorEpochSlotStats(args: {
+    epoch: Epoch;
+    votePubkey: VotePubkey;
+    identityPubkey: IdentityPubkey;
+    slotsAssigned: number;
+    slotsProduced: number;
+    slotsSkipped: number;
+  }): Promise<ValidatorEpochSlotStats> {
+    const rows = [...this.rows.values()].filter(
+      (r) => r.epoch === args.epoch && r.leaderIdentity === args.identityPubkey,
+    );
+    const captured = rows.filter((r) => r.factsCapturedAt !== null);
+    const produced = captured.filter((r) => r.blockStatus === 'produced');
+    const processedSlots = rows.length;
+    const factCapturedSlots = captured.length;
+    const missingFactSlots = rows.length - captured.length;
+    const fetchErrorSlots = [...this.fetchErrors.values()].filter(
+      (e) => e.epoch === args.epoch && e.leaderIdentity === args.identityPubkey,
+    ).length;
+    const totalFees = produced.reduce((acc, row) => acc + row.feesLamports, 0n);
+    const totalTips = produced.reduce((acc, row) => acc + row.tipsLamports, 0n);
+    const best = produced
+      .map((row) => ({ slot: row.slot, income: row.feesLamports + row.tipsLamports }))
+      .sort((a, b) => (b.income > a.income ? 1 : b.income < a.income ? -1 : a.slot - b.slot))[0];
+    const txCount = produced.reduce((acc, row) => acc + row.txCount, 0);
+    const failedTxCount = produced.reduce((acc, row) => acc + row.failedTxCount, 0);
+    const unknownMetaTxCount = produced.reduce((acc, row) => acc + row.unknownMetaTxCount, 0);
+    const tipBearingBlockCount = produced.filter((row) => row.tipsLamports > 0n).length;
+    const pendingSlots = Math.max(0, args.slotsAssigned - processedSlots - fetchErrorSlots);
+    return {
+      epoch: args.epoch,
+      votePubkey: args.votePubkey,
+      identityPubkey: args.identityPubkey,
+      hasData: processedSlots > 0 || fetchErrorSlots > 0,
+      quality: {
+        slotsAssigned: args.slotsAssigned,
+        slotsProduced: args.slotsProduced,
+        slotsSkipped: args.slotsSkipped,
+        processedSlots,
+        factCapturedSlots,
+        missingFactSlots,
+        pendingSlots,
+        fetchErrorSlots,
+        complete:
+          args.slotsAssigned > 0 &&
+          pendingSlots === 0 &&
+          fetchErrorSlots === 0 &&
+          missingFactSlots === 0,
+      },
+      summary: {
+        producedBlocks: produced.length,
+        totalIncomeLamports: totalFees + totalTips,
+        totalFeesLamports: totalFees,
+        totalTipsLamports: totalTips,
+        txCount,
+        successfulTxCount: produced.reduce((acc, row) => acc + row.successfulTxCount, 0),
+        failedTxCount,
+        unknownMetaTxCount,
+        failedTxRate:
+          txCount > 0 ? Math.round((failedTxCount / txCount) * 1_000_000) / 1_000_000 : null,
+        signatureCount: produced.reduce((acc, row) => acc + row.signatureCount, 0),
+        tipTxCount: produced.reduce((acc, row) => acc + row.tipTxCount, 0),
+        tipBearingBlockCount,
+        tipBearingBlockRatio:
+          produced.length > 0
+            ? Math.round((tipBearingBlockCount / produced.length) * 1_000_000) / 1_000_000
+            : null,
+        avgPriorityFeePerProducedBlockLamports:
+          produced.length > 0
+            ? produced.reduce((acc, row) => acc + row.priorityFeesLamports, 0n) /
+              BigInt(produced.length)
+            : null,
+        avgTipPerProducedBlockLamports:
+          produced.length > 0 ? totalTips / BigInt(produced.length) : null,
+        maxPriorityFeeLamports: produced.reduce(
+          (max, row) => (row.maxPriorityFeeLamports > max ? row.maxPriorityFeeLamports : max),
+          0n,
+        ),
+        maxTipLamports: produced.reduce(
+          (max, row) => (row.maxTipLamports > max ? row.maxTipLamports : max),
+          0n,
+        ),
+        computeUnitsConsumed: produced.reduce((acc, row) => acc + row.computeUnitsConsumed, 0n),
+        bestBlockSlot: best?.slot ?? null,
+        bestBlockIncomeLamports: best?.income ?? null,
+      },
+      updatedAt: rows.reduce<Date | null>(
+        (latest, row) => (latest === null || row.processedAt > latest ? row.processedAt : latest),
+        null,
+      ),
+    };
   }
 }
 
@@ -953,6 +1069,17 @@ export function makeProcessedBlock(
     priorityFeesLamports: priorityFees,
     tipsLamports: tips,
     blockStatus: status,
+    blockTime: null,
+    txCount: 0,
+    successfulTxCount: 0,
+    failedTxCount: 0,
+    unknownMetaTxCount: 0,
+    signatureCount: 0,
+    tipTxCount: 0,
+    maxTipLamports: 0n,
+    maxPriorityFeeLamports: 0n,
+    computeUnitsConsumed: 0n,
+    factsCapturedAt: new Date(),
     processedAt: new Date(),
   };
 }

@@ -122,6 +122,7 @@ export const LoadedAddressesSchema = z
 export const TxMetaSchema = z.object({
   err: z.unknown().optional(),
   fee: U64Schema,
+  computeUnitsConsumed: U64Schema.optional(),
   preBalances: z.array(U64Schema),
   postBalances: z.array(U64Schema),
   loadedAddresses: LoadedAddressesSchema,

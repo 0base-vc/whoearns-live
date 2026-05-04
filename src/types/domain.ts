@@ -191,7 +191,73 @@ export interface ProcessedBlock {
    */
   tipsLamports: bigint;
   blockStatus: ProcessedBlockStatus;
+  /**
+   * Wall-clock block time from Solana RPC, null when the provider did
+   * not include it or the row represents a skipped slot.
+   */
+  blockTime: Date | null;
+  /** Total transactions carried by this produced block. */
+  txCount: number;
+  /** Transactions with `meta.err === null`. */
+  successfulTxCount: number;
+  /** Transactions with `meta.err !== null`. */
+  failedTxCount: number;
+  /** Transactions whose metadata was missing from the upstream block payload. */
+  unknownMetaTxCount: number;
+  /** Sum of `transaction.signatures.length` across transactions. */
+  signatureCount: number;
+  /** Successful transactions that deposited a positive Jito tip. */
+  tipTxCount: number;
+  /** Largest single-transaction Jito tip observed in this block. */
+  maxTipLamports: bigint;
+  /** Largest single-transaction priority fee observed in this block. */
+  maxPriorityFeeLamports: bigint;
+  /** Sum of `meta.computeUnitsConsumed` when providers expose it. */
+  computeUnitsConsumed: bigint;
+  /** Null for rows created before block-level slot facts were captured. */
+  factsCapturedAt: Date | null;
   processedAt: Date;
+}
+
+export interface ValidatorEpochSlotStats {
+  epoch: Epoch;
+  votePubkey: VotePubkey;
+  identityPubkey: IdentityPubkey;
+  hasData: boolean;
+  quality: {
+    slotsAssigned: number;
+    slotsProduced: number;
+    slotsSkipped: number;
+    processedSlots: number;
+    factCapturedSlots: number;
+    missingFactSlots: number;
+    pendingSlots: number;
+    fetchErrorSlots: number;
+    complete: boolean;
+  };
+  summary: {
+    producedBlocks: number;
+    totalIncomeLamports: bigint;
+    totalFeesLamports: bigint;
+    totalTipsLamports: bigint;
+    txCount: number;
+    successfulTxCount: number;
+    failedTxCount: number;
+    unknownMetaTxCount: number;
+    failedTxRate: number | null;
+    signatureCount: number;
+    tipTxCount: number;
+    tipBearingBlockCount: number;
+    tipBearingBlockRatio: number | null;
+    avgPriorityFeePerProducedBlockLamports: bigint | null;
+    avgTipPerProducedBlockLamports: bigint | null;
+    maxPriorityFeeLamports: bigint;
+    maxTipLamports: bigint;
+    computeUnitsConsumed: bigint;
+    bestBlockSlot: Slot | null;
+    bestBlockIncomeLamports: bigint | null;
+  };
+  updatedAt: Date | null;
 }
 
 export interface IngestionCursor {

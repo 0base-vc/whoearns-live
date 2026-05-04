@@ -11,6 +11,7 @@ import { AggregatesRepository } from '../storage/repositories/aggregates.repo.js
 import { ClaimsRepository } from '../storage/repositories/claims.repo.js';
 import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import { ProfilesRepository } from '../storage/repositories/profiles.repo.js';
+import { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
 import { StatsRepository } from '../storage/repositories/stats.repo.js';
 import { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
@@ -34,6 +35,7 @@ export async function startApi(): Promise<void> {
     validators: new ValidatorsRepository(pool),
     epochs: new EpochsRepository(pool),
     stats: new StatsRepository(pool),
+    processedBlocks: new ProcessedBlocksRepository(pool),
     aggregates: new AggregatesRepository(pool),
     watchedDynamic: new WatchedDynamicRepository(pool),
     profiles: profilesRepo,

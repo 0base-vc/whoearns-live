@@ -362,6 +362,7 @@ export async function startWorker(): Promise<void> {
               slot: block.slot,
               epoch: gate.epoch,
               leaderIdentity: expectedLeader,
+              blockTime: block.blockTime,
               rewards: block.rewards,
               transactions: block.transactions,
             });

@@ -114,6 +114,40 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /v1/validators/{idOrVote}/epochs/{epoch}/leader-slots:
+    get:
+      summary: Leader-slot facts for one validator epoch
+      description: |
+        Aggregates slot facts from watched validator leader slots only.
+        This endpoint does not trigger Solana RPC calls; it reads
+        `processed_blocks` facts already produced by the worker. Use closed
+        epochs when turning these facts into public claims or X posts.
+      parameters:
+        - $ref: '#/components/parameters/IdOrVotePath'
+        - name: epoch
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: Validator is known; body reflects stored slot facts and fetch errors.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidatorEpochLeaderSlots'
+        '400':
+          description: Invalid pubkey or epoch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Pubkey is unknown to the indexer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /v1/validators/{idOrVote}/history:
     get:
       summary: Newest-first per-epoch history for a validator
@@ -554,6 +588,124 @@ components:
             tipsUpdatedAt: { type: [string, 'null'], format: date-time }
             medianTipUpdatedAt: { type: [string, 'null'], format: date-time }
             medianTotalUpdatedAt: { type: [string, 'null'], format: date-time }
+
+    ValidatorEpochLeaderSlots:
+      type: object
+      required: [epoch, vote, identity, hasData, isFinal, quality, summary, updatedAt]
+      properties:
+        epoch: { type: integer, minimum: 0 }
+        vote: { type: string }
+        identity: { type: string }
+        hasData:
+          type: boolean
+          description: True when at least one slot fact or unresolved fetch error exists.
+        isFinal:
+          type: boolean
+          description: True when the epoch row is closed. Prefer true for public claims.
+        quality:
+          type: object
+          required:
+            [
+              slotsAssigned,
+              slotsProduced,
+              slotsSkipped,
+              processedSlots,
+              factCapturedSlots,
+              missingFactSlots,
+              pendingSlots,
+              fetchErrorSlots,
+              complete,
+            ]
+          properties:
+            slotsAssigned: { type: integer, minimum: 0 }
+            slotsProduced: { type: integer, minimum: 0 }
+            slotsSkipped: { type: integer, minimum: 0 }
+            processedSlots:
+              type: integer
+              minimum: 0
+              description: Produced + skipped slot facts stored locally.
+            factCapturedSlots:
+              type: integer
+              minimum: 0
+              description: Stored slot rows captured by the block-facts pipeline.
+            missingFactSlots:
+              type: integer
+              minimum: 0
+              description: Legacy stored slot rows that predate block-fact capture.
+            pendingSlots:
+              type: integer
+              minimum: 0
+              description: Assigned leader slots with no local fact and no unresolved fetch error.
+            fetchErrorSlots:
+              type: integer
+              minimum: 0
+              description: Leader slots with an unresolved RPC fetch error.
+            complete:
+              type: boolean
+              description: True when every assigned slot has captured facts and no unresolved fetch errors remain.
+        summary:
+          type: object
+          required:
+            [
+              producedBlocks,
+              totalIncomeLamports,
+              totalIncomeSol,
+              totalFeesLamports,
+              totalFeesSol,
+              totalTipsLamports,
+              totalTipsSol,
+              txCount,
+              successfulTxCount,
+              failedTxCount,
+              unknownMetaTxCount,
+              failedTxRate,
+              signatureCount,
+              tipTxCount,
+              tipBearingBlockCount,
+              tipBearingBlockRatio,
+              avgPriorityFeePerProducedBlockLamports,
+              avgPriorityFeePerProducedBlockSol,
+              avgTipPerProducedBlockLamports,
+              avgTipPerProducedBlockSol,
+              maxPriorityFeeLamports,
+              maxPriorityFeeSol,
+              maxTipLamports,
+              maxTipSol,
+              computeUnitsConsumed,
+              bestBlockSlot,
+              bestBlockIncomeLamports,
+              bestBlockIncomeSol,
+            ]
+          properties:
+            producedBlocks: { type: integer, minimum: 0 }
+            totalIncomeLamports: { type: string }
+            totalIncomeSol: { type: string }
+            totalFeesLamports: { type: string }
+            totalFeesSol: { type: string }
+            totalTipsLamports: { type: string }
+            totalTipsSol: { type: string }
+            txCount: { type: integer, minimum: 0 }
+            successfulTxCount: { type: integer, minimum: 0 }
+            failedTxCount: { type: integer, minimum: 0 }
+            unknownMetaTxCount: { type: integer, minimum: 0 }
+            failedTxRate: { type: [number, 'null'], minimum: 0, maximum: 1 }
+            signatureCount: { type: integer, minimum: 0 }
+            tipTxCount: { type: integer, minimum: 0 }
+            tipBearingBlockCount: { type: integer, minimum: 0 }
+            tipBearingBlockRatio: { type: [number, 'null'], minimum: 0, maximum: 1 }
+            avgPriorityFeePerProducedBlockLamports: { type: [string, 'null'] }
+            avgPriorityFeePerProducedBlockSol: { type: [string, 'null'] }
+            avgTipPerProducedBlockLamports: { type: [string, 'null'] }
+            avgTipPerProducedBlockSol: { type: [string, 'null'] }
+            maxPriorityFeeLamports: { type: string }
+            maxPriorityFeeSol: { type: string }
+            maxTipLamports: { type: string }
+            maxTipSol: { type: string }
+            computeUnitsConsumed: { type: string }
+            bestBlockSlot: { type: [integer, 'null'], minimum: 0 }
+            bestBlockIncomeLamports: { type: [string, 'null'] }
+            bestBlockIncomeSol: { type: [string, 'null'] }
+        updatedAt: { type: [string, 'null'], format: date-time }
 
     ValidatorProfile:
       type: object

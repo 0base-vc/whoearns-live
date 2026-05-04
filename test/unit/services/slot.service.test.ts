@@ -60,6 +60,17 @@ async function putFact(
     priorityFeesLamports: args.status === 'produced' ? 60n : 0n,
     tipsLamports: 0n,
     blockStatus: args.status,
+    blockTime: null,
+    txCount: 0,
+    successfulTxCount: 0,
+    failedTxCount: 0,
+    unknownMetaTxCount: 0,
+    signatureCount: 0,
+    tipTxCount: 0,
+    maxTipLamports: 0n,
+    maxPriorityFeeLamports: 0n,
+    computeUnitsConsumed: 0n,
+    factsCapturedAt: new Date(),
     processedAt: new Date(),
   };
   await repo.insertBatch([row]);

@@ -16,6 +16,7 @@ import type { AggregatesRepository } from '../storage/repositories/aggregates.re
 import type { ClaimsRepository } from '../storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import type { ProfilesRepository } from '../storage/repositories/profiles.repo.js';
+import type { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
 import type { StatsRepository } from '../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import type { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
@@ -29,6 +30,7 @@ import mcpRoutes from './routes/mcp.route.js';
 import metricsRoutes from './routes/metrics.route.js';
 import ogRoutes from './routes/og.route.js';
 import seoRoutes from './routes/seo.route.js';
+import validatorLeaderSlotsRoutes from './routes/validator-leader-slots.route.js';
 import validatorsHistoryRoutes from './routes/validators-history.route.js';
 import validatorsRoutes from './routes/validators.route.js';
 import {
@@ -46,6 +48,7 @@ export interface BuildServerDeps {
     validators: ValidatorsRepository;
     epochs: EpochsRepository;
     stats: StatsRepository;
+    processedBlocks: ProcessedBlocksRepository;
     aggregates: AggregatesRepository;
     watchedDynamic: WatchedDynamicRepository;
     /**
@@ -230,6 +233,12 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       statsRepo: deps.repos.stats,
       validatorsRepo: deps.repos.validators,
       epochsRepo: deps.repos.epochs,
+    });
+    await scope.register(validatorLeaderSlotsRoutes, {
+      statsRepo: deps.repos.stats,
+      validatorsRepo: deps.repos.validators,
+      epochsRepo: deps.repos.epochs,
+      processedBlocksRepo: deps.repos.processedBlocks,
     });
     await scope.register(validatorsHistoryRoutes, {
       statsRepo: deps.repos.stats,
