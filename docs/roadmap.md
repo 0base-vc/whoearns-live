@@ -1,8 +1,8 @@
 # Roadmap
 
-Forward-looking plan captured from product, technical, security, and UX
-reviews in April 2026. Each phase lists a concrete trigger for kickoff and
-the specific work inside.
+Forward-looking plan captured from product, technical, security, UX, and
+AI-operations reviews in April 2026. Each phase lists a concrete trigger for
+kickoff and the specific work inside.
 
 Treat this document as the authoritative "why we'd do X next" — if
 the answer to "why aren't we doing this now?" isn't written down
@@ -44,11 +44,14 @@ site. Design-reviewed; see agent notes below.
       against validator identity key. Unlocks: moniker + Twitter
       handle registration, muting the 0base.vc footer CTA on the
       operator's own page, self-service opt-out.
-- [ ] Twitter rank-change bot — posts "validator X moved from #87
+- [ ] X rank-change bot — posts "validator X moved from #87
       to #45 this week" with an OG card image. Tagging the operator
       makes the site come to them instead of the other way around.
 - [x] OG image endpoint — server-rendered `/og/income/:pubkey.png`
       with income + rank snapshot.
+- [ ] AI-assisted insight drafts — generate candidate public posts from
+      closed-epoch API data only, with citations to the exact sample,
+      epoch, and fields used before a maintainer publishes anything.
 
 ### Phase 3 — block-source abstraction (Yellowstone)
 
@@ -88,7 +91,7 @@ application.
 - [ ] Prometheus exporter — read the API, emit validator-level
       metrics that plug into existing Grafana dashboards.
 - [ ] Webhook subscriptions — "notify me when my validator's income
-      changes by ±X%" via Discord / Telegram / Slack.
+      changes by +/- X%" via common webhook targets.
 
 ## Phase 5 — Foundation application materials
 

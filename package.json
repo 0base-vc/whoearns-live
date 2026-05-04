@@ -1,7 +1,7 @@
 {
   "name": "whoearns-live",
   "version": "0.3.0",
-  "description": "Open-source Solana validator income transparency service: indexer, API, and UI.",
+  "description": "AI-assisted, open-source Solana validator income intelligence service: indexer, API, and UI.",
   "license": "MIT",
   "type": "module",
   "homepage": "https://whoearns.live",
@@ -19,7 +19,10 @@
     "jito",
     "mev",
     "block-fees",
-    "open-data"
+    "open-data",
+    "ai",
+    "validator-intelligence",
+    "mcp"
   ],
   "engines": {
     "node": ">=22.0.0",

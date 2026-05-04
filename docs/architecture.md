@@ -4,6 +4,11 @@ This document describes the runtime topology, the ingestion jobs, the
 storage layout, and the invariants the indexer relies on. If you are
 looking for HTTP contracts, see [`api.md`](./api.md).
 
+WhoEarns positions AI as an operations and interpretation layer above this
+system. AI can summarize closed-epoch data, flag unusual income patterns,
+and help maintain public docs, but it does not write accounting facts. The
+source of truth remains the PostgreSQL data derived from Solana block data.
+
 ## Components
 
 ```

@@ -111,9 +111,8 @@ See `values.yaml` for the full, commented reference. Highlights:
   `image.pullPolicy` defaults to `Always` so every `helm upgrade` pulls
   fresh. For audit-grade stability, pin a SHA tag in your overlay.
 - `imagePullSecrets` is empty by default; set it for private registries.
-- `ingress.enabled` defaults to `false`. The 0base overlay turns it on
-  with external-dns + Cloudflare annotations; adapt for your own DNS
-  controller.
+- `ingress.enabled` defaults to `false`. Production overlays can turn it on
+  with annotations for external-dns, Cloudflare, or your own DNS controller.
 - `persistence.size` / `.storageClass` controls the PVC backing Postgres.
 - `postgres.user` / `.password` / `.database` are baked into the data
   directory at first boot. Changing them later does **not** rotate the

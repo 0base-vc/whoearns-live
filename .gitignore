@@ -39,9 +39,11 @@ deploy/helm/**/Chart.lock
 # Local operator-only files. Keep private dashboards, ad-hoc scripts,
 # exported Grafana JSON, and cluster-specific notes out of commits.
 ops-local/
+marketing/
 
 # Playwright / Claude preview artifacts — screenshots and DOM snapshots
 # dropped by playwright during UI preview runs. Useful at debug time,
 # not worth committing.
+.playwright-cli/
 .playwright-mcp/
 /*.png

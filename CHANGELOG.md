@@ -5,6 +5,12 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- AI-assisted positioning across public docs, SEO metadata, OpenAPI,
+  `llms.txt`, and AI-agent guidance. The source-of-truth contract remains
+  Solana block data, not AI-written summaries.
+
 ### Changed
 
 - Renamed the public Helm chart path, chart name, Docker Compose project,
@@ -67,5 +73,4 @@ details? } }`) and per-field freshness timestamps in validator
 
 ## [0.1.0] - 2026-04-15
 
-Initial private prototype for Solana validator slot, fee, and income
-indexing.
+Initial prototype for Solana validator slot, fee, and income indexing.

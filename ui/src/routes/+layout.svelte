@@ -38,8 +38,8 @@
     LOCALIZED_CONTENT_ROUTES.has(page.url.pathname),
   );
 
-  const DEFAULT_TITLE = `${SITE_NAME} — per-epoch income, fees, and MEV`;
-  const DEFAULT_DESCRIPTION = `${SITE_NAME} — open dashboard for Solana validator income. Track per-epoch slot production, block fees, and on-chain Jito tips for any validator on mainnet. Maintained by 0base.vc.`;
+  const DEFAULT_TITLE = `${SITE_NAME} — AI-assisted Solana validator income intelligence`;
+  const DEFAULT_DESCRIPTION = `${SITE_NAME} is an AI-assisted open data project by 0base.vc for Solana validator income: closed-epoch fees, Jito tips, slots, skip rate, and performance.`;
 
   /**
    * Sync `<html lang>` with the active locale on bilingual content pages.
@@ -310,8 +310,7 @@
             href="https://x.com/WhoearnsLive"
             target="_blank"
             rel="me noopener noreferrer"
-            class="inline-flex min-h-11 items-center hover:text-[color:var(--color-brand-500)]"
-            >X</a
+            class="inline-flex min-h-11 items-center hover:text-[color:var(--color-brand-500)]">X</a
           >
           <a
             href="https://0base.vc"

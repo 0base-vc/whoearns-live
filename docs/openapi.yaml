@@ -3,9 +3,10 @@ info:
   title: WhoEarns API
   version: '0.3.0'
   description: |
-    Read-only HTTP API for WhoEarns, an open-source Solana validator income
-    transparency service. Income is derived from Solana RPC block data only:
-    base fees, priority fees, and on-chain Jito tips found in produced blocks.
+    Read-only HTTP API for WhoEarns, an AI-assisted open-source Solana
+    validator income intelligence service by 0base.vc. Income is derived
+    from Solana RPC block data only: base fees, priority fees, and on-chain
+    Jito tips found in produced blocks.
     Numeric fields are `null` when the matching `hasSlots` or `hasIncome`
     boolean is false.
 

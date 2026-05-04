@@ -77,6 +77,12 @@
       a_ko: '네 — 기본 데이터는 CC0(퍼블릭 도메인)로 공개되어 있고, 코드는 MIT 라이선스이며, /v1/* 의 공개 HTTP API와 /openapi.yaml의 OpenAPI 스펙이 제공됩니다. AI agent용 MCP 서버는 /mcp, 크롤러용 llms.txt는 /llms.txt에서 받을 수 있습니다. IP당 60req/min 제한이 있으므로, 대량 사용은 Helm 차트로 셀프 호스팅하세요.',
     },
     {
+      q_en: 'What does AI-assisted mean for WhoEarns?',
+      q_ko: 'WhoEarns에서 AI-assisted는 무엇을 의미하나요?',
+      a_en: 'AI helps 0base.vc operate WhoEarns: monitor freshness, detect unusual validator income patterns, draft public explanations, and keep AI-agent surfaces such as MCP and llms.txt useful. AI is not the accounting source. The source of truth is Solana block data, and serious claims should reference closed epochs, tracked-sample boundaries, and reproducible API fields.',
+      a_ko: 'AI는 0base.vc가 WhoEarns를 운영하는 데 도움을 줍니다: 데이터 신선도 모니터링, 비정상 validator 수익 패턴 탐지, 공개 설명 초안 작성, MCP와 llms.txt 같은 AI-agent 표면 정리. AI가 회계 기준은 아닙니다. 진짜 기준은 Solana 블록 데이터이며, 중요한 주장은 종료된 epoch, 추적 샘플 범위, 재현 가능한 API 필드를 기준으로 해야 합니다.',
+    },
+    {
       q_en: 'How does this site differ from solanabeach.io / validators.app / stakewiz.com?',
       q_ko: '이 사이트는 solanabeach.io / validators.app / stakewiz.com과 무엇이 다른가요?',
       a_en: 'Three differences: (1) every metric is contextualized against the top-100 cluster median for the same epoch, so you can tell if a validator is over- or under-performing peers; (2) MEV tips are derived from each produced block, so current-epoch income can update in near real time; (3) all derived data is CC0 with a documented public API. Other dashboards typically gate this behind login or vendor-specific endpoints.',

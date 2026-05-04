@@ -1,7 +1,7 @@
 # WhoEarns UI
 
-SvelteKit UI for browsing per-epoch Solana validator income — slot production,
-block fees, and on-chain Jito tips — powered by the
+SvelteKit UI for browsing AI-assisted, per-epoch Solana validator income —
+slot production, block fees, and on-chain Jito tips — powered by the
 [WhoEarns](https://github.com/0base-vc/whoearns-live) API.
 
 ## Pages
@@ -32,7 +32,7 @@ serve `ui/build/` with any static file server.
 ## Contract
 
 Response shape is mirrored in `src/lib/types.ts`. Keep this in sync with the
-the WhoEarns
+WhoEarns
 [`docs/openapi.yaml`](https://github.com/0base-vc/whoearns-live/blob/main/docs/openapi.yaml)
 when the contract evolves. The UI is deliberately decoupled at the HTTP
 layer, not the module layer.

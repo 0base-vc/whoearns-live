@@ -2,6 +2,11 @@
 
 Machine-readable version: [`openapi.yaml`](./openapi.yaml).
 
+WhoEarns is AI-assisted, but the HTTP API is data-first. AI may help
+operators monitor freshness, spot unusual validator-income patterns, and
+draft explanations, but API values are derived from stored Solana block
+facts and should be treated as the reproducible source of truth.
+
 ## Conventions
 
 - **Base URL.** No path prefix. The service sits behind an ingress.

@@ -4,6 +4,11 @@ This document is for people running WhoEarns in an environment they care
 about. If you are just kicking the tires locally, the
 [README](../README.md) quickstart is usually enough.
 
+Operationally, "AI-assisted" means maintainers may use AI to monitor
+freshness, review anomalies, and draft public explanations. Keep the
+runtime source of truth boring: Solana RPC block facts, PostgreSQL rows,
+logs, health checks, and metrics.
+
 ## Running locally
 
 ### Docker Compose
@@ -129,6 +134,9 @@ SQL migrations live in `src/storage/migrations/` and are applied by
   API request counters/latency histograms plus default Node.js process
   metrics; validator/business metrics still belong in an exporter that
   consumes the HTTP API.
+- **AI-agent surfaces.** `/llms.txt`, `/llms-full.txt`, OpenAPI, and MCP are
+  public read surfaces. Treat them like docs: keep claims tied to closed
+  epochs, tracked-sample boundaries, and reproducible API fields.
 - **Health.** `/healthz` is appropriate for both liveness and
   readiness.
 

@@ -4,16 +4,32 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org/)
 [![CI](https://github.com/0base-vc/whoearns-live/actions/workflows/ci.yml/badge.svg)](https://github.com/0base-vc/whoearns-live/actions/workflows/ci.yml)
 
-WhoEarns is a public, open-source Solana validator income transparency
-service. This repository contains the indexer, HTTP API, MCP server, Helm
-chart, Docker image, and SvelteKit UI that power
-[whoearns.live](https://whoearns.live).
+WhoEarns is an AI-assisted, public, open-source Solana validator income
+intelligence service by 0base.vc. This repository contains the indexer,
+HTTP API, MCP server, Helm chart, Docker image, and SvelteKit UI that
+power [whoearns.live](https://whoearns.live).
 
 The public data model tracks per-epoch slot production, base/priority block
 fees, and on-chain Jito tips derived from Solana block data. The derived data
 is intended to be freely queryable and reproducible; it is **not** financial
 advice, a delegation recommendation, or a complete accounting of validator or
 delegator revenue.
+
+## AI-assisted operations
+
+WhoEarns uses AI as an operations and insight layer, not as the source of
+truth. The source of truth is still reproducible Solana block data stored as
+per-slot facts.
+
+AI helps maintainers:
+
+- monitor validator income data and freshness signals,
+- detect anomalies such as unusual priority-fee or Jito-tip spikes,
+- draft public explanations for X, docs, and AI-agent surfaces,
+- keep MCP, `llms.txt`, OpenAPI, and SEO metadata aligned.
+
+Any public claim should remain tied to closed-epoch data, clear sample
+boundaries, and the API fields that reproduce it.
 
 ## What this is
 

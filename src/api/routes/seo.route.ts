@@ -195,10 +195,10 @@ Sitemap: ${SITE_URL}/sitemap.xml
     // /llms-full.txt for agents that want it.
     const body = `# ${SITE_NAME}
 
-> ${SITE_NAME} — who's earning on Solana right now? Open-source explorer
-> tracking per-epoch slot production, block fees (base + priority +
-> tips), and on-chain Jito tips for validators on Solana mainnet. Data
-> is indexed from Solana RPC block data. Maintained by
+> ${SITE_NAME} — AI-assisted Solana validator income intelligence.
+> Open-source explorer tracking per-epoch slot production, block fees
+> (base + priority), and on-chain Jito tips for validators on Solana
+> mainnet. Data is indexed from Solana RPC block data. Maintained by
 > 0base.vc, all data released under CC0.
 
 ## Core pages
@@ -217,6 +217,12 @@ Sitemap: ${SITE_URL}/sitemap.xml
 - ${SITE_URL}/llms-full.txt: Full reference for AI agents (extended doc)
 - ${SITE_URL}/.well-known/ai-plugin.json: Agent plugin manifest
 - ${SITE_URL}/mcp: Model Context Protocol server (Streamable HTTP)
+
+## AI-assisted operations
+
+AI helps 0base.vc monitor freshness, detect unusual income patterns,
+and draft public explanations. The source of truth remains Solana block
+data and closed-epoch API fields.
 `;
     return reply.type('text/plain; charset=utf-8').header('cache-control', CACHE_1H).send(body);
   });
@@ -238,9 +244,11 @@ Sitemap: ${SITE_URL}/sitemap.xml
 
 ## What this service is
 
-${SITE_NAME} (${SITE_URL}) is a free public HTTP API
-and web dashboard tracking validator income on Solana mainnet. For
-every validator in the watched set it records:
+${SITE_NAME} (${SITE_URL}) is an AI-assisted, free public HTTP API
+and web dashboard tracking validator income on Solana mainnet. 0base.vc
+uses AI to monitor data freshness, detect unusual income patterns, and
+draft public explanations; the source of truth remains reproducible
+Solana block data. For every validator in the watched set it records:
 
 - Slot production: slotsAssigned (leader schedule), slotsProduced,
   slotsSkipped, skipRate.
@@ -251,6 +259,15 @@ every validator in the watched set it records:
 Data is indexed directly from the Solana JSON-RPC API.
 It is not simulated or estimated. All derived data is released under
 CC0 (public domain).
+
+## AI interpretation contract
+
+- Treat AI-written summaries as commentary over the API, not as source data.
+- Prefer closed-epoch records for rankings and public claims.
+- Say "tracked validators" or "watched set" unless a query covers every
+  active validator.
+- Do not describe validator income as delegator APY unless commission and
+  distribution policy are explicitly modeled.
 
 ## Data freshness contract
 
@@ -359,9 +376,9 @@ GitHub: https://github.com/0base-vc/whoearns-live (MIT)
       // the human name picks up spaces or punctuation later.
       name_for_model: SITE_NAME.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
       description_for_human:
-        'Query per-epoch Solana validator income, block fees, on-chain Jito tips, and cluster rankings.',
+        'Query AI-assisted Solana validator income intelligence: per-epoch block fees, on-chain Jito tips, and cluster rankings.',
       description_for_model:
-        'Use to look up Solana validator performance data. Provides per-epoch slot production, block-fee earnings (base + priority), on-chain Jito tips, and cluster leaderboard rankings. Accepts both vote and identity pubkeys. Closed-epoch data is final; running-epoch data is a live lower bound. Numeric values are strings (parse lamports as BigInt). Missing slot or income data is represented by null numerics and hasSlots/hasIncome booleans.',
+        'Use to look up AI-assisted Solana validator income intelligence from reproducible on-chain data. Provides per-epoch slot production, block-fee earnings (base + priority), on-chain Jito tips, and cluster leaderboard rankings. Accepts both vote and identity pubkeys. Closed-epoch data is final; running-epoch data is a live lower bound. Numeric values are strings (parse lamports as BigInt). Missing slot or income data is represented by null numerics and hasSlots/hasIncome booleans. Do not treat operator income as delegator APY unless commission and distribution policy are explicitly modeled.',
       auth: { type: 'none' },
       api: {
         type: 'openapi',

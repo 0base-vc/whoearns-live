@@ -60,8 +60,8 @@
   const pageTitle = $derived(t(`About — ${SITE_NAME}`, `소개 — ${SITE_NAME}`));
   const pageDescription = $derived(
     t(
-      `${SITE_NAME} — a public good for the Solana validator ecosystem. Open-source, open-data, self-hostable. Maintained by 0base.vc.`,
-      `${SITE_NAME} — Solana 밸리데이터 생태계를 위한 공공재. 오픈소스, 오픈 데이터, 직접 호스팅 가능. 0base.vc가 운영합니다.`,
+      `${SITE_NAME} — an AI-assisted public good for the Solana validator ecosystem. Open-source, open-data, self-hostable. Maintained by 0base.vc.`,
+      `${SITE_NAME} — Solana 밸리데이터 생태계를 위한 AI-assisted 공공재. 오픈소스, 오픈 데이터, 직접 호스팅 가능. 0base.vc가 운영합니다.`,
     ),
   );
 </script>
@@ -108,11 +108,32 @@
       보상, 슬롯 생산량, 클러스터 벤치마크 — 를 들여다보는 오픈 대시보드입니다. Solana 메인넷
       밸리데이터 운영자인 0base.vc가 운영하며, 생태계에 대한 OSS 기여로 공개합니다.
     {:else}
-      {SITE_NAME} is an open dashboard for inspecting per-epoch Solana validator economics — block fees,
-      on-chain Jito tips, slot production, and cluster benchmarks. It's maintained by 0base.vc, operator
-      of a Solana mainnet validator, and shipped as an OSS contribution to the ecosystem.
+      {SITE_NAME} is an AI-assisted open dashboard for inspecting per-epoch Solana validator economics
+      — block fees, on-chain Jito tips, slot production, and cluster benchmarks. It's maintained by 0base.vc,
+      operator of a Solana mainnet validator, and shipped as an OSS contribution to the ecosystem.
     {/if}
   </p>
+</section>
+
+<!-- AI-assisted operations -->
+<section aria-labelledby="ai-title" class="mt-14">
+  <h2 id="ai-title" class="text-lg font-semibold">
+    {t('AI-assisted, data-grounded', 'AI-assisted, 데이터 기반')}
+  </h2>
+  <div class="mt-4 grid gap-6 text-sm text-[color:var(--color-text-muted)] sm:grid-cols-2">
+    <p>
+      {t(
+        'AI helps 0base.vc monitor freshness, detect unusual income patterns, and draft public explanations. The source of truth remains Solana block data: leader slots, block fees, priority fees, Jito tips, produced slots, and skipped slots.',
+        'AI는 0base.vc가 데이터 신선도, 비정상 수익 패턴, 공개 설명 초안을 더 빠르게 다루도록 돕습니다. 진짜 기준은 여전히 Solana 블록 데이터입니다: 리더 슬롯, 블록 수수료, priority fee, Jito tips, 생산 슬롯, 스킵 슬롯.',
+      )}
+    </p>
+    <p>
+      {t(
+        'Every insight should be reproducible from closed-epoch data and labeled with its sample boundary. AI can point at anomalies; it does not replace the on-chain accounting or make delegation recommendations.',
+        '모든 인사이트는 종료된 epoch 데이터에서 재현 가능해야 하고, 어떤 샘플 기준인지 명시해야 합니다. AI는 이상치를 가리킬 수 있지만, 온체인 회계를 대체하거나 위임 추천을 하지 않습니다.',
+      )}
+    </p>
+  </div>
 </section>
 
 <!-- Mission / principles -->

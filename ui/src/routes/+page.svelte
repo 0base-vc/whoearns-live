@@ -44,10 +44,10 @@
 </script>
 
 <svelte:head>
-  <title>{SITE_NAME} — top Solana validators by per-epoch income</title>
+  <title>{SITE_NAME} — AI-assisted Solana validator income intelligence</title>
   <meta
     name="description"
-    content="Open dashboard for the Solana validator cluster. See which operators earned the most in the last epoch, compare against the top-100 median, and drill into any validator's history."
+    content="AI-assisted open data project by 0base.vc for Solana validator income. Compare closed-epoch fees, Jito tips, slots, skip rate, and performance."
   />
   <link rel="canonical" href={`${SITE_URL}/`} />
 
@@ -74,15 +74,15 @@
   ></div>
 
   <p class="text-xs font-semibold uppercase tracking-wider text-[color:var(--color-brand-500)]">
-    Solana · Mainnet
+    Solana · Mainnet · AI-assisted open data
   </p>
   <h1 id="hero-title" class="mt-2 text-4xl font-semibold tracking-tight sm:text-5xl">
     Who's earning on
     <span class="text-[color:var(--color-brand-500)]">Solana right now?</span>
   </h1>
   <p class="mt-4 max-w-2xl text-base text-[color:var(--color-text-muted)]">
-    Per-epoch block fees and MEV income for every tracked Solana validator, compared against the
-    top-100 cluster median. Updated every tick from live mainnet data.
+    AI-assisted validator income intelligence from on-chain data: per-epoch block fees, Jito tips,
+    slots, skip rate, and performance for tracked Solana validators.
   </p>
 
   <form onsubmit={submit} class="mt-6 flex max-w-xl gap-2">
