@@ -16,6 +16,7 @@
 -->
 <script lang="ts">
   import Leaderboard from '$lib/components/Leaderboard.svelte';
+  import { serializeJsonLd } from '$lib/json-ld';
   import { SITE_NAME, SITE_URL } from '$lib/site';
 
   let input = $state('');
@@ -56,7 +57,7 @@
        queries. Concrete items are client-fetched; the schema just
        declares the page's shape. -->
   {@html `<script type="application/ld+json">
-  ${JSON.stringify({
+  ${serializeJsonLd({
     '@context': 'https://schema.org',
     '@type': 'ItemList',
     name: 'Top Solana validators by per-epoch income',

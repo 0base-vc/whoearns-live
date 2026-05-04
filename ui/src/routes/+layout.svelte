@@ -15,6 +15,7 @@
   import BrandMark from '$lib/components/BrandMark.svelte';
   import DelegationCTA from '$lib/components/DelegationCTA.svelte';
   import LocaleSwitcher from '$lib/components/LocaleSwitcher.svelte';
+  import { serializeJsonLd } from '$lib/json-ld';
   import { SITE_NAME, SITE_URL } from '$lib/site';
   import { currentLocale, syncLocaleFromUrl } from '$lib/stores/locale.svelte';
 
@@ -114,7 +115,7 @@
   <!-- JSON-LD: WebSite + SoftwareApplication so search engines render
        a rich result with the site name, URL, and sitelinks searchbox -->
   {@html `<script type="application/ld+json">
-  ${JSON.stringify({
+  ${serializeJsonLd({
     '@context': 'https://schema.org',
     '@graph': [
       {

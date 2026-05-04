@@ -282,6 +282,31 @@ describe('ValidatorService.trackOnDemand', () => {
     expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
   });
 
+  it('caps the negative-cache map and evicts oldest pubkey first', async () => {
+    const rpc = makeRpcStub();
+    const validatorsRepo = new FakeValidatorsRepo();
+    const watchedDynamicRepo = new FakeWatchedDynamicRepo();
+    const service = new ValidatorService({
+      validatorsRepo: validatorsRepo as unknown as ValidatorsRepository,
+      watchedDynamicRepo: watchedDynamicRepo as unknown as WatchedDynamicRepository,
+      rpc: rpc as unknown as SolanaRpcClient,
+      logger: silent,
+      onDemandNegativeCacheMaxEntries: 3,
+    });
+
+    // 4 distinct unknown pubkeys → cap=3 → first one must have been evicted.
+    await service.trackOnDemand('Unknown1111111111111111111111111111111111');
+    await service.trackOnDemand('Unknown2222222222222222222222222222222222');
+    await service.trackOnDemand('Unknown3333333333333333333333333333333333');
+    await service.trackOnDemand('Unknown4444444444444444444444444444444444');
+
+    const cache = (service as unknown as { onDemandMissUntilByPubkey: Map<string, number> })
+      .onDemandMissUntilByPubkey;
+    expect(cache.size).toBe(3);
+    expect(cache.has('Unknown1111111111111111111111111111111111')).toBe(false);
+    expect(cache.has('Unknown4444444444444444444444444444444444')).toBe(true);
+  });
+
   it('returns ok:false when activated stake falls below the floor', async () => {
     const rpc = makeRpcStub();
     const { service } = makeServiceWithDynamic(rpc);
@@ -383,5 +408,35 @@ describe('ValidatorService.refreshValidatorInfoForIdentity', () => {
     expect(row?.name).toBe('Example Validator');
     expect(row?.website).toBeNull();
     expect(row?.iconUrl).toBe('https://example.com/icon.png');
+  });
+});
+
+describe('ValidatorService.assessClaimEligibility', () => {
+  it('shares the on-demand cooldown so a verify probe does not double the RPC fetch', async () => {
+    const rpc = makeRpcStub();
+    const validatorsRepo = new FakeValidatorsRepo();
+    const watchedDynamicRepo = new FakeWatchedDynamicRepo();
+    const service = new ValidatorService({
+      validatorsRepo: validatorsRepo as unknown as ValidatorsRepository,
+      watchedDynamicRepo: watchedDynamicRepo as unknown as WatchedDynamicRepository,
+      rpc: rpc as unknown as SolanaRpcClient,
+      logger: silent,
+    });
+
+    // First call resolves through a cold cache → triggers one refresh.
+    const first = await service.assessClaimEligibility(
+      'UnknownVote1111111111111111111111111111111',
+    );
+    expect(first.eligible).toBe(false);
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
+
+    // Second call within the cooldown window — the cache miss should
+    // route through `refreshOnDemandVoteAccounts`, find the cooldown
+    // engaged, and skip the RPC call instead of issuing a second one.
+    const second = await service.assessClaimEligibility(
+      'UnknownVote2222222222222222222222222222222',
+    );
+    expect(second.eligible).toBe(false);
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
   });
 });

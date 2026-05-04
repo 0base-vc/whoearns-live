@@ -21,6 +21,16 @@ Ingress is enabled. Hosts:
 {{- range .Values.ingress.hosts }}
   - http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
 {{- end }}
+{{- $hops := .Values.config.trustProxyHops | default 0 | int }}
+{{- if eq $hops 0 }}
+
+WARNING: ingress.enabled=true but config.trustProxyHops=0.
+With this combination Fastify treats the ingress controller's pod IP as the
+client IP, so the per-IP rate limit becomes a SINGLE shared bucket across all
+clients and legitimate users will be throttled. Set config.trustProxyHops=1
+when you only have one trusted proxy hop in front of the API (the most common
+ingress-nginx setup), or higher to match your topology.
+{{- end }}
 {{- else }}
 No Ingress was created. Port-forward locally:
 

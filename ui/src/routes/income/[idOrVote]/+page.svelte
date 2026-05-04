@@ -57,6 +57,7 @@
   import EllipsisAddress from '$lib/components/EllipsisAddress.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import { serializeJsonLd } from '$lib/json-ld';
   import { SITE_NAME, SITE_URL } from '$lib/site';
 
   // Per-row decimal counts in the epoch-history table. Fixed-
@@ -82,10 +83,6 @@
     } catch {
       return null;
     }
-  }
-
-  function serializeJsonLd(value: unknown): string {
-    return JSON.stringify(value).replace(/</g, '\\u003c');
   }
 
   /**
