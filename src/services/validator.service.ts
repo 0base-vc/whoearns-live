@@ -1,5 +1,6 @@
 import type { SolanaRpcClient } from '../clients/solana-rpc.js';
 import type { Logger } from '../core/logger.js';
+import { normaliseHttpUrlOrNull } from '../core/url.js';
 import type { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import type { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
 import type { Epoch, IdentityPubkey, Validator, VotePubkey } from '../types/domain.js';
@@ -22,6 +23,10 @@ function normaliseText(raw: string | undefined): string | null {
   const trimmed = raw.trim();
   return trimmed.length === 0 ? null : trimmed;
 }
+
+const ON_DEMAND_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
+const ON_DEMAND_REFRESH_FAILURE_COOLDOWN_MS = 30 * 1000;
+const ON_DEMAND_NEGATIVE_CACHE_MS = 5 * 60 * 1000;
 
 export interface ValidatorServiceDeps {
   validatorsRepo: ValidatorsRepository;
@@ -47,6 +52,9 @@ export class ValidatorService {
   private lastRefresh: Validator[] = [];
   /** Per-vote activated stake from the last refresh (used for top-N ranking). */
   private lastStakeByVote: Map<VotePubkey, number> = new Map();
+  private onDemandRefreshPromise: Promise<void> | null = null;
+  private nextOnDemandRefreshAllowedAtMs = 0;
+  private onDemandMissUntilByPubkey: Map<string, number> = new Map();
 
   constructor(deps: ValidatorServiceDeps) {
     this.validatorsRepo = deps.validatorsRepo;
@@ -182,9 +190,9 @@ export class ValidatorService {
         identityPubkey: identity,
         name: normaliseText(cd.name),
         details: normaliseText(cd.details),
-        website: normaliseText(cd.website),
+        website: normaliseHttpUrlOrNull(cd.website),
         keybaseUsername: normaliseText(cd.keybaseUsername),
-        iconUrl: normaliseText(cd.iconUrl),
+        iconUrl: normaliseHttpUrlOrNull(cd.iconUrl),
       },
     ]);
     this.logger.info(
@@ -420,6 +428,17 @@ export class ValidatorService {
       };
     }
 
+    const nowMs = Date.now();
+    const missUntil = this.onDemandMissUntilByPubkey.get(pubkey);
+    if (missUntil !== undefined && missUntil > nowMs) {
+      return {
+        ok: false,
+        reason:
+          'Pubkey was not found among active Solana vote accounts recently. Try again after a few minutes.',
+      };
+    }
+    if (missUntil !== undefined) this.onDemandMissUntilByPubkey.delete(pubkey);
+
     // Look up in our own cache (fast path for repeat hits). If miss,
     // refresh from RPC so a freshly-registered validator gets a fair
     // shot without a 24h wait for the next validator-service refresh.
@@ -440,11 +459,16 @@ export class ValidatorService {
     seek();
 
     if (matchVote === undefined) {
+      if (this.lastRefresh.length > 0 && nowMs < this.nextOnDemandRefreshAllowedAtMs) {
+        this.onDemandMissUntilByPubkey.set(pubkey, nowMs + ON_DEMAND_NEGATIVE_CACHE_MS);
+        return {
+          ok: false,
+          reason:
+            'Pubkey not found among active Solana vote accounts. Double-check the address, or wait a few minutes if this validator just came online.',
+        };
+      }
       try {
-        // 0 is a placeholder epoch — refresh only uses it for the
-        // `firstSeen` column, which is overwritten on next real
-        // refresh.
-        await this.refreshFromRpc(0);
+        await this.refreshOnDemandVoteAccounts();
         seek();
       } catch (err) {
         this.logger.warn({ err, pubkey }, 'validator.service: trackOnDemand refresh failed');
@@ -456,6 +480,7 @@ export class ValidatorService {
     }
 
     if (matchVote === undefined || matchIdentity === undefined) {
+      this.onDemandMissUntilByPubkey.set(pubkey, Date.now() + ON_DEMAND_NEGATIVE_CACHE_MS);
       return {
         ok: false,
         reason:
@@ -505,5 +530,29 @@ export class ValidatorService {
     }
 
     return { ok: true, votePubkey: matchVote, identityPubkey: matchIdentity, newlyTracked };
+  }
+
+  private async refreshOnDemandVoteAccounts(): Promise<void> {
+    if (this.onDemandRefreshPromise !== null) {
+      await this.onDemandRefreshPromise;
+      return;
+    }
+
+    this.onDemandRefreshPromise = (async () => {
+      try {
+        // 0 is a placeholder epoch — refresh only uses it for the
+        // `firstSeen` column, which is overwritten on next real
+        // refresh.
+        await this.refreshFromRpc(0);
+        this.nextOnDemandRefreshAllowedAtMs = Date.now() + ON_DEMAND_REFRESH_COOLDOWN_MS;
+      } catch (err) {
+        this.nextOnDemandRefreshAllowedAtMs = Date.now() + ON_DEMAND_REFRESH_FAILURE_COOLDOWN_MS;
+        throw err;
+      } finally {
+        this.onDemandRefreshPromise = null;
+      }
+    })();
+
+    await this.onDemandRefreshPromise;
   }
 }

@@ -96,7 +96,10 @@ const NarrativeOverrideSchema = z
   .string()
   .max(NARRATIVE_OVERRIDE_MAX, { message: `narrativeOverride > ${NARRATIVE_OVERRIDE_MAX} chars` })
   .nullable()
-  .optional();
+  .optional()
+  .refine((value) => value === undefined || value === null || !/[<>]/.test(value), {
+    message: 'narrativeOverride must not contain angle brackets',
+  });
 
 const ProfileUpdateBodySchema = SignedEnvelopeSchema.extend({
   profile: z.object({

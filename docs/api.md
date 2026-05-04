@@ -19,9 +19,9 @@ facts and should be treated as the reproducible source of truth.
 - **Timestamps.** ISO 8601 UTC (`"2026-04-15T09:59:42.000Z"`).
 - **CORS.** Disabled by default.
 - **Auth / rate limiting.** Public read routes are unauthenticated. `/v1/*`
-  routes are protected by the configurable `API_RATE_LIMIT_*` in-process
-  limiter; high-volume deployments should still enforce their own ingress/CDN
-  controls.
+  and `/mcp` routes are protected by the configurable `API_RATE_LIMIT_*`
+  in-process limiter; high-volume deployments should still enforce their own
+  ingress/CDN controls.
 
 ## Error envelope
 
@@ -394,5 +394,5 @@ different operation.
 
 Streamable HTTP MCP endpoint for AI agents. The server exposes four read-only
 tools: `get_current_epoch`, `get_leaderboard`, `get_validator`, and
-`get_validator_leader_slots`. MCP calls are exempt from the `/v1/*` IP rate
-limit, but tool schemas cap response sizes.
+`get_validator_leader_slots`. MCP calls use the same public per-IP rate limit
+as `/v1/*`; tool schemas also cap response sizes.

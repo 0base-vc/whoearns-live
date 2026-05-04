@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Resvg } from '@resvg/resvg-js';
-import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import satori from 'satori';
 import type { AppConfig } from '../../core/config.js';
 import type { IdentityPubkey, VotePubkey } from '../../types/domain.js';
@@ -373,7 +373,7 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
   // og:image tag. Two paths because the layout meta currently uses
   // `/og-default.png` (root path, dash) and we want the directory
   // form `/og/default.png` for consistency with per-validator paths.
-  const handleDefault = async (_request: unknown, reply: FastifyReply) => {
+  const handleDefault = async (request: FastifyRequest, reply: FastifyReply) => {
     const buf = await renderOrFail('__default__', {
       wordmark: opts.config.SITE_NAME,
       title: opts.config.SITE_NAME,
@@ -381,7 +381,11 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
     });
     if (buf === null) {
       return reply.code(503).send({
-        error: { code: 'og_unavailable', message: 'OG renderer unavailable', requestId: '' },
+        error: {
+          code: 'og_unavailable',
+          message: 'OG renderer unavailable',
+          requestId: request.id,
+        },
       });
     }
     return reply
@@ -400,7 +404,7 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
     const param = rawParam.endsWith('.png') ? rawParam.slice(0, -4) : rawParam;
     if (param.length === 0) {
       return reply.code(400).send({
-        error: { code: 'validation_error', message: 'vote required', requestId: '' },
+        error: { code: 'validation_error', message: 'vote required', requestId: request.id },
       });
     }
 
@@ -411,7 +415,11 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
     }
     if (validator === null) {
       return reply.code(404).send({
-        error: { code: 'not_found', message: `validator not found: ${param}`, requestId: '' },
+        error: {
+          code: 'not_found',
+          message: `validator not found: ${param}`,
+          requestId: request.id,
+        },
       });
     }
 
@@ -449,7 +457,11 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
     const buf = await renderOrFail(validator.votePubkey, content);
     if (buf === null) {
       return reply.code(503).send({
-        error: { code: 'og_unavailable', message: 'OG renderer unavailable', requestId: '' },
+        error: {
+          code: 'og_unavailable',
+          message: 'OG renderer unavailable',
+          requestId: request.id,
+        },
       });
     }
     return reply

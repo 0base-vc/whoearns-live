@@ -74,6 +74,20 @@
   // visible to the user.
   const APPROX_SLOT_MS = 400;
 
+  function safeHttpUrl(raw: string | null | undefined): string | null {
+    if (raw === null || raw === undefined) return null;
+    try {
+      const url = new URL(raw);
+      return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function serializeJsonLd(value: unknown): string {
+    return JSON.stringify(value).replace(/</g, '\\u003c');
+  }
+
   /**
    * `relativeNow` drives `formatTimestamp()` and the "updated Xs ago"
    * ticker so relative timestamps advance without a page reload.
@@ -112,6 +126,8 @@
    */
   const isTracking = $derived<boolean>(history.tracking === true);
   const trackingMessage = $derived<string | null>(history.trackingMessage ?? null);
+  const safeWebsiteUrl = $derived(safeHttpUrl(history.website));
+  const safeIconUrl = $derived(safeHttpUrl(history.iconUrl));
 
   const currentRow = $derived<ValidatorEpochRecord | undefined>(
     currentEpoch === null ? undefined : history.items.find((r) => r.epoch === currentEpoch.epoch),
@@ -371,7 +387,7 @@
     `variableMeasured` for the headline numbers and `description`
     for the English-first page summary or operator-authored note.
   -->
-  {@html `<script type="application/ld+json">${JSON.stringify(jsonLd)}</script>`}
+  {@html `<script type="application/ld+json">${serializeJsonLd(jsonLd)}</script>`}
   {#if isTracking}
     <!--
       Auto-refresh only while tracking — pulls newly-filled data without
@@ -404,9 +420,9 @@
         class="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)]"
         aria-hidden="true"
       >
-        {#if history.iconUrl && !iconLoadFailed}
+        {#if safeIconUrl && !iconLoadFailed}
           <img
-            src={history.iconUrl}
+            src={safeIconUrl}
             alt=""
             class="h-full w-full object-cover"
             loading="eager"
@@ -474,20 +490,23 @@
             {/if}
           </h1>
         {/if}
-        {#if history.website}
+        {#if safeWebsiteUrl}
           <!--
             Website is user-supplied on-chain; treat as untrusted link.
             `rel="noopener noreferrer nofollow"` prevents window.opener
             leak + discourages SEO pass-through to spammy registrations.
+            URL scheme validation is duplicated here even though the
+            backend also normalises validator-info: this page must stay
+            safe if an old DB row predates the backend guard.
           -->
           <p class="mt-1.5 truncate text-xs">
             <a
-              href={history.website}
+              href={safeWebsiteUrl}
               target="_blank"
               rel="noopener noreferrer nofollow"
               class="text-[color:var(--color-brand-500)] hover:underline"
             >
-              {history.website} ↗
+              {safeWebsiteUrl} ↗
             </a>
           </p>
         {/if}

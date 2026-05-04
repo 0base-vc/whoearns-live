@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { pino } from 'pino';
 import { ValidatorService } from '../../../src/services/validator.service.js';
 import type { SolanaRpcClient } from '../../../src/clients/solana-rpc.js';
+import type { RpcValidatorInfoAccount } from '../../../src/clients/types.js';
 import type { ValidatorsRepository } from '../../../src/storage/repositories/validators.repo.js';
 import type { WatchedDynamicRepository } from '../../../src/storage/repositories/watched-dynamic.repo.js';
 import {
@@ -269,6 +270,18 @@ describe('ValidatorService.trackOnDemand', () => {
     expect((await watchedDynamicRepo.listVotes()).length).toBe(0);
   });
 
+  it('does not repeat full vote-account refreshes for unknown pubkeys during cooldown', async () => {
+    const rpc = makeRpcStub();
+    const { service } = makeServiceWithDynamic(rpc);
+
+    const first = await service.trackOnDemand('UnknownPubkey11111111111111111111111111111');
+    const second = await service.trackOnDemand('UnknownPubkey22222222222222222222222222222');
+
+    expect(first.ok).toBe(false);
+    expect(second.ok).toBe(false);
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
+  });
+
   it('returns ok:false when activated stake falls below the floor', async () => {
     const rpc = makeRpcStub();
     const { service } = makeServiceWithDynamic(rpc);
@@ -312,5 +325,63 @@ describe('ValidatorService.trackOnDemand', () => {
     if (!result.ok) {
       expect(result.reason).toMatch(/not wired/i);
     }
+  });
+});
+
+describe('ValidatorService.refreshValidatorInfoForIdentity', () => {
+  function validatorInfo(configData: {
+    name?: string;
+    details?: string;
+    website?: string;
+    iconUrl?: string;
+    keybaseUsername?: string;
+  }): RpcValidatorInfoAccount {
+    return {
+      pubkey: 'Config1111111111111111111111111111111111111',
+      account: {
+        data: {
+          parsed: {
+            type: 'validatorInfo',
+            info: {
+              keys: [{ pubkey: IDENTITY_A, signer: true }],
+              configData,
+            },
+          },
+          program: 'spl-config',
+        },
+      },
+    };
+  }
+
+  it('keeps only http(s) validator-info URLs', async () => {
+    const repo = new FakeValidatorsRepo();
+    await repo.upsert({
+      votePubkey: VOTE_A,
+      identityPubkey: IDENTITY_A,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    const rpc = {
+      getVoteAccounts: vi.fn(),
+      getValidatorInfoForIdentity: vi.fn().mockResolvedValue(
+        validatorInfo({
+          name: '  Example Validator  ',
+          website: 'javascript:alert(1)',
+          iconUrl: 'https://example.com/icon.png',
+        }),
+      ),
+    };
+    const service = new ValidatorService({
+      validatorsRepo: repo as unknown as ValidatorsRepository,
+      rpc: rpc as unknown as SolanaRpcClient,
+      logger: silent,
+    });
+
+    await service.refreshValidatorInfoForIdentity(IDENTITY_A);
+
+    const row = await repo.findByVote(VOTE_A);
+    expect(row?.name).toBe('Example Validator');
+    expect(row?.website).toBeNull();
+    expect(row?.iconUrl).toBe('https://example.com/icon.png');
   });
 });

@@ -18,6 +18,10 @@
   import { currentLocale } from '$lib/stores/locale.svelte';
   import { SITE_NAME, SITE_URL } from '$lib/site';
 
+  function serializeJsonLd(value: unknown): string {
+    return JSON.stringify(value).replace(/</g, '\\u003c');
+  }
+
   /**
    * Each term has English + Korean copy. Edit this array to add /
    * remove / clarify terms; the rendered list and the JSON-LD both
@@ -151,7 +155,7 @@
   <link rel="alternate" hreflang="en" href={`${SITE_URL}/glossary?lang=en`} />
   <link rel="alternate" hreflang="ko" href={`${SITE_URL}/glossary?lang=ko`} />
   <link rel="alternate" hreflang="x-default" href={`${SITE_URL}/glossary`} />
-  {@html `<script type="application/ld+json">${JSON.stringify(jsonLd)}</script>`}
+  {@html `<script type="application/ld+json">${serializeJsonLd(jsonLd)}</script>`}
 </svelte:head>
 
 <section class="relative">

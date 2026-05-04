@@ -1016,6 +1016,11 @@ export class FakeValidatorService {
   };
   readonly trackCalls: Array<{ pubkey: string; opts?: { minActivatedStakeLamports?: bigint } }> =
     [];
+  activatedStakeLamports: bigint | null = null;
+
+  getActivatedStakeLamports(_vote: VotePubkey): bigint | null {
+    return this.activatedStakeLamports;
+  }
 
   async trackOnDemand(
     pubkey: string,

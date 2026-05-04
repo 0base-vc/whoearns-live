@@ -128,16 +128,14 @@ describe('GET /v1/validators/:idOrVote/history', () => {
     expect(body.items[0]?.epoch).toBe(500);
     // Not an auto-track response.
     expect(body.tracking).toBeUndefined();
-    // Fire-and-forget touchLookup + trackOnDemand were invoked
-    // (eventually — await a microtask to let the void-promises
-    // settle). The route always fires `trackOnDemand` for known
-    // validators to close the "exists in validators table via
-    // refreshFromRpc but not in watched_dynamic" hole that left
-    // some income pages permanently empty.
+    // Fire-and-forget dynamic add was invoked without calling
+    // trackOnDemand. Known validators already resolved from local DB,
+    // so this path must not trigger a full upstream vote-account
+    // refresh just to make the fee-ingester watch the vote.
     await Promise.resolve();
     await Promise.resolve();
-    expect(ctx.validatorService.trackCalls.length).toBe(1);
-    expect(ctx.validatorService.trackCalls[0]?.pubkey).toBe(VOTE_1);
+    expect(ctx.validatorService.trackCalls).toHaveLength(0);
+    expect(await ctx.watchedDynamic.findByVote(VOTE_1)).not.toBeNull();
 
     await ctx.app.close();
   });

@@ -112,6 +112,15 @@ export const ConfigSchema = z.object({
    */
   API_RATE_LIMIT_MAX: PositiveInt.default(60),
   API_RATE_LIMIT_WINDOW_MS: PositiveInt.default(60_000),
+  /**
+   * Number of trusted reverse-proxy hops in front of Fastify.
+   *
+   * 0 (default) means Fastify ignores X-Forwarded-* headers. Set to
+   * 1 when the app is only reachable through a trusted ingress that
+   * appends X-Forwarded-For, so request.ip resolves to the real client
+   * while caller-supplied spoofed entries remain untrusted.
+   */
+  TRUST_PROXY_HOPS: NonNegativeInt.default(0),
 
   SOLANA_RPC_URL: NonEmptyString.url(),
   SOLANA_RPC_TIMEOUT_MS: PositiveInt.default(30_000),

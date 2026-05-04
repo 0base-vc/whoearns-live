@@ -44,6 +44,7 @@ function makeConfig(): AppConfig {
     SOLANA_RPC_BURST_CREDITS: 0,
     API_RATE_LIMIT_MAX: 60,
     API_RATE_LIMIT_WINDOW_MS: 60_000,
+    TRUST_PROXY_HOPS: 0,
     POSTGRES_URL: 'postgres://localhost/x',
     POSTGRES_POOL_SIZE: 10,
     POSTGRES_STATEMENT_TIMEOUT_MS: 10_000,
@@ -293,6 +294,27 @@ describe('smoke: api server boots and routes 200/degraded', () => {
         'get_validator',
         'get_validator_leader_slots',
       ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rate-limits MCP calls because the endpoint is public', async () => {
+    const deps = makeDeps();
+    deps.config = { ...deps.config, API_RATE_LIMIT_MAX: 1, API_RATE_LIMIT_WINDOW_MS: 60_000 };
+    const app = await buildServer(deps);
+    try {
+      const request = {
+        method: 'POST' as const,
+        url: '/mcp',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      };
+      expect((await app.inject(request)).statusCode).toBe(200);
+      expect((await app.inject(request)).statusCode).toBe(429);
     } finally {
       await app.close();
     }

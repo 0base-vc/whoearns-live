@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppConfig } from '../../core/config.js';
+import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
@@ -542,8 +543,8 @@ async function buildValidatorPayload(
     vote: validator.votePubkey,
     identity: validator.identityPubkey,
     name: validator.name,
-    iconUrl: validator.iconUrl,
-    website: validator.website,
+    iconUrl: normaliseHttpUrlOrNull(validator.iconUrl),
+    website: normaliseHttpUrlOrNull(validator.website),
     claimed: claimedSet.has(validator.votePubkey),
     profile:
       profile === null

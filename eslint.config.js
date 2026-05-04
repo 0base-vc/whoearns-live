@@ -14,6 +14,10 @@ export default [
       // SvelteKit UI has its own toolchain under ui/; don't lint it with
       // the backend's ESLint config.
       'ui/**',
+      // Local/private marketing drafts are intentionally gitignored and
+      // can depend on operator-only assets; they are outside the OSS
+      // backend lint target.
+      'marketing/**',
     ],
   },
   js.configs.recommended,

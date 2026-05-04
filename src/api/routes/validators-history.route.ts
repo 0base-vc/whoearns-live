@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
+import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import type { ValidatorService } from '../../services/validator.service.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
@@ -29,8 +30,8 @@ export interface ValidatorsHistoryRoutesDeps {
   validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>;
   epochsRepo: Pick<EpochsRepository, 'findByEpoch' | 'findCurrent'>;
   aggregatesRepo: Pick<AggregatesRepository, 'findManyByEpochsTopN'>;
-  watchedDynamicRepo: Pick<WatchedDynamicRepository, 'touchLookup'>;
-  validatorService: Pick<ValidatorService, 'trackOnDemand'>;
+  watchedDynamicRepo: Pick<WatchedDynamicRepository, 'touchLookup' | 'add'>;
+  validatorService: Pick<ValidatorService, 'trackOnDemand' | 'getActivatedStakeLamports'>;
   /**
    * Phase 3 profile decoration. When present, the response merges
    * `twitter_handle` + `hide_footer_cta` + `opted_out` onto the top-
@@ -195,29 +196,23 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // isn't slowed by bookkeeping.
     void watchedDynamicRepo.touchLookup(validator.votePubkey);
 
-    // Validators can land in the `validators` table via
-    // `refreshFromRpc` (which mirrors the entire cluster) WITHOUT
-    // ever being registered in `watched_validators_dynamic`. If a
-    // user visits /income/:vote for such a validator, the prior
-    // flow only bumped touchLookup and returned empty history —
-    // because the fee/slot ingester union (config ∪ dynamic) didn't
-    // include this vote, stats never got written. Fire another
-    // `trackOnDemand` to guarantee the watched set contains them.
-    //
-    // `trackOnDemand` is fully idempotent:
-    //   - vote already in dynamic watched → `add` ON CONFLICT bumps
-    //     lookup_count only (no-op stats-wise)
-    //   - vote NOT in dynamic watched → inserts with stake-floor
-    //     check and fires the moniker fetch
-    //
-    // Runs fire-and-forget so the user's history response isn't
-    // gated on stake resolution or the moniker RPC roundtrip.
-    void validatorService.trackOnDemand(validator.votePubkey).catch((err) => {
-      request.log.warn(
-        { err, vote: validator.votePubkey },
-        'validators-history: ensure-watched trackOnDemand failed (non-fatal)',
-      );
-    });
+    // Ensure known validators are in the dynamic watched set without
+    // calling `trackOnDemand`. The known path already resolved from
+    // local DB; falling back to full `getVoteAccounts` here lets
+    // ordinary page views amplify into upstream RPC work during a
+    // cold-start window. `add` is idempotent and also bumps lookup_count.
+    void watchedDynamicRepo
+      .add({
+        votePubkey: validator.votePubkey,
+        activatedStakeLamportsAtAdd:
+          validatorService.getActivatedStakeLamports(validator.votePubkey) ?? 0n,
+      })
+      .catch((err) => {
+        request.log.warn(
+          { err, vote: validator.votePubkey },
+          'validators-history: ensure-watched dynamic add failed (non-fatal)',
+        );
+      });
 
     // Phase 3: pull the validator's profile + claim in parallel with
     // history. If the operator has opted out, the short-circuit
@@ -302,8 +297,8 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
       vote: validator.votePubkey,
       identity: validator.identityPubkey,
       name: validator.name,
-      iconUrl: validator.iconUrl,
-      website: validator.website,
+      iconUrl: normaliseHttpUrlOrNull(validator.iconUrl),
+      website: normaliseHttpUrlOrNull(validator.website),
       items,
       claimed,
       ...(profile !== null

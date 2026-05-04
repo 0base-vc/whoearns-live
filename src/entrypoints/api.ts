@@ -73,6 +73,7 @@ export async function startApi(): Promise<void> {
     claimsRepo,
     profilesRepo,
     validatorsRepo: repos.validators,
+    validatorService,
     logger,
   });
   const services = { validator: validatorService, claim: claimService };

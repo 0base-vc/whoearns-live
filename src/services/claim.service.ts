@@ -4,6 +4,7 @@ import type { ClaimsRepository } from '../storage/repositories/claims.repo.js';
 import type { ProfilesRepository } from '../storage/repositories/profiles.repo.js';
 import type { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import type { Logger } from '../core/logger.js';
+import type { ValidatorService } from './validator.service.js';
 import type {
   IdentityPubkey,
   ValidatorClaim,
@@ -238,6 +239,7 @@ export interface ClaimServiceDeps {
   claimsRepo: ClaimsRepository;
   profilesRepo: ProfilesRepository;
   validatorsRepo: ValidatorsRepository;
+  validatorService: Pick<ValidatorService, 'assessClaimEligibility'>;
   logger: Logger;
   /**
    * Injectable clock so tests can assert timestamp-window semantics
@@ -250,6 +252,7 @@ export class ClaimService {
   private readonly claimsRepo: ClaimsRepository;
   private readonly profilesRepo: ProfilesRepository;
   private readonly validatorsRepo: ValidatorsRepository;
+  private readonly validatorService: Pick<ValidatorService, 'assessClaimEligibility'>;
   private readonly logger: Logger;
   private readonly nowFn: () => number;
 
@@ -257,6 +260,7 @@ export class ClaimService {
     this.claimsRepo = deps.claimsRepo;
     this.profilesRepo = deps.profilesRepo;
     this.validatorsRepo = deps.validatorsRepo;
+    this.validatorService = deps.validatorService;
     this.logger = deps.logger;
     this.nowFn = deps.now ?? Date.now;
   }
@@ -361,15 +365,25 @@ export class ClaimService {
       return { ok: false, reason: 'bad_signature' };
     }
 
+    if (existingClaim === null) {
+      const eligibility = await this.validatorService.assessClaimEligibility(body.votePubkey);
+      if (!eligibility.eligible) {
+        return { ok: false, reason: 'stake_below_floor', detail: eligibility.reason };
+      }
+    }
+
     // 7. Upsert the claim row. For profile updates against an
     //    already-claimed validator this is essentially a nonce
     //    bump with identity re-confirmation; for first-ever claims
     //    it creates the row.
-    await this.claimsRepo.upsert({
+    const persisted = await this.claimsRepo.upsert({
       votePubkey: body.votePubkey,
       identityPubkey: body.identityPubkey,
       nonce: body.nonce,
     });
+    if (!persisted) {
+      return { ok: false, reason: 'nonce_replay' };
+    }
 
     // 8. Re-read so the caller gets the freshly-persisted row.
     const refreshed = await this.claimsRepo.findByVote(body.votePubkey);

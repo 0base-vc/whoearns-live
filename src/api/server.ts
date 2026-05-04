@@ -129,7 +129,7 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     loggerInstance: deps.logger satisfies FastifyBaseLogger,
     disableRequestLogging: false,
     genReqId: () => crypto.randomUUID(),
-    trustProxy: true,
+    trustProxy: deps.config.TRUST_PROXY_HOPS > 0 ? deps.config.TRUST_PROXY_HOPS : false,
   });
   const app = appTyped as unknown as FastifyInstance;
 
@@ -161,19 +161,14 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     skipOnError: true,
     // Don't count /healthz probes towards a client's budget; k8s
     // liveness/readiness probes would otherwise burn through quota.
-    // Also exempt the MCP transport: MCP clients are explicitly
-    // configured per-user (Claude Desktop / Code config files), so
-    // they're trusted callers — and a normal multi-tool conversation
-    // can easily issue 5-10 calls in under a minute, which would
-    // chew through a 60/min budget for no meaningful protection.
-    // Per-tool input caps (max limit=100, epochLimit=50) bound the
-    // server cost intrinsically; the IP-rate-limit isn't the right
-    // backpressure layer here.
+    // MCP is intentionally NOT exempt: it is a public unauthenticated
+    // HTTP endpoint, and tool input caps only bound per-call cost, not
+    // call volume.
     //
     // /metrics is no longer on this listener — see the
     // dedicated-port block at the end of buildServer for the
     // separate Fastify instance bound to METRICS_PORT.
-    allowList: (req) => req.url === '/healthz' || req.url.startsWith('/mcp'),
+    allowList: (req) => req.url === '/healthz',
   });
 
   registerRequestId(app);

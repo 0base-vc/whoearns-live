@@ -12,6 +12,10 @@
   import { currentLocale } from '$lib/stores/locale.svelte';
   import { SITE_NAME, SITE_URL } from '$lib/site';
 
+  function serializeJsonLd(value: unknown): string {
+    return JSON.stringify(value).replace(/</g, '\\u003c');
+  }
+
   /**
    * Each Q&A is bilingual. Editing tips:
    *   - Each answer should stand alone — GenAI engines extract them
@@ -134,7 +138,7 @@
   <link rel="alternate" hreflang="en" href={`${SITE_URL}/faq?lang=en`} />
   <link rel="alternate" hreflang="ko" href={`${SITE_URL}/faq?lang=ko`} />
   <link rel="alternate" hreflang="x-default" href={`${SITE_URL}/faq`} />
-  {@html `<script type="application/ld+json">${JSON.stringify(jsonLd)}</script>`}
+  {@html `<script type="application/ld+json">${serializeJsonLd(jsonLd)}</script>`}
 </svelte:head>
 
 <section class="relative">

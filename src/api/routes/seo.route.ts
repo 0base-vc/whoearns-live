@@ -336,8 +336,8 @@ Body: { "votes": ["Vote111...", ...] }. Bulk lookup; returns
 
 Default 60 requests / minute / IP. AI crawlers (GPTBot, ClaudeBot,
 PerplexityBot) are whitelisted to /v1/leaderboard and
-/v1/epoch/current via robots.txt. Higher-volume queries should use
-the MCP server (no IP-based budget) or run a self-hosted indexer.
+/v1/epoch/current via robots.txt. MCP calls use the same public
+per-IP budget. Higher-volume queries should run a self-hosted indexer.
 
 ## Error envelope
 

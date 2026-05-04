@@ -70,16 +70,19 @@ export class ClaimsRepository {
     votePubkey: VotePubkey;
     identityPubkey: IdentityPubkey;
     nonce: string;
-  }): Promise<void> {
-    await this.pool.query(
+  }): Promise<boolean> {
+    const result = await this.pool.query(
       `INSERT INTO validator_claims (vote_pubkey, identity_pubkey, claimed_at, last_nonce_used)
        VALUES ($1, $2, NOW(), $3)
        ON CONFLICT (vote_pubkey) DO UPDATE SET
          identity_pubkey = EXCLUDED.identity_pubkey,
          claimed_at      = EXCLUDED.claimed_at,
-         last_nonce_used = EXCLUDED.last_nonce_used`,
+         last_nonce_used = EXCLUDED.last_nonce_used
+       WHERE validator_claims.last_nonce_used IS DISTINCT FROM EXCLUDED.last_nonce_used
+       RETURNING vote_pubkey`,
       [args.votePubkey, args.identityPubkey, args.nonce],
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   /**

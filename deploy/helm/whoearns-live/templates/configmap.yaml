@@ -14,6 +14,7 @@ data:
   METRICS_PORT: {{ .Values.config.metricsPort | default 0 | quote }}
   API_RATE_LIMIT_MAX: {{ .Values.config.apiRateLimitMax | default 60 | quote }}
   API_RATE_LIMIT_WINDOW_MS: {{ .Values.config.apiRateLimitWindowMs | default 60000 | quote }}
+  TRUST_PROXY_HOPS: {{ .Values.config.trustProxyHops | default 0 | quote }}
   SOLANA_RPC_URL: {{ .Values.config.solanaRpcUrl | quote }}
   SOLANA_RPC_TIMEOUT_MS: {{ .Values.config.solanaRpcTimeoutMs | quote }}
   SOLANA_RPC_CONCURRENCY: {{ .Values.config.solanaRpcConcurrency | quote }}

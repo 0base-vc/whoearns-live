@@ -161,6 +161,11 @@ config:
   # UI traffic, tight enough that cluster-wide scraping trips early.
   apiRateLimitMax: 60
   apiRateLimitWindowMs: 60000
+  # Number of trusted reverse-proxy hops in front of the API.
+  # 0 ignores X-Forwarded-* headers. Set to 1 only when traffic can
+  # reach the pod exclusively through a trusted ingress/LB that appends
+  # X-Forwarded-For.
+  trustProxyHops: 0
   solanaRpcUrl: https://solana-rpc.publicnode.com
   solanaRpcTimeoutMs: 30000
   solanaRpcConcurrency: 4

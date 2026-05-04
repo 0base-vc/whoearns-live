@@ -142,40 +142,41 @@ deployment at `https://whoearns.live` for a quick spin.
 All configuration is read from environment variables at process start.
 See [`.env.example`](./.env.example) for the authoritative list.
 
-| Variable                             | Default                                             | Description                                                                                                               |
-| ------------------------------------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `NODE_ENV`                           | `development`                                       | One of `development`, `production`, `test`.                                                                               |
-| `LOG_LEVEL`                          | `info`                                              | pino level: `trace`, `debug`, `info`, `warn`, `error`, `fatal`.                                                           |
-| `HTTP_PORT`                          | `8080`                                              | API listen port.                                                                                                          |
-| `HTTP_HOST`                          | `0.0.0.0`                                           | API listen address.                                                                                                       |
-| `METRICS_PORT`                       | `0`                                                 | Separate cluster-internal `/metrics` listener. `0` disables it.                                                           |
-| `SITE_URL`                           | `http://localhost:8080`                             | Canonical public URL used for OpenAPI, SEO, and MCP metadata.                                                             |
-| `SITE_NAME`                          | `WhoEarns`                                          | Public display name used by API metadata and generated pages.                                                             |
-| `API_RATE_LIMIT_MAX`                 | `60`                                                | Per-IP request cap for public API routes.                                                                                 |
-| `API_RATE_LIMIT_WINDOW_MS`           | `60000`                                             | Rate-limit window in milliseconds.                                                                                        |
-| `SOLANA_RPC_URL`                     | `https://solana-rpc.publicnode.com`                 | Solana JSON-RPC endpoint. Public RPC is rate-limited; use a paid provider for `*` mode.                                   |
-| `SOLANA_RPC_TIMEOUT_MS`              | `30000`                                             | Per-request RPC timeout.                                                                                                  |
-| `SOLANA_RPC_CONCURRENCY`             | `4`                                                 | Maximum concurrent in-flight RPC calls from the worker.                                                                   |
-| `SOLANA_RPC_MAX_RETRIES`             | `3`                                                 | Retry budget for transient RPC failures.                                                                                  |
-| `SOLANA_FALLBACK_RPC_URL`            | _(unset)_                                           | Optional secondary RPC used after primary retries are exhausted.                                                          |
-| `SOLANA_ARCHIVE_RPC_URL`             | _(unset)_                                           | Optional secondary endpoint retained for one-shot historical scripts.                                                     |
-| `YELLOWSTONE_GRPC_URL`               | _(unset)_                                           | Optional live block stream; JSON-RPC still repairs missed slots.                                                          |
-| `YELLOWSTONE_GRPC_X_TOKEN`           | _(unset)_                                           | Optional auth token for Yellowstone providers that require one.                                                           |
-| `SOLANA_RPC_CREDITS_PER_SEC`         | `0`                                                 | Optional upstream-credit token bucket. `0` disables it.                                                                   |
-| `SOLANA_RPC_BURST_CREDITS`           | `0`                                                 | Optional burst size for the RPC credit bucket.                                                                            |
-| `POSTGRES_URL`                       | `postgres://indexer:indexer@localhost:5432/indexer` | PostgreSQL connection string.                                                                                             |
-| `POSTGRES_POOL_SIZE`                 | `10`                                                | `pg` pool size.                                                                                                           |
-| `POSTGRES_STATEMENT_TIMEOUT_MS`      | `10000`                                             | Per-query statement timeout.                                                                                              |
-| `VALIDATORS_WATCH_LIST`              | _(empty)_                                           | Comma-separated vote pubkeys, or `*` for all validators. Empty means "track nothing" and is only useful for API-only use. |
-| `EPOCH_WATCH_INTERVAL_MS`            | `30000`                                             | How often the worker checks for a new epoch.                                                                              |
-| `SLOT_INGEST_INTERVAL_MS`            | `60000`                                             | How often the worker derives slot counters from leader schedule + local facts.                                            |
-| `FEE_INGEST_INTERVAL_MS`             | `30000`                                             | How often the worker walks the leader schedule and processes new blocks.                                                  |
-| `FEE_INGEST_BATCH_SIZE`              | `50`                                                | Number of blocks processed per fee-ingest batch.                                                                          |
-| `AGGREGATES_INTERVAL_MS`             | `300000`                                            | How often the worker recomputes cluster medians.                                                                          |
-| `CLOSED_EPOCH_RECONCILE_INTERVAL_MS` | `300000`                                            | How often the worker repairs the latest closed epoch from leader-slot facts.                                              |
-| `VALIDATOR_INFO_INTERVAL_MS`         | `21600000`                                          | How often watched validator identity metadata is refreshed.                                                               |
-| `SLOT_FINALITY_BUFFER`               | `32`                                                | Blocks within this distance from the tip are considered not yet final and are skipped.                                    |
-| `SHUTDOWN_TIMEOUT_MS`                | `15000`                                             | Grace period for in-flight work on SIGTERM.                                                                               |
+| Variable                             | Default                                             | Description                                                                                                                       |
+| ------------------------------------ | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `NODE_ENV`                           | `development`                                       | One of `development`, `production`, `test`.                                                                                       |
+| `LOG_LEVEL`                          | `info`                                              | pino level: `trace`, `debug`, `info`, `warn`, `error`, `fatal`.                                                                   |
+| `HTTP_PORT`                          | `8080`                                              | API listen port.                                                                                                                  |
+| `HTTP_HOST`                          | `0.0.0.0`                                           | API listen address.                                                                                                               |
+| `METRICS_PORT`                       | `0`                                                 | Separate cluster-internal `/metrics` listener. `0` disables it.                                                                   |
+| `SITE_URL`                           | `http://localhost:8080`                             | Canonical public URL used for OpenAPI, SEO, and MCP metadata.                                                                     |
+| `SITE_NAME`                          | `WhoEarns`                                          | Public display name used by API metadata and generated pages.                                                                     |
+| `API_RATE_LIMIT_MAX`                 | `60`                                                | Per-IP request cap for public API routes.                                                                                         |
+| `API_RATE_LIMIT_WINDOW_MS`           | `60000`                                             | Rate-limit window in milliseconds.                                                                                                |
+| `TRUST_PROXY_HOPS`                   | `0`                                                 | Trusted reverse-proxy hop count for client IP resolution. Keep `0` unless the app is only reachable through a trusted ingress/LB. |
+| `SOLANA_RPC_URL`                     | `https://solana-rpc.publicnode.com`                 | Solana JSON-RPC endpoint. Public RPC is rate-limited; use a paid provider for `*` mode.                                           |
+| `SOLANA_RPC_TIMEOUT_MS`              | `30000`                                             | Per-request RPC timeout.                                                                                                          |
+| `SOLANA_RPC_CONCURRENCY`             | `4`                                                 | Maximum concurrent in-flight RPC calls from the worker.                                                                           |
+| `SOLANA_RPC_MAX_RETRIES`             | `3`                                                 | Retry budget for transient RPC failures.                                                                                          |
+| `SOLANA_FALLBACK_RPC_URL`            | _(unset)_                                           | Optional secondary RPC used after primary retries are exhausted.                                                                  |
+| `SOLANA_ARCHIVE_RPC_URL`             | _(unset)_                                           | Optional secondary endpoint retained for one-shot historical scripts.                                                             |
+| `YELLOWSTONE_GRPC_URL`               | _(unset)_                                           | Optional live block stream; JSON-RPC still repairs missed slots.                                                                  |
+| `YELLOWSTONE_GRPC_X_TOKEN`           | _(unset)_                                           | Optional auth token for Yellowstone providers that require one.                                                                   |
+| `SOLANA_RPC_CREDITS_PER_SEC`         | `0`                                                 | Optional upstream-credit token bucket. `0` disables it.                                                                           |
+| `SOLANA_RPC_BURST_CREDITS`           | `0`                                                 | Optional burst size for the RPC credit bucket.                                                                                    |
+| `POSTGRES_URL`                       | `postgres://indexer:indexer@localhost:5432/indexer` | PostgreSQL connection string.                                                                                                     |
+| `POSTGRES_POOL_SIZE`                 | `10`                                                | `pg` pool size.                                                                                                                   |
+| `POSTGRES_STATEMENT_TIMEOUT_MS`      | `10000`                                             | Per-query statement timeout.                                                                                                      |
+| `VALIDATORS_WATCH_LIST`              | _(empty)_                                           | Comma-separated vote pubkeys, or `*` for all validators. Empty means "track nothing" and is only useful for API-only use.         |
+| `EPOCH_WATCH_INTERVAL_MS`            | `30000`                                             | How often the worker checks for a new epoch.                                                                                      |
+| `SLOT_INGEST_INTERVAL_MS`            | `60000`                                             | How often the worker derives slot counters from leader schedule + local facts.                                                    |
+| `FEE_INGEST_INTERVAL_MS`             | `30000`                                             | How often the worker walks the leader schedule and processes new blocks.                                                          |
+| `FEE_INGEST_BATCH_SIZE`              | `50`                                                | Number of blocks processed per fee-ingest batch.                                                                                  |
+| `AGGREGATES_INTERVAL_MS`             | `300000`                                            | How often the worker recomputes cluster medians.                                                                                  |
+| `CLOSED_EPOCH_RECONCILE_INTERVAL_MS` | `300000`                                            | How often the worker repairs the latest closed epoch from leader-slot facts.                                                      |
+| `VALIDATOR_INFO_INTERVAL_MS`         | `21600000`                                          | How often watched validator identity metadata is refreshed.                                                                       |
+| `SLOT_FINALITY_BUFFER`               | `32`                                                | Blocks within this distance from the tip are considered not yet final and are skipped.                                            |
+| `SHUTDOWN_TIMEOUT_MS`                | `15000`                                             | Grace period for in-flight work on SIGTERM.                                                                                       |
 
 ### Watch list modes
 
@@ -277,10 +278,10 @@ scraping the UI or parsing OpenAPI:
 | `get_validator`              | Per-epoch history for one validator (vote OR identity pubkey).     |
 | `get_validator_leader_slots` | Stored leader-slot facts for one validator epoch; no live RPC hit. |
 
-The MCP transport is exempt from the per-IP rate limit on `/v1/*`
-because MCP clients are explicitly configured per-user; tool input
-schemas cap response sizes (`limit ≤ 100`, `epochLimit ≤ 50`, one
-validator epoch per leader-slot call) so intrinsic cost is bounded.
+The MCP transport is public and unauthenticated, so it uses the same
+per-IP rate limiter as the HTTP API. Tool input schemas additionally
+cap response sizes (`limit ≤ 100`, `epochLimit ≤ 50`, one validator
+epoch per leader-slot call) so intrinsic per-call cost is bounded.
 
 **Claude Desktop** — add to `~/.claude/claude_desktop_config.json`
 (the `https://whoearns.live` URL below is the 0base.vc reference

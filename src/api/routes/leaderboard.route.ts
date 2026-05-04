@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { lamportsToSol, lamportsToString } from '../../core/lamports.js';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
+import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
@@ -207,8 +208,8 @@ function toRow(
     vote: stats.votePubkey,
     identity: stats.identityPubkey,
     name: info?.name ?? null,
-    iconUrl: info?.iconUrl ?? null,
-    website: info?.website ?? null,
+    iconUrl: normaliseHttpUrlOrNull(info?.iconUrl),
+    website: normaliseHttpUrlOrNull(info?.website),
     slotsAssigned: stats.slotsAssigned,
     slotsProduced: stats.slotsProduced,
     slotsSkipped: stats.slotsSkipped,

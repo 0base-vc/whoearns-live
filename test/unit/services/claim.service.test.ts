@@ -118,13 +118,16 @@ class FakeClaimsRepo implements Pick<ClaimsRepository, 'findByVote' | 'upsert' |
     votePubkey: VotePubkey;
     identityPubkey: string;
     nonce: string;
-  }): Promise<void> {
+  }): Promise<boolean> {
+    const existing = this.rows.get(args.votePubkey);
+    if (existing !== undefined && existing.lastNonceUsed === args.nonce) return false;
     this.rows.set(args.votePubkey, {
       votePubkey: args.votePubkey,
       identityPubkey: args.identityPubkey,
       claimedAt: new Date(),
       lastNonceUsed: args.nonce,
     });
+    return true;
   }
   async bumpNonce(args: { votePubkey: VotePubkey; nonce: string }): Promise<void> {
     const existing = this.rows.get(args.votePubkey);
@@ -155,6 +158,24 @@ class FakeProfilesRepo implements Pick<ProfilesRepository, 'findByVote' | 'upser
       narrativeOverride: args.narrativeOverride,
       updatedAt: new Date(),
     });
+  }
+}
+
+class FakeClaimEligibility {
+  eligible = true;
+
+  async assessClaimEligibility(): Promise<
+    | { eligible: true; activatedStakeLamports: bigint }
+    | { eligible: false; reason: string; activatedStakeLamports: bigint | null }
+  > {
+    if (!this.eligible) {
+      return {
+        eligible: false,
+        reason: 'Activated stake 0 lamports is below the minimum 1000000000 lamports required.',
+        activatedStakeLamports: 0n,
+      };
+    }
+    return { eligible: true, activatedStakeLamports: 1_000_000_000n };
   }
 }
 
@@ -189,18 +210,21 @@ function makeService(now: number = Date.now()): {
   claims: FakeClaimsRepo;
   profiles: FakeProfilesRepo;
   validators: FakeValidatorsRepo;
+  eligibility: FakeClaimEligibility;
 } {
   const claims = new FakeClaimsRepo();
   const profiles = new FakeProfilesRepo();
   const validators = new FakeValidatorsRepo();
+  const eligibility = new FakeClaimEligibility();
   const service = new ClaimService({
     claimsRepo: claims as unknown as ClaimsRepository,
     profilesRepo: profiles as unknown as ProfilesRepository,
     validatorsRepo: validators as unknown as ValidatorsRepository,
+    validatorService: eligibility,
     logger: silent,
     now: () => now,
   });
-  return { service, claims, profiles, validators };
+  return { service, claims, profiles, validators, eligibility };
 }
 
 describe('canonicaliseSignedPayload', () => {
@@ -394,6 +418,28 @@ describe('ClaimService.verifySigned', () => {
     }
     const persisted = await claims.findByVote(VOTE);
     expect(persisted).not.toBeNull();
+  });
+
+  it('rejects a first-time claim below the stake floor after signature verification', async () => {
+    const { service, claims, validators, eligibility } = makeService(fixedNow);
+    const kp = await generateIdentityKeypair();
+    validators.addValidator(VOTE, kp.identityBase58);
+    eligibility.eligible = false;
+
+    const body: SignedPayloadBody = {
+      purpose: 'claim',
+      votePubkey: VOTE,
+      identityPubkey: kp.identityBase58,
+      nonce: 'nonce-low-stake',
+      timestampSec: Math.floor(fixedNow / 1000),
+    };
+    const sig = await signPayload(body, kp.secret);
+
+    const result = await service.verifySigned({ body, signatureBase58: sig });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('stake_below_floor');
+    await expect(claims.findByVote(VOTE)).resolves.toBeNull();
   });
 
   it('rejects a signature from a DIFFERENT keypair (bad_signature)', async () => {
