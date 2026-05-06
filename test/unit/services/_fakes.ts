@@ -757,6 +757,17 @@ export class FakeProcessedBlocksRepo {
     return inserted;
   }
 
+  async updateMissingFactsBatch(blocks: ProcessedBlock[]): Promise<Set<Slot>> {
+    const updated = new Set<Slot>();
+    for (const b of blocks) {
+      const existing = this.rows.get(b.slot);
+      if (existing === undefined || existing.factsCapturedAt !== null) continue;
+      this.rows.set(b.slot, b);
+      updated.add(b.slot);
+    }
+    return updated;
+  }
+
   async recordFetchError(args: {
     epoch: Epoch;
     slot: Slot;
@@ -786,6 +797,25 @@ export class FakeProcessedBlocksRepo {
     const out = new Set<Slot>();
     for (const row of this.rows.values()) {
       if (row.epoch === epoch && row.slot >= slotStart && row.slot <= slotEnd) {
+        out.add(row.slot);
+      }
+    }
+    return out;
+  }
+
+  async getFactCapturedSlotsInRange(
+    epoch: Epoch,
+    slotStart: Slot,
+    slotEnd: Slot,
+  ): Promise<Set<Slot>> {
+    const out = new Set<Slot>();
+    for (const row of this.rows.values()) {
+      if (
+        row.epoch === epoch &&
+        row.slot >= slotStart &&
+        row.slot <= slotEnd &&
+        row.factsCapturedAt !== null
+      ) {
         out.add(row.slot);
       }
     }

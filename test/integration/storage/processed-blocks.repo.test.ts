@@ -109,6 +109,33 @@ describe('ProcessedBlocksRepository', () => {
     expect(got.size).toBe(0);
   });
 
+  it('getFactCapturedSlotsInRange and updateMissingFactsBatch repair only legacy rows', async () => {
+    await repo.insertBatch([
+      mkBlock(100, { feesLamports: 1000n, txCount: 1 }),
+      mkBlock(101, { feesLamports: 1n, factsCapturedAt: null }),
+    ]);
+
+    const capturedBefore = await repo.getFactCapturedSlotsInRange(500, 100, 101);
+    expect([...capturedBefore]).toEqual([100]);
+
+    const updated = await repo.updateMissingFactsBatch([
+      mkBlock(100, { feesLamports: 9999n, txCount: 9 }),
+      mkBlock(101, { feesLamports: 2000n, txCount: 2 }),
+    ]);
+
+    expect([...updated]).toEqual([101]);
+    const untouched = await repo.findBySlot(100);
+    const repaired = await repo.findBySlot(101);
+    expect(untouched!.feesLamports).toBe(1000n);
+    expect(untouched!.txCount).toBe(1);
+    expect(repaired!.feesLamports).toBe(2000n);
+    expect(repaired!.txCount).toBe(2);
+    expect(repaired!.factsCapturedAt).not.toBeNull();
+
+    const capturedAfter = await repo.getFactCapturedSlotsInRange(500, 100, 101);
+    expect([...capturedAfter].sort((a, b) => a - b)).toEqual([100, 101]);
+  });
+
   it('countStatusesForIdentityInRange: counts produced and skipped local facts', async () => {
     await repo.insertBatch([
       mkBlock(100, { leaderIdentity: 'A', blockStatus: 'produced' }),

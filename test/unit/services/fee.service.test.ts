@@ -456,6 +456,40 @@ describe('FeeService.ingestPendingBlocks', () => {
     expect(stats.feeAndTipCalls).toHaveLength(0);
   });
 
+  it('repairs legacy processed rows that are missing captured block facts', async () => {
+    const stats = new FakeStatsRepo();
+    const blocks = new FakeProcessedBlocksRepo();
+    blocks.rows.set(FIRST_SLOT, {
+      ...makeProcessedBlock(FIRST_SLOT, EPOCH, IDENTITY_A, 1n),
+      factsCapturedAt: null,
+      txCount: 0,
+      blockTime: null,
+    });
+    const rpc = makeRpc(async () => blockWithFeesFixture);
+
+    const result = await makeService(rpc, stats, blocks).ingestPendingBlocks({
+      epoch: EPOCH,
+      identities: [IDENTITY_A],
+      leaderSchedule: { [IDENTITY_A]: [0] },
+      firstSlot: FIRST_SLOT,
+      lastSlot: FIRST_SLOT,
+      safeUpperSlot: FIRST_SLOT,
+      batchSize: 1,
+    });
+
+    expect(result).toEqual({ processed: 1, skipped: 0, errors: 0 });
+    expect(rpc.getBlock).toHaveBeenCalledTimes(1);
+    expect(blocks.rows.size).toBe(1);
+    const repaired = blocks.rows.get(FIRST_SLOT);
+    expect(repaired).toBeDefined();
+    expect(repaired!.factsCapturedAt).not.toBeNull();
+    expect(repaired!.feesLamports).toBe(12_345_678n);
+    expect(repaired!.blockTime).toEqual(new Date(1_734_000_000 * 1000));
+    // The row already existed, so repairing facts must not apply a new
+    // aggregate delta. The closed-epoch reconciler rebuilds totals from facts.
+    expect(stats.incomeDeltaCalls).toHaveLength(0);
+  });
+
   it('continues after a per-block error and counts it as an error', async () => {
     const stats = new FakeStatsRepo();
     const blocks = new FakeProcessedBlocksRepo();
@@ -544,6 +578,12 @@ describe('FeeService.ingestPendingBlocks', () => {
         return undefined;
       },
       async getProcessedSlotsInRange(): Promise<Set<number>> {
+        return new Set<number>();
+      },
+      async getFactCapturedSlotsInRange(): Promise<Set<number>> {
+        return new Set<number>();
+      },
+      async updateMissingFactsBatch(): Promise<Set<number>> {
         return new Set<number>();
       },
       async hasSlot(): Promise<boolean> {

@@ -132,12 +132,12 @@ export class ProcessedBlocksRepository {
       const b = blocks[i]!;
       const base = i * 20;
       rowClauses.push(
-        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}::numeric, ` +
+        `($${base + 1}::bigint, $${base + 2}::bigint, $${base + 3}, $${base + 4}::numeric, ` +
           `$${base + 5}::numeric, $${base + 6}::numeric, $${base + 7}::numeric, ` +
-          `$${base + 8}, $${base + 9}, $${base + 10}::int, $${base + 11}::int, ` +
+          `$${base + 8}, $${base + 9}::timestamptz, $${base + 10}::int, $${base + 11}::int, ` +
           `$${base + 12}::int, $${base + 13}::int, $${base + 14}::int, ` +
           `$${base + 15}::int, $${base + 16}::numeric, $${base + 17}::numeric, ` +
-          `$${base + 18}::numeric, $${base + 19}, $${base + 20})`,
+          `$${base + 18}::numeric, $${base + 19}::timestamptz, $${base + 20}::timestamptz)`,
       );
       params.push(
         b.slot,
@@ -183,6 +183,92 @@ export class ProcessedBlocksRepository {
     const inserted = new Set<Slot>();
     for (const r of rows) inserted.add(Number(r.slot));
     return inserted;
+  }
+
+  /**
+   * Fill block-fact columns on rows that already exist but predate the
+   * block-fact capture pipeline. These rows are deliberately not treated as
+   * new inserts by callers, so aggregate deltas are not applied twice.
+   */
+  async updateMissingFactsBatch(blocks: ProcessedBlock[]): Promise<Set<Slot>> {
+    if (blocks.length === 0) return new Set();
+
+    const params: unknown[] = [];
+    const rowClauses: string[] = [];
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i]!;
+      const base = i * 20;
+      rowClauses.push(
+        `($${base + 1}::bigint, $${base + 2}::bigint, $${base + 3}, $${base + 4}::numeric, ` +
+          `$${base + 5}::numeric, $${base + 6}::numeric, $${base + 7}::numeric, ` +
+          `$${base + 8}, $${base + 9}::timestamptz, $${base + 10}::int, $${base + 11}::int, ` +
+          `$${base + 12}::int, $${base + 13}::int, $${base + 14}::int, ` +
+          `$${base + 15}::int, $${base + 16}::numeric, $${base + 17}::numeric, ` +
+          `$${base + 18}::numeric, $${base + 19}::timestamptz, $${base + 20}::timestamptz)`,
+      );
+      params.push(
+        b.slot,
+        b.epoch,
+        b.leaderIdentity,
+        b.feesLamports.toString(),
+        b.baseFeesLamports.toString(),
+        b.priorityFeesLamports.toString(),
+        b.tipsLamports.toString(),
+        b.blockStatus,
+        b.blockTime,
+        b.txCount,
+        b.successfulTxCount,
+        b.failedTxCount,
+        b.unknownMetaTxCount,
+        b.signatureCount,
+        b.tipTxCount,
+        b.maxTipLamports.toString(),
+        b.maxPriorityFeeLamports.toString(),
+        b.computeUnitsConsumed.toString(),
+        b.factsCapturedAt,
+        b.processedAt,
+      );
+    }
+
+    const { rows } = await this.pool.query<{ slot: string }>(
+      `WITH incoming (
+          slot, epoch, leader_identity,
+          fees_lamports, base_fees_lamports, priority_fees_lamports, tips_lamports,
+          block_status, block_time, tx_count, successful_tx_count, failed_tx_count,
+          unknown_meta_tx_count, signature_count, tip_tx_count, max_tip_lamports,
+          max_priority_fee_lamports, compute_units_consumed, facts_captured_at, processed_at
+        ) AS (
+          VALUES ${rowClauses.join(', ')}
+        )
+       UPDATE processed_blocks AS pb
+          SET leader_identity = incoming.leader_identity,
+              fees_lamports = incoming.fees_lamports,
+              base_fees_lamports = incoming.base_fees_lamports,
+              priority_fees_lamports = incoming.priority_fees_lamports,
+              tips_lamports = incoming.tips_lamports,
+              block_status = incoming.block_status,
+              block_time = incoming.block_time,
+              tx_count = incoming.tx_count,
+              successful_tx_count = incoming.successful_tx_count,
+              failed_tx_count = incoming.failed_tx_count,
+              unknown_meta_tx_count = incoming.unknown_meta_tx_count,
+              signature_count = incoming.signature_count,
+              tip_tx_count = incoming.tip_tx_count,
+              max_tip_lamports = incoming.max_tip_lamports,
+              max_priority_fee_lamports = incoming.max_priority_fee_lamports,
+              compute_units_consumed = incoming.compute_units_consumed,
+              facts_captured_at = incoming.facts_captured_at,
+              processed_at = incoming.processed_at
+         FROM incoming
+        WHERE pb.epoch = incoming.epoch
+          AND pb.slot = incoming.slot
+          AND pb.facts_captured_at IS NULL
+       RETURNING pb.slot`,
+      params,
+    );
+    const updated = new Set<Slot>();
+    for (const r of rows) updated.add(Number(r.slot));
+    return updated;
   }
 
   async recordFetchError(args: {
@@ -249,6 +335,31 @@ export class ProcessedBlocksRepository {
       `SELECT slot
          FROM processed_blocks
         WHERE epoch = $1 AND slot BETWEEN $2 AND $3`,
+      [epoch, slotStart, slotEnd],
+    );
+    const set = new Set<Slot>();
+    for (const r of rows) {
+      set.add(Number(r.slot));
+    }
+    return set;
+  }
+
+  /**
+   * Return processed slots whose block-fact payload has been captured.
+   * A row with `facts_captured_at IS NULL` is a legacy/incomplete row and
+   * must still be eligible for a `getBlock(full)` repair pass.
+   */
+  async getFactCapturedSlotsInRange(
+    epoch: Epoch,
+    slotStart: Slot,
+    slotEnd: Slot,
+  ): Promise<Set<Slot>> {
+    const { rows } = await this.pool.query<{ slot: string }>(
+      `SELECT slot
+         FROM processed_blocks
+        WHERE epoch = $1
+          AND slot BETWEEN $2 AND $3
+          AND facts_captured_at IS NOT NULL`,
       [epoch, slotStart, slotEnd],
     );
     const set = new Set<Slot>();

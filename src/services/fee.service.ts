@@ -303,19 +303,11 @@ function normaliseFetchError(err: unknown): { code: string | null; message: stri
  * row per observed slot.
  *
  * Idempotency model:
- *   We rely on the `processed_blocks.slot` primary key. `insertBatch` uses
- *   `ON CONFLICT (slot) DO NOTHING` and reports the number of rows actually
- *   inserted. Fee deltas are only applied for newly inserted rows, so
- *   re-running the same batch is a no-op.
- *
- *   Tradeoff: the "which slots are new" check lives inside
- *   `processedBlocksRepo.getProcessedSlotsInRange` rather than being driven
- *   off `insertBatch`'s return count. If the process crashes between the
- *   insert and the delta update, a re-run will find no new slots (because
- *   the insert is already persisted) and the delta will be lost. This is
- *   intentional — the alternative (two-phase commit across two tables) is
- *   more code than the rare-crash loss is worth. If we observe drift in
- *   practice, the fix is a transactional insert + update combined.
+ *   We rely on the `(epoch, slot)` primary key. Fresh rows go through
+ *   `insertBatch`; legacy rows that exist but have `facts_captured_at IS NULL`
+ *   go through `updateMissingFactsBatch`. Fee deltas are applied only for
+ *   slots the DB reports as newly inserted, so repairing block-fact columns
+ *   cannot double-count aggregate income.
  */
 export class FeeService {
   private readonly rpc: SolanaRpcClient;
@@ -374,15 +366,16 @@ export class FeeService {
       return { processed: 0, skipped: 0, errors: 0 };
     }
 
-    // Subtract already-processed slots.
-    const already = await this.processedBlocksRepo.getProcessedSlotsInRange(
-      epoch,
-      firstSlot,
-      safeUpperSlot,
-    );
+    // Subtract slots that already have complete block facts. Rows that exist
+    // but still have `facts_captured_at IS NULL` are legacy/incomplete rows:
+    // they must be fetched again so leader-slot summaries can become complete.
+    const [already, captured] = await Promise.all([
+      this.processedBlocksRepo.getProcessedSlotsInRange(epoch, firstSlot, safeUpperSlot),
+      this.processedBlocksRepo.getFactCapturedSlotsInRange(epoch, firstSlot, safeUpperSlot),
+    ]);
     const pending: Slot[] = [];
     for (const slot of slotToIdentity.keys()) {
-      if (!already.has(slot)) pending.push(slot);
+      if (!captured.has(slot)) pending.push(slot);
     }
     pending.sort((a, b) => a - b);
 
@@ -574,19 +567,29 @@ export class FeeService {
       }
 
       if (rows.length > 0) {
+        const insertRows = rows.filter((row) => !already.has(row.slot));
+        const repairRows = rows.filter((row) => already.has(row.slot));
+
         // `insertBatch` returns the slots it actually inserted. Apply
         // deltas only for those; a row that lost a race with a concurrent
         // writer (or with our own earlier run after a crash) must NOT
         // have its fee / tip added again.
-        const insertedSlots = await this.processedBlocksRepo.insertBatch(rows);
+        const insertedSlots = await this.processedBlocksRepo.insertBatch(insertRows);
+        const repairedSlots = await this.processedBlocksRepo.updateMissingFactsBatch(repairRows);
         await this.processedBlocksRepo.markFetchResolved(
           epoch,
           rows.map((row) => row.slot),
         );
-        if (insertedSlots.size < rows.length) {
+        if (insertedSlots.size < insertRows.length) {
           this.logger.warn(
-            { inserted: insertedSlots.size, rows: rows.length },
+            { inserted: insertedSlots.size, rows: insertRows.length },
             'fee.service: some rows already present (race or re-run) — deltas skipped for those',
+          );
+        }
+        if (repairedSlots.size < repairRows.length) {
+          this.logger.warn(
+            { repaired: repairedSlots.size, rows: repairRows.length },
+            'fee.service: some missing-fact rows were already repaired (race or re-run)',
           );
         }
         const deltaByIdentity = new Map<
