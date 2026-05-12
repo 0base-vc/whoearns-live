@@ -105,7 +105,8 @@ waiting for a payout API.
 The leader-slot API reads the same watched-leader-slot facts that power income
 totals. It does **not** scan every Solana slot and does **not** call RPC at
 request time. The worker derives tx counts, failed-tx counts, tip-bearing
-transaction counts, max priority fee, max Jito tip, and compute-unit totals
+transaction counts, max priority fee, max Jito tip, compute-unit totals,
+provider cost-unit totals, and explicit ComputeBudget request aggregates
 from the existing `getBlock(transactionDetails='full')` response.
 
 RPC fetch failures are stored separately from true skipped slots. That lets
@@ -348,6 +349,22 @@ public claims from these stored slot facts while the income page stays simple.
     "maxTipLamports": "50000000",
     "maxTipSol": "0.05",
     "computeUnitsConsumed": "1234567890",
+    "costUnits": "1300000000",
+    "computeBudgetRequestedUnits": "4200000000",
+    "computeBudgetLimitTxCount": 19400,
+    "computeBudgetPriceTxCount": 12100,
+    "maxComputeUnitLimit": "1400000",
+    "maxComputeUnitPriceMicroLamports": "50000",
+    "avgComputeUnitsPerProducedBlock": "30111411",
+    "avgComputeUnitsPerTransaction": "61728",
+    "avgCostUnitsPerProducedBlock": "31707317",
+    "avgCostUnitsPerTransaction": "65000",
+    "incomeLamportsPerMillionComputeUnit": "996300",
+    "incomeSolPerMillionComputeUnit": "0.0009963",
+    "priorityFeeLamportsPerMillionComputeUnit": "842700",
+    "priorityFeeSolPerMillionComputeUnit": "0.0008427",
+    "tipLamportsPerMillionComputeUnit": "105300",
+    "tipSolPerMillionComputeUnit": "0.0001053",
     "bestBlockSlot": 417000123,
     "bestBlockIncomeLamports": "142000000",
     "bestBlockIncomeSol": "0.142"

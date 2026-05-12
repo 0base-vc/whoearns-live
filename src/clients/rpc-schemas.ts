@@ -123,9 +123,16 @@ export const TxMetaSchema = z.object({
   err: z.unknown().optional(),
   fee: U64Schema,
   computeUnitsConsumed: U64Schema.optional(),
+  costUnits: U64Schema.optional(),
   preBalances: z.array(U64Schema),
   postBalances: z.array(U64Schema),
   loadedAddresses: LoadedAddressesSchema,
+});
+
+export const CompiledInstructionSchema = z.object({
+  programIdIndex: z.number().int().nonnegative(),
+  accounts: z.array(z.number().int().nonnegative()).optional(),
+  data: z.string(),
 });
 
 /**
@@ -138,6 +145,7 @@ export const RpcFullTransactionEntrySchema = z.object({
     signatures: z.array(z.string().min(1)),
     message: z.object({
       accountKeys: z.array(z.string().min(1)),
+      instructions: z.array(CompiledInstructionSchema).optional(),
     }),
   }),
   meta: TxMetaSchema.nullable(),

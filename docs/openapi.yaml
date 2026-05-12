@@ -733,6 +733,22 @@ components:
               maxTipLamports,
               maxTipSol,
               computeUnitsConsumed,
+              costUnits,
+              computeBudgetRequestedUnits,
+              computeBudgetLimitTxCount,
+              computeBudgetPriceTxCount,
+              maxComputeUnitLimit,
+              maxComputeUnitPriceMicroLamports,
+              avgComputeUnitsPerProducedBlock,
+              avgComputeUnitsPerTransaction,
+              avgCostUnitsPerProducedBlock,
+              avgCostUnitsPerTransaction,
+              incomeLamportsPerMillionComputeUnit,
+              incomeSolPerMillionComputeUnit,
+              priorityFeeLamportsPerMillionComputeUnit,
+              priorityFeeSolPerMillionComputeUnit,
+              tipLamportsPerMillionComputeUnit,
+              tipSolPerMillionComputeUnit,
               bestBlockSlot,
               bestBlockIncomeLamports,
               bestBlockIncomeSol,
@@ -763,6 +779,22 @@ components:
             maxTipLamports: { type: string }
             maxTipSol: { type: string }
             computeUnitsConsumed: { type: string }
+            costUnits: { type: string }
+            computeBudgetRequestedUnits: { type: string }
+            computeBudgetLimitTxCount: { type: integer, minimum: 0 }
+            computeBudgetPriceTxCount: { type: integer, minimum: 0 }
+            maxComputeUnitLimit: { type: string }
+            maxComputeUnitPriceMicroLamports: { type: string }
+            avgComputeUnitsPerProducedBlock: { type: [string, 'null'] }
+            avgComputeUnitsPerTransaction: { type: [string, 'null'] }
+            avgCostUnitsPerProducedBlock: { type: [string, 'null'] }
+            avgCostUnitsPerTransaction: { type: [string, 'null'] }
+            incomeLamportsPerMillionComputeUnit: { type: [string, 'null'] }
+            incomeSolPerMillionComputeUnit: { type: [string, 'null'] }
+            priorityFeeLamportsPerMillionComputeUnit: { type: [string, 'null'] }
+            priorityFeeSolPerMillionComputeUnit: { type: [string, 'null'] }
+            tipLamportsPerMillionComputeUnit: { type: [string, 'null'] }
+            tipSolPerMillionComputeUnit: { type: [string, 'null'] }
             bestBlockSlot: { type: [integer, 'null'], minimum: 0 }
             bestBlockIncomeLamports: { type: [string, 'null'] }
             bestBlockIncomeSol: { type: [string, 'null'] }

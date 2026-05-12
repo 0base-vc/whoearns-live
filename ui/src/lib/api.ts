@@ -6,6 +6,7 @@ import type {
   LeaderboardSort,
   LeaderboardWindow,
   ValidatorEpochRecord,
+  ValidatorEpochLeaderSlots,
   ValidatorHistory,
   ValidatorProfile,
   ValidatorSearchResponse,
@@ -121,6 +122,18 @@ export function searchValidators(
 ): Promise<ValidatorSearchResponse> {
   const params = new URLSearchParams({ q, limit: String(limit) });
   return call<ValidatorSearchResponse>(`/v1/validators/search?${params.toString()}`, fetchFn);
+}
+
+export function fetchValidatorLeaderSlots(
+  idOrVote: string,
+  epoch: number,
+  fetchFn: typeof fetch = fetch,
+): Promise<ValidatorEpochLeaderSlots> {
+  const safeId = encodeURIComponent(idOrVote);
+  return call<ValidatorEpochLeaderSlots>(
+    `/v1/validators/${safeId}/epochs/${epoch}/leader-slots`,
+    fetchFn,
+  );
 }
 
 // ────────────────────────────────────────────────────────────────────

@@ -23,6 +23,12 @@ function mkBlock(slot: number, overrides: Partial<ProcessedBlock> = {}): Process
     maxTipLamports: 0n,
     maxPriorityFeeLamports: 0n,
     computeUnitsConsumed: 0n,
+    costUnits: 0n,
+    computeBudgetRequestedUnits: 0n,
+    computeBudgetLimitTxCount: 0,
+    computeBudgetPriceTxCount: 0,
+    maxComputeUnitLimit: 0n,
+    maxComputeUnitPriceMicroLamports: 0n,
     factsCapturedAt: new Date('2024-06-01T00:00:00Z'),
     processedAt: new Date('2024-06-01T00:00:00Z'),
     ...overrides,
@@ -167,6 +173,12 @@ describe('ProcessedBlocksRepository', () => {
         maxTipLamports: 10n,
         maxPriorityFeeLamports: 70n,
         computeUnitsConsumed: 1000n,
+        costUnits: 1200n,
+        computeBudgetRequestedUnits: 300_000n,
+        computeBudgetLimitTxCount: 2,
+        computeBudgetPriceTxCount: 1,
+        maxComputeUnitLimit: 200_000n,
+        maxComputeUnitPriceMicroLamports: 5_000n,
       }),
       mkBlock(101, {
         leaderIdentity: 'A',
@@ -180,6 +192,12 @@ describe('ProcessedBlocksRepository', () => {
         tipTxCount: 0,
         maxPriorityFeeLamports: 20n,
         computeUnitsConsumed: 500n,
+        costUnits: 600n,
+        computeBudgetRequestedUnits: 100_000n,
+        computeBudgetLimitTxCount: 1,
+        computeBudgetPriceTxCount: 1,
+        maxComputeUnitLimit: 100_000n,
+        maxComputeUnitPriceMicroLamports: 3_000n,
       }),
       mkBlock(102, {
         leaderIdentity: 'A',
@@ -220,6 +238,20 @@ describe('ProcessedBlocksRepository', () => {
     expect(slotStats.summary.txCount).toBe(3);
     expect(slotStats.summary.failedTxRate).toBe(0.333333);
     expect(slotStats.summary.tipBearingBlockRatio).toBe(0.5);
+    expect(slotStats.summary.computeUnitsConsumed).toBe(1500n);
+    expect(slotStats.summary.costUnits).toBe(1800n);
+    expect(slotStats.summary.computeBudgetRequestedUnits).toBe(400_000n);
+    expect(slotStats.summary.computeBudgetLimitTxCount).toBe(3);
+    expect(slotStats.summary.computeBudgetPriceTxCount).toBe(2);
+    expect(slotStats.summary.maxComputeUnitLimit).toBe(200_000n);
+    expect(slotStats.summary.maxComputeUnitPriceMicroLamports).toBe(5_000n);
+    expect(slotStats.summary.avgComputeUnitsPerProducedBlock).toBe(750n);
+    expect(slotStats.summary.avgComputeUnitsPerTransaction).toBe(500n);
+    expect(slotStats.summary.avgCostUnitsPerProducedBlock).toBe(900n);
+    expect(slotStats.summary.avgCostUnitsPerTransaction).toBe(600n);
+    expect(slotStats.summary.incomeLamportsPerMillionComputeUnit).toBe(106_666n);
+    expect(slotStats.summary.priorityFeeLamportsPerMillionComputeUnit).toBe(66_666n);
+    expect(slotStats.summary.tipLamportsPerMillionComputeUnit).toBe(6_666n);
     expect(slotStats.summary.bestBlockSlot).toBe(100);
     expect(slotStats.summary.bestBlockIncomeLamports).toBe(110n);
 

@@ -70,6 +70,12 @@ async function putFact(
     maxTipLamports: 0n,
     maxPriorityFeeLamports: 0n,
     computeUnitsConsumed: 0n,
+    costUnits: 0n,
+    computeBudgetRequestedUnits: 0n,
+    computeBudgetLimitTxCount: 0,
+    computeBudgetPriceTxCount: 0,
+    maxComputeUnitLimit: 0n,
+    maxComputeUnitPriceMicroLamports: 0n,
     factsCapturedAt: new Date(),
     processedAt: new Date(),
   };

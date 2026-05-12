@@ -1,3 +1,4 @@
+import bs58 from 'bs58';
 import type { BlockFetcher } from '../clients/block-fetcher.js';
 import {
   buildFullAccountKeyList,
@@ -15,6 +16,11 @@ import { toLamports } from '../core/lamports.js';
 import type { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
 import type { StatsRepository } from '../storage/repositories/stats.repo.js';
 import type { Epoch, IdentityPubkey, ProcessedBlock, Slot, VotePubkey } from '../types/domain.js';
+
+const COMPUTE_BUDGET_PROGRAM_ID = 'ComputeBudget111111111111111111111111111111';
+const COMPUTE_BUDGET_REQUEST_UNITS_DEPRECATED = 0;
+const COMPUTE_BUDGET_SET_UNIT_LIMIT = 2;
+const COMPUTE_BUDGET_SET_UNIT_PRICE = 3;
 
 export interface FeeServiceDeps {
   rpc: SolanaRpcClient;
@@ -100,11 +106,69 @@ export interface PerBlockSlotFacts {
   maxTipLamports: bigint;
   maxPriorityFeeLamports: bigint;
   computeUnitsConsumed: bigint;
+  costUnits: bigint;
+  computeBudgetRequestedUnits: bigint;
+  computeBudgetLimitTxCount: number;
+  computeBudgetPriceTxCount: number;
+  maxComputeUnitLimit: bigint;
+  maxComputeUnitPriceMicroLamports: bigint;
 }
 
 export interface PerBlockAnalysis {
   income: PerBlockIncome;
   slotFacts: PerBlockSlotFacts;
+}
+
+interface ComputeBudgetRequestFacts {
+  requestedUnits: bigint | null;
+  unitPriceMicroLamports: bigint | null;
+}
+
+function readU32Le(bytes: Uint8Array, offset: number): bigint | null {
+  if (bytes.length < offset + 4) return null;
+  return (
+    BigInt(bytes[offset] ?? 0) |
+    (BigInt(bytes[offset + 1] ?? 0) << 8n) |
+    (BigInt(bytes[offset + 2] ?? 0) << 16n) |
+    (BigInt(bytes[offset + 3] ?? 0) << 24n)
+  );
+}
+
+function readU64Le(bytes: Uint8Array, offset: number): bigint | null {
+  if (bytes.length < offset + 8) return null;
+  let value = 0n;
+  for (let i = 0; i < 8; i += 1) {
+    value |= BigInt(bytes[offset + i] ?? 0) << BigInt(8 * i);
+  }
+  return value;
+}
+
+function extractComputeBudgetRequestFacts(tx: RpcFullTransactionEntry): ComputeBudgetRequestFacts {
+  const staticKeys = tx.transaction.message.accountKeys;
+  const instructions = tx.transaction.message.instructions ?? [];
+  let requestedUnits: bigint | null = null;
+  let unitPriceMicroLamports: bigint | null = null;
+
+  for (const ix of instructions) {
+    if (staticKeys[ix.programIdIndex] !== COMPUTE_BUDGET_PROGRAM_ID) continue;
+
+    let data: Uint8Array;
+    try {
+      data = bs58.decode(ix.data);
+    } catch {
+      continue;
+    }
+    const tag = data[0];
+    if (tag === COMPUTE_BUDGET_REQUEST_UNITS_DEPRECATED || tag === COMPUTE_BUDGET_SET_UNIT_LIMIT) {
+      requestedUnits = readU32Le(data, 1) ?? requestedUnits;
+      continue;
+    }
+    if (tag === COMPUTE_BUDGET_SET_UNIT_PRICE) {
+      unitPriceMicroLamports = readU64Le(data, 1) ?? unitPriceMicroLamports;
+    }
+  }
+
+  return { requestedUnits, unitPriceMicroLamports };
 }
 
 /**
@@ -146,6 +210,12 @@ export function analyzeBlockTransactions(
     maxTipLamports: 0n,
     maxPriorityFeeLamports: 0n,
     computeUnitsConsumed: 0n,
+    costUnits: 0n,
+    computeBudgetRequestedUnits: 0n,
+    computeBudgetLimitTxCount: 0,
+    computeBudgetPriceTxCount: 0,
+    maxComputeUnitLimit: 0n,
+    maxComputeUnitPriceMicroLamports: 0n,
   };
   if (!transactions || transactions.length === 0) return { income, slotFacts };
 
@@ -175,6 +245,24 @@ export function analyzeBlockTransactions(
     const computeUnits = toBigIntLenient(tx.meta.computeUnitsConsumed);
     if (computeUnits !== null) {
       slotFacts.computeUnitsConsumed += computeUnits;
+    }
+    const costUnits = toBigIntLenient(tx.meta.costUnits);
+    if (costUnits !== null) {
+      slotFacts.costUnits += costUnits;
+    }
+    const computeBudget = extractComputeBudgetRequestFacts(tx);
+    if (computeBudget.requestedUnits !== null) {
+      slotFacts.computeBudgetRequestedUnits += computeBudget.requestedUnits;
+      slotFacts.computeBudgetLimitTxCount += 1;
+      if (computeBudget.requestedUnits > slotFacts.maxComputeUnitLimit) {
+        slotFacts.maxComputeUnitLimit = computeBudget.requestedUnits;
+      }
+    }
+    if (computeBudget.unitPriceMicroLamports !== null) {
+      slotFacts.computeBudgetPriceTxCount += 1;
+      if (computeBudget.unitPriceMicroLamports > slotFacts.maxComputeUnitPriceMicroLamports) {
+        slotFacts.maxComputeUnitPriceMicroLamports = computeBudget.unitPriceMicroLamports;
+      }
     }
 
     // Tip extraction — skip failed bundles (they shouldn't have
@@ -521,6 +609,12 @@ export class FeeService {
             maxTipLamports: 0n,
             maxPriorityFeeLamports: 0n,
             computeUnitsConsumed: 0n,
+            costUnits: 0n,
+            computeBudgetRequestedUnits: 0n,
+            computeBudgetLimitTxCount: 0,
+            computeBudgetPriceTxCount: 0,
+            maxComputeUnitLimit: 0n,
+            maxComputeUnitPriceMicroLamports: 0n,
             factsCapturedAt: now,
             processedAt: now,
           });
@@ -553,6 +647,12 @@ export class FeeService {
           maxTipLamports: r.slotFacts.maxTipLamports,
           maxPriorityFeeLamports: r.slotFacts.maxPriorityFeeLamports,
           computeUnitsConsumed: r.slotFacts.computeUnitsConsumed,
+          costUnits: r.slotFacts.costUnits,
+          computeBudgetRequestedUnits: r.slotFacts.computeBudgetRequestedUnits,
+          computeBudgetLimitTxCount: r.slotFacts.computeBudgetLimitTxCount,
+          computeBudgetPriceTxCount: r.slotFacts.computeBudgetPriceTxCount,
+          maxComputeUnitLimit: r.slotFacts.maxComputeUnitLimit,
+          maxComputeUnitPriceMicroLamports: r.slotFacts.maxComputeUnitPriceMicroLamports,
           factsCapturedAt: now,
           processedAt: now,
         });
@@ -717,6 +817,12 @@ export class FeeService {
       maxTipLamports: slotFacts.maxTipLamports,
       maxPriorityFeeLamports: slotFacts.maxPriorityFeeLamports,
       computeUnitsConsumed: slotFacts.computeUnitsConsumed,
+      costUnits: slotFacts.costUnits,
+      computeBudgetRequestedUnits: slotFacts.computeBudgetRequestedUnits,
+      computeBudgetLimitTxCount: slotFacts.computeBudgetLimitTxCount,
+      computeBudgetPriceTxCount: slotFacts.computeBudgetPriceTxCount,
+      maxComputeUnitLimit: slotFacts.maxComputeUnitLimit,
+      maxComputeUnitPriceMicroLamports: slotFacts.maxComputeUnitPriceMicroLamports,
       factsCapturedAt: processedAt,
       processedAt,
     };

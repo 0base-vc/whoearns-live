@@ -278,6 +278,72 @@ export interface ValidatorSearchResponse {
   items: ValidatorSearchItem[];
 }
 
+export interface ValidatorEpochLeaderSlots {
+  epoch: number;
+  vote: string;
+  identity: string;
+  hasData: boolean;
+  isFinal: boolean;
+  quality: {
+    slotsAssigned: number;
+    slotsProduced: number;
+    slotsSkipped: number;
+    processedSlots: number;
+    factCapturedSlots: number;
+    missingFactSlots: number;
+    pendingSlots: number;
+    fetchErrorSlots: number;
+    complete: boolean;
+  };
+  summary: {
+    producedBlocks: number;
+    totalIncomeLamports: string;
+    totalIncomeSol: string;
+    totalFeesLamports: string;
+    totalFeesSol: string;
+    totalTipsLamports: string;
+    totalTipsSol: string;
+    txCount: number;
+    successfulTxCount: number;
+    failedTxCount: number;
+    unknownMetaTxCount: number;
+    failedTxRate: number | null;
+    signatureCount: number;
+    tipTxCount: number;
+    tipBearingBlockCount: number;
+    tipBearingBlockRatio: number | null;
+    avgPriorityFeePerProducedBlockLamports: string | null;
+    avgPriorityFeePerProducedBlockSol: string | null;
+    avgTipPerProducedBlockLamports: string | null;
+    avgTipPerProducedBlockSol: string | null;
+    maxPriorityFeeLamports: string;
+    maxPriorityFeeSol: string;
+    maxTipLamports: string;
+    maxTipSol: string;
+    computeUnitsConsumed: string;
+    costUnits: string;
+    computeBudgetRequestedUnits: string;
+    computeBudgetLimitTxCount: number;
+    computeBudgetPriceTxCount: number;
+    maxComputeUnitLimit: string;
+    maxComputeUnitPriceMicroLamports: string;
+    avgComputeUnitsPerProducedBlock: string | null;
+    avgComputeUnitsPerTransaction: string | null;
+    avgCostUnitsPerProducedBlock: string | null;
+    avgCostUnitsPerTransaction: string | null;
+    incomeLamportsPerMillionComputeUnit: string | null;
+    incomeSolPerMillionComputeUnit: string | null;
+    priorityFeeLamportsPerMillionComputeUnit: string | null;
+    priorityFeeSolPerMillionComputeUnit: string | null;
+    tipLamportsPerMillionComputeUnit: string | null;
+    tipSolPerMillionComputeUnit: string | null;
+    bestBlockSlot: number | null;
+    bestBlockIncomeLamports: string | null;
+    bestBlockIncomeSol: string | null;
+  };
+  updatedAt: string | null;
+}
+
 export interface ApiError {
   error: {
     code: string;

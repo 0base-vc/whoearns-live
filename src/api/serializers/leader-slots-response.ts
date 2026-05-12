@@ -34,6 +34,22 @@ export interface ValidatorEpochSlotStatsResponse {
     maxTipLamports: string;
     maxTipSol: string;
     computeUnitsConsumed: string;
+    costUnits: string;
+    computeBudgetRequestedUnits: string;
+    computeBudgetLimitTxCount: number;
+    computeBudgetPriceTxCount: number;
+    maxComputeUnitLimit: string;
+    maxComputeUnitPriceMicroLamports: string;
+    avgComputeUnitsPerProducedBlock: string | null;
+    avgComputeUnitsPerTransaction: string | null;
+    avgCostUnitsPerProducedBlock: string | null;
+    avgCostUnitsPerTransaction: string | null;
+    incomeLamportsPerMillionComputeUnit: string | null;
+    incomeSolPerMillionComputeUnit: string | null;
+    priorityFeeLamportsPerMillionComputeUnit: string | null;
+    priorityFeeSolPerMillionComputeUnit: string | null;
+    tipLamportsPerMillionComputeUnit: string | null;
+    tipSolPerMillionComputeUnit: string | null;
     bestBlockSlot: number | null;
     bestBlockIncomeLamports: string | null;
     bestBlockIncomeSol: string | null;
@@ -64,6 +80,13 @@ export function serializeValidatorEpochSlotStats(
   const avgTip = lamportPairOrNull(slotStats.summary.avgTipPerProducedBlockLamports);
   const maxPriority = lamportPair(slotStats.summary.maxPriorityFeeLamports);
   const maxTip = lamportPair(slotStats.summary.maxTipLamports);
+  const incomePerMillionCu = lamportPairOrNull(
+    slotStats.summary.incomeLamportsPerMillionComputeUnit,
+  );
+  const priorityPerMillionCu = lamportPairOrNull(
+    slotStats.summary.priorityFeeLamportsPerMillionComputeUnit,
+  );
+  const tipPerMillionCu = lamportPairOrNull(slotStats.summary.tipLamportsPerMillionComputeUnit);
   const bestBlock = lamportPairOrNull(slotStats.summary.bestBlockIncomeLamports);
 
   return {
@@ -99,6 +122,26 @@ export function serializeValidatorEpochSlotStats(
       maxTipLamports: maxTip.lamports,
       maxTipSol: maxTip.sol,
       computeUnitsConsumed: slotStats.summary.computeUnitsConsumed.toString(),
+      costUnits: slotStats.summary.costUnits.toString(),
+      computeBudgetRequestedUnits: slotStats.summary.computeBudgetRequestedUnits.toString(),
+      computeBudgetLimitTxCount: slotStats.summary.computeBudgetLimitTxCount,
+      computeBudgetPriceTxCount: slotStats.summary.computeBudgetPriceTxCount,
+      maxComputeUnitLimit: slotStats.summary.maxComputeUnitLimit.toString(),
+      maxComputeUnitPriceMicroLamports:
+        slotStats.summary.maxComputeUnitPriceMicroLamports.toString(),
+      avgComputeUnitsPerProducedBlock:
+        slotStats.summary.avgComputeUnitsPerProducedBlock?.toString() ?? null,
+      avgComputeUnitsPerTransaction:
+        slotStats.summary.avgComputeUnitsPerTransaction?.toString() ?? null,
+      avgCostUnitsPerProducedBlock:
+        slotStats.summary.avgCostUnitsPerProducedBlock?.toString() ?? null,
+      avgCostUnitsPerTransaction: slotStats.summary.avgCostUnitsPerTransaction?.toString() ?? null,
+      incomeLamportsPerMillionComputeUnit: incomePerMillionCu.lamports,
+      incomeSolPerMillionComputeUnit: incomePerMillionCu.sol,
+      priorityFeeLamportsPerMillionComputeUnit: priorityPerMillionCu.lamports,
+      priorityFeeSolPerMillionComputeUnit: priorityPerMillionCu.sol,
+      tipLamportsPerMillionComputeUnit: tipPerMillionCu.lamports,
+      tipSolPerMillionComputeUnit: tipPerMillionCu.sol,
       bestBlockSlot: slotStats.summary.bestBlockSlot,
       bestBlockIncomeLamports: bestBlock.lamports,
       bestBlockIncomeSol: bestBlock.sol,

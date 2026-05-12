@@ -360,6 +360,11 @@ export class GrpcBlockSubscriber {
       // `transactionDetails: 'full'` response shape.
       const accountKeys = tx.transaction.message.accountKeys.map((bytes) => bs58.encode(bytes));
       const signatures = tx.transaction.signatures.map((s) => bs58.encode(s));
+      const instructions = (tx.transaction.message.instructions ?? []).map((ix) => ({
+        programIdIndex: ix.programIdIndex,
+        accounts: Array.from(ix.accounts ?? []),
+        data: bs58.encode(ix.data),
+      }));
       // ALT-loaded accounts from v0 transactions. Yellowstone
       // exposes these as `loadedWritableAddresses` +
       // `loadedReadonlyAddresses`, each `Uint8Array[]`. Shape them
@@ -379,6 +384,7 @@ export class GrpcBlockSubscriber {
           signatures,
           message: {
             accountKeys,
+            ...(instructions.length > 0 ? { instructions } : {}),
           },
         },
         meta: {
@@ -387,6 +393,7 @@ export class GrpcBlockSubscriber {
           ...(tx.meta.computeUnitsConsumed !== undefined
             ? { computeUnitsConsumed: tx.meta.computeUnitsConsumed }
             : {}),
+          ...(tx.meta.costUnits !== undefined ? { costUnits: tx.meta.costUnits } : {}),
           preBalances: tx.meta.preBalances,
           postBalances: tx.meta.postBalances,
           ...(hasLoaded

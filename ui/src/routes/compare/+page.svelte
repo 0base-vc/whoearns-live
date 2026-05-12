@@ -24,10 +24,16 @@
   import ValidatorSearchCombobox from '$lib/components/ValidatorSearchCombobox.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import { fetchValidatorLeaderSlots } from '$lib/api';
   import { formatSol, shortenPubkey } from '$lib/format';
   import { SITE_NAME, SITE_URL } from '$lib/site';
   import type { CompareData, CompareSlot } from './+page';
-  import type { LeaderboardWindow, ValidatorEpochRecord, ValidatorHistory } from '$lib/types';
+  import type {
+    LeaderboardWindow,
+    ValidatorEpochLeaderSlots,
+    ValidatorEpochRecord,
+    ValidatorHistory,
+  } from '$lib/types';
 
   let { data }: { data: CompareData } = $props();
 
@@ -45,6 +51,8 @@
   let formError = $state<string | null>(null);
   // svelte-ignore state_referenced_locally
   let windowMode = $state<LeaderboardWindow>(data.window);
+  let leaderSlotStats = $state<Record<string, ValidatorEpochLeaderSlots | null>>({});
+  let leaderSlotStatsLoading = $state(false);
 
   const PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
   const WINDOW_OPTIONS: Array<{ key: LeaderboardWindow; label: string }> = [
@@ -54,8 +62,55 @@
     { key: 'final_epoch', label: 'Final epoch' },
   ];
 
+  function leaderSlotStatsKey(vote: string, epoch: number): string {
+    return `${vote}:${epoch}`;
+  }
+
+  function rowsNeededForLeaderSlotStats(history: ValidatorHistory | null): ValidatorEpochRecord[] {
+    if (history === null) return [];
+    const current = history.items.find((r) => r.isCurrentEpoch);
+    const closed = history.items.filter((r) => r.isFinal).slice(0, 2);
+    return [...(current ? [current] : []), ...closed];
+  }
+
   $effect(() => {
     windowMode = data.window;
+  });
+
+  $effect(() => {
+    const requests = new Map<string, { vote: string; epoch: number }>();
+    for (const history of [data.a?.history ?? null, data.b?.history ?? null]) {
+      if (history === null) continue;
+      for (const row of rowsNeededForLeaderSlotStats(history)) {
+        const key = leaderSlotStatsKey(history.vote, row.epoch);
+        if (Object.prototype.hasOwnProperty.call(leaderSlotStats, key)) continue;
+        requests.set(key, { vote: history.vote, epoch: row.epoch });
+      }
+    }
+    if (requests.size === 0) return;
+
+    let cancelled = false;
+    leaderSlotStatsLoading = true;
+    Promise.all(
+      Array.from(requests, async ([key, request]) => {
+        try {
+          const stats = await fetchValidatorLeaderSlots(request.vote, request.epoch);
+          return [key, stats] as const;
+        } catch {
+          return [key, null] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return;
+      for (const [key, stats] of entries) {
+        leaderSlotStats[key] = stats;
+      }
+      leaderSlotStatsLoading = false;
+    });
+
+    return () => {
+      cancelled = true;
+    };
   });
 
   function navigateCompare(a: string, b: string, nextWindow: LeaderboardWindow): void {
@@ -141,6 +196,16 @@
     blockFeesSol: number | null;
     priorityFeesSol: number | null;
     tipsSol: number | null;
+    txCount: number | null;
+    computeUnits: number | null;
+    costUnits: number | null;
+    incomePerMillionCuSol: number | null;
+    priorityFeesPerMillionCuSol: number | null;
+    tipsPerMillionCuSol: number | null;
+    avgCuPerProducedBlock: number | null;
+    avgCuPerTx: number | null;
+    avgCostUnitsPerProducedBlock: number | null;
+    avgCostUnitsPerTx: number | null;
     skipRatePct: number | null;
   };
 
@@ -166,6 +231,12 @@
     return acc.seen ? acc.sum : null;
   }
 
+  function parseNumericString(value: string | null | undefined): number | null {
+    if (value === null || value === undefined) return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
   function pickedRows(history: ValidatorHistory | null): ValidatorEpochRecord[] {
     if (history === null) return [];
     const current = history.items.find((r) => r.isCurrentEpoch);
@@ -188,6 +259,12 @@
     let slots = 0;
     let producedSlots = 0;
     let skipped = 0;
+    let txCount = 0;
+    let sawTxCount = false;
+    let computeUnits = 0;
+    let sawComputeUnits = false;
+    let costUnits = 0;
+    let sawCostUnits = false;
     const total: SolAccumulator = { sum: 0, seen: false };
     const blockFees: SolAccumulator = { sum: 0, seen: false };
     const priorityFees: SolAccumulator = { sum: 0, seen: false };
@@ -200,15 +277,65 @@
       addSol(blockFees, row.blockFeesTotalSol);
       addSol(priorityFees, row.blockPriorityFeesTotalSol);
       addSol(tips, row.blockTipsTotalSol);
+      if (history !== null) {
+        const slotStats = leaderSlotStats[leaderSlotStatsKey(history.vote, row.epoch)];
+        if (slotStats !== undefined && slotStats !== null) {
+          txCount += slotStats.summary.txCount;
+          sawTxCount = true;
+          const cu = parseNumericString(slotStats.summary.computeUnitsConsumed);
+          if (cu !== null) {
+            computeUnits += cu;
+            sawComputeUnits = true;
+          }
+          const cost = parseNumericString(slotStats.summary.costUnits);
+          if (cost !== null) {
+            costUnits += cost;
+            sawCostUnits = true;
+          }
+        }
+      }
     }
+    const totalSol = finishSol(total);
+    const priorityFeesSol = finishSol(priorityFees);
+    const tipsSol = finishSol(tips);
+    const finalComputeUnits = sawComputeUnits ? computeUnits : null;
+    const finalCostUnits = sawCostUnits ? costUnits : null;
+    const finalTxCount = sawTxCount ? txCount : null;
     return {
       label: rows.map((row) => row.epoch).join(' + '),
       slots,
       producedSlots,
-      totalSol: finishSol(total),
+      totalSol,
       blockFeesSol: finishSol(blockFees),
-      priorityFeesSol: finishSol(priorityFees),
-      tipsSol: finishSol(tips),
+      priorityFeesSol,
+      tipsSol,
+      txCount: finalTxCount,
+      computeUnits: finalComputeUnits,
+      costUnits: finalCostUnits,
+      incomePerMillionCuSol:
+        finalComputeUnits !== null && finalComputeUnits > 0 && totalSol !== null
+          ? (totalSol * 1_000_000) / finalComputeUnits
+          : null,
+      priorityFeesPerMillionCuSol:
+        finalComputeUnits !== null && finalComputeUnits > 0 && priorityFeesSol !== null
+          ? (priorityFeesSol * 1_000_000) / finalComputeUnits
+          : null,
+      tipsPerMillionCuSol:
+        finalComputeUnits !== null && finalComputeUnits > 0 && tipsSol !== null
+          ? (tipsSol * 1_000_000) / finalComputeUnits
+          : null,
+      avgCuPerProducedBlock:
+        finalComputeUnits !== null && producedSlots > 0 ? finalComputeUnits / producedSlots : null,
+      avgCuPerTx:
+        finalComputeUnits !== null && finalTxCount !== null && finalTxCount > 0
+          ? finalComputeUnits / finalTxCount
+          : null,
+      avgCostUnitsPerProducedBlock:
+        finalCostUnits !== null && producedSlots > 0 ? finalCostUnits / producedSlots : null,
+      avgCostUnitsPerTx:
+        finalCostUnits !== null && finalTxCount !== null && finalTxCount > 0
+          ? finalCostUnits / finalTxCount
+          : null,
       skipRatePct: slots > 0 ? (skipped / slots) * 100 : null,
     };
   }
@@ -281,6 +408,26 @@
     return row?.tipsSol ?? null;
   }
 
+  function statIncomePerMillionCu(row: WindowStats | null): number | null {
+    return row?.incomePerMillionCuSol ?? null;
+  }
+
+  function statPriorityFeesPerMillionCu(row: WindowStats | null): number | null {
+    return row?.priorityFeesPerMillionCuSol ?? null;
+  }
+
+  function statAvgCuPerProducedBlock(row: WindowStats | null): number | null {
+    return row?.avgCuPerProducedBlock ?? null;
+  }
+
+  function statAvgCuPerTx(row: WindowStats | null): number | null {
+    return row?.avgCuPerTx ?? null;
+  }
+
+  function statAvgCostUnitsPerTx(row: WindowStats | null): number | null {
+    return row?.avgCostUnitsPerTx ?? null;
+  }
+
   function statTipSharePct(row: WindowStats | null): number | null {
     if (row === null || row.totalSol === null || row.totalSol <= 0 || row.tipsSol === null)
       return null;
@@ -344,6 +491,51 @@
       higherIsBetter: true,
       extract: statTips,
       fmt: (v) => `◎${formatSol(v.toString())}`,
+    },
+    {
+      key: 'income_per_million_cu',
+      label: 'Income / 1M CU (◎)',
+      tooltip:
+        'Total income divided by consumed compute units. Useful for comparing revenue density of executed workload.',
+      higherIsBetter: true,
+      extract: statIncomePerMillionCu,
+      fmt: (v) => `◎${v.toFixed(9)}`,
+    },
+    {
+      key: 'priority_per_million_cu',
+      label: 'Priority fees / 1M CU (◎)',
+      tooltip:
+        'Priority fees divided by consumed compute units. Highlights high-value transaction flow per unit of execution.',
+      higherIsBetter: true,
+      extract: statPriorityFeesPerMillionCu,
+      fmt: (v) => `◎${v.toFixed(9)}`,
+    },
+    {
+      key: 'cu_per_block',
+      label: 'CU / produced block',
+      tooltip:
+        'Average consumed compute units per produced block. Context row: workload intensity, not automatically better or worse.',
+      higherIsBetter: null,
+      extract: statAvgCuPerProducedBlock,
+      fmt: (v) => Math.round(v).toLocaleString(),
+    },
+    {
+      key: 'cu_per_tx',
+      label: 'CU / transaction',
+      tooltip:
+        'Average consumed compute units per transaction in produced blocks. Context row for transaction mix and execution intensity.',
+      higherIsBetter: null,
+      extract: statAvgCuPerTx,
+      fmt: (v) => Math.round(v).toLocaleString(),
+    },
+    {
+      key: 'cost_units_per_tx',
+      label: 'Cost units / transaction',
+      tooltip:
+        'Average provider-reported cost units per transaction when available. Context row for runtime cost shape.',
+      higherIsBetter: null,
+      extract: statAvgCostUnitsPerTx,
+      fmt: (v) => Math.round(v).toLocaleString(),
     },
     {
       key: 'jito_share',
@@ -630,6 +822,9 @@
     <p class="mt-3 text-xs text-[color:var(--color-text-subtle)]">
       Highlighted cells mark directional wins. Context rows are not highlighted. Total income is
       biased by stake size — for a stake-neutral read, use Income / slot or Skip rate.
+      {#if leaderSlotStatsLoading}
+        CU rows are loading.
+      {/if}
     </p>
   </section>
 {:else}

@@ -334,8 +334,9 @@ Same as one history item but for the running epoch only. Cheaper.
 Leader-slot facts for one validator epoch. Returns data
 quality (processed/pending/fetch-error slots), tx counts, failed tx
 rate, tip-bearing block ratio, max priority fee, max Jito tip, compute
-unit total, and best block. Use closed epochs before deriving public
-claims from these facts.
+unit totals, provider cost-unit totals, ComputeBudget request aggregates,
+per-block/per-transaction CU averages, income per 1M CU, and best block.
+Use closed epochs before deriving public claims from these facts.
 
 ### POST /v1/validators/current-epoch/batch
 Body: { "votes": ["Vote111...", ...] }. Bulk lookup; returns

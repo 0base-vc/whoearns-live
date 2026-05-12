@@ -272,12 +272,12 @@ POST-only Streamable HTTP (no auth, stateless). AI agents — Claude Desktop,
 Claude Code, custom MCP clients — can call four tools without
 scraping the UI or parsing OpenAPI:
 
-| Tool                         | Description                                                         |
-| ---------------------------- | ------------------------------------------------------------------- |
-| `get_current_epoch`          | Returns the running epoch number, slot range, and elapsed slots.    |
-| `get_leaderboard`            | Top-N validators for live-trend, current, stable, or final windows. |
-| `get_validator`              | Per-epoch history for one validator (vote OR identity pubkey).      |
-| `get_validator_leader_slots` | Stored leader-slot facts for one validator epoch; no live RPC hit.  |
+| Tool                         | Description                                                                                 |
+| ---------------------------- | ------------------------------------------------------------------------------------------- |
+| `get_current_epoch`          | Returns the running epoch number, slot range, and elapsed slots.                            |
+| `get_leaderboard`            | Top-N validators for live-trend, current, stable, or final windows.                         |
+| `get_validator`              | Per-epoch history for one validator (vote OR identity pubkey).                              |
+| `get_validator_leader_slots` | Stored leader-slot facts for one validator epoch, including CU efficiency; no live RPC hit. |
 
 The MCP transport is public and unauthenticated, so it uses the same
 per-IP rate limiter as the HTTP API. Tool input schemas additionally

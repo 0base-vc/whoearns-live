@@ -217,6 +217,18 @@ export interface ProcessedBlock {
   maxPriorityFeeLamports: bigint;
   /** Sum of `meta.computeUnitsConsumed` when providers expose it. */
   computeUnitsConsumed: bigint;
+  /** Sum of provider-supplied `meta.costUnits` when available. */
+  costUnits: bigint;
+  /** Sum of explicit ComputeBudget SetComputeUnitLimit requests. */
+  computeBudgetRequestedUnits: bigint;
+  /** Transactions that set an explicit ComputeBudget unit limit. */
+  computeBudgetLimitTxCount: number;
+  /** Transactions that set an explicit ComputeBudget unit price. */
+  computeBudgetPriceTxCount: number;
+  /** Largest explicit ComputeBudget unit limit observed in this block. */
+  maxComputeUnitLimit: bigint;
+  /** Largest explicit ComputeBudget unit price, in micro-lamports per CU. */
+  maxComputeUnitPriceMicroLamports: bigint;
   /** Null for rows created before block-level slot facts were captured. */
   factsCapturedAt: Date | null;
   processedAt: Date;
@@ -257,6 +269,19 @@ export interface ValidatorEpochSlotStats {
     maxPriorityFeeLamports: bigint;
     maxTipLamports: bigint;
     computeUnitsConsumed: bigint;
+    costUnits: bigint;
+    computeBudgetRequestedUnits: bigint;
+    computeBudgetLimitTxCount: number;
+    computeBudgetPriceTxCount: number;
+    maxComputeUnitLimit: bigint;
+    maxComputeUnitPriceMicroLamports: bigint;
+    avgComputeUnitsPerProducedBlock: bigint | null;
+    avgComputeUnitsPerTransaction: bigint | null;
+    avgCostUnitsPerProducedBlock: bigint | null;
+    avgCostUnitsPerTransaction: bigint | null;
+    incomeLamportsPerMillionComputeUnit: bigint | null;
+    priorityFeeLamportsPerMillionComputeUnit: bigint | null;
+    tipLamportsPerMillionComputeUnit: bigint | null;
     bestBlockSlot: Slot | null;
     bestBlockIncomeLamports: bigint | null;
   };

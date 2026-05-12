@@ -114,7 +114,7 @@
       path: '/v1/validators/{idOrVote}/epochs/{epoch}/leader-slots',
       summary: 'Leader-slot facts for one validator epoch',
       description:
-        'Aggregates stored facts from watched validator leader slots only. The API call does not trigger Solana RPC; it returns local slot quality fields such as `factCapturedSlots`, `missingFactSlots`, `pendingSlots`, `fetchErrorSlots`, and `complete`, plus block fee, tip, tx, and compute summaries.',
+        'Aggregates stored facts from watched validator leader slots only. The API call does not trigger Solana RPC; it returns slot quality fields plus block fee, tip, tx, CU, cost-unit, ComputeBudget, and income-per-1M-CU summaries.',
       example: `${SITE_URL}/v1/validators/9f7dqiYNBZbgPesAnLeWnKCtxYHSfMg5x1EMZCJwVwG7/epochs/966/leader-slots`,
     },
     {

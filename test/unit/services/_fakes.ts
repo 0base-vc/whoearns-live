@@ -1020,6 +1020,10 @@ export class FakeProcessedBlocksRepo {
     ).length;
     const totalFees = produced.reduce((acc, row) => acc + row.feesLamports, 0n);
     const totalTips = produced.reduce((acc, row) => acc + row.tipsLamports, 0n);
+    const totalIncome = totalFees + totalTips;
+    const totalPriorityFees = produced.reduce((acc, row) => acc + row.priorityFeesLamports, 0n);
+    const totalComputeUnits = produced.reduce((acc, row) => acc + row.computeUnitsConsumed, 0n);
+    const totalCostUnits = produced.reduce((acc, row) => acc + row.costUnits, 0n);
     const best = produced
       .map((row) => ({ slot: row.slot, income: row.feesLamports + row.tipsLamports }))
       .sort((a, b) => (b.income > a.income ? 1 : b.income < a.income ? -1 : a.slot - b.slot))[0];
@@ -1050,7 +1054,7 @@ export class FakeProcessedBlocksRepo {
       },
       summary: {
         producedBlocks: produced.length,
-        totalIncomeLamports: totalFees + totalTips,
+        totalIncomeLamports: totalIncome,
         totalFeesLamports: totalFees,
         totalTipsLamports: totalTips,
         txCount,
@@ -1081,7 +1085,41 @@ export class FakeProcessedBlocksRepo {
           (max, row) => (row.maxTipLamports > max ? row.maxTipLamports : max),
           0n,
         ),
-        computeUnitsConsumed: produced.reduce((acc, row) => acc + row.computeUnitsConsumed, 0n),
+        computeUnitsConsumed: totalComputeUnits,
+        costUnits: totalCostUnits,
+        computeBudgetRequestedUnits: produced.reduce(
+          (acc, row) => acc + row.computeBudgetRequestedUnits,
+          0n,
+        ),
+        computeBudgetLimitTxCount: produced.reduce(
+          (acc, row) => acc + row.computeBudgetLimitTxCount,
+          0,
+        ),
+        computeBudgetPriceTxCount: produced.reduce(
+          (acc, row) => acc + row.computeBudgetPriceTxCount,
+          0,
+        ),
+        maxComputeUnitLimit: produced.reduce(
+          (max, row) => (row.maxComputeUnitLimit > max ? row.maxComputeUnitLimit : max),
+          0n,
+        ),
+        maxComputeUnitPriceMicroLamports: produced.reduce(
+          (max, row) =>
+            row.maxComputeUnitPriceMicroLamports > max ? row.maxComputeUnitPriceMicroLamports : max,
+          0n,
+        ),
+        avgComputeUnitsPerProducedBlock:
+          produced.length > 0 ? totalComputeUnits / BigInt(produced.length) : null,
+        avgComputeUnitsPerTransaction: txCount > 0 ? totalComputeUnits / BigInt(txCount) : null,
+        avgCostUnitsPerProducedBlock:
+          produced.length > 0 ? totalCostUnits / BigInt(produced.length) : null,
+        avgCostUnitsPerTransaction: txCount > 0 ? totalCostUnits / BigInt(txCount) : null,
+        incomeLamportsPerMillionComputeUnit:
+          totalComputeUnits > 0n ? (totalIncome * 1_000_000n) / totalComputeUnits : null,
+        priorityFeeLamportsPerMillionComputeUnit:
+          totalComputeUnits > 0n ? (totalPriorityFees * 1_000_000n) / totalComputeUnits : null,
+        tipLamportsPerMillionComputeUnit:
+          totalComputeUnits > 0n ? (totalTips * 1_000_000n) / totalComputeUnits : null,
         bestBlockSlot: best?.slot ?? null,
         bestBlockIncomeLamports: best?.income ?? null,
       },
@@ -1254,6 +1292,12 @@ export function makeProcessedBlock(
     maxTipLamports: 0n,
     maxPriorityFeeLamports: 0n,
     computeUnitsConsumed: 0n,
+    costUnits: 0n,
+    computeBudgetRequestedUnits: 0n,
+    computeBudgetLimitTxCount: 0,
+    computeBudgetPriceTxCount: 0,
+    maxComputeUnitLimit: 0n,
+    maxComputeUnitPriceMicroLamports: 0n,
     factsCapturedAt: new Date(),
     processedAt: new Date(),
   };

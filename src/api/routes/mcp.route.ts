@@ -305,7 +305,7 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
       {
         title: 'Get validator leader-slot facts',
         description:
-          'Returns one validator epoch of stored watched leader-slot facts. Use this for data-quality checks and insight generation: processed/pending/fetch-error slots, fact capture completeness, failed tx rate, tip-bearing block ratio, max priority fee, max Jito tip, compute units, and best block. ' +
+          'Returns one validator epoch of stored watched leader-slot facts. Use this for data-quality checks and insight generation: processed/pending/fetch-error slots, fact capture completeness, failed tx rate, tip-bearing block ratio, max priority fee, max Jito tip, compute units, cost units, ComputeBudget requests, income per 1M CU, and best block. ' +
           'This tool does NOT trigger Solana RPC; it reads the same local slot facts as /v1/validators/{idOrVote}/epochs/{epoch}/leader-slots. Prefer closed epochs and require quality.complete=true before making public claims. ' +
           SHARED_TOOL_PROVENANCE_NOTE,
         inputSchema: {

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { pino } from 'pino';
+import bs58 from 'bs58';
 import {
   FeeService,
   analyzeBlockTransactions,
@@ -21,6 +22,8 @@ import {
   blockWithFeesFixture,
   blockWithoutFeesFixture,
 } from '../../fixtures/rpc-fixtures.js';
+
+const COMPUTE_BUDGET_PROGRAM_ID = 'ComputeBudget111111111111111111111111111111';
 
 const silent = pino({ level: 'silent' });
 
@@ -213,14 +216,27 @@ describe('decomposeBlockIncome — type tolerance across RPC shapes', () => {
     const txSuccess: RpcFullTransactionEntry = {
       transaction: {
         signatures: ['sig1', 'sig2'],
-        message: { accountKeys: ['payer', TIP] },
+        message: {
+          accountKeys: ['payer', TIP, COMPUTE_BUDGET_PROGRAM_ID],
+          instructions: [
+            {
+              programIdIndex: 2,
+              data: bs58.encode(Uint8Array.from([2, 0x40, 0x0d, 0x03, 0x00])),
+            },
+            {
+              programIdIndex: 2,
+              data: bs58.encode(Uint8Array.from([3, 0x88, 0x13, 0, 0, 0, 0, 0, 0])),
+            },
+          ],
+        },
       },
       meta: {
         err: null,
         fee: 25_000n,
         computeUnitsConsumed: 123_000n,
-        preBalances: [10_000_000n, 0n],
-        postBalances: [9_970_000n, 5_000n],
+        costUnits: 124_000n,
+        preBalances: [10_000_000n, 0n, 1n],
+        postBalances: [9_970_000n, 5_000n, 1n],
       },
     };
     const txFailed: RpcFullTransactionEntry = {
@@ -232,6 +248,7 @@ describe('decomposeBlockIncome — type tolerance across RPC shapes', () => {
         err: { InstructionError: [0, 'Custom'] },
         fee: 9_000n,
         computeUnitsConsumed: 7_000n,
+        costUnits: 8_000n,
         preBalances: [10_000_000n],
         postBalances: [9_991_000n],
       },
@@ -252,6 +269,12 @@ describe('decomposeBlockIncome — type tolerance across RPC shapes', () => {
       maxTipLamports: 5_000n,
       maxPriorityFeeLamports: 15_000n,
       computeUnitsConsumed: 130_000n,
+      costUnits: 132_000n,
+      computeBudgetRequestedUnits: 200_000n,
+      computeBudgetLimitTxCount: 1,
+      computeBudgetPriceTxCount: 1,
+      maxComputeUnitLimit: 200_000n,
+      maxComputeUnitPriceMicroLamports: 5_000n,
     });
   });
 });
