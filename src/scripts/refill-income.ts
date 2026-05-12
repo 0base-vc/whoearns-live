@@ -1,5 +1,5 @@
 /**
- * Reset + refill income data for recent closed epochs (migration 0010).
+ * Reset + refill income and leader-slot fact data for recent epochs.
  *
  * Supersedes `backfill-tips.ts`. Does more than the old script:
  *
@@ -9,7 +9,9 @@
  *   2. RE-FETCHES each block with `transactionDetails: 'full'` and
  *      re-computes the four-way income decomposition (leader post-burn
  *      fees + gross base + gross priority + MEV tips).
- *   3. OVERWRITES the per-block row with the freshly computed values.
+ *   3. OVERWRITES the per-block row with the freshly computed values,
+ *      including tx counts, compute units, cost units, and ComputeBudget
+ *      request aggregates.
  *   4. RESETS the per-epoch aggregate totals to 0 (via
  *      `StatsRepository.resetEpochTotals`) and re-applies per-block
  *      deltas via `addIncomeDelta` as the script walks the blocks —
@@ -64,7 +66,7 @@ import { SolanaRpcClient } from '../clients/solana-rpc.js';
 import { TokenBucket } from '../clients/token-bucket.js';
 import { loadConfig } from '../core/config.js';
 import { createLogger } from '../core/logger.js';
-import { decomposeBlockIncome, extractLeaderFees } from '../services/fee.service.js';
+import { analyzeBlockTransactions, extractLeaderFees } from '../services/fee.service.js';
 import { ValidatorService } from '../services/validator.service.js';
 import { closePool, createPool } from '../storage/db.js';
 import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
@@ -225,7 +227,7 @@ async function main(): Promise<number> {
                 });
                 if (block === null) return;
                 const leaderFees = extractLeaderFees(block.rewards, identity);
-                const income = decomposeBlockIncome(block.transactions);
+                const { income, slotFacts } = analyzeBlockTransactions(block.transactions);
                 // Derive leader's NET base share (rewards - priority).
                 // See `fee.service.ingestPendingBlocks` for the full
                 // derivation — same rule applies here so backfill and
@@ -236,13 +238,34 @@ async function main(): Promise<number> {
                 // reflects the new decomposition. Skipped rows keep
                 // their 0s untouched (not in `slots` since we filter
                 // to `block_status = 'produced'`).
-                const ok = await processedBlocksRepo.replaceIncomeForBlock({
+                const processedAt = new Date();
+                const ok = await processedBlocksRepo.replaceProducedBlockFacts({
                   epoch,
                   slot,
+                  leaderIdentity: identity,
                   feesLamports: leaderFees,
                   baseFeesLamports: leaderBase,
                   priorityFeesLamports: income.priorityFees,
                   tipsLamports: income.mevTips,
+                  blockStatus: 'produced',
+                  blockTime: blockTimeFromUnixSeconds(block.blockTime),
+                  txCount: slotFacts.txCount,
+                  successfulTxCount: slotFacts.successfulTxCount,
+                  failedTxCount: slotFacts.failedTxCount,
+                  unknownMetaTxCount: slotFacts.unknownMetaTxCount,
+                  signatureCount: slotFacts.signatureCount,
+                  tipTxCount: slotFacts.tipTxCount,
+                  maxTipLamports: slotFacts.maxTipLamports,
+                  maxPriorityFeeLamports: slotFacts.maxPriorityFeeLamports,
+                  computeUnitsConsumed: slotFacts.computeUnitsConsumed,
+                  costUnits: slotFacts.costUnits,
+                  computeBudgetRequestedUnits: slotFacts.computeBudgetRequestedUnits,
+                  computeBudgetLimitTxCount: slotFacts.computeBudgetLimitTxCount,
+                  computeBudgetPriceTxCount: slotFacts.computeBudgetPriceTxCount,
+                  maxComputeUnitLimit: slotFacts.maxComputeUnitLimit,
+                  maxComputeUnitPriceMicroLamports: slotFacts.maxComputeUnitPriceMicroLamports,
+                  factsCapturedAt: processedAt,
+                  processedAt,
                 });
                 if (ok) {
                   identityLeader += leaderFees;
@@ -343,6 +366,12 @@ function lamportsToSolDisplay(lamports: bigint): string {
   if (lamports === 0n) return '0';
   const sol = Number(lamports) / 1_000_000_000;
   return sol.toFixed(6).replace(/\.?0+$/, '');
+}
+
+function blockTimeFromUnixSeconds(value: number | null | undefined): Date | null {
+  if (value === null || value === undefined) return null;
+  if (!Number.isFinite(value)) return null;
+  return new Date(value * 1000);
 }
 
 main()

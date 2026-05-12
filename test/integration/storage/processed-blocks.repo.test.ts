@@ -158,6 +158,62 @@ describe('ProcessedBlocksRepository', () => {
     });
   });
 
+  it('replaceProducedBlockFacts: rewrites income and slot facts for backfill', async () => {
+    await repo.insertBatch([mkBlock(100, { leaderIdentity: 'A', feesLamports: 1n })]);
+
+    const replacedAt = new Date('2026-05-12T00:00:00Z');
+    const ok = await repo.replaceProducedBlockFacts(
+      mkBlock(100, {
+        leaderIdentity: 'A',
+        feesLamports: 100n,
+        baseFeesLamports: 40n,
+        priorityFeesLamports: 60n,
+        tipsLamports: 7n,
+        blockTime: new Date('2026-05-11T23:59:00Z'),
+        txCount: 3,
+        successfulTxCount: 2,
+        failedTxCount: 1,
+        signatureCount: 4,
+        tipTxCount: 1,
+        maxTipLamports: 7n,
+        maxPriorityFeeLamports: 55n,
+        computeUnitsConsumed: 123_000n,
+        costUnits: 130_000n,
+        computeBudgetRequestedUnits: 400_000n,
+        computeBudgetLimitTxCount: 2,
+        computeBudgetPriceTxCount: 1,
+        maxComputeUnitLimit: 250_000n,
+        maxComputeUnitPriceMicroLamports: 5_000n,
+        factsCapturedAt: replacedAt,
+        processedAt: replacedAt,
+      }),
+    );
+
+    expect(ok).toBe(true);
+    const found = await repo.findBySlot(100);
+    expect(found).not.toBeNull();
+    expect(found).toMatchObject({
+      feesLamports: 100n,
+      baseFeesLamports: 40n,
+      priorityFeesLamports: 60n,
+      tipsLamports: 7n,
+      txCount: 3,
+      successfulTxCount: 2,
+      failedTxCount: 1,
+      signatureCount: 4,
+      tipTxCount: 1,
+      maxTipLamports: 7n,
+      maxPriorityFeeLamports: 55n,
+      computeUnitsConsumed: 123_000n,
+      costUnits: 130_000n,
+      computeBudgetRequestedUnits: 400_000n,
+      computeBudgetLimitTxCount: 2,
+      computeBudgetPriceTxCount: 1,
+      maxComputeUnitLimit: 250_000n,
+      maxComputeUnitPriceMicroLamports: 5_000n,
+    });
+  });
+
   it('getValidatorEpochSlotStats: aggregates block facts and unresolved fetch errors', async () => {
     await repo.insertBatch([
       mkBlock(100, {

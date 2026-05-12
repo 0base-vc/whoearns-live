@@ -555,6 +555,72 @@ export class ProcessedBlocksRepository {
   }
 
   /**
+   * Overwrite the full derived fact payload for an existing produced block.
+   * Used by refill jobs after extractor changes. This intentionally does not
+   * insert missing rows; the caller should only repair leader slots that the
+   * ingester has already materialised.
+   */
+  async replaceProducedBlockFacts(block: ProcessedBlock): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE processed_blocks
+          SET leader_identity = $3,
+              fees_lamports = $4::numeric,
+              base_fees_lamports = $5::numeric,
+              priority_fees_lamports = $6::numeric,
+              tips_lamports = $7::numeric,
+              block_time = $8::timestamptz,
+              tx_count = $9::int,
+              successful_tx_count = $10::int,
+              failed_tx_count = $11::int,
+              unknown_meta_tx_count = $12::int,
+              signature_count = $13::int,
+              tip_tx_count = $14::int,
+              max_tip_lamports = $15::numeric,
+              max_priority_fee_lamports = $16::numeric,
+              compute_units_consumed = $17::numeric,
+              cost_units = $18::numeric,
+              compute_budget_requested_units = $19::numeric,
+              compute_budget_limit_tx_count = $20::int,
+              compute_budget_price_tx_count = $21::int,
+              max_compute_unit_limit = $22::numeric,
+              max_compute_unit_price_micro_lamports = $23::numeric,
+              facts_captured_at = $24::timestamptz,
+              processed_at = $25::timestamptz
+        WHERE epoch = $1
+          AND slot = $2
+          AND block_status = 'produced'`,
+      [
+        block.epoch,
+        block.slot,
+        block.leaderIdentity,
+        block.feesLamports.toString(),
+        block.baseFeesLamports.toString(),
+        block.priorityFeesLamports.toString(),
+        block.tipsLamports.toString(),
+        block.blockTime,
+        block.txCount,
+        block.successfulTxCount,
+        block.failedTxCount,
+        block.unknownMetaTxCount,
+        block.signatureCount,
+        block.tipTxCount,
+        block.maxTipLamports.toString(),
+        block.maxPriorityFeeLamports.toString(),
+        block.computeUnitsConsumed.toString(),
+        block.costUnits.toString(),
+        block.computeBudgetRequestedUnits.toString(),
+        block.computeBudgetLimitTxCount,
+        block.computeBudgetPriceTxCount,
+        block.maxComputeUnitLimit.toString(),
+        block.maxComputeUnitPriceMicroLamports.toString(),
+        block.factsCapturedAt,
+        block.processedAt,
+      ],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  /**
    * Convenience: fetch a single block by slot. Not part of the required
    * API but useful in tests; kept internal to the repository.
    */
