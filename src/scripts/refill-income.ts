@@ -36,6 +36,14 @@
  * ~20 days of epochs and would mean ~4000+ `getBlock(full)` calls
  * which at ~3MB/block is a lot of bandwidth (>12GB).
  *
+ * For targeted repairs, use an explicit comma-separated list:
+ *   BACKFILL_EPOCH_LIST=959,958,957,956 pnpm backfill:income
+ * This bypasses the recent-epoch window and only scans those epochs.
+ *
+ * Set `BACKFILL_CONCURRENCY=1..8` to tune refill-local parallelism.
+ * This is separate from `SOLANA_RPC_CONCURRENCY`; use both when a
+ * provider is rate-limiting historical getBlock(full) calls.
+ *
  * Set `INCLUDE_RUNNING=1` to ALSO re-scan the currently-running
  * epoch. Useful after fixing a live-ingestion bug (e.g. the
  * gRPC bigint-fee-loss fix) where the running-epoch's per-block
@@ -54,6 +62,9 @@
  *
  *   # Last two closed epochs
  *   BACKFILL_EPOCHS=2 POSTGRES_URL=... pnpm backfill:income
+ *
+ *   # Specific older epochs with lower concurrency
+ *   BACKFILL_EPOCH_LIST=959,958,957,956 BACKFILL_CONCURRENCY=2 POSTGRES_URL=... pnpm backfill:income
  *
  *   # Inside a pod (production image ships compiled JS)
  *   kubectl exec -it whoearns-live-0 -- node dist/scripts/refill-income.js
@@ -76,15 +87,18 @@ import { ValidatorsRepository } from '../storage/repositories/validators.repo.js
 import { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
 import type { Epoch } from '../types/domain.js';
 
-const BACKFILL_CONCURRENCY = 4;
-
 async function main(): Promise<number> {
   const cfg = loadConfig();
   const log = createLogger(cfg);
   log.info('refill-income: starting');
 
-  const epochsToBackfill = Math.max(1, Math.min(10, Number(process.env['BACKFILL_EPOCHS'] ?? '1')));
-  log.info({ epochsToBackfill }, 'refill-income: epoch count resolved');
+  const epochsToBackfill = parseBoundedIntegerEnv('BACKFILL_EPOCHS', 1, 1, 10);
+  const backfillConcurrency = parseBoundedIntegerEnv('BACKFILL_CONCURRENCY', 4, 1, 8);
+  const explicitEpochs = parseEpochList(process.env['BACKFILL_EPOCH_LIST']);
+  log.info(
+    { epochsToBackfill, backfillConcurrency, explicitEpochs },
+    'refill-income: options resolved',
+  );
 
   const pool = createPool(cfg);
   try {
@@ -142,27 +156,31 @@ async function main(): Promise<number> {
       log.info('refill-income: no closed epochs yet, nothing to do');
       return 0;
     }
+    const includeRunning = process.env['INCLUDE_RUNNING'] === '1';
     const targetEpochs: Epoch[] = [];
 
-    // Optionally include the running epoch at the head of the list.
-    // Use case: a live-ingestion bug corrupted per-block rows for the
-    // current epoch (e.g. bigint fee handling regression); re-scanning
-    // all produced blocks fixes the numbers without waiting for the
-    // epoch to close. Scan order matters here — do running epoch
-    // FIRST so the user sees correct running-epoch numbers as soon as
-    // the script gets to its end; historical epochs get fixed after.
-    const includeRunning = process.env['INCLUDE_RUNNING'] === '1';
-    if (includeRunning) {
-      const current = await epochsRepo.findCurrent();
-      if (current !== null && !current.isClosed && current.epoch > latestClosed.epoch) {
-        targetEpochs.push(current.epoch);
+    if (explicitEpochs !== null) {
+      targetEpochs.push(...explicitEpochs);
+    } else {
+      // Optionally include the running epoch at the head of the list.
+      // Use case: a live-ingestion bug corrupted per-block rows for the
+      // current epoch (e.g. bigint fee handling regression); re-scanning
+      // all produced blocks fixes the numbers without waiting for the
+      // epoch to close. Scan order matters here — do running epoch
+      // FIRST so the user sees correct running-epoch numbers as soon as
+      // the script gets to its end; historical epochs get fixed after.
+      if (includeRunning) {
+        const current = await epochsRepo.findCurrent();
+        if (current !== null && !current.isClosed && current.epoch > latestClosed.epoch) {
+          targetEpochs.push(current.epoch);
+        }
       }
-    }
 
-    for (let i = 0; i < epochsToBackfill; i++) {
-      const e = latestClosed.epoch - i;
-      if (e < 0) break;
-      targetEpochs.push(e);
+      for (let i = 0; i < epochsToBackfill; i++) {
+        const e = latestClosed.epoch - i;
+        if (e < 0) break;
+        targetEpochs.push(e);
+      }
     }
     log.info({ targetEpochs, includeRunning }, 'refill-income: epoch plan');
 
@@ -171,7 +189,7 @@ async function main(): Promise<number> {
     const topN =
       cfg.VALIDATORS_WATCH_LIST.mode === 'top' ? cfg.VALIDATORS_WATCH_LIST.topN : undefined;
 
-    const fetchLimit = pLimit(BACKFILL_CONCURRENCY);
+    const fetchLimit = pLimit(backfillConcurrency);
 
     for (const epoch of targetEpochs) {
       const votes = await validatorService.getActiveVotePubkeys(
@@ -372,6 +390,39 @@ function blockTimeFromUnixSeconds(value: number | null | undefined): Date | null
   if (value === null || value === undefined) return null;
   if (!Number.isFinite(value)) return null;
   return new Date(value * 1000);
+}
+
+function parseBoundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function parseEpochList(raw: string | undefined): Epoch[] | null {
+  if (raw === undefined || raw.trim() === '') return null;
+
+  const epochs: Epoch[] = [];
+  const seen = new Set<number>();
+  for (const part of raw.split(',')) {
+    const trimmed = part.trim();
+    if (trimmed === '') continue;
+    const parsed = Number(trimmed);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      throw new Error(`Invalid BACKFILL_EPOCH_LIST entry: ${trimmed}`);
+    }
+    if (!seen.has(parsed)) {
+      seen.add(parsed);
+      epochs.push(parsed);
+    }
+  }
+
+  if (epochs.length === 0) {
+    throw new Error('BACKFILL_EPOCH_LIST did not contain any valid epochs');
+  }
+
+  return epochs;
 }
 
 main()
