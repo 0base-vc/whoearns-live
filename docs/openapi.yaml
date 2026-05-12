@@ -956,14 +956,24 @@ components:
         - blockTipsTotalSol
         - totalIncomeLamports
         - totalIncomeSol
+        - performanceLamportsPerSlot
+        - performanceSolPerSlot
         - windowSlots
         - windowIncomeLamports
         - windowIncomeSol
+        - incomeLamportsPerSlot
+        - incomeSolPerSlot
         - currentElapsedAssignedSlots
         - currentIncomeLamports
         - currentIncomeSol
         - closedEpochsIncluded
         - sampleStatus
+        - slotWindowLastSlot
+        - slotWindowUpdatedAt
+        - lastUpdatedAt
+        - activatedStakeLamports
+        - activatedStakeSol
+        - incomePerStake
         - claimed
       properties:
         rank: { type: integer, minimum: 1 }

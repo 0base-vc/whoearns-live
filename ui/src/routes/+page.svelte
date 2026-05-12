@@ -68,8 +68,8 @@
   ${serializeJsonLd({
     '@context': 'https://schema.org',
     '@type': 'ItemList',
-    name: 'Top Solana validators by per-epoch income',
-    description: 'Ranked list of Solana mainnet validators by live-trend leader income.',
+    name: 'Top Solana validators by live-trend income per slot',
+    description: 'Ranked list of Solana mainnet validators by live-trend income per leader slot.',
     url: `${SITE_URL}/`,
   })}
   </script>`}
