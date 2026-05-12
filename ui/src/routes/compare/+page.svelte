@@ -55,6 +55,7 @@
   let leaderSlotStatsLoading = $state(false);
 
   const PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+  const LAST_MONTH_EPOCHS = 16;
   const WINDOW_OPTIONS: Array<{ key: LeaderboardWindow; label: string }> = [
     { key: 'live_trend', label: 'Live trend' },
     { key: 'current_only', label: 'Current only' },
@@ -170,10 +171,10 @@
     navigateCompare(PUBKEY_RE.test(a) ? a : '', PUBKEY_RE.test(b) ? b : '', windowMode);
   }
 
-  function lifetimeTotalSol(history: ValidatorHistory | null): number | null {
+  function lastMonthTotalSol(history: ValidatorHistory | null): number | null {
     if (history === null || history.items.length === 0) return null;
     let total = 0;
-    for (const r of history.items) {
+    for (const r of history.items.slice(0, LAST_MONTH_EPOCHS)) {
       const fees = r.blockFeesTotalSol === null ? 0 : Number(r.blockFeesTotalSol);
       const mev = r.blockTipsTotalSol === null ? 0 : Number(r.blockTipsTotalSol);
       total += (Number.isFinite(fees) ? fees : 0) + (Number.isFinite(mev) ? mev : 0);
@@ -347,8 +348,8 @@
   const slotB = $derived(data.b);
   const statsA = $derived(windowStats(slotA?.history ?? null));
   const statsB = $derived(windowStats(slotB?.history ?? null));
-  const lifetimeA = $derived(lifetimeTotalSol(slotA?.history ?? null));
-  const lifetimeB = $derived(lifetimeTotalSol(slotB?.history ?? null));
+  const lastMonthA = $derived(lastMonthTotalSol(slotA?.history ?? null));
+  const lastMonthB = $derived(lastMonthTotalSol(slotB?.history ?? null));
 
   // Fallback epoch — pick the larger of the two so the column header
   // ("Epoch N") makes sense when one side has more recent data.
@@ -703,11 +704,11 @@
             <AddressDisplay pubkey={slot.history.vote} head={8} tail={8} />
           </p>
           <p class="mt-4 text-xs uppercase tracking-wide text-[color:var(--color-text-muted)]">
-            Total income (last {slot.history.items.length} epochs)
+            Total income (last month)
           </p>
           <p class="mt-1 text-3xl font-semibold tracking-tight text-[color:var(--color-brand-500)]">
-            {#if (i === 0 ? lifetimeA : lifetimeB) !== null}
-              ◎{formatSol((i === 0 ? lifetimeA : lifetimeB)!.toString())}
+            {#if (i === 0 ? lastMonthA : lastMonthB) !== null}
+              ◎{formatSol((i === 0 ? lastMonthA : lastMonthB)!.toString())}
             {:else}
               <span class="text-[color:var(--color-text-subtle)]">—</span>
             {/if}

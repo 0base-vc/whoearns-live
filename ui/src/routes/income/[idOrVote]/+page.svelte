@@ -74,6 +74,7 @@
   // we round aggressively (hours/mins, no seconds) so the noise isn't
   // visible to the user.
   const APPROX_SLOT_MS = 400;
+  const LAST_MONTH_EPOCHS = 16;
 
   function safeHttpUrl(raw: string | null | undefined): string | null {
     if (raw === null || raw === undefined) return null;
@@ -133,19 +134,20 @@
     currentRow === undefined ? history.items : history.items.filter((r) => r !== currentRow),
   );
 
-  const lifetimeFeesSol = $derived<number>(
-    history.items.reduce((acc, r) => {
+  const lastMonthRows = $derived<ValidatorEpochRecord[]>(history.items.slice(0, LAST_MONTH_EPOCHS));
+  const lastMonthFeesSol = $derived<number>(
+    lastMonthRows.reduce((acc, r) => {
       const v = r.blockFeesTotalSol === null ? 0 : Number(r.blockFeesTotalSol);
       return acc + (Number.isFinite(v) ? v : 0);
     }, 0),
   );
-  const lifetimeMevSol = $derived<number>(
-    history.items.reduce((acc, r) => {
+  const lastMonthMevSol = $derived<number>(
+    lastMonthRows.reduce((acc, r) => {
       const v = r.blockTipsTotalSol === null ? 0 : Number(r.blockTipsTotalSol);
       return acc + (Number.isFinite(v) ? v : 0);
     }, 0),
   );
-  const lifetimeTotalSol = $derived<number>(lifetimeFeesSol + lifetimeMevSol);
+  const lastMonthTotalSol = $derived<number>(lastMonthFeesSol + lastMonthMevSol);
 
   const latestClosedRow = $derived<ValidatorEpochRecord | null>(
     history.items.find((r) => r.isFinal) ?? null,
@@ -231,7 +233,7 @@
   const titleLabel = $derived(history.name ?? shortVote);
   const pageTitle = $derived(`${titleLabel} — Solana validator income | ${SITE_NAME}`);
   const pageDescription = $derived(
-    `Per-epoch income for Solana validator ${history.vote}: block fees, on-chain Jito tips, slot production, and indexed-validator median income per leader slot over the last ${history.items.length} epochs.`,
+    `Per-epoch income for Solana validator ${history.vote}: block fees, on-chain Jito tips, slot production, and indexed-validator median income per leader slot over the most recent month-sized window.`,
   );
 
   /**
@@ -271,10 +273,10 @@
         variableMeasured: [
           {
             '@type': 'PropertyValue',
-            name: 'totalIncomeSol',
-            value: lifetimeTotalSol > 0 ? lifetimeTotalSol.toFixed(9) : '0',
+            name: 'lastMonthIncomeSol',
+            value: lastMonthTotalSol > 0 ? lastMonthTotalSol.toFixed(9) : '0',
             description:
-              'Lifetime block fees + on-chain Jito tip earnings (in SOL) across indexed epochs',
+              'Block fees + on-chain Jito tip earnings (in SOL) over the most recent month-sized window',
           },
           {
             '@type': 'PropertyValue',
@@ -396,7 +398,7 @@
   {/if}
 </svelte:head>
 
-<!-- ─────────── 1. Validator hero (identity + lifetime) ─────────── -->
+<!-- ─────────── 1. Validator hero (identity + recent income) ─────────── -->
 <Card tone="raised">
   <div class="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
     <div class="flex items-start gap-4 min-w-0 flex-1">
@@ -560,16 +562,16 @@
         <p
           class="inline-flex items-center text-xs font-semibold uppercase tracking-wider text-[color:var(--color-text-subtle)]"
         >
-          Total income · last {history.items.length} epochs
+          Total income · last month
           <Tooltip
-            label="About lifetime income"
-            content="Block fees + on-chain Jito tips summed across the most recent epochs we've indexed. Pre-commission — this is what the operator earned, not what delegators received."
+            label="About last-month income"
+            content="Block fees + on-chain Jito tips summed across the most recent month-sized window we have indexed. Pre-commission — this is what the operator earned, not what delegators received."
           />
         </p>
         <p
           class="mt-1 text-4xl font-semibold tracking-tight text-[color:var(--color-brand-500)] sm:text-5xl"
         >
-          ◎{formatSol(lifetimeTotalSol.toString())}
+          ◎{formatSol(lastMonthTotalSol.toString())}
         </p>
       </div>
     {/if}

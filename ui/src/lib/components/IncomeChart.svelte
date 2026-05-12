@@ -16,6 +16,9 @@
   const RUNNING_DASH = '6 3';
   const PEER_DASH = '10 5';
   const PEER_BENCHMARK_MIN_VALIDATORS = 3;
+  const INCOME_PER_SLOT_DECIMALS = 4;
+  const AXIS_TEXT_FILL = 'var(--color-text-muted)';
+  const AXIS_SUBTLE_FILL = 'var(--color-text-subtle)';
 
   function denominatorFor(row: ValidatorEpochRecord): number | null {
     const slots = row.isCurrentEpoch ? row.slotsElapsedAssigned : row.slotsAssigned;
@@ -132,9 +135,6 @@
     if (hasPeerMedian) {
       items.push({ label: 'Indexed median', color: PEER_COLOR, dashed: true });
     }
-    if (transitionData.length === 2) {
-      items.push({ label: 'Running tail', color: '#a1a1aa', dashed: true });
-    }
     return items;
   });
 
@@ -168,6 +168,12 @@
     }).format(value);
     return formatted;
   }
+
+  function formatIncomePerSlot(value: number | null | undefined): string {
+    if (value === null || value === undefined) return 'n/a';
+    const n = Number(value);
+    return Number.isFinite(n) ? n.toFixed(INCOME_PER_SLOT_DECIMALS) : 'n/a';
+  }
 </script>
 
 <section
@@ -178,7 +184,7 @@
     <div>
       <h2 id="chart-title" class="text-sm font-semibold">Income per leader slot</h2>
       <p class="text-xs text-[color:var(--color-text-muted)]">
-        Total income normalized by scheduled leader slots. Dashed tail = running epoch.
+        Total income normalized by scheduled leader slots. Dashed final segment = running epoch.
       </p>
     </div>
     {#if epochRange !== null}
@@ -201,7 +207,28 @@
         ? `Line chart of total income per leader slot from epoch ${epochRange.first} to ${epochRange.last}. A hidden table below lists the chart values.`
         : 'Line chart of total income per leader slot.'}
     >
-      <LineChart data={chartData} x="epoch" {series} legend={false} tooltip={{ mode: 'voronoi' }}>
+      <LineChart
+        data={chartData}
+        x="epoch"
+        {series}
+        legend={false}
+        tooltip={{ mode: 'voronoi' }}
+        props={{
+          xAxis: {
+            tickLabelProps: {
+              fill: AXIS_SUBTLE_FILL,
+            },
+            tickLength: 0,
+          },
+          yAxis: {
+            format: formatIncomePerSlot,
+            tickLabelProps: {
+              fill: AXIS_TEXT_FILL,
+            },
+            tickLength: 0,
+          },
+        }}
+      >
         <svelte:fragment slot="tooltip" let:x let:width let:padding>
           <Tooltip.Root
             let:data
@@ -218,15 +245,17 @@
                 label="This validator"
                 value={point?.validatorIncomePerSlot ?? null}
                 color={VALIDATOR_COLOR}
-                format="decimal"
-              />
+              >
+                {formatIncomePerSlot(point?.validatorIncomePerSlot)}
+              </Tooltip.Item>
               {#if point?.peerMedianIncomePerSlot !== null && point?.peerMedianIncomePerSlot !== undefined}
                 <Tooltip.Item
                   label="Indexed median"
                   value={point.peerMedianIncomePerSlot}
                   color={PEER_COLOR}
-                  format="decimal"
-                />
+                >
+                  {formatIncomePerSlot(point.peerMedianIncomePerSlot)}
+                </Tooltip.Item>
               {/if}
             </Tooltip.List>
             {#if point?.peerMedianIncomePerSlot !== null && point?.peerMedianIncomePerSlot !== undefined}
@@ -257,8 +286,16 @@
         {#each chartData as point (point.epoch)}
           <tr>
             <th scope="row">{point.epoch}</th>
-            <td>{point.validatorIncomePerSlot ?? 'not available'}</td>
-            <td>{point.peerMedianIncomePerSlot ?? 'not available'}</td>
+            <td>
+              {point.validatorIncomePerSlot === null
+                ? 'not available'
+                : formatIncomePerSlot(point.validatorIncomePerSlot)}
+            </td>
+            <td>
+              {point.peerMedianIncomePerSlot === null
+                ? 'not available'
+                : formatIncomePerSlot(point.peerMedianIncomePerSlot)}
+            </td>
             <td>{point.peerSampleValidators ?? 'not available'}</td>
           </tr>
         {/each}
