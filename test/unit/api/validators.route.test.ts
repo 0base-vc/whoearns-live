@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import validatorsRoutes from '../../../src/api/routes/validators.route.js';
+import type { ClaimsRepository } from '../../../src/storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
+import type { ProfilesRepository } from '../../../src/storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../../src/storage/repositories/validators.repo.js';
 import {
@@ -27,12 +29,16 @@ interface Ctx {
   stats: FakeStatsRepo;
   validators: FakeValidatorsRepo;
   epochs: FakeEpochsRepo;
+  optedOutVotes: Set<string>;
+  claimedVotes: Set<string>;
 }
 
 async function makeCtx(): Promise<Ctx> {
   const stats = new FakeStatsRepo();
   const validators = new FakeValidatorsRepo();
   const epochs = new FakeEpochsRepo();
+  const optedOutVotes = new Set<string>();
+  const claimedVotes = new Set<string>();
 
   const app = makeTestApp(silent);
   setErrorHandler(app, silent);
@@ -40,8 +46,15 @@ async function makeCtx(): Promise<Ctx> {
     statsRepo: stats as unknown as StatsRepository,
     validatorsRepo: validators as unknown as ValidatorsRepository,
     epochsRepo: epochs as unknown as EpochsRepository,
+    profilesRepo: {
+      findOptedOutVotes: async () => new Set(optedOutVotes),
+    } as unknown as ProfilesRepository,
+    claimsRepo: {
+      findClaimedVotes: async (votes: string[]) =>
+        new Set(votes.filter((vote) => claimedVotes.has(vote))),
+    } as unknown as ClaimsRepository,
   });
-  return { app, stats, validators, epochs };
+  return { app, stats, validators, epochs, optedOutVotes, claimedVotes };
 }
 
 async function seedValidator(ctx: Ctx, vote: string, identity: string, epoch = 500) {
@@ -52,6 +65,124 @@ async function seedValidator(ctx: Ctx, vote: string, identity: string, epoch = 5
     lastSeenEpoch: epoch,
   });
 }
+
+async function seedValidatorInfo(
+  ctx: Ctx,
+  identity: string,
+  info: {
+    name: string | null;
+    keybaseUsername?: string | null;
+    website?: string | null;
+    iconUrl?: string | null;
+  },
+) {
+  await ctx.validators.upsertInfo([
+    {
+      identityPubkey: identity,
+      name: info.name,
+      details: null,
+      website: info.website ?? null,
+      keybaseUsername: info.keybaseUsername ?? null,
+      iconUrl: info.iconUrl ?? null,
+    },
+  ]);
+}
+
+describe('GET /v1/validators/search', () => {
+  let ctx: Ctx;
+  beforeEach(async () => {
+    ctx = await makeCtx();
+    await seedValidator(ctx, VOTE_1, IDENTITY_1, 501);
+    await seedValidator(ctx, VOTE_2, IDENTITY_2, 500);
+    await seedValidator(ctx, VOTE_3, 'Node333333333333333333333333333333333333333', 499);
+    await seedValidatorInfo(ctx, IDENTITY_1, {
+      name: '0base.vc AI Validator',
+      keybaseUsername: 'zerobase',
+      website: 'https://0base.vc',
+      iconUrl: 'https://0base.vc/icon.png',
+    });
+    await seedValidatorInfo(ctx, IDENTITY_2, {
+      name: 'Trillium Research',
+      keybaseUsername: 'trillium',
+    });
+    await seedValidatorInfo(ctx, 'Node333333333333333333333333333333333333333', {
+      name: 'Small Blocks Lab',
+      keybaseUsername: 'smallblocks',
+    });
+  });
+
+  it('searches by validator name substring and returns claimed state', async () => {
+    ctx.claimedVotes.add(VOTE_1);
+    const res = await ctx.app.inject({ method: 'GET', url: '/v1/validators/search?q=base' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      query: string;
+      count: number;
+      items: Array<{ vote: string; name: string | null; claimed: boolean; website: string | null }>;
+    };
+    expect(body.query).toBe('base');
+    expect(body.count).toBe(1);
+    expect(body.items[0]).toMatchObject({
+      vote: VOTE_1,
+      name: '0base.vc AI Validator',
+      claimed: true,
+      website: 'https://0base.vc/',
+    });
+    await ctx.app.close();
+  });
+
+  it('searches vote and identity prefixes without RPC lookups', async () => {
+    const byVote = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/search?q=${encodeURIComponent(VOTE_2.slice(0, 8))}`,
+    });
+    expect(byVote.statusCode).toBe(200);
+    expect((byVote.json() as { items: Array<{ vote: string }> }).items[0]?.vote).toBe(VOTE_2);
+
+    const byIdentity = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/search?q=${encodeURIComponent(IDENTITY_1.slice(0, 8))}`,
+    });
+    expect(byIdentity.statusCode).toBe(200);
+    expect((byIdentity.json() as { items: Array<{ vote: string }> }).items[0]?.vote).toBe(VOTE_1);
+    await ctx.app.close();
+  });
+
+  it('clamps limit to 1-25 and rejects q shorter than two characters', async () => {
+    const one = await ctx.app.inject({ method: 'GET', url: '/v1/validators/search?q=a&limit=1' });
+    expect(one.statusCode).toBe(400);
+
+    const limited = await ctx.app.inject({
+      method: 'GET',
+      url: '/v1/validators/search?q=validator&limit=0',
+    });
+    expect(limited.statusCode).toBe(200);
+    expect((limited.json() as { limit: number; items: unknown[] }).limit).toBe(1);
+
+    const capped = await ctx.app.inject({
+      method: 'GET',
+      url: '/v1/validators/search?q=validator&limit=100',
+    });
+    expect(capped.statusCode).toBe(200);
+    expect((capped.json() as { limit: number }).limit).toBe(25);
+    await ctx.app.close();
+  });
+
+  it('excludes opted-out validators and matches keybase usernames', async () => {
+    ctx.optedOutVotes.add(VOTE_2);
+    const hidden = await ctx.app.inject({ method: 'GET', url: '/v1/validators/search?q=trillium' });
+    expect(hidden.statusCode).toBe(200);
+    expect((hidden.json() as { items: unknown[] }).items).toEqual([]);
+
+    const keybase = await ctx.app.inject({
+      method: 'GET',
+      url: '/v1/validators/search?q=smallblocks',
+    });
+    expect(keybase.statusCode).toBe(200);
+    expect((keybase.json() as { items: Array<{ vote: string }> }).items[0]?.vote).toBe(VOTE_3);
+    await ctx.app.close();
+  });
+});
 
 describe('GET /v1/validators/:idOrVote/current-epoch', () => {
   let ctx: Ctx;

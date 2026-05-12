@@ -1,6 +1,6 @@
 {
   "name": "whoearns-live",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "AI-assisted, open-source Solana validator income intelligence service: indexer, API, and UI.",
   "license": "MIT",
   "type": "module",

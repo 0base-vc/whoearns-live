@@ -65,6 +65,7 @@ export interface EpochValidatorStats {
   votePubkey: VotePubkey;
   identityPubkey: IdentityPubkey;
   slotsAssigned: number;
+  slotsElapsedAssigned: number;
   slotsProduced: number;
   slotsSkipped: number;
   /**
@@ -123,6 +124,8 @@ export interface EpochValidatorStats {
    */
   activatedStakeLamports: bigint | null;
   slotsUpdatedAt: Date | null;
+  slotWindowLastSlot: Slot | null;
+  slotWindowUpdatedAt: Date | null;
   feesUpdatedAt: Date | null;
   medianFeeUpdatedAt: Date | null;
   medianBaseFeeUpdatedAt: Date | null;
@@ -287,6 +290,12 @@ export interface ValidatorCurrentEpochResponse {
   hasIncome: boolean;
 
   slotsAssigned: number | null;
+  /**
+   * Current-epoch leader slots that have elapsed through the finalized safe
+   * window. Null on rows without slot data. Closed epochs may return 0 for
+   * legacy rows; use `slotsAssigned` for final-epoch denominators.
+   */
+  slotsElapsedAssigned: number | null;
   slotsProduced: number | null;
   slotsSkipped: number | null;
 

@@ -1,12 +1,19 @@
 import type pg from 'pg';
 import { toLamports } from '../../core/lamports.js';
-import type { Epoch, EpochValidatorStats, IdentityPubkey, VotePubkey } from '../../types/domain.js';
+import type {
+  Epoch,
+  EpochValidatorStats,
+  IdentityPubkey,
+  Slot,
+  VotePubkey,
+} from '../../types/domain.js';
 
 interface StatsRow {
   epoch: string;
   vote_pubkey: string;
   identity_pubkey: string;
   slots_assigned: number;
+  slots_elapsed_assigned: number;
   slots_produced: number;
   slots_skipped: number;
   block_fees_total_lamports: string;
@@ -23,6 +30,8 @@ interface StatsRow {
   median_total_lamports: string | null;
   activated_stake_lamports: string | null;
   slots_updated_at: Date | null;
+  slot_window_last_slot: string | null;
+  slot_window_updated_at: Date | null;
   fees_updated_at: Date | null;
   median_fee_updated_at: Date | null;
   median_base_fee_updated_at: Date | null;
@@ -38,6 +47,7 @@ function rowToStats(row: StatsRow): EpochValidatorStats {
     votePubkey: row.vote_pubkey,
     identityPubkey: row.identity_pubkey,
     slotsAssigned: row.slots_assigned,
+    slotsElapsedAssigned: row.slots_elapsed_assigned,
     slotsProduced: row.slots_produced,
     slotsSkipped: row.slots_skipped,
     blockFeesTotalLamports: toLamports(row.block_fees_total_lamports),
@@ -67,6 +77,9 @@ function rowToStats(row: StatsRow): EpochValidatorStats {
     activatedStakeLamports:
       row.activated_stake_lamports === null ? null : toLamports(row.activated_stake_lamports),
     slotsUpdatedAt: row.slots_updated_at,
+    slotWindowLastSlot:
+      row.slot_window_last_slot === null ? null : Number(row.slot_window_last_slot),
+    slotWindowUpdatedAt: row.slot_window_updated_at,
     feesUpdatedAt: row.fees_updated_at,
     medianFeeUpdatedAt: row.median_fee_updated_at,
     medianBaseFeeUpdatedAt: row.median_base_fee_updated_at,
@@ -82,6 +95,8 @@ export interface UpsertSlotStatsArgs {
   votePubkey: VotePubkey;
   identityPubkey: IdentityPubkey;
   slotsAssigned: number;
+  slotsElapsedAssigned?: number;
+  slotWindowLastSlot?: Slot | null;
   slotsProduced: number;
   slotsSkipped: number;
   /**
@@ -99,6 +114,8 @@ export interface EnsureSlotStatsRowArgs {
   votePubkey: VotePubkey;
   identityPubkey: IdentityPubkey;
   slotsAssigned: number;
+  slotsElapsedAssigned?: number;
+  slotWindowLastSlot?: Slot | null;
   activatedStakeLamports?: bigint | null;
 }
 
@@ -150,7 +167,8 @@ export interface AddIncomeDeltaArgs {
  * migration is mid-flight. Cheap.
  */
 const STATS_COLS = `epoch, vote_pubkey, identity_pubkey,
-  slots_assigned, slots_produced, slots_skipped,
+  slots_assigned, COALESCE(slots_elapsed_assigned, 0) AS slots_elapsed_assigned,
+  slots_produced, slots_skipped,
   block_fees_total_lamports, median_fee_lamports,
   COALESCE(block_base_fees_total_lamports, 0) AS block_base_fees_total_lamports,
   median_base_fee_lamports,
@@ -159,7 +177,8 @@ const STATS_COLS = `epoch, vote_pubkey, identity_pubkey,
   COALESCE(block_tips_total_lamports, 0) AS block_tips_total_lamports,
   median_tip_lamports, median_total_lamports,
   activated_stake_lamports,
-  slots_updated_at, fees_updated_at, median_fee_updated_at,
+  slots_updated_at, slot_window_last_slot, slot_window_updated_at,
+  fees_updated_at, median_fee_updated_at,
   median_base_fee_updated_at, median_priority_fee_updated_at,
   tips_updated_at, median_tip_updated_at, median_total_updated_at`;
 
@@ -199,6 +218,81 @@ export type LeaderboardSort =
   | 'skip_rate'
   | 'median_fee';
 
+export type LeaderboardWindow = 'live_trend' | 'current_only' | 'stable_trend' | 'final_epoch';
+
+export type LeaderboardWindowSort =
+  | 'income_per_slot'
+  | 'total_income'
+  | 'mev_tips'
+  | 'fees'
+  | 'skip_rate';
+
+export interface LeaderboardWindowEpoch {
+  epoch: Epoch;
+  isCurrent: boolean;
+}
+
+interface WindowedLeaderboardStatsRow {
+  vote_pubkey: string;
+  identity_pubkey: string;
+  window_slots: string;
+  slots_assigned: string;
+  slots_elapsed_assigned: string;
+  slots_produced: string;
+  slots_skipped: string;
+  block_fees_total_lamports: string;
+  block_tips_total_lamports: string;
+  current_income_lamports: string;
+  current_elapsed_assigned: string;
+  closed_epochs_included: string;
+  slot_window_last_slot: string | null;
+  slot_window_updated_at: Date | null;
+  last_updated_at: Date | null;
+  activated_stake_lamports: string | null;
+}
+
+export interface WindowedLeaderboardStats {
+  votePubkey: VotePubkey;
+  identityPubkey: IdentityPubkey;
+  windowSlots: number;
+  slotsAssigned: number;
+  slotsElapsedAssigned: number;
+  slotsProduced: number;
+  slotsSkipped: number;
+  blockFeesTotalLamports: bigint;
+  blockTipsTotalLamports: bigint;
+  currentIncomeLamports: bigint;
+  currentElapsedAssignedSlots: number;
+  closedEpochsIncluded: number;
+  slotWindowLastSlot: Slot | null;
+  slotWindowUpdatedAt: Date | null;
+  lastUpdatedAt: Date | null;
+  activatedStakeLamports: bigint | null;
+}
+
+function rowToWindowedStats(row: WindowedLeaderboardStatsRow): WindowedLeaderboardStats {
+  return {
+    votePubkey: row.vote_pubkey,
+    identityPubkey: row.identity_pubkey,
+    windowSlots: Number(row.window_slots),
+    slotsAssigned: Number(row.slots_assigned),
+    slotsElapsedAssigned: Number(row.slots_elapsed_assigned),
+    slotsProduced: Number(row.slots_produced),
+    slotsSkipped: Number(row.slots_skipped),
+    blockFeesTotalLamports: toLamports(row.block_fees_total_lamports),
+    blockTipsTotalLamports: toLamports(row.block_tips_total_lamports),
+    currentIncomeLamports: toLamports(row.current_income_lamports),
+    currentElapsedAssignedSlots: Number(row.current_elapsed_assigned),
+    closedEpochsIncluded: Number(row.closed_epochs_included),
+    slotWindowLastSlot:
+      row.slot_window_last_slot === null ? null : Number(row.slot_window_last_slot),
+    slotWindowUpdatedAt: row.slot_window_updated_at,
+    lastUpdatedAt: row.last_updated_at,
+    activatedStakeLamports:
+      row.activated_stake_lamports === null ? null : toLamports(row.activated_stake_lamports),
+  };
+}
+
 export class StatsRepository {
   constructor(private readonly pool: pg.Pool) {}
 
@@ -218,32 +312,39 @@ export class StatsRepository {
       args.activatedStakeLamports === undefined || args.activatedStakeLamports === null
         ? null
         : args.activatedStakeLamports.toString();
+    const elapsedAssigned = args.slotsElapsedAssigned ?? 0;
+    const windowLastSlot = args.slotWindowLastSlot ?? null;
     await this.pool.query(
       `INSERT INTO epoch_validator_stats (
          epoch, vote_pubkey, identity_pubkey,
-         slots_assigned, slots_produced, slots_skipped,
+         slots_assigned, slots_elapsed_assigned, slots_produced, slots_skipped,
          block_fees_total_lamports, block_base_fees_total_lamports,
          block_priority_fees_total_lamports, block_tips_total_lamports,
          activated_stake_lamports,
-         slots_updated_at, fees_updated_at
+         slots_updated_at, slot_window_last_slot, slot_window_updated_at, fees_updated_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0, 0, $7::numeric, NOW(), NULL)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, 0, 0, $8::numeric, NOW(), $9::bigint, NOW(), NULL)
        ON CONFLICT (epoch, vote_pubkey) DO UPDATE SET
          identity_pubkey          = EXCLUDED.identity_pubkey,
          slots_assigned           = EXCLUDED.slots_assigned,
+         slots_elapsed_assigned   = EXCLUDED.slots_elapsed_assigned,
          slots_produced           = EXCLUDED.slots_produced,
          slots_skipped            = EXCLUDED.slots_skipped,
          activated_stake_lamports = COALESCE(EXCLUDED.activated_stake_lamports,
                                              epoch_validator_stats.activated_stake_lamports),
-         slots_updated_at         = NOW()`,
+         slots_updated_at         = NOW(),
+         slot_window_last_slot    = EXCLUDED.slot_window_last_slot,
+         slot_window_updated_at   = NOW()`,
       [
         args.epoch,
         args.votePubkey,
         args.identityPubkey,
         args.slotsAssigned,
+        elapsedAssigned,
         args.slotsProduced,
         args.slotsSkipped,
         stakeParam,
+        windowLastSlot,
       ],
     );
   }
@@ -261,15 +362,17 @@ export class StatsRepository {
     const values: string[] = [];
     for (let i = 0; i < rows.length; i += 1) {
       const row = rows[i]!;
-      const base = i * 5;
+      const base = i * 7;
       values.push(
-        `($${base + 1}::bigint, $${base + 2}, $${base + 3}, $${base + 4}::int, $${base + 5}::numeric)`,
+        `($${base + 1}::bigint, $${base + 2}, $${base + 3}, $${base + 4}::int, $${base + 5}::int, $${base + 6}::bigint, $${base + 7}::numeric)`,
       );
       params.push(
         row.epoch,
         row.votePubkey,
         row.identityPubkey,
         row.slotsAssigned,
+        row.slotsElapsedAssigned ?? 0,
+        row.slotWindowLastSlot ?? null,
         row.activatedStakeLamports === undefined || row.activatedStakeLamports === null
           ? null
           : row.activatedStakeLamports.toString(),
@@ -279,20 +382,23 @@ export class StatsRepository {
     const { rowCount } = await this.pool.query(
       `INSERT INTO epoch_validator_stats (
          epoch, vote_pubkey, identity_pubkey,
-         slots_assigned, slots_produced, slots_skipped,
-         activated_stake_lamports, slots_updated_at
+         slots_assigned, slots_elapsed_assigned, slots_produced, slots_skipped,
+         activated_stake_lamports, slots_updated_at, slot_window_last_slot, slot_window_updated_at
        )
        SELECT
          v.epoch,
          v.vote_pubkey,
          v.identity_pubkey,
          v.slots_assigned,
+         v.slots_elapsed_assigned,
          0,
          0,
          v.activated_stake_lamports,
-         NOW()
+         NOW(),
+         v.slot_window_last_slot,
+         CASE WHEN v.slot_window_last_slot IS NULL THEN NULL ELSE NOW() END
        FROM (VALUES ${values.join(', ')})
-         AS v(epoch, vote_pubkey, identity_pubkey, slots_assigned, activated_stake_lamports)
+         AS v(epoch, vote_pubkey, identity_pubkey, slots_assigned, slots_elapsed_assigned, slot_window_last_slot, activated_stake_lamports)
        ON CONFLICT (epoch, vote_pubkey) DO NOTHING`,
       params,
     );
@@ -763,5 +869,134 @@ export class StatsRepository {
       [epoch, safe],
     );
     return rows.map(rowToStats);
+  }
+
+  async findTopNByWindow(args: {
+    epochs: LeaderboardWindowEpoch[];
+    limit: number;
+    sort?: LeaderboardWindowSort;
+    minWindowSlots?: number;
+  }): Promise<WindowedLeaderboardStats[]> {
+    if (args.epochs.length === 0) return [];
+
+    const safeLimit = Math.max(1, Math.min(args.limit, 500));
+    const minWindowSlots = Math.max(1, args.minWindowSlots ?? 4);
+    const sort = args.sort ?? 'income_per_slot';
+    const order = ((): string => {
+      switch (sort) {
+        case 'total_income':
+          return `window_income_lamports DESC, window_slots DESC`;
+        case 'mev_tips':
+          return `block_tips_total_lamports DESC, window_income_lamports DESC`;
+        case 'fees':
+          return `block_fees_total_lamports DESC, window_income_lamports DESC`;
+        case 'skip_rate':
+          return `(slots_skipped::float / NULLIF(window_slots, 0)) ASC NULLS LAST,
+                  window_income_lamports DESC`;
+        case 'income_per_slot':
+        default:
+          return `(window_income_lamports::numeric / NULLIF(window_slots, 0)) DESC NULLS LAST,
+                  window_income_lamports DESC`;
+      }
+    })();
+
+    const params: unknown[] = [];
+    const values: string[] = [];
+    for (let i = 0; i < args.epochs.length; i += 1) {
+      const epoch = args.epochs[i]!;
+      const base = i * 3;
+      values.push(`($${base + 1}::bigint, $${base + 2}::boolean, $${base + 3}::int)`);
+      params.push(epoch.epoch, epoch.isCurrent, epoch.isCurrent ? 2 : 1);
+    }
+    const minParam = params.length + 1;
+    const limitParam = params.length + 2;
+    params.push(minWindowSlots, safeLimit);
+
+    const { rows } = await this.pool.query<WindowedLeaderboardStatsRow>(
+      `WITH included(epoch, is_current, priority) AS (
+         VALUES ${values.join(', ')}
+       ),
+       windowed AS (
+         SELECT
+           evs.vote_pubkey,
+           (ARRAY_AGG(evs.identity_pubkey ORDER BY included.priority DESC, evs.epoch DESC))[1]
+             AS identity_pubkey,
+           SUM(CASE
+             WHEN included.is_current THEN COALESCE(evs.slots_elapsed_assigned, 0)
+             ELSE evs.slots_assigned
+           END)::bigint AS window_slots,
+           SUM(evs.slots_assigned)::bigint AS slots_assigned,
+           SUM(CASE
+             WHEN included.is_current THEN COALESCE(evs.slots_elapsed_assigned, 0)
+             ELSE 0
+           END)::bigint AS slots_elapsed_assigned,
+           SUM(evs.slots_produced)::bigint AS slots_produced,
+           SUM(evs.slots_skipped)::bigint AS slots_skipped,
+           SUM(evs.block_fees_total_lamports)::numeric AS block_fees_total_lamports,
+           SUM(COALESCE(evs.block_tips_total_lamports, 0))::numeric AS block_tips_total_lamports,
+           SUM(evs.block_fees_total_lamports + COALESCE(evs.block_tips_total_lamports, 0))::numeric
+             AS window_income_lamports,
+           SUM(CASE
+             WHEN included.is_current
+             THEN evs.block_fees_total_lamports + COALESCE(evs.block_tips_total_lamports, 0)
+             ELSE 0
+           END)::numeric AS current_income_lamports,
+           SUM(CASE
+             WHEN included.is_current THEN COALESCE(evs.slots_elapsed_assigned, 0)
+             ELSE 0
+           END)::bigint AS current_elapsed_assigned,
+           COUNT(*) FILTER (WHERE included.is_current IS FALSE)::bigint AS closed_epochs_included,
+           MAX(evs.slot_window_last_slot) FILTER (WHERE included.is_current) AS slot_window_last_slot,
+           MAX(evs.slot_window_updated_at) FILTER (WHERE included.is_current)
+             AS slot_window_updated_at,
+           MAX(GREATEST(
+             COALESCE(evs.fees_updated_at, '-infinity'::timestamptz),
+             COALESCE(evs.tips_updated_at, '-infinity'::timestamptz),
+             COALESCE(evs.slots_updated_at, '-infinity'::timestamptz),
+             COALESCE(evs.slot_window_updated_at, '-infinity'::timestamptz)
+           )) AS last_updated_at,
+          (ARRAY_AGG(evs.activated_stake_lamports ORDER BY included.priority DESC, evs.epoch DESC)
+             FILTER (WHERE evs.activated_stake_lamports IS NOT NULL))[1]
+             AS activated_stake_lamports
+          FROM included
+          JOIN epoch_validator_stats evs ON evs.epoch = included.epoch
+         WHERE evs.slots_updated_at IS NOT NULL
+           AND (
+             evs.fees_updated_at IS NOT NULL
+             OR evs.tips_updated_at IS NOT NULL
+             OR EXISTS (
+               SELECT 1
+                 FROM processed_blocks pb
+                WHERE pb.epoch = evs.epoch
+                  AND pb.leader_identity = evs.identity_pubkey
+                LIMIT 1
+             )
+           )
+         GROUP BY evs.vote_pubkey
+       )
+       SELECT
+         vote_pubkey,
+         identity_pubkey,
+         window_slots,
+         slots_assigned,
+         slots_elapsed_assigned,
+         slots_produced,
+         slots_skipped,
+         block_fees_total_lamports,
+         block_tips_total_lamports,
+         current_income_lamports,
+         current_elapsed_assigned,
+         closed_epochs_included,
+         slot_window_last_slot,
+         slot_window_updated_at,
+         NULLIF(last_updated_at, '-infinity'::timestamptz) AS last_updated_at,
+         activated_stake_lamports
+        FROM windowed
+       WHERE window_slots >= $${minParam}
+       ORDER BY ${order}
+       LIMIT $${limitParam}`,
+      params,
+    );
+    return rows.map(rowToWindowedStats);
   }
 }

@@ -68,7 +68,7 @@ helm upgrade --install whoearns-live deploy/helm/whoearns-live \
 helm upgrade whoearns-live deploy/helm/whoearns-live \
   --namespace whoearns-live \
   --reuse-values \
-  --set image.tag="0.3.0"
+  --set image.tag="0.4.0"
 ```
 
 Migrations run inside the container on start before the API and worker boot.

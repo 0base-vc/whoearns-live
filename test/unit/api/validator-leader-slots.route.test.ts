@@ -5,6 +5,7 @@ import { setErrorHandler } from '../../../src/api/error-handler.js';
 import validatorLeaderSlotsRoutes from '../../../src/api/routes/validator-leader-slots.route.js';
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
 import type { ProcessedBlocksRepository } from '../../../src/storage/repositories/processed-blocks.repo.js';
+import type { ProfilesRepository } from '../../../src/storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../../src/storage/repositories/validators.repo.js';
 import {
@@ -29,6 +30,7 @@ interface Ctx {
   validators: FakeValidatorsRepo;
   epochs: FakeEpochsRepo;
   blocks: FakeProcessedBlocksRepo;
+  optedOutVotes: Set<string>;
 }
 
 async function makeCtx(): Promise<Ctx> {
@@ -36,6 +38,7 @@ async function makeCtx(): Promise<Ctx> {
   const validators = new FakeValidatorsRepo();
   const epochs = new FakeEpochsRepo();
   const blocks = new FakeProcessedBlocksRepo();
+  const optedOutVotes = new Set<string>();
 
   const app = makeTestApp(silent);
   setErrorHandler(app, silent);
@@ -44,8 +47,21 @@ async function makeCtx(): Promise<Ctx> {
     validatorsRepo: validators as unknown as ValidatorsRepository,
     epochsRepo: epochs as unknown as EpochsRepository,
     processedBlocksRepo: blocks as unknown as ProcessedBlocksRepository,
+    profilesRepo: {
+      findByVote: async (vote: string) =>
+        optedOutVotes.has(vote)
+          ? {
+              votePubkey: vote,
+              twitterHandle: null,
+              hideFooterCta: false,
+              optedOut: true,
+              narrativeOverride: null,
+              updatedAt: new Date(),
+            }
+          : null,
+    } as unknown as ProfilesRepository,
   });
-  return { app, stats, validators, epochs, blocks };
+  return { app, stats, validators, epochs, blocks, optedOutVotes };
 }
 
 describe('GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots', () => {
@@ -120,6 +136,16 @@ describe('GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots', () => {
     const res = await ctx.app.inject({
       method: 'GET',
       url: `/v1/validators/${VOTE_2}/epochs/500/leader-slots`,
+    });
+    expect(res.statusCode).toBe(404);
+    await ctx.app.close();
+  });
+
+  it('redacts opted-out validators', async () => {
+    ctx.optedOutVotes.add(VOTE_1);
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/epochs/500/leader-slots`,
     });
     expect(res.statusCode).toBe(404);
     await ctx.app.close();

@@ -152,11 +152,9 @@ ${urls.join('\n')}
   });
 
   app.get('/robots.txt', async (_request, reply) => {
-    // Whitelist the major AI crawlers to /v1/leaderboard and
-    // /v1/epoch/current — both are single-request, modest-payload
-    // endpoints that satisfy 99% of citation needs without inviting
-    // a 2000-validator history scrape. `*` keeps the existing
-    // disallow on /v1/* for unknown agents.
+    // Whitelist the major AI crawlers to modest public endpoints that
+    // satisfy citation needs without inviting a 2000-validator history
+    // scrape. `*` keeps the existing disallow on /v1/* for unknown agents.
     const body = `User-agent: *
 Allow: /
 Allow: /llms.txt
@@ -171,17 +169,21 @@ Disallow: /healthz
 User-agent: GPTBot
 Allow: /v1/leaderboard
 Allow: /v1/epoch/current
+Allow: /v1/validators/search
 
 User-agent: ClaudeBot
 Allow: /v1/leaderboard
 Allow: /v1/epoch/current
+Allow: /v1/validators/search
 
 User-agent: PerplexityBot
 Allow: /v1/leaderboard
 Allow: /v1/epoch/current
+Allow: /v1/validators/search
 
 User-agent: Googlebot
 Allow: /v1/leaderboard
+Allow: /v1/validators/search
 
 Sitemap: ${SITE_URL}/sitemap.xml
 `;
@@ -204,7 +206,7 @@ Sitemap: ${SITE_URL}/sitemap.xml
 
 ## Core pages
 
-- ${SITE_URL}/: Leaderboard — top validators by per-epoch performance / income
+- ${SITE_URL}/: Leaderboard — top validators by live-trend income per slot
 - ${SITE_URL}/income/{vote}: Per-validator history (vote OR identity pubkey)
 - ${SITE_URL}/compare: Side-by-side comparison of two validators
 - ${SITE_URL}/glossary: Plain-language definitions of Solana validator terms
@@ -264,7 +266,8 @@ CC0 (public domain).
 ## AI interpretation contract
 
 - Treat AI-written summaries as commentary over the API, not as source data.
-- Prefer closed-epoch records for rankings and public claims.
+- Use live-trend leaderboard records for current discovery; prefer final
+  closed-epoch records for durable public claims.
 - Say "tracked validators" or "watched set" unless a query covers every
   active validator.
 - Do not describe validator income as delegator APY unless commission and
@@ -290,9 +293,8 @@ CC0 (public domain).
 - All SOL amounts are STRING decimals with up to 9 decimal places.
 - All timestamps are ISO 8601 UTC strings.
 - All pubkeys are base58-encoded strings.
-- "performance" = (blockFeesTotal + blockTipsTotal) / slotsAssigned —
-  lamports per assigned slot. Stake-neutral and commission-neutral:
-  measures raw block-production skill.
+- "incomePerSlot" = (blockFeesTotal + blockTipsTotal) / windowSlots —
+  lamports per leader slot in the selected leaderboard window.
 - "incomePerStake" = (blockFeesTotal + blockTipsTotal) / activatedStake —
   per-epoch yield, raw fraction. Annualize by multiplying ~182
   epochs/year for an APR. This is OPERATOR side, not delegator yield.
@@ -303,13 +305,20 @@ CC0 (public domain).
 Returns the running epoch: { epoch, firstSlot, lastSlot, slotCount,
 currentSlot, slotsElapsed, isClosed, observedAt }. Call this first.
 
-### GET /v1/leaderboard?sort=performance&limit=25
-Top-N validators ranked by chosen metric for the latest closed epoch.
-Sort options: performance | total_income | income_per_stake |
-skip_rate | median_fee. Limit max 500. Each row has rank, vote,
-identity, name, iconUrl, website, slot counts, fee/MEV/total income,
-performance, activatedStake, incomePerStake, claimed (operator
-verified ownership).
+### GET /v1/leaderboard?window=live_trend&sort=income_per_slot&limit=25
+Top-N validators ranked by chosen window. Default window is live_trend:
+current epoch elapsed leader slots plus the latest final epoch. Other
+windows: current_only | stable_trend | final_epoch. Sort options:
+income_per_slot | total_income | mev_tips | fees | skip_rate. Limit max
+500. Each row has rank, vote, identity, name, iconUrl, website, window
+slot counts, fee/MEV/total income, income per slot, sampleStatus, and
+claimed (operator verified ownership).
+
+### GET /v1/validators/search?q=0base&limit=10
+DB-only validator search. Matches validator name, vote prefix, identity
+prefix, and keybase username. Does not call Solana RPC and excludes
+opted-out validators. Returns vote, identity, name, iconUrl, website,
+and claimed.
 
 ### GET /v1/validators/{idOrVote}/history?limit=20
 Per-epoch history for a specific validator. Pass either a vote or
@@ -335,8 +344,8 @@ Body: { "votes": ["Vote111...", ...] }. Bulk lookup; returns
 ## Rate limit
 
 Default 60 requests / minute / IP. AI crawlers (GPTBot, ClaudeBot,
-PerplexityBot) are whitelisted to /v1/leaderboard and
-/v1/epoch/current via robots.txt. MCP calls use the same public
+PerplexityBot) are whitelisted to /v1/leaderboard, /v1/epoch/current,
+and /v1/validators/search via robots.txt. MCP calls use the same public
 per-IP budget. Higher-volume queries should run a self-hosted indexer.
 
 ## Error envelope
@@ -351,8 +360,9 @@ The MCP server at ${SITE_URL}/mcp (Streamable HTTP, stateless)
 exposes four tools:
 
 - get_current_epoch(): Returns current epoch state.
-- get_leaderboard(sort?, limit?): Ranked validators for the latest
-  closed epoch.
+- get_leaderboard(window?, sort?, minWindowSlots?, limit?): Ranked
+  validators for live_trend (default), current_only, stable_trend, or
+  final_epoch. Default sort is income_per_slot.
 - get_validator(voteOrIdentity, epochLimit?): Per-epoch history.
 - get_validator_leader_slots(voteOrIdentity, epoch): Stored
   leader-slot facts and data-quality fields for one validator epoch.
@@ -390,7 +400,7 @@ GitHub: https://github.com/0base-vc/whoearns-live (MIT)
       description_for_human:
         'Query AI-assisted Solana validator income intelligence: per-epoch block fees, on-chain Jito tips, and cluster rankings.',
       description_for_model:
-        'Use to look up AI-assisted Solana validator income intelligence from reproducible on-chain data. Provides per-epoch slot production, block-fee earnings (base + priority), on-chain Jito tips, cluster leaderboard rankings, and stored leader-slot facts for watched validators. Accepts both vote and identity pubkeys. Closed-epoch data is final; running-epoch data is a live lower bound. Numeric values are strings (parse lamports as BigInt). Missing slot or income data is represented by null numerics and hasSlots/hasIncome booleans; leader-slot completeness is represented by quality.complete and pending/fetch-error counts. Do not treat operator income as delegator APY unless commission and distribution policy are explicitly modeled.',
+        'Use to look up AI-assisted Solana validator income intelligence from reproducible on-chain data. Provides validator name search, per-epoch slot production, block-fee earnings (base + priority), on-chain Jito tips, live-trend leaderboard rankings, and stored leader-slot facts for watched validators. Accepts both vote and identity pubkeys. Closed-epoch data is final; running-epoch data is a live lower bound. Numeric values are strings (parse lamports as BigInt). Missing slot or income data is represented by null numerics and hasSlots/hasIncome booleans; leader-slot completeness is represented by quality.complete and pending/fetch-error counts. Do not treat operator income as delegator APY unless commission and distribution policy are explicitly modeled.',
       auth: { type: 'none' },
       api: {
         type: 'openapi',

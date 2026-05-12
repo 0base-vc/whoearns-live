@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: WhoEarns API
-  version: '0.3.0'
+  version: '0.4.0'
   description: |
     Read-only HTTP API for WhoEarns, an AI-assisted open-source Solana
     validator income intelligence service by 0base.vc. Income is derived
@@ -14,6 +14,11 @@ info:
     enums were removed. Current-epoch values are lower bounds and can increase
     until the epoch closes; closed-epoch rows are marked with `isFinal=true`.
     Repository migration note: `docs/migrations/v0.3-api.md`.
+
+    **v0.4 leaderboard/search update.** `/v1/leaderboard` now defaults to
+    `window=live_trend&sort=income_per_slot`; validator name search is exposed
+    at `/v1/validators/search`. Repository migration note:
+    `docs/migrations/v0.4-api.md`.
 
 servers:
   - url: http://localhost:8080
@@ -53,6 +58,44 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /v1/validators/search:
+    get:
+      summary: Search known validators by name or pubkey
+      description: |
+        DB-only search over validator `name`, `vote_pubkey`, `identity_pubkey`,
+        and `keybase_username`. This endpoint never calls Solana RPC and
+        excludes opted-out validators.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 96
+          description: Name substring, keybase username, vote prefix, or identity prefix.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 25
+            default: 10
+          description: Result count. Values outside 1-25 are clamped.
+      responses:
+        '200':
+          description: Matching validators from the local database.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidatorSearchResponse'
+        '400':
+          description: Query is missing, too short, or malformed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /v1/validators/{idOrVote}/current-epoch:
     get:
@@ -184,37 +227,36 @@ paths:
 
   /v1/leaderboard:
     get:
-      summary: Top-N cluster leaderboard for a closed epoch
+      summary: Top-N cluster leaderboard
       description: |
-        Ranks validators by one of five sort modes (see the `sort` query param).
-        Defaults to the most recent closed epoch; clients can force an epoch
-        via `?epoch=N`. Empty-state returns `200` with `items: []` — first-boot
-        clusters and unsupported sort/epoch combinations never 404.
+        Ranks validators using a selected leaderboard window. The default is
+        `window=live_trend&sort=income_per_slot`, which combines the running
+        epoch so far with the latest final epoch. Empty-state returns `200`
+        with `items: []`.
+
+        **Windows:**
+          - `live_trend` (DEFAULT): current epoch elapsed leader slots + latest
+            final epoch.
+          - `current_only`: current epoch elapsed leader slots only.
+          - `stable_trend`: current epoch elapsed leader slots + two latest
+            final epochs.
+          - `final_epoch`: latest final epoch only, or `?epoch=N` when an
+            explicit closed epoch is requested.
 
         **Sort modes:**
-          - `performance` (DEFAULT): `(block_fees + block_tips) / slots_assigned`,
-            DESC. Stake-neutral + commission-neutral skill metric — captures
-            block-fee quality, Jito-tip capture, and reliability in one number.
-            Recommended for "who runs their validator well, regardless of
-            size". Mathematically, performance = per-block yield × (1 −
-            skip_rate).
-          - `total_income`: `block_fees + block_tips`, DESC. Stake-biased (bigger
-            validators earn more in absolute terms).
-          - `income_per_stake`: `(block_fees + block_tips) / activated_stake`, DESC.
-            Operator revenue per unit of stake — note: block fees + tips bypass
-            validator commission, so this is NOT a delegator APR.
-            Rows missing a stake snapshot (pre-migration epochs) are
-            filtered out; the endpoint may return an empty list for older
-            epochs.
-          - `skip_rate`: `slots_skipped / slots_assigned`, ASC. Lower = more
-            reliable. Reliability / uptime proxy.
-          - `median_fee`: per-validator median block fee, DESC. Reflects
-            tx-selection / priority-fee capture quality.
+          - `income_per_slot` (DEFAULT): `(block_fees + block_tips) / windowSlots`,
+            DESC. Stake-neutral income capture across the selected window.
+          - `total_income`: `block_fees + block_tips`, DESC.
+          - `mev_tips`: on-chain Jito tips, DESC.
+          - `fees`: base + priority block fees, DESC.
+          - `skip_rate`: `slots_skipped / windowSlots`, ASC. Lower is better.
 
-        Rows with `slotsAssigned < 30` are returned but marked by the UI
-        as low-sample (a single tip-heavy block can dominate such rows).
-        Clients that want stricter filtering should apply their own
-        threshold on `slotsAssigned` after the fetch.
+        Rows below `minWindowSlots` are filtered. Returned rows also include a
+        `sampleStatus` hint (`low`, `medium`, `normal`) for UI dimming.
+        Compatibility: bare `?epoch=N` is treated as
+        `window=final_epoch&epoch=N`; legacy sort aliases `performance` and
+        `income_per_stake` map to `income_per_slot`, and `median_fee` maps to
+        `fees`.
       parameters:
         - name: epoch
           in: query
@@ -222,7 +264,7 @@ paths:
           schema:
             type: integer
             minimum: 0
-          description: Target epoch. Defaults to the most recent closed epoch.
+          description: Explicit closed epoch. Only valid with `window=final_epoch`; a bare `?epoch=N` request defaults to that window for v0.3 compatibility.
         - name: limit
           in: query
           required: false
@@ -231,16 +273,29 @@ paths:
             minimum: 1
             maximum: 500
             default: 100
+        - name: window
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/LeaderboardWindow'
+          description: Leaderboard sample window. Default `live_trend`.
+        - name: minWindowSlots
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 4
+          description: Minimum denominator slots required for a row.
         - name: sort
           in: query
           required: false
           schema:
-            type: string
-            enum: [performance, total_income, income_per_stake, skip_rate, median_fee]
-            default: performance
+            $ref: '#/components/schemas/LeaderboardSort'
       responses:
         '200':
-          description: Ranked validator list for the target epoch.
+          description: Ranked validator list for the selected window.
           content:
             application/json:
               schema:
@@ -252,6 +307,11 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '404':
           description: Explicit `?epoch=N` references an unknown epoch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Explicit `?epoch=N` references an epoch that is not closed yet.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -372,20 +432,20 @@ paths:
 
   /mcp:
     get:
-      summary: Streamable HTTP MCP endpoint
+      summary: MCP streaming verb disabled
       responses:
-        '200':
-          description: MCP transport response.
+        '405':
+          description: Public stateless MCP accepts POST only.
     post:
       summary: Streamable HTTP MCP endpoint
       responses:
         '200':
           description: MCP transport response.
     delete:
-      summary: Streamable HTTP MCP session cleanup endpoint
+      summary: MCP session cleanup verb disabled
       responses:
-        '200':
-          description: MCP transport response.
+        '405':
+          description: Public stateless MCP accepts POST only.
 
 components:
   parameters:
@@ -837,12 +897,43 @@ components:
               properties:
                 updatedAt: { type: string, format: date-time }
 
+    ValidatorSearchItem:
+      type: object
+      required: [vote, identity, name, iconUrl, website, claimed]
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+        name: { type: [string, 'null'] }
+        iconUrl: { type: [string, 'null'] }
+        website: { type: [string, 'null'] }
+        claimed: { type: boolean }
+
+    ValidatorSearchResponse:
+      type: object
+      required: [query, limit, count, items]
+      properties:
+        query: { type: string }
+        limit: { type: integer, minimum: 1, maximum: 25 }
+        count: { type: integer, minimum: 0 }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ValidatorSearchItem' }
+
+    LeaderboardWindow:
+      type: string
+      enum: [live_trend, current_only, stable_trend, final_epoch]
+      default: live_trend
+      description: |
+        Sample window for `/v1/leaderboard`. `live_trend` is current epoch
+        elapsed leader slots plus the latest final epoch.
+
     LeaderboardSort:
       type: string
-      enum: [performance, total_income, income_per_stake, skip_rate, median_fee]
+      enum: [income_per_slot, total_income, mev_tips, fees, skip_rate]
+      default: income_per_slot
       description: |
         Ranking mode for `/v1/leaderboard`. See endpoint doc for semantics.
-        `performance` (default) is the stake-neutral skill metric.
+        `income_per_slot` (default) is the stake-neutral live trend metric.
 
     LeaderboardItem:
       type: object
@@ -854,6 +945,7 @@ components:
         - iconUrl
         - website
         - slotsAssigned
+        - slotsElapsedAssigned
         - slotsProduced
         - slotsSkipped
         - skipRate
@@ -863,6 +955,15 @@ components:
         - blockTipsTotalSol
         - totalIncomeLamports
         - totalIncomeSol
+        - windowSlots
+        - windowIncomeLamports
+        - windowIncomeSol
+        - currentElapsedAssignedSlots
+        - currentIncomeLamports
+        - currentIncomeSol
+        - closedEpochsIncluded
+        - sampleStatus
+        - claimed
       properties:
         rank: { type: integer, minimum: 1 }
         vote: { type: string }
@@ -882,13 +983,14 @@ components:
             Validator's registered website URL. USER-SUPPLIED — treat
             as untrusted when rendering as a hyperlink.
         slotsAssigned: { type: integer, minimum: 0 }
+        slotsElapsedAssigned: { type: integer, minimum: 0 }
         slotsProduced: { type: integer, minimum: 0 }
         slotsSkipped: { type: integer, minimum: 0 }
         skipRate:
           type: [number, 'null']
           minimum: 0
           maximum: 1
-          description: slotsSkipped / slotsAssigned, null when no slots assigned.
+          description: slotsSkipped / windowSlots, null when no window slots.
         blockFeesTotalLamports: { type: string, description: bigint-as-string }
         blockFeesTotalSol: { type: string }
         blockTipsTotalLamports:
@@ -902,13 +1004,23 @@ components:
         performanceLamportsPerSlot:
           type: [string, 'null']
           description: |
-            Income per assigned slot (lamports). Stake-neutral +
-            commission-neutral skill metric. Null only when
-            `slotsAssigned === 0` (edge case on pre-slot-ingester
-            rows); normally non-null for all listed rows.
+            Backward-compatible alias for `incomeLamportsPerSlot`.
         performanceSolPerSlot: { type: [string, 'null'] }
-        medianFeeLamports: { type: [string, 'null'] }
-        medianFeeSol: { type: [string, 'null'] }
+        windowSlots: { type: integer, minimum: 0 }
+        windowIncomeLamports: { type: string, description: bigint-as-string }
+        windowIncomeSol: { type: string }
+        incomeLamportsPerSlot: { type: [string, 'null'], description: bigint-as-string }
+        incomeSolPerSlot: { type: [string, 'null'] }
+        currentElapsedAssignedSlots: { type: integer, minimum: 0 }
+        currentIncomeLamports: { type: string, description: bigint-as-string }
+        currentIncomeSol: { type: string }
+        closedEpochsIncluded: { type: integer, minimum: 0 }
+        sampleStatus:
+          type: string
+          enum: [low, medium, normal]
+        slotWindowLastSlot: { type: [integer, 'null'], minimum: 0 }
+        slotWindowUpdatedAt: { type: [string, 'null'], format: date-time }
+        lastUpdatedAt: { type: [string, 'null'], format: date-time }
         activatedStakeLamports:
           type: [string, 'null']
           description: |
@@ -923,14 +1035,48 @@ components:
             totalIncome / activatedStake as a dimensionless ratio per
             epoch. Multiply by 100 for percentage; null when stake
             data is unavailable.
+        claimed: { type: boolean }
 
     Leaderboard:
       type: object
-      required: [epoch, epochClosedAt, sort, count, limit, items, cluster]
+      required:
+        - epoch
+        - epochClosedAt
+        - window
+        - sort
+        - isFinal
+        - currentEpoch
+        - closedEpochsIncluded
+        - asOfSlot
+        - safeUpperSlot
+        - slotDenominator
+        - samplePolicy
+        - count
+        - limit
+        - items
+        - cluster
       properties:
         epoch: { type: integer, minimum: 0 }
         epochClosedAt: { type: [string, 'null'], format: date-time }
+        window: { $ref: '#/components/schemas/LeaderboardWindow' }
         sort: { $ref: '#/components/schemas/LeaderboardSort' }
+        isFinal: { type: boolean }
+        currentEpoch: { type: [integer, 'null'], minimum: 0 }
+        closedEpochsIncluded:
+          type: array
+          items: { type: integer, minimum: 0 }
+        asOfSlot: { type: [integer, 'null'], minimum: 0 }
+        safeUpperSlot: { type: [integer, 'null'], minimum: 0 }
+        slotDenominator:
+          type: string
+          enum: [window_slots]
+        samplePolicy:
+          type: object
+          required: [minWindowSlots, lowBelow, mediumBelow]
+          properties:
+            minWindowSlots: { type: integer, minimum: 1 }
+            lowBelow: { type: integer, minimum: 1 }
+            mediumBelow: { type: integer, minimum: 1 }
         count: { type: integer, minimum: 0 }
         limit: { type: integer, minimum: 1, maximum: 500 }
         items:

@@ -161,25 +161,69 @@ Status codes: 200 once the first epoch row is written; 404 before that.
 
 ## `GET /v1/leaderboard`
 
-Returns a ranked validator list for a closed epoch. Without `epoch`, the
-endpoint uses the latest closed epoch observed by the indexer.
+Returns a ranked validator list for a selected sample window. The default is
+`window=live_trend&sort=income_per_slot`, which combines the running epoch so
+far with the latest final epoch.
 
 Query params:
 
-- `epoch` — optional epoch number.
+- `window` — `live_trend` (default), `current_only`, `stable_trend`, or
+  `final_epoch`.
+- `epoch` — optional closed epoch number. Only valid with `window=final_epoch`.
 - `limit` — 1-500, default 100.
-- `sort` — `performance` (default), `total_income`, `income_per_stake`,
-  `skip_rate`, or `median_fee`.
+- `sort` — `income_per_slot` (default), `total_income`, `mev_tips`, `fees`,
+  or `skip_rate`.
+- `minWindowSlots` — 1-500, default 4. Rows below this denominator are
+  filtered.
 
-`performance` is the recommended stake-neutral view:
+Compatibility notes:
 
-```
-(blockFeesTotalLamports + blockTipsTotalLamports) / slotsAssigned
-```
+- A bare `?epoch=N` request is treated as `window=final_epoch&epoch=N`.
+- Legacy sort aliases are accepted: `performance` and `income_per_stake`
+  map to `income_per_slot`; `median_fee` maps to `fees`.
+
+Windows:
+
+- `live_trend` — current epoch elapsed leader slots + latest final epoch.
+- `current_only` — current epoch elapsed leader slots only.
+- `stable_trend` — current epoch elapsed leader slots + two latest final
+  epochs.
+- `final_epoch` — latest final epoch only, or `?epoch=N` when requested.
 
 Rows include validator identity metadata, slot counts, block fee/tip totals,
-performance-per-slot fields, stake snapshot fields when available, and a
-`claimed` boolean.
+window income fields, `incomeSolPerSlot`, stake snapshot fields when
+available, `sampleStatus`, and a `claimed` boolean.
+
+## `GET /v1/validators/search`
+
+Searches known validators from the local database. This endpoint never calls
+Solana RPC and opted-out validators are excluded.
+
+Query params:
+
+- `q` — required, 2-96 chars. Matches validator `name`, vote pubkey prefix,
+  identity pubkey prefix, and keybase username.
+- `limit` — clamped to 1-25, default 10.
+
+Response:
+
+```json
+{
+  "query": "0base",
+  "limit": 10,
+  "count": 1,
+  "items": [
+    {
+      "vote": "5BAi9YGCipHq4ZcXuen5vagRQqRTVTRszXNqBZC6uBPZ",
+      "identity": "zeroT6PTAEjipvZuACTh1mbGCqTHgA6i1ped9DcuidX",
+      "name": "0base.vc",
+      "iconUrl": "https://example.com/icon.png",
+      "website": "https://example.com",
+      "claimed": true
+    }
+  ]
+}
+```
 
 ## `GET /v1/validators/:idOrVote/history`
 
@@ -391,9 +435,11 @@ The signed payload binds the purpose (`claim` or `profile`), timestamp, nonce,
 pubkeys, and profile fields, so a profile signature cannot be replayed as a
 different operation.
 
-## `GET /mcp`, `POST /mcp`, `DELETE /mcp`
+## `POST /mcp`
 
 Streamable HTTP MCP endpoint for AI agents. The server exposes four read-only
 tools: `get_current_epoch`, `get_leaderboard`, `get_validator`, and
-`get_validator_leader_slots`. MCP calls use the same public per-IP rate limit
+`get_validator_leader_slots`. MCP calls use the same public per-IP rate limit.
+The public stateless transport accepts POST only; GET/DELETE return 405 to
+avoid unauthenticated long-lived stream connections.
 as `/v1/*`; tool schemas also cap response sizes.

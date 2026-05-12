@@ -262,4 +262,45 @@ export class ValidatorsRepository {
     }
     return out;
   }
+
+  async searchByText(
+    query: string,
+    limit: number,
+    optedOutVotes: Set<VotePubkey> = new Set(),
+  ): Promise<Validator[]> {
+    const safeLimit = Math.max(1, Math.min(limit, 25));
+    const trimmed = query.trim();
+    if (trimmed.length < 2) return [];
+
+    const lowered = trimmed.toLowerCase();
+    const like = `%${lowered.replace(/[%_\\]/g, '\\$&')}%`;
+    const prefix = `${lowered.replace(/[%_\\]/g, '\\$&')}%`;
+    const optedOut = Array.from(optedOutVotes);
+    const { rows } = await this.pool.query<ValidatorRow>(
+      `SELECT v.vote_pubkey, v.identity_pubkey, v.first_seen_epoch, v.last_seen_epoch,
+              v.updated_at, v.name, v.details, v.website, v.keybase_username, v.icon_url,
+              v.info_updated_at,
+              CASE
+                WHEN lower(v.vote_pubkey) LIKE $3 ESCAPE '\\' THEN 0
+                WHEN lower(v.identity_pubkey) LIKE $3 ESCAPE '\\' THEN 1
+                WHEN lower(v.name) LIKE $2 ESCAPE '\\' THEN 2
+                WHEN lower(v.keybase_username) LIKE $2 ESCAPE '\\' THEN 3
+                ELSE 4
+              END AS rank_key
+         FROM validators v
+         LEFT JOIN validator_profiles vp ON v.vote_pubkey = vp.vote_pubkey
+        WHERE (
+              lower(v.vote_pubkey) LIKE $3 ESCAPE '\\'
+           OR lower(v.identity_pubkey) LIKE $3 ESCAPE '\\'
+           OR lower(v.name) LIKE $2 ESCAPE '\\'
+           OR lower(v.keybase_username) LIKE $2 ESCAPE '\\'
+        )
+          AND vp.opted_out IS NOT TRUE
+          AND NOT (v.vote_pubkey = ANY($4::text[]))
+        ORDER BY rank_key ASC, v.last_seen_epoch DESC, v.name ASC NULLS LAST, v.vote_pubkey ASC
+        LIMIT $1`,
+      [safeLimit, like, prefix, optedOut],
+    );
+    return rows.map(rowToValidator);
+  }
 }

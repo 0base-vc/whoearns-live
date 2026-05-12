@@ -182,6 +182,8 @@ describe('fee-ingester.job', () => {
         votePubkey: VOTE_A,
         identityPubkey: IDENTITY_A,
         slotsAssigned: 3,
+        slotsElapsedAssigned: 3,
+        slotWindowLastSlot: 168,
         activatedStakeLamports: null,
       },
     ]);

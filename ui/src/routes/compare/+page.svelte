@@ -9,12 +9,10 @@
   both inputs are missing, the page falls through to a search form
   that POSTs back to itself with the params populated.
 
-  Per-metric grid below the heroes shows the same comparable metrics
-  as the income page (performance, total income, skip rate, median
-  fee, block fees, tips) with a "winner" highlight on each row.
-  Stake-neutral metrics (performance and skip rate) are the fairest
-  direct comparison; total-income comparisons are biased by stake
-  size, which we annotate.
+  Per-metric grid below the heroes shows comparable metrics from the
+  selected leaderboard window. Stake-neutral metrics (income per slot
+  and skip rate) are the fairest direct comparison; total-income
+  comparisons are biased by stake size, which we annotate.
 
   The compare surface is English-first because its labels are compact
   domain terms and are meant to match the leaderboard/income pages.
@@ -23,12 +21,13 @@
   import { goto } from '$app/navigation';
   import AddressDisplay from '$lib/components/AddressDisplay.svelte';
   import Card from '$lib/components/Card.svelte';
+  import ValidatorSearchCombobox from '$lib/components/ValidatorSearchCombobox.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { formatSol, shortenPubkey } from '$lib/format';
   import { SITE_NAME, SITE_URL } from '$lib/site';
   import type { CompareData, CompareSlot } from './+page';
-  import type { ValidatorEpochRecord, ValidatorHistory } from '$lib/types';
+  import type { LeaderboardWindow, ValidatorEpochRecord, ValidatorHistory } from '$lib/types';
 
   let { data }: { data: CompareData } = $props();
 
@@ -43,29 +42,67 @@
   let inputA = $state(data.a?.input ?? '');
   // svelte-ignore state_referenced_locally
   let inputB = $state(data.b?.input ?? '');
+  let formError = $state<string | null>(null);
+  // svelte-ignore state_referenced_locally
+  let windowMode = $state<LeaderboardWindow>(data.window);
+
+  const PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+  const WINDOW_OPTIONS: Array<{ key: LeaderboardWindow; label: string }> = [
+    { key: 'live_trend', label: 'Live trend' },
+    { key: 'current_only', label: 'Current only' },
+    { key: 'stable_trend', label: 'Stable trend' },
+    { key: 'final_epoch', label: 'Final epoch' },
+  ];
+
+  $effect(() => {
+    windowMode = data.window;
+  });
+
+  function navigateCompare(a: string, b: string, nextWindow: LeaderboardWindow): void {
+    const params = new URLSearchParams();
+    if (a.length > 0) params.set('a', a);
+    if (b.length > 0) params.set('b', b);
+    params.set('window', nextWindow);
+    void goto(`/compare?${params.toString()}`, { invalidateAll: true, keepFocus: true });
+  }
+
+  function resolvedInputOrCurrentVote(input: string, slot: CompareSlot | null | undefined): string {
+    const trimmed = input.trim();
+    if (PUBKEY_RE.test(trimmed)) return trimmed;
+    return slot?.history?.vote ?? '';
+  }
 
   function submit(e: SubmitEvent) {
     e.preventDefault();
     const a = inputA.trim();
     const b = inputB.trim();
     if (a.length === 0 && b.length === 0) return;
+    if ((a.length > 0 && !PUBKEY_RE.test(a)) || (b.length > 0 && !PUBKEY_RE.test(b))) {
+      formError = 'Select a validator from results or paste a vote / identity pubkey.';
+      return;
+    }
+    formError = null;
+    navigateCompare(a, b, windowMode);
+  }
+
+  function updateWindow(next: LeaderboardWindow): void {
+    windowMode = next;
     const params = new URLSearchParams();
+    const a = resolvedInputOrCurrentVote(inputA, slotA);
+    const b = resolvedInputOrCurrentVote(inputB, slotB);
     if (a.length > 0) params.set('a', a);
     if (b.length > 0) params.set('b', b);
+    params.set('window', next);
     void goto(`/compare?${params.toString()}`, { invalidateAll: true, keepFocus: true });
   }
 
-  /**
-   * Pull the most-recent CLOSED-epoch row for a validator. Same
-   * "skip running epoch" rule as the OG image renderer — a row
-   * whose status hasn't settled would let the comparison shift
-   * underneath the user's scroll. Falls back to the newest row
-   * available when nothing is closed yet.
-   */
-  function latestClosed(history: ValidatorHistory | null): ValidatorEpochRecord | null {
-    if (history === null || history.items.length === 0) return null;
-    const closed = history.items.find((r) => r.isFinal);
-    return closed ?? history.items[0] ?? null;
+  function selectValidator(side: 'a' | 'b', vote: string): void {
+    if (side === 'a') inputA = vote;
+    else inputB = vote;
+    formError = null;
+    const a = side === 'a' ? vote : inputA.trim();
+    const b = side === 'b' ? vote : inputB.trim();
+    navigateCompare(PUBKEY_RE.test(a) ? a : '', PUBKEY_RE.test(b) ? b : '', windowMode);
   }
 
   function lifetimeTotalSol(history: ValidatorHistory | null): number | null {
@@ -79,33 +116,6 @@
     return total;
   }
 
-  function rowSkipRatePct(row: ValidatorEpochRecord | null): number | null {
-    if (row === null || row.slotsAssigned === null || row.slotsAssigned <= 0) return null;
-    return ((row.slotsSkipped ?? 0) / row.slotsAssigned) * 100;
-  }
-
-  function rowTotalSol(row: ValidatorEpochRecord | null): number | null {
-    if (row === null) return null;
-    const fees = row.blockFeesTotalSol === null ? 0 : Number(row.blockFeesTotalSol);
-    const mev = row.blockTipsTotalSol === null ? 0 : Number(row.blockTipsTotalSol);
-    const v = (Number.isFinite(fees) ? fees : 0) + (Number.isFinite(mev) ? mev : 0);
-    return v > 0 ? v : null;
-  }
-
-  function rowPerformancePerSlot(row: ValidatorEpochRecord | null): number | null {
-    const total = rowTotalSol(row);
-    if (total === null || row === null || row.slotsAssigned === null || row.slotsAssigned <= 0) {
-      return null;
-    }
-    return total / row.slotsAssigned;
-  }
-
-  function rowMedianFeeSol(row: ValidatorEpochRecord | null): number | null {
-    if (row === null || row.medianBlockFeeSol === null) return null;
-    const v = Number(row.medianBlockFeeSol);
-    return Number.isFinite(v) ? v : null;
-  }
-
   // NOTE: Operator APR isn't shown here because activated stake isn't
   // on the per-epoch `ValidatorEpochRecord` shape — it's only on the
   // leaderboard projection. Adding it would mean an extra fetch per
@@ -113,22 +123,64 @@
   // marginal benefit. Use the income page for APR; this page focuses
   // on per-epoch comparable metrics.
 
+  type WindowStats = {
+    label: string;
+    slots: number;
+    totalSol: number | null;
+    skipRatePct: number | null;
+  };
+
+  function pickedRows(history: ValidatorHistory | null): ValidatorEpochRecord[] {
+    if (history === null) return [];
+    const current = history.items.find((r) => r.isCurrentEpoch);
+    const closed = history.items.filter((r) => r.isFinal);
+    if (windowMode === 'current_only') return current ? [current] : [];
+    if (windowMode === 'stable_trend')
+      return [...(current ? [current] : []), ...closed.slice(0, 2)];
+    if (windowMode === 'final_epoch') return closed.slice(0, 1);
+    return [...(current ? [current] : []), ...closed.slice(0, 1)];
+  }
+
+  function rowWindowSlots(row: ValidatorEpochRecord): number {
+    if (row.isCurrentEpoch) return row.slotsElapsedAssigned ?? 0;
+    return row.slotsAssigned ?? 0;
+  }
+
+  function windowStats(history: ValidatorHistory | null): WindowStats | null {
+    const rows = pickedRows(history);
+    if (rows.length === 0) return null;
+    let slots = 0;
+    let skipped = 0;
+    let total = 0;
+    for (const row of rows) {
+      slots += rowWindowSlots(row);
+      skipped += row.slotsSkipped ?? 0;
+      const value = row.totalIncomeSol === null ? 0 : Number(row.totalIncomeSol);
+      total += Number.isFinite(value) ? value : 0;
+    }
+    return {
+      label: rows.map((row) => row.epoch).join(' + '),
+      slots,
+      totalSol: total > 0 ? total : null,
+      skipRatePct: slots > 0 ? (skipped / slots) * 100 : null,
+    };
+  }
+
   // Both heroes' derived data. Derived blocks here keep the template
   // tidy (the value-and-loser formatting logic is the bulk of this
   // page).
   const slotA = $derived(data.a);
   const slotB = $derived(data.b);
-  const rowA = $derived(latestClosed(slotA?.history ?? null));
-  const rowB = $derived(latestClosed(slotB?.history ?? null));
+  const statsA = $derived(windowStats(slotA?.history ?? null));
+  const statsB = $derived(windowStats(slotB?.history ?? null));
   const lifetimeA = $derived(lifetimeTotalSol(slotA?.history ?? null));
   const lifetimeB = $derived(lifetimeTotalSol(slotB?.history ?? null));
 
   // Fallback epoch — pick the larger of the two so the column header
   // ("Epoch N") makes sense when one side has more recent data.
-  const headerEpoch = $derived(
-    rowA !== null && rowB !== null
-      ? Math.max(rowA.epoch, rowB.epoch)
-      : (rowA?.epoch ?? rowB?.epoch ?? null),
+  const headerLabel = $derived(statsA?.label ?? statsB?.label ?? null);
+  const activeWindowLabel = $derived(
+    WINDOW_OPTIONS.find((option) => option.key === windowMode)?.label ?? 'Live trend',
   );
 
   /**
@@ -148,28 +200,41 @@
     higherIsBetter: boolean;
     /** When true, only compute when slotsAssigned >= floor on both. */
     needsScheduledSlots?: boolean;
-    extract: (row: ValidatorEpochRecord | null) => number | null;
+    extract: (row: WindowStats | null) => number | null;
     fmt: (v: number) => string;
   };
 
+  function statTotalSol(row: WindowStats | null): number | null {
+    return row?.totalSol ?? null;
+  }
+
+  function statIncomePerSlot(row: WindowStats | null): number | null {
+    if (row === null || row.totalSol === null || row.slots <= 0) return null;
+    return row.totalSol / row.slots;
+  }
+
+  function statSkipRatePct(row: WindowStats | null): number | null {
+    return row?.skipRatePct ?? null;
+  }
+
   const METRICS: MetricRow[] = [
     {
-      key: 'performance',
-      label: 'Performance (◎/slot)',
+      key: 'income_per_slot',
+      label: 'Income / slot (◎)',
       tooltip:
-        'Income per scheduled block. Stake-neutral — the cleanest direct comparison between any two validators.',
+        'Income per window leader slot. Current slots use elapsed assigned slots; closed epochs use assigned slots.',
       higherIsBetter: true,
       needsScheduledSlots: true,
-      extract: rowPerformancePerSlot,
+      extract: statIncomePerSlot,
       fmt: (v) => `◎${v.toFixed(6)}`,
     },
     {
       key: 'total_income',
-      label: 'Epoch total income (◎)',
+      label: 'Window total income (◎)',
       tooltip:
-        'Block fees + on-chain Jito tips in the last closed epoch. Biased by stake size — bigger validators always win this row regardless of operator skill.',
+        'Block fees + on-chain Jito tips in the selected comparison window. Biased by stake size.',
       higherIsBetter: true,
-      extract: rowTotalSol,
+      extract: statTotalSol,
       fmt: (v) => `◎${formatSol(v.toString())}`,
     },
     {
@@ -178,16 +243,8 @@
       tooltip: 'Fraction of scheduled blocks that did not get produced. Lower is better.',
       higherIsBetter: false,
       needsScheduledSlots: true,
-      extract: rowSkipRatePct,
+      extract: statSkipRatePct,
       fmt: (v) => `${v.toFixed(2)}%`,
-    },
-    {
-      key: 'median_fee',
-      label: 'Median block fee (◎)',
-      tooltip: 'Median fee captured per produced block. Reflects priority-fee capture quality.',
-      higherIsBetter: true,
-      extract: rowMedianFeeSol,
-      fmt: (v) => `◎${v.toFixed(6)}`,
     },
   ];
 
@@ -197,8 +254,8 @@
    * is "lower is better"; everything else is "higher is better".
    */
   function winnerOf(metric: MetricRow): 'a' | 'b' | 'tie' | null {
-    const va = metric.extract(rowA);
-    const vb = metric.extract(rowB);
+    const va = metric.extract(statsA);
+    const vb = metric.extract(statsB);
     if (va === null || vb === null) return null;
     if (va === vb) return 'tie';
     if (metric.higherIsBetter) return va > vb ? 'a' : 'b';
@@ -223,9 +280,9 @@
     if (slotA?.history && slotB?.history) {
       const a = displayName(slotA);
       const b = displayName(slotB);
-      return `Side-by-side comparison of Solana validators ${a} and ${b}: per-epoch income, skip rate, tips, and performance per slot.`;
+      return `Side-by-side comparison of Solana validators ${a} and ${b}: live-trend income per slot, total income, and skip rate.`;
     }
-    return 'Side-by-side comparison of any two Solana validators — performance, income, skip rate, and on-chain Jito tips.';
+    return 'Side-by-side comparison of any two Solana validators — search by name or paste vote / identity pubkeys.';
   });
 </script>
 
@@ -241,8 +298,8 @@
   </p>
   <h1 class="mt-2 text-4xl font-semibold tracking-tight sm:text-5xl">Compare two validators</h1>
   <p class="mt-4 max-w-2xl text-base text-[color:var(--color-text-muted)]">
-    Paste two vote or identity pubkeys and see them side-by-side. The fairest comparisons are
-    stake-neutral: performance and skip rate.
+    Search by validator name, or paste vote / identity pubkeys. The fairest comparisons are
+    stake-neutral: income per slot and skip rate.
   </p>
 </section>
 
@@ -255,28 +312,50 @@
     floor.
   -->
   <div class="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_auto]">
-    <input
-      type="text"
+    <ValidatorSearchCombobox
+      id="compare-validator-a"
+      label="Validator A"
+      placeholder="Validator A — search name or paste pubkey"
       bind:value={inputA}
-      placeholder="Validator A — vote or identity pubkey"
-      class="min-h-11 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 font-mono text-base sm:text-sm"
-      aria-label="Validator A pubkey"
+      onSelect={(item) => selectValidator('a', item.vote)}
     />
-    <input
-      type="text"
+    <ValidatorSearchCombobox
+      id="compare-validator-b"
+      label="Validator B"
+      placeholder="Validator B — search name or paste pubkey"
       bind:value={inputB}
-      placeholder="Validator B — vote or identity pubkey"
-      class="min-h-11 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 font-mono text-base sm:text-sm"
-      aria-label="Validator B pubkey"
+      onSelect={(item) => selectValidator('b', item.vote)}
     />
     <button
       type="submit"
-      class="inline-flex min-h-11 items-center justify-center rounded-lg bg-[color:var(--color-brand-500)] px-5 py-2 text-base font-semibold text-white hover:bg-[color:var(--color-brand-600)] sm:text-sm"
+      class="inline-flex min-h-11 items-center justify-center rounded-lg bg-[color:var(--color-brand-500)] px-5 py-2 text-base font-semibold text-white hover:bg-[color:var(--color-brand-600)] sm:self-end sm:text-sm"
     >
       Compare
     </button>
   </div>
+  {#if formError !== null}
+    <p class="mt-2 text-xs text-[color:var(--color-status-warn-fg)]">{formError}</p>
+  {/if}
 </form>
+
+<div
+  class="mt-5 inline-flex flex-wrap gap-1 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-1"
+>
+  {#each WINDOW_OPTIONS as option (option.key)}
+    <button
+      type="button"
+      class="rounded-md px-3 py-1.5 text-sm font-medium transition-colors"
+      class:bg-[color:var(--color-brand-500)]={windowMode === option.key}
+      class:text-white={windowMode === option.key}
+      class:text-[color:var(--color-text-muted)]={windowMode !== option.key}
+      class:hover:text-[color:var(--color-text-default)]={windowMode !== option.key}
+      onclick={() => updateWindow(option.key)}
+      aria-pressed={windowMode === option.key}
+    >
+      {option.label}
+    </button>
+  {/each}
+</div>
 
 {#if slotA && slotB}
   <!-- ─────────── Heroes side by side ─────────── -->
@@ -328,18 +407,17 @@
   <section class="mt-10">
     <header class="mb-4 flex items-baseline justify-between">
       <h2 class="text-lg font-semibold">Per-metric comparison</h2>
-      {#if headerEpoch !== null}
+      {#if headerLabel !== null}
         <p class="font-mono text-xs text-[color:var(--color-text-subtle)]">
-          Latest closed epoch:
-          {headerEpoch}
+          {activeWindowLabel}: epochs {headerLabel}
         </p>
       {/if}
     </header>
 
     <div class="grid gap-3 md:hidden">
       {#each METRICS as metric (metric.key)}
-        {@const va = metric.extract(rowA)}
-        {@const vb = metric.extract(rowB)}
+        {@const va = metric.extract(statsA)}
+        {@const vb = metric.extract(statsB)}
         {@const winner = winnerOf(metric)}
         <article
           class="rounded-xl border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
@@ -393,8 +471,8 @@
         </thead>
         <tbody class="divide-y divide-[color:var(--color-border-default)]">
           {#each METRICS as metric (metric.key)}
-            {@const va = metric.extract(rowA)}
-            {@const vb = metric.extract(rowB)}
+            {@const va = metric.extract(statsA)}
+            {@const vb = metric.extract(statsB)}
             {@const winner = winnerOf(metric)}
             <tr>
               <th scope="row" class="px-4 py-3 text-left font-medium">
@@ -424,7 +502,7 @@
     </div>
     <p class="mt-3 text-xs text-[color:var(--color-text-subtle)]">
       Highlighted cell wins the row. Total income is biased by stake size — for a stake-neutral
-      read, use Performance or Skip rate.
+      read, use Income / slot or Skip rate.
     </p>
   </section>
 {:else}

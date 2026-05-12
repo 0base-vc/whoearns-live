@@ -12,7 +12,7 @@
  * so a paste/share/bookmark of `?a=...&b=...` round-trips cleanly.
  */
 import { fetchValidatorHistory } from '$lib/api';
-import type { ValidatorHistory } from '$lib/types';
+import type { LeaderboardWindow, ValidatorHistory } from '$lib/types';
 import type { PageLoad } from './$types';
 
 export interface CompareSlot {
@@ -26,6 +26,7 @@ export interface CompareSlot {
 export interface CompareData {
   a: CompareSlot | null;
   b: CompareSlot | null;
+  window: LeaderboardWindow;
 }
 
 async function fetchSlot(input: string, fetchFn: typeof fetch): Promise<CompareSlot> {
@@ -44,6 +45,14 @@ async function fetchSlot(input: string, fetchFn: typeof fetch): Promise<CompareS
 export const load: PageLoad = async ({ url, fetch }): Promise<CompareData> => {
   const a = url.searchParams.get('a')?.trim() ?? '';
   const b = url.searchParams.get('b')?.trim() ?? '';
+  const rawWindow = url.searchParams.get('window');
+  const window: LeaderboardWindow =
+    rawWindow === 'current_only' ||
+    rawWindow === 'stable_trend' ||
+    rawWindow === 'final_epoch' ||
+    rawWindow === 'live_trend'
+      ? rawWindow
+      : 'live_trend';
 
   // Parallel fetch — independent calls, no reason to serialise. The
   // common case (both inputs valid) finishes in one round-trip.
@@ -52,5 +61,5 @@ export const load: PageLoad = async ({ url, fetch }): Promise<CompareData> => {
     b.length > 0 ? fetchSlot(b, fetch) : Promise.resolve(null),
   ]);
 
-  return { a: slotA, b: slotB };
+  return { a: slotA, b: slotB, window };
 };

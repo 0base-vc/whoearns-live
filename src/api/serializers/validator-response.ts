@@ -87,6 +87,7 @@ export function serializeValidator(
     hasIncome,
 
     slotsAssigned: hasSlots ? stats.slotsAssigned : null,
+    slotsElapsedAssigned: hasSlots ? stats.slotsElapsedAssigned : null,
     slotsProduced: hasSlots ? stats.slotsProduced : null,
     slotsSkipped: hasSlots ? stats.slotsSkipped : null,
 
@@ -188,6 +189,7 @@ export function serializeValidatorPlaceholder(args: {
     hasIncome: false,
 
     slotsAssigned: null,
+    slotsElapsedAssigned: null,
     slotsProduced: null,
     slotsSkipped: null,
 

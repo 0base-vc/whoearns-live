@@ -178,12 +178,18 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
         votes.flatMap((vote) => {
           const identity = identityByVote.get(vote);
           if (identity === undefined) return [];
+          const assignedOffsets = cachedSchedule?.[identity] ?? [];
           return [
             {
               epoch,
               votePubkey: vote,
               identityPubkey: identity,
-              slotsAssigned: cachedSchedule?.[identity]?.length ?? 0,
+              slotsAssigned: assignedOffsets.length,
+              slotsElapsedAssigned: assignedOffsets.reduce((count, offset) => {
+                const slot = epochInfo.firstSlot + offset;
+                return slot <= safeUpperSlot ? count + 1 : count;
+              }, 0),
+              slotWindowLastSlot: safeUpperSlot,
               activatedStakeLamports: deps.validatorService.getActivatedStakeLamports(vote),
             },
           ];

@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Live Trend 2.0 leaderboard windows: `live_trend` (default),
+  `current_only`, `stable_trend`, and `final_epoch`.
+- DB-only validator search via `GET /v1/validators/search` for name,
+  vote pubkey prefix, identity pubkey prefix, and keybase username lookups.
 - AI-assisted positioning across public docs, SEO metadata, OpenAPI,
   `llms.txt`, and AI-agent guidance. The source-of-truth contract remains
   Solana block data, not AI-written summaries.
@@ -15,6 +19,11 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `/v1/leaderboard` now defaults to
+  `window=live_trend&sort=income_per_slot`; v0.3 sort aliases and bare
+  `?epoch=N` remain accepted for compatibility.
+- MCP `get_leaderboard` now follows the same window model as the public
+  leaderboard instead of advertising latest-closed-epoch-only semantics.
 - Renamed the public Helm chart path, chart name, Docker Compose project,
   local image name, and logger service name to `whoearns-live`.
 - Cleaned up public docs: moved the v0.3 API migration note under

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
 import type { ProcessedBlocksRepository } from '../../storage/repositories/processed-blocks.repo.js';
+import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import type { Validator, VotePubkey } from '../../types/domain.js';
@@ -16,6 +17,7 @@ export interface ValidatorLeaderSlotsRoutesDeps {
   validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>;
   epochsRepo: Pick<EpochsRepository, 'findByEpoch'>;
   processedBlocksRepo: Pick<ProcessedBlocksRepository, 'getValidatorEpochSlotStats'>;
+  profilesRepo: Pick<ProfilesRepository, 'findByVote'>;
 }
 
 function unwrap<T>(
@@ -41,7 +43,7 @@ const validatorLeaderSlotsRoutes: FastifyPluginAsync<ValidatorLeaderSlotsRoutesD
   app: FastifyInstance,
   opts: ValidatorLeaderSlotsRoutesDeps,
 ) => {
-  const { statsRepo, validatorsRepo, epochsRepo, processedBlocksRepo } = opts;
+  const { statsRepo, validatorsRepo, epochsRepo, processedBlocksRepo, profilesRepo } = opts;
 
   app.get(
     '/v1/validators/:idOrVote/epochs/:epoch/leader-slots',
@@ -53,6 +55,10 @@ const validatorLeaderSlotsRoutes: FastifyPluginAsync<ValidatorLeaderSlotsRoutesD
 
       const validator = await findValidatorByVoteOrIdentity(validatorsRepo, params.idOrVote);
       if (validator === null) {
+        throw new NotFoundError('validator', params.idOrVote);
+      }
+      const profile = await profilesRepo.findByVote(validator.votePubkey);
+      if (profile?.optedOut === true) {
         throw new NotFoundError('validator', params.idOrVote);
       }
 

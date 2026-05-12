@@ -228,12 +228,15 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       statsRepo: deps.repos.stats,
       validatorsRepo: deps.repos.validators,
       epochsRepo: deps.repos.epochs,
+      profilesRepo: deps.repos.profiles,
+      claimsRepo: deps.repos.claims,
     });
     await scope.register(validatorLeaderSlotsRoutes, {
       statsRepo: deps.repos.stats,
       validatorsRepo: deps.repos.validators,
       epochsRepo: deps.repos.epochs,
       processedBlocksRepo: deps.repos.processedBlocks,
+      profilesRepo: deps.repos.profiles,
     });
     await scope.register(validatorsHistoryRoutes, {
       statsRepo: deps.repos.stats,

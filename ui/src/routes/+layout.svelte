@@ -40,7 +40,7 @@
   );
 
   const DEFAULT_TITLE = `${SITE_NAME} — AI-assisted Solana validator income intelligence`;
-  const DEFAULT_DESCRIPTION = `${SITE_NAME} is an AI-assisted open data project by 0base.vc for Solana validator income: closed-epoch fees, Jito tips, slots, skip rate, and performance.`;
+  const DEFAULT_DESCRIPTION = `${SITE_NAME} is an AI-assisted open data project by 0base.vc for Solana validator income: live-trend block fees, Jito tips, slots, skip rate, and income per slot.`;
 
   /**
    * Sync `<html lang>` with the active locale on bilingual content pages.

@@ -1,10 +1,10 @@
 <!--
-  Home / landing (redesigned around the leaderboard).
+  Home / landing (redesigned around the live-trend leaderboard).
 
   Structure:
     1. Hero — brand headline + one-line pitch + slim search ("know the pubkey? jump to it")
     2. Leaderboard — the PRIMARY discovery surface. Top validators by
-       last-epoch income; each row is a click-through.
+       live-trend income per slot; each row is a click-through.
     3. Features — three-card explainer (per-epoch / cluster benchmark / open data).
 
   Why search was demoted: the original "enter a 44-char pubkey" form as
@@ -16,22 +16,30 @@
 -->
 <script lang="ts">
   import Leaderboard from '$lib/components/Leaderboard.svelte';
+  import ValidatorSearchCombobox from '$lib/components/ValidatorSearchCombobox.svelte';
   import { serializeJsonLd } from '$lib/json-ld';
   import { SITE_NAME, SITE_URL } from '$lib/site';
 
   let input = $state('');
+  let searchError = $state<string | null>(null);
+
+  const PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
   function submit(e: SubmitEvent): void {
     e.preventDefault();
     const trimmed = input.trim();
     if (trimmed.length === 0) return;
+    if (!PUBKEY_RE.test(trimmed)) {
+      searchError = 'Select a validator from results or paste a vote / identity pubkey.';
+      return;
+    }
     window.location.href = `/income/${encodeURIComponent(trimmed)}`;
   }
 
   const features = [
     {
       title: 'Per-epoch breakdown',
-      body: 'Slots assigned / produced, skip rate, block fees, and on-chain Jito tips — one row per closed epoch, with running totals for the live one.',
+      body: 'Slots assigned / produced, skip rate, block fees, and on-chain Jito tips — final rows for closed epochs, with running totals for the live one.',
     },
     {
       title: 'Cluster benchmark',
@@ -48,7 +56,7 @@
   <title>{SITE_NAME} — AI-assisted Solana validator income intelligence</title>
   <meta
     name="description"
-    content="AI-assisted open data project by 0base.vc for Solana validator income. Compare closed-epoch fees, Jito tips, slots, skip rate, and performance."
+    content="AI-assisted open data project by 0base.vc for Solana validator income. Compare live-trend fees, Jito tips, slots, skip rate, and income per slot."
   />
   <link rel="canonical" href={`${SITE_URL}/`} />
 
@@ -61,8 +69,7 @@
     '@context': 'https://schema.org',
     '@type': 'ItemList',
     name: 'Top Solana validators by per-epoch income',
-    description:
-      'Ranked list of Solana mainnet validators by total leader income in the most recent closed epoch.',
+    description: 'Ranked list of Solana mainnet validators by live-trend leader income.',
     url: `${SITE_URL}/`,
   })}
   </script>`}
@@ -83,30 +90,25 @@
   </h1>
   <p class="mt-4 max-w-2xl text-base text-[color:var(--color-text-muted)]">
     AI-assisted validator income intelligence from on-chain data: per-epoch block fees, Jito tips,
-    slots, skip rate, and performance for tracked Solana validators.
+    slots, skip rate, and income per slot for tracked Solana validators.
   </p>
 
   <form onsubmit={submit} class="mt-6 flex max-w-xl gap-2">
-    <label for="pubkey" class="sr-only">Validator vote or identity pubkey</label>
-    <!--
-      iOS Safari auto-zooms on focus when the input's computed
-      font-size is < 16 px, then doesn't zoom back out — leaves the
-      visitor stuck in a half-zoomed layout until they pinch out
-      manually. `text-base` (16 px) on mobile defuses that; `sm:text-sm`
-      restores the original 14 px monospace look on tablet+ where the
-      auto-zoom rule doesn't apply. Same pattern below for the submit
-      button so the row keeps its baseline alignment.
-    -->
-    <input
-      id="pubkey"
-      name="pubkey"
-      type="text"
-      bind:value={input}
-      placeholder="Know a vote or identity pubkey? Jump to it…"
-      class="flex-1 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-elevated)] px-4 py-2.5 font-mono text-base shadow-sm placeholder:text-[color:var(--color-text-subtle)] focus:border-[color:var(--color-brand-500)] sm:text-sm"
-      autocomplete="off"
-      spellcheck="false"
-    />
+    <div class="min-w-0 flex-1">
+      <ValidatorSearchCombobox
+        id="home-validator-search"
+        label="Validator name, vote pubkey, or identity pubkey"
+        placeholder="Search validator name, or paste vote / identity pubkey…"
+        bind:value={input}
+        onSelect={(item) => {
+          searchError = null;
+          window.location.href = `/income/${encodeURIComponent(item.vote)}`;
+        }}
+      />
+      {#if searchError !== null}
+        <p class="mt-1 text-xs text-[color:var(--color-status-warn-fg)]">{searchError}</p>
+      {/if}
+    </div>
     <button
       type="submit"
       class="inline-flex min-h-11 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-[color:var(--color-brand-500)] px-5 py-2.5 text-base font-semibold text-white shadow-sm transition-colors hover:bg-[color:var(--color-brand-600)] disabled:opacity-40 sm:text-sm"

@@ -183,6 +183,10 @@ describe('smoke: api server boots and routes 200/degraded', () => {
       expect(full.statusCode).toBe(200);
       expect(full.body).toContain('Streamable HTTP');
       expect(full.body).toContain('https://test.example.com');
+      expect(full.body).toContain('window=live_trend');
+      expect(full.body).toContain('income_per_slot');
+      expect(full.body).toContain('/v1/validators/search');
+      expect(full.body).not.toContain('Ranked validators for the latest\n  closed epoch');
     } finally {
       await app.close();
     }
@@ -294,6 +298,17 @@ describe('smoke: api server boots and routes 200/degraded', () => {
         'get_validator',
         'get_validator_leader_slots',
       ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects public MCP streaming verbs', async () => {
+    const app = await buildServer(makeDeps());
+    try {
+      const res = await app.inject({ method: 'GET', url: '/mcp' });
+      expect(res.statusCode).toBe(405);
+      expect(res.headers.allow).toBe('POST');
     } finally {
       await app.close();
     }

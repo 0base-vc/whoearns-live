@@ -312,4 +312,69 @@ describe('StatsRepository', () => {
 
     await expect(repo.rebuildIncomeTotalsFromProcessedBlocks(500, ['I1'])).resolves.toBe(0);
   });
+
+  it('findTopNByWindow: excludes pure placeholders but keeps fact-backed skipped slots', async () => {
+    await repo.ensureSlotStatsRows([
+      {
+        epoch: 500,
+        votePubkey: 'PlaceholderVote',
+        identityPubkey: 'PlaceholderId',
+        slotsAssigned: 8,
+        slotsElapsedAssigned: 8,
+      },
+    ]);
+
+    await expect(
+      repo.findTopNByWindow({
+        epochs: [{ epoch: 500, isCurrent: false }],
+        limit: 10,
+        sort: 'income_per_slot',
+        minWindowSlots: 1,
+      }),
+    ).resolves.toEqual([]);
+
+    await repo.upsertSlotStats({
+      epoch: 500,
+      votePubkey: 'SkippedVote',
+      identityPubkey: 'SkippedId',
+      slotsAssigned: 4,
+      slotsProduced: 0,
+      slotsSkipped: 4,
+    });
+    await processedBlocksRepo.insertBatch([
+      {
+        epoch: 500,
+        slot: 50_001,
+        leaderIdentity: 'SkippedId',
+        feesLamports: 0n,
+        baseFeesLamports: 0n,
+        priorityFeesLamports: 0n,
+        tipsLamports: 0n,
+        blockStatus: 'skipped',
+        blockTime: null,
+        txCount: 0,
+        successfulTxCount: 0,
+        failedTxCount: 0,
+        unknownMetaTxCount: 0,
+        signatureCount: 0,
+        tipTxCount: 0,
+        maxTipLamports: 0n,
+        maxPriorityFeeLamports: 0n,
+        computeUnitsConsumed: 0n,
+        factsCapturedAt: new Date(),
+        processedAt: new Date(),
+      },
+    ]);
+
+    const rows = await repo.findTopNByWindow({
+      epochs: [{ epoch: 500, isCurrent: false }],
+      limit: 10,
+      sort: 'income_per_slot',
+      minWindowSlots: 1,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.votePubkey).toBe('SkippedVote');
+    expect(rows[0]?.windowSlots).toBe(4);
+    expect(rows[0]?.blockFeesTotalLamports).toBe(0n);
+  });
 });

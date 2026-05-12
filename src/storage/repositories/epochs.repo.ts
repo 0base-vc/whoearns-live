@@ -123,6 +123,20 @@ export class EpochsRepository {
     return first ? rowToEpoch(first) : null;
   }
 
+  async findLatestClosedEpochs(limit: number): Promise<EpochInfo[]> {
+    if (limit <= 0) return [];
+    const safe = Math.max(1, Math.min(limit, 10));
+    const { rows } = await this.pool.query<EpochRow>(
+      `SELECT epoch, first_slot, last_slot, slot_count, current_slot, is_closed, observed_at, closed_at
+         FROM epochs
+        WHERE is_closed = TRUE
+        ORDER BY epoch DESC
+        LIMIT $1`,
+      [safe],
+    );
+    return rows.map(rowToEpoch);
+  }
+
   async markClosed(epoch: Epoch, closedAt: Date): Promise<void> {
     await this.pool.query(
       `UPDATE epochs
