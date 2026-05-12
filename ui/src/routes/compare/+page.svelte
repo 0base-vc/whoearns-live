@@ -87,13 +87,23 @@
 
   function updateWindow(next: LeaderboardWindow): void {
     windowMode = next;
-    const params = new URLSearchParams();
     const a = resolvedInputOrCurrentVote(inputA, slotA);
     const b = resolvedInputOrCurrentVote(inputB, slotB);
-    if (a.length > 0) params.set('a', a);
-    if (b.length > 0) params.set('b', b);
-    params.set('window', next);
-    void goto(`/compare?${params.toString()}`, { invalidateAll: true, keepFocus: true });
+
+    // Window selection is computed entirely from the already-fetched
+    // history rows. Keep the URL shareable, but avoid a SvelteKit
+    // navigation so the comparison table does not jump back to the top.
+    try {
+      const url = new URL(globalThis.location.href);
+      if (a.length > 0) url.searchParams.set('a', a);
+      else url.searchParams.delete('a');
+      if (b.length > 0) url.searchParams.set('b', b);
+      else url.searchParams.delete('b');
+      url.searchParams.set('window', next);
+      globalThis.history.replaceState({}, '', url.toString());
+    } catch {
+      // The in-memory state already updated; URL sync is a convenience.
+    }
   }
 
   function selectValidator(side: 'a' | 'b', vote: string): void {
@@ -126,9 +136,35 @@
   type WindowStats = {
     label: string;
     slots: number;
+    producedSlots: number;
     totalSol: number | null;
+    blockFeesSol: number | null;
+    priorityFeesSol: number | null;
+    tipsSol: number | null;
     skipRatePct: number | null;
   };
+
+  type SolAccumulator = {
+    sum: number;
+    seen: boolean;
+  };
+
+  function parseSol(value: string | null): number | null {
+    if (value === null) return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function addSol(acc: SolAccumulator, value: string | null): void {
+    const n = parseSol(value);
+    if (n === null) return;
+    acc.sum += n;
+    acc.seen = true;
+  }
+
+  function finishSol(acc: SolAccumulator): number | null {
+    return acc.seen ? acc.sum : null;
+  }
 
   function pickedRows(history: ValidatorHistory | null): ValidatorEpochRecord[] {
     if (history === null) return [];
@@ -150,18 +186,29 @@
     const rows = pickedRows(history);
     if (rows.length === 0) return null;
     let slots = 0;
+    let producedSlots = 0;
     let skipped = 0;
-    let total = 0;
+    const total: SolAccumulator = { sum: 0, seen: false };
+    const blockFees: SolAccumulator = { sum: 0, seen: false };
+    const priorityFees: SolAccumulator = { sum: 0, seen: false };
+    const tips: SolAccumulator = { sum: 0, seen: false };
     for (const row of rows) {
       slots += rowWindowSlots(row);
+      producedSlots += row.slotsProduced ?? 0;
       skipped += row.slotsSkipped ?? 0;
-      const value = row.totalIncomeSol === null ? 0 : Number(row.totalIncomeSol);
-      total += Number.isFinite(value) ? value : 0;
+      addSol(total, row.totalIncomeSol);
+      addSol(blockFees, row.blockFeesTotalSol);
+      addSol(priorityFees, row.blockPriorityFeesTotalSol);
+      addSol(tips, row.blockTipsTotalSol);
     }
     return {
       label: rows.map((row) => row.epoch).join(' + '),
       slots,
-      totalSol: total > 0 ? total : null,
+      producedSlots,
+      totalSol: finishSol(total),
+      blockFeesSol: finishSol(blockFees),
+      priorityFeesSol: finishSol(priorityFees),
+      tipsSol: finishSol(tips),
       skipRatePct: slots > 0 ? (skipped / slots) * 100 : null,
     };
   }
@@ -197,7 +244,7 @@
     key: string;
     label: string;
     tooltip: string;
-    higherIsBetter: boolean;
+    higherIsBetter: boolean | null;
     /** When true, only compute when slotsAssigned >= floor on both. */
     needsScheduledSlots?: boolean;
     extract: (row: WindowStats | null) => number | null;
@@ -213,8 +260,35 @@
     return row.totalSol / row.slots;
   }
 
+  function statIncomePerProducedBlock(row: WindowStats | null): number | null {
+    if (row === null || row.totalSol === null || row.producedSlots <= 0) return null;
+    return row.totalSol / row.producedSlots;
+  }
+
   function statSkipRatePct(row: WindowStats | null): number | null {
     return row?.skipRatePct ?? null;
+  }
+
+  function statBlockFees(row: WindowStats | null): number | null {
+    return row?.blockFeesSol ?? null;
+  }
+
+  function statPriorityFees(row: WindowStats | null): number | null {
+    return row?.priorityFeesSol ?? null;
+  }
+
+  function statTips(row: WindowStats | null): number | null {
+    return row?.tipsSol ?? null;
+  }
+
+  function statTipSharePct(row: WindowStats | null): number | null {
+    if (row === null || row.totalSol === null || row.totalSol <= 0 || row.tipsSol === null)
+      return null;
+    return (row.tipsSol / row.totalSol) * 100;
+  }
+
+  function statProducedSlots(row: WindowStats | null): number | null {
+    return row?.producedSlots ?? null;
   }
 
   const METRICS: MetricRow[] = [
@@ -229,6 +303,15 @@
       fmt: (v) => `◎${v.toFixed(6)}`,
     },
     {
+      key: 'income_per_produced_block',
+      label: 'Income / produced block (◎)',
+      tooltip:
+        'Total income divided by produced blocks in the selected window. Complements income / slot by ignoring skipped slots.',
+      higherIsBetter: true,
+      extract: statIncomePerProducedBlock,
+      fmt: (v) => `◎${v.toFixed(6)}`,
+    },
+    {
       key: 'total_income',
       label: 'Window total income (◎)',
       tooltip:
@@ -236,6 +319,49 @@
       higherIsBetter: true,
       extract: statTotalSol,
       fmt: (v) => `◎${formatSol(v.toString())}`,
+    },
+    {
+      key: 'block_fees',
+      label: 'Block fees (◎)',
+      tooltip: 'Base + priority fees captured by produced blocks in the selected window.',
+      higherIsBetter: true,
+      extract: statBlockFees,
+      fmt: (v) => `◎${formatSol(v.toString())}`,
+    },
+    {
+      key: 'priority_fees',
+      label: 'Priority fees (◎)',
+      tooltip:
+        'Priority-fee component only. Useful for seeing which validator captured higher transaction demand.',
+      higherIsBetter: true,
+      extract: statPriorityFees,
+      fmt: (v) => `◎${formatSol(v.toString())}`,
+    },
+    {
+      key: 'jito_tips',
+      label: 'Jito tips (◎)',
+      tooltip: 'On-chain Jito tips observed in produced blocks for the selected window.',
+      higherIsBetter: true,
+      extract: statTips,
+      fmt: (v) => `◎${formatSol(v.toString())}`,
+    },
+    {
+      key: 'jito_share',
+      label: 'Jito share (%)',
+      tooltip:
+        'Jito tips divided by total income. Context only: a higher share is not automatically better.',
+      higherIsBetter: null,
+      extract: statTipSharePct,
+      fmt: (v) => `${v.toFixed(2)}%`,
+    },
+    {
+      key: 'produced_slots',
+      label: 'Produced slots',
+      tooltip:
+        'Produced leader slots in the selected window. Context only because slot count is mostly driven by stake.',
+      higherIsBetter: null,
+      extract: statProducedSlots,
+      fmt: (v) => v.toLocaleString(),
     },
     {
       key: 'skip_rate',
@@ -254,6 +380,7 @@
    * is "lower is better"; everything else is "higher is better".
    */
   function winnerOf(metric: MetricRow): 'a' | 'b' | 'tie' | null {
+    if (metric.higherIsBetter === null) return null;
     const va = metric.extract(statsA);
     const vb = metric.extract(statsB);
     if (va === null || vb === null) return null;
@@ -501,8 +628,8 @@
       </table>
     </div>
     <p class="mt-3 text-xs text-[color:var(--color-text-subtle)]">
-      Highlighted cell wins the row. Total income is biased by stake size — for a stake-neutral
-      read, use Income / slot or Skip rate.
+      Highlighted cells mark directional wins. Context rows are not highlighted. Total income is
+      biased by stake size — for a stake-neutral read, use Income / slot or Skip rate.
     </p>
   </section>
 {:else}
