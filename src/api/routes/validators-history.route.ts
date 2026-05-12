@@ -15,6 +15,7 @@ import type {
   EpochPeerBenchmark,
   ValidatorCurrentEpochResponse,
 } from '../../types/domain.js';
+import { setNoStoreCache } from '../cache-headers.js';
 import { HistoryQuerySchema, VoteOrIdentityParamSchema } from '../schemas/requests.js';
 import { serializeValidator } from '../serializers/validator-response.js';
 
@@ -149,7 +150,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
   } = opts;
   const serialCtx = {};
 
-  app.get('/v1/validators/:idOrVote/history', async (request, _reply): Promise<HistoryResponse> => {
+  app.get('/v1/validators/:idOrVote/history', async (request, reply): Promise<HistoryResponse> => {
     const params = unwrap(VoteOrIdentityParamSchema.safeParse(request.params), 'path parameter');
     const query = unwrap(HistoryQuerySchema.safeParse(request.query), 'query parameter');
 
@@ -175,6 +176,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
       // Freshly-tracked validator — no info record has been fetched
       // yet (that happens on the next validator-info-refresh tick).
       // UI falls back to pubkey display.
+      setNoStoreCache(reply);
       return {
         vote: result.votePubkey,
         identity: result.identityPubkey,
@@ -244,6 +246,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // that asked not to be advertised, even if their on-chain
     // validator-info publish is public.
     if (profile !== null && profile.optedOut) {
+      setNoStoreCache(reply);
       return {
         vote: validator.votePubkey,
         identity: validator.identityPubkey,
@@ -303,6 +306,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // can show the operator's Twitter link and honour the footer
     // mute. Absent = never-claimed OR claimed-but-never-edited —
     // UI treats both identically (no overrides).
+    setNoStoreCache(reply);
     return {
       vote: validator.votePubkey,
       identity: validator.identityPubkey,

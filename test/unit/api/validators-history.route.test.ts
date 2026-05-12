@@ -16,6 +16,7 @@
 import { pino } from 'pino';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import { NO_STORE_CACHE_CONTROL } from '../../../src/api/cache-headers.js';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import validatorsHistoryRoutes from '../../../src/api/routes/validators-history.route.js';
 import type { ValidatorService } from '../../../src/services/validator.service.js';
@@ -125,6 +126,7 @@ describe('GET /v1/validators/:idOrVote/history', () => {
       url: `/v1/validators/${VOTE_1}/history?limit=10`,
     });
     expect(res.statusCode).toBe(200);
+    expect(res.headers['cache-control']).toBe(NO_STORE_CACHE_CONTROL);
     const body = res.json() as {
       vote: string;
       identity: string;

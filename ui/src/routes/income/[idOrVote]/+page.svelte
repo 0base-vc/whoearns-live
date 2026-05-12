@@ -51,7 +51,7 @@
     shortenPubkey,
   } from '$lib/format';
 
-  import IncomeChart from '$lib/components/IncomeChart.svelte';
+  import IncomeChartLoader from '$lib/components/IncomeChartLoader.svelte';
   import Card from '$lib/components/Card.svelte';
   import AddressDisplay from '$lib/components/AddressDisplay.svelte';
   import EllipsisAddress from '$lib/components/EllipsisAddress.svelte';
@@ -870,7 +870,7 @@
 -->
 {#if hasAnyHistory}
   <div class="mt-6">
-    <IncomeChart history={history.items} />
+    <IncomeChartLoader history={history.items} />
   </div>
 {/if}
 

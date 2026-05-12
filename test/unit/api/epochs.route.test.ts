@@ -1,6 +1,7 @@
 import { pino } from 'pino';
 import { describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import { PUBLIC_READ_CACHE_CONTROL } from '../../../src/api/cache-headers.js';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import epochsRoutes from '../../../src/api/routes/epochs.route.js';
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
@@ -35,6 +36,7 @@ describe('GET /v1/epoch/current', () => {
 
     const res = await app.inject({ method: 'GET', url: '/v1/epoch/current' });
     expect(res.statusCode).toBe(200);
+    expect(res.headers['cache-control']).toBe(PUBLIC_READ_CACHE_CONTROL);
     const body = res.json() as {
       epoch: number;
       firstSlot: number;

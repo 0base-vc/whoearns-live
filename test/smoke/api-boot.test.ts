@@ -1,6 +1,14 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { pino } from 'pino';
 import { describe, expect, it } from 'vitest';
 import type pg from 'pg';
+import {
+  HTML_CACHE_CONTROL,
+  IMMUTABLE_ASSET_CACHE_CONTROL,
+  STATIC_ASSET_CACHE_CONTROL,
+} from '../../src/api/cache-headers.js';
 import { buildServer } from '../../src/api/server.js';
 import type { AppConfig } from '../../src/core/config.js';
 import type { ValidatorService } from '../../src/services/validator.service.js';
@@ -132,6 +140,46 @@ describe('smoke: api server boots and routes 200/degraded', () => {
       expect(res.statusCode).toBe(404);
     } finally {
       await app.close();
+    }
+  });
+
+  it('serves immutable assets for one year while keeping HTML revalidated', async () => {
+    const uiDir = await mkdtemp(join(tmpdir(), 'whoearns-ui-build-'));
+    await mkdir(join(uiDir, '_app', 'immutable', 'entry'), { recursive: true });
+    await mkdir(join(uiDir, '_app'), { recursive: true });
+    await mkdir(join(uiDir, 'brand'), { recursive: true });
+    await writeFile(join(uiDir, 'index.html'), '<!doctype html><title>WhoEarns</title>');
+    await writeFile(join(uiDir, 'spa-fallback.html'), '<!doctype html><title>WhoEarns</title>');
+    await writeFile(join(uiDir, '_app', 'env.js'), 'export {};');
+    await writeFile(join(uiDir, '_app', 'immutable', 'entry', 'start.fake.js'), 'export {};');
+    await writeFile(join(uiDir, 'brand', 'logo.svg'), '<svg></svg>');
+
+    const deps = makeDeps();
+    deps.uiBuildDir = uiDir;
+    const app = await buildServer(deps);
+
+    try {
+      const asset = await app.inject({
+        method: 'GET',
+        url: '/_app/immutable/entry/start.fake.js',
+      });
+      expect(asset.statusCode).toBe(200);
+      expect(asset.headers['cache-control']).toBe(IMMUTABLE_ASSET_CACHE_CONTROL);
+
+      const html = await app.inject({ method: 'GET', url: '/' });
+      expect(html.statusCode).toBe(200);
+      expect(html.headers['cache-control']).toBe(HTML_CACHE_CONTROL);
+
+      const env = await app.inject({ method: 'GET', url: '/_app/env.js' });
+      expect(env.statusCode).toBe(200);
+      expect(env.headers['cache-control']).toBe(HTML_CACHE_CONTROL);
+
+      const brand = await app.inject({ method: 'GET', url: '/brand/logo.svg' });
+      expect(brand.statusCode).toBe(200);
+      expect(brand.headers['cache-control']).toBe(STATIC_ASSET_CACHE_CONTROL);
+    } finally {
+      await app.close();
+      await rm(uiDir, { recursive: true, force: true });
     }
   });
 

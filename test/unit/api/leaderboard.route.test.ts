@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { pino } from 'pino';
 import { describe, expect, it } from 'vitest';
+import { CLIENT_READ_CACHE_CONTROL } from '../../../src/api/cache-headers.js';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import leaderboardRoutes, {
   type LeaderboardRoutesDeps,
@@ -165,6 +166,7 @@ describe('GET /v1/leaderboard', () => {
     try {
       const res = await app.inject({ method: 'GET', url: '/v1/leaderboard' });
       expect(res.statusCode).toBe(200);
+      expect(res.headers['cache-control']).toBe(CLIENT_READ_CACHE_CONTROL);
       expect(res.json()).toMatchObject({
         window: 'live_trend',
         sort: 'income_per_slot',

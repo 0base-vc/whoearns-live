@@ -34,6 +34,11 @@ import validatorLeaderSlotsRoutes from './routes/validator-leader-slots.route.js
 import validatorsHistoryRoutes from './routes/validators-history.route.js';
 import validatorsRoutes from './routes/validators.route.js';
 import {
+  HTML_CACHE_CONTROL,
+  IMMUTABLE_ASSET_CACHE_CONTROL,
+  STATIC_ASSET_CACHE_CONTROL,
+} from './cache-headers.js';
+import {
   classifyUserAgent,
   httpRequestDurationSeconds,
   httpRequestsTotal,
@@ -303,21 +308,18 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       prefix: '/',
       wildcard: false,
       index: 'index.html',
+      cacheControl: false,
       // Caching policy:
-      //   - `/_app/immutable/*` → 7 days `public, max-age=604800` (no
-      //     `immutable` keyword). Vite content-hashes these filenames
-      //     so technically a 1-year `immutable` cache would be safe in
-      //     theory (URL collision impossible). In PRACTICE the
-      //     `immutable` keyword tells browsers to skip revalidation
-      //     even on hard-refresh — a one-way ticket if a bad asset
-      //     ever lands in a user's cache (build pipeline regression,
-      //     transient CDN bug, etc.) since this codebase has no
-      //     cache-purge API and operator intervention has no remedy
-      //     short of regenerating every hash. 7 days hits ~99% of
-      //     repeat-visit cache benefits while leaving a self-healing
-      //     window: a bad asset would clear on its own within a week,
-      //     and any user can hard-refresh to recover immediately.
-      //   - HTML → `no-cache`. The shell imports content-hashed JS
+      //   - `/_app/immutable/*` → 1 year + `immutable`. Vite content-hashes
+      //     these filenames, so deploys publish new URLs instead of mutating
+      //     cached bytes. Cloudflare must have a matching cache rule for this
+      //     prefix; deploys should still purge HTML shells so visitors discover
+      //     the new hashed entry chunks immediately.
+      //   - Runtime SvelteKit files (`/_app/env.js`, `/_app/version.json`)
+      //     and HTML → `no-cache`.
+      //   - Other static assets (brand images, etc.) → 1 day public cache.
+      //
+      //     The shell imports content-hashed JS
       //     chunks by name (`/_app/immutable/entry/start.<HASH>.js`).
       //     Each deploy emits chunks with NEW hashes and the previous
       //     deploy's chunks are gone from disk after the rolling pod
@@ -338,9 +340,15 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       //     strategy. Until then, correctness > 600 ms.
       setHeaders(res, path) {
         if (path.includes('/_app/immutable/')) {
-          res.setHeader('cache-control', 'public, max-age=604800');
-        } else if (path.endsWith('.html')) {
-          res.setHeader('cache-control', 'no-cache');
+          res.setHeader('cache-control', IMMUTABLE_ASSET_CACHE_CONTROL);
+        } else if (
+          path.endsWith('.html') ||
+          path.includes('/_app/env.js') ||
+          path.includes('/_app/version.json')
+        ) {
+          res.setHeader('cache-control', HTML_CACHE_CONTROL);
+        } else {
+          res.setHeader('cache-control', STATIC_ASSET_CACHE_CONTROL);
         }
       },
     });

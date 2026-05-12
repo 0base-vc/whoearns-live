@@ -59,6 +59,20 @@
     content="AI-assisted open data project by 0base.vc for Solana validator income. Compare live-trend fees, Jito tips, slots, skip rate, and income per slot."
   />
   <link rel="canonical" href={`${SITE_URL}/`} />
+  <link
+    rel="preload"
+    href="/v1/leaderboard?limit=25&sort=income_per_slot&window=live_trend"
+    as="fetch"
+    type="application/json"
+    crossorigin="anonymous"
+  />
+  <link
+    rel="preload"
+    href="/v1/epoch/current"
+    as="fetch"
+    type="application/json"
+    crossorigin="anonymous"
+  />
 
   <!-- ItemList schema: tells search engines the homepage lists ranked
        entities, improving rich-result eligibility for "top validators"

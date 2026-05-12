@@ -16,6 +16,7 @@ import type {
 } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import type { EpochInfo, IdentityPubkey } from '../../types/domain.js';
+import { setClientReadCache } from '../cache-headers.js';
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -280,12 +281,15 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
   const { statsRepo, epochsRepo, aggregatesRepo, validatorsRepo, profilesRepo, claimsRepo } = opts;
   const responseCache = new Map<string, { expiresAt: number; body: LeaderboardResponse }>();
 
-  app.get('/v1/leaderboard', async (request, _reply): Promise<LeaderboardResponse> => {
+  app.get('/v1/leaderboard', async (request, reply): Promise<LeaderboardResponse> => {
     const query = unwrap(LeaderboardQuerySchema.safeParse(request.query), 'query parameter');
     const cacheKey = JSON.stringify(query);
     const now = Date.now();
     const cached = responseCache.get(cacheKey);
-    if (cached !== undefined && cached.expiresAt > now) return cached.body;
+    if (cached !== undefined && cached.expiresAt > now) {
+      setClientReadCache(reply);
+      return cached.body;
+    }
 
     const resolved = await resolveWindowEpochs(query.window, query.epoch, epochsRepo);
 
@@ -308,6 +312,7 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
         cluster: null,
       };
       responseCache.set(cacheKey, { expiresAt: now + LEADERBOARD_CACHE_TTL_MS, body });
+      setClientReadCache(reply);
       return body;
     }
 
@@ -390,6 +395,7 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
       cluster,
     };
     responseCache.set(cacheKey, { expiresAt: now + LEADERBOARD_CACHE_TTL_MS, body });
+    setClientReadCache(reply);
     return body;
   });
 };
