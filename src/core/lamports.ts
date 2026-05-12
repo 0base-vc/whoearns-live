@@ -35,6 +35,31 @@ export function lamportsToSol(lamports: bigint | number | string): string {
   return `${negative ? '-' : ''}${whole.toString()}.${fracStr}`;
 }
 
+/**
+ * Format a decimal lamports value as SOL. Used for percentile queries where
+ * PostgreSQL may return fractional lamports.
+ */
+export function decimalLamportsToSol(lamports: string): string {
+  const trimmed = lamports.trim();
+  if (!/^-?\d+(\.\d+)?$/.test(trimmed)) {
+    throw new RangeError(`Invalid decimal lamports string: "${lamports}"`);
+  }
+
+  const negative = trimmed.startsWith('-');
+  const unsigned = negative ? trimmed.slice(1) : trimmed;
+  const [whole = '0', frac = ''] = unsigned.split('.');
+  const digits = `${whole.replace(/^0+/, '') || '0'}${frac}`;
+  const scale = frac.length + 9;
+  const padded = digits.padStart(scale + 1, '0');
+  const wholePartRaw = padded.slice(0, padded.length - scale);
+  const fracPartRaw = padded.slice(padded.length - scale);
+  const wholePart = wholePartRaw.replace(/^0+/, '') || '0';
+  const fracPart = fracPartRaw.replace(/0+$/, '');
+  const sign = negative && (wholePart !== '0' || fracPart.length > 0) ? '-' : '';
+
+  return fracPart.length === 0 ? `${sign}${wholePart}` : `${sign}${wholePart}.${fracPart}`;
+}
+
 export function lamportsToString(lamports: bigint | number | string | null): string | null {
   if (lamports === null) return null;
   return toLamports(lamports).toString();

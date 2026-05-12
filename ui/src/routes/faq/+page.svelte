@@ -92,8 +92,8 @@
     {
       q_en: 'How does this site differ from solanabeach.io / validators.app / stakewiz.com?',
       q_ko: '이 사이트는 solanabeach.io / validators.app / stakewiz.com과 무엇이 다른가요?',
-      a_en: 'Three differences: (1) every metric is contextualized against the top-100 cluster median for the same epoch, so you can tell if a validator is over- or under-performing peers; (2) MEV tips are derived from each produced block, so current-epoch income can update in near real time; (3) all derived data is CC0 with a documented public API. Other dashboards typically gate this behind login or vendor-specific endpoints.',
-      a_ko: '세 가지 차이가 있습니다. (1) 모든 지표를 같은 에폭의 top-100 클러스터 median과 비교 표시 — 피어 대비 잘하는지 못하는지 즉시 판단 가능; (2) MEV tips를 각 생산 블록에서 도출하므로 진행 중 에폭 수입도 거의 실시간으로 갱신 가능; (3) 모든 파생 데이터가 CC0이고 공개 API로 제공. 타 대시보드는 보통 로그인이나 벤더 엔드포인트 뒤에 둡니다.',
+      a_en: 'Three differences: (1) validator income is normalized per leader slot and compared against the indexed-validator median, so you can tell if a validator is over- or under-performing peers; (2) MEV tips are derived from each produced block, so current-epoch income can update in near real time; (3) all derived data is CC0 with a documented public API. Other dashboards typically gate this behind login or vendor-specific endpoints.',
+      a_ko: '세 가지 차이가 있습니다. (1) validator 수입을 leader slot당 값으로 정규화하고 indexed validator median과 비교해 피어 대비 잘하는지 못하는지 판단 가능; (2) MEV tips를 각 생산 블록에서 도출하므로 진행 중 에폭 수입도 거의 실시간으로 갱신 가능; (3) 모든 파생 데이터가 CC0이고 공개 API로 제공. 타 대시보드는 보통 로그인이나 벤더 엔드포인트 뒤에 둡니다.',
     },
     {
       q_en: "I'm a validator operator — how do I claim my profile here?",

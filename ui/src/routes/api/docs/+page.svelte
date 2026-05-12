@@ -122,7 +122,7 @@
       path: '/v1/validators/{idOrVote}/history',
       summary: 'Per-epoch history for a validator',
       description:
-        'Rows returned newest-first. Each row carries `isFinal`, `hasSlots`, `hasIncome`, and an optional `cluster` block for median comparison context.',
+        'Rows returned newest-first. Each row carries `isFinal`, `hasSlots`, `hasIncome`, and `peerBenchmark` for indexed-validator median income per leader slot.',
       params: [
         {
           name: 'limit',
@@ -155,7 +155,7 @@
   <title>{`API reference — ${SITE_NAME}`}</title>
   <meta
     name="description"
-    content={`Public HTTP API for ${SITE_NAME} — per-epoch Solana validator stats, cluster medians, and the homepage leaderboard. Free, versioned, data licensed CC0.`}
+    content={`Public HTTP API for ${SITE_NAME} — per-epoch Solana validator stats, indexed-validator peer benchmarks, and the homepage leaderboard. Free, versioned, data licensed CC0.`}
   />
   <link rel="canonical" href={`${SITE_URL}/api/docs`} />
 </svelte:head>

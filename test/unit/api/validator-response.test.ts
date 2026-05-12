@@ -133,6 +133,27 @@ describe('serializeValidator', () => {
     expect(out.blockTipsTotalLamports).toBe('0');
     expect(out.totalIncomeLamports).toBe('0');
   });
+
+  it('attaches indexed-validator peer benchmark when provided', () => {
+    const out = serializeValidator(baseStats, closedEpoch, {}, null, {
+      epoch: 500,
+      sample: 'indexed_validators',
+      sampleValidators: 25,
+      sampleSlots: 1000,
+      medianIncomeLamportsPerSlot: '12345.5',
+      medianIncomeSolPerSlot: '0.0000123455',
+      basis: 'income_per_assigned_slot',
+    });
+
+    expect(out.peerBenchmark).toEqual({
+      sample: 'indexed_validators',
+      sampleValidators: 25,
+      sampleSlots: 1000,
+      medianIncomeLamportsPerSlot: '12345.5',
+      medianIncomeSolPerSlot: '0.0000123455',
+      basis: 'income_per_assigned_slot',
+    });
+  });
 });
 
 describe('serializeValidatorPlaceholder', () => {

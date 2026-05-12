@@ -8,6 +8,87 @@ describe('StatsRepository', () => {
   let repo: StatsRepository;
   let processedBlocksRepo: ProcessedBlocksRepository;
 
+  async function seedIncomeRow(args: {
+    epoch: number;
+    vote: string;
+    identity: string;
+    slotsAssigned: number;
+    slotsElapsedAssigned?: number;
+    fees: bigint;
+    tips?: bigint;
+  }): Promise<void> {
+    await repo.upsertSlotStats({
+      epoch: args.epoch,
+      votePubkey: args.vote,
+      identityPubkey: args.identity,
+      slotsAssigned: args.slotsAssigned,
+      slotsProduced: args.slotsAssigned,
+      slotsSkipped: 0,
+      ...(args.slotsElapsedAssigned === undefined
+        ? {}
+        : { slotsElapsedAssigned: args.slotsElapsedAssigned }),
+    });
+    await repo.addIncomeDelta({
+      epoch: args.epoch,
+      identityPubkey: args.identity,
+      leaderFeeDeltaLamports: args.fees,
+      baseFeeDeltaLamports: 0n,
+      priorityFeeDeltaLamports: args.fees,
+      tipDeltaLamports: args.tips ?? 0n,
+    });
+  }
+
+  async function seedFactBackedZeroIncomeRow(args: {
+    epoch: number;
+    vote: string;
+    identity: string;
+    slot: number;
+    slotsAssigned: number;
+    slotsElapsedAssigned?: number;
+  }): Promise<void> {
+    await repo.upsertSlotStats({
+      epoch: args.epoch,
+      votePubkey: args.vote,
+      identityPubkey: args.identity,
+      slotsAssigned: args.slotsAssigned,
+      slotsProduced: 0,
+      slotsSkipped: args.slotsAssigned,
+      ...(args.slotsElapsedAssigned === undefined
+        ? {}
+        : { slotsElapsedAssigned: args.slotsElapsedAssigned }),
+    });
+    await processedBlocksRepo.insertBatch([
+      {
+        epoch: args.epoch,
+        slot: args.slot,
+        leaderIdentity: args.identity,
+        feesLamports: 0n,
+        baseFeesLamports: 0n,
+        priorityFeesLamports: 0n,
+        tipsLamports: 0n,
+        blockStatus: 'skipped',
+        blockTime: null,
+        txCount: 0,
+        successfulTxCount: 0,
+        failedTxCount: 0,
+        unknownMetaTxCount: 0,
+        signatureCount: 0,
+        tipTxCount: 0,
+        maxTipLamports: 0n,
+        maxPriorityFeeLamports: 0n,
+        computeUnitsConsumed: 0n,
+        costUnits: 0n,
+        computeBudgetRequestedUnits: 0n,
+        computeBudgetLimitTxCount: 0,
+        computeBudgetPriceTxCount: 0,
+        maxComputeUnitLimit: 0n,
+        maxComputeUnitPriceMicroLamports: 0n,
+        factsCapturedAt: new Date(),
+        processedAt: new Date(),
+      },
+    ]);
+  }
+
   beforeAll(async () => {
     fixture = await setupPgFixture();
     repo = new StatsRepository(fixture.pool);
@@ -72,7 +153,7 @@ describe('StatsRepository', () => {
     expect(s!.blockFeesTotalLamports).toBe(123_456_789n);
   });
 
-  it('ensureSlotStatsRows: inserts missing rows without touching existing rows', async () => {
+  it('ensureSlotStatsRows: inserts missing rows without touching existing income rows', async () => {
     await repo.upsertSlotStats({
       epoch: 500,
       votePubkey: 'V1',
@@ -119,6 +200,45 @@ describe('StatsRepository', () => {
     expect(created?.slotsProduced).toBe(0);
     expect(created?.slotsSkipped).toBe(0);
     expect(created?.activatedStakeLamports).toBe(200n);
+  });
+
+  it('ensureSlotStatsRows: refreshes elapsed slot window on existing rows without touching income', async () => {
+    await repo.upsertSlotStats({
+      epoch: 500,
+      votePubkey: 'V1',
+      identityPubkey: 'I1',
+      slotsAssigned: 10,
+      slotsElapsedAssigned: 2,
+      slotWindowLastSlot: 100,
+      slotsProduced: 2,
+      slotsSkipped: 0,
+    });
+    await repo.addIncomeDelta({
+      epoch: 500,
+      identityPubkey: 'I1',
+      leaderFeeDeltaLamports: 100n,
+      baseFeeDeltaLamports: 40n,
+      priorityFeeDeltaLamports: 60n,
+      tipDeltaLamports: 7n,
+    });
+
+    const inserted = await repo.ensureSlotStatsRows([
+      {
+        epoch: 500,
+        votePubkey: 'V1',
+        identityPubkey: 'I1',
+        slotsAssigned: 10,
+        slotsElapsedAssigned: 5,
+        slotWindowLastSlot: 110,
+      },
+    ]);
+
+    expect(inserted).toBe(0);
+    const row = await repo.findByVoteEpoch('V1', 500);
+    expect(row?.slotsElapsedAssigned).toBe(5);
+    expect(row?.slotWindowLastSlot).toBe(110);
+    expect(row?.blockFeesTotalLamports).toBe(100n);
+    expect(row?.blockTipsTotalLamports).toBe(7n);
   });
 
   it('addFeeDelta: accumulates across multiple calls', async () => {
@@ -323,6 +443,174 @@ describe('StatsRepository', () => {
     expect(row?.blockTipsTotalLamports).toBe(18n);
 
     await expect(repo.rebuildIncomeTotalsFromProcessedBlocks(500, ['I1'])).resolves.toBe(0);
+  });
+
+  it('findIndexedIncomePerSlotBenchmarks: computes closed and current epoch medians with the right denominator', async () => {
+    await seedIncomeRow({
+      epoch: 500,
+      vote: 'ClosedA',
+      identity: 'ClosedIdA',
+      slotsAssigned: 100,
+      slotsElapsedAssigned: 10,
+      fees: 1_000n,
+    });
+    await seedIncomeRow({
+      epoch: 500,
+      vote: 'ClosedB',
+      identity: 'ClosedIdB',
+      slotsAssigned: 100,
+      slotsElapsedAssigned: 10,
+      fees: 3_000n,
+      tips: 1_000n,
+    });
+    await seedIncomeRow({
+      epoch: 500,
+      vote: 'ClosedC',
+      identity: 'ClosedIdC',
+      slotsAssigned: 100,
+      slotsElapsedAssigned: 10,
+      fees: 7_000n,
+    });
+    await seedIncomeRow({
+      epoch: 501,
+      vote: 'CurrentA',
+      identity: 'CurrentIdA',
+      slotsAssigned: 100,
+      slotsElapsedAssigned: 10,
+      fees: 1_000n,
+    });
+    await seedIncomeRow({
+      epoch: 501,
+      vote: 'CurrentB',
+      identity: 'CurrentIdB',
+      slotsAssigned: 100,
+      slotsElapsedAssigned: 10,
+      fees: 3_000n,
+    });
+    await seedIncomeRow({
+      epoch: 501,
+      vote: 'CurrentC',
+      identity: 'CurrentIdC',
+      slotsAssigned: 100,
+      slotsElapsedAssigned: 10,
+      fees: 5_000n,
+    });
+
+    const benchmarks = await repo.findIndexedIncomePerSlotBenchmarks([
+      { epoch: 500, isCurrent: false },
+      { epoch: 501, isCurrent: true },
+    ]);
+    const byEpoch = new Map(benchmarks.map((b) => [b.epoch, b]));
+
+    expect(byEpoch.get(500)).toMatchObject({
+      sample: 'indexed_validators',
+      sampleValidators: 3,
+      sampleSlots: 300,
+      basis: 'income_per_assigned_slot',
+    });
+    expect(Number(byEpoch.get(500)?.medianIncomeLamportsPerSlot)).toBe(40);
+    expect(byEpoch.get(500)?.medianIncomeSolPerSlot).toBe('0.00000004');
+
+    expect(byEpoch.get(501)).toMatchObject({
+      sampleValidators: 3,
+      sampleSlots: 30,
+      basis: 'income_per_elapsed_assigned_slot',
+    });
+    expect(Number(byEpoch.get(501)?.medianIncomeLamportsPerSlot)).toBe(300);
+    expect(byEpoch.get(501)?.medianIncomeSolPerSlot).toBe('0.0000003');
+  });
+
+  it('findIndexedIncomePerSlotBenchmarks: includes fact-backed zero income and excludes opted-out, missing-income, and zero-denominator rows', async () => {
+    await seedIncomeRow({
+      epoch: 502,
+      vote: 'IncludedVote',
+      identity: 'IncludedId',
+      slotsAssigned: 9,
+      fees: 8_000n,
+      tips: 1_000n,
+    });
+    await seedFactBackedZeroIncomeRow({
+      epoch: 502,
+      vote: 'ZeroIncomeVote',
+      identity: 'ZeroIncomeId',
+      slot: 502_001,
+      slotsAssigned: 10,
+    });
+    await seedIncomeRow({
+      epoch: 502,
+      vote: 'IncludedVoteB',
+      identity: 'IncludedIdB',
+      slotsAssigned: 10,
+      fees: 2_000n,
+    });
+    await repo.upsertSlotStats({
+      epoch: 502,
+      votePubkey: 'MissingFeeVote',
+      identityPubkey: 'MissingFeeId',
+      slotsAssigned: 10,
+      slotsProduced: 10,
+      slotsSkipped: 0,
+    });
+    await seedIncomeRow({
+      epoch: 502,
+      vote: 'ZeroSlotVote',
+      identity: 'ZeroSlotId',
+      slotsAssigned: 0,
+      fees: 10_000n,
+    });
+    await seedIncomeRow({
+      epoch: 502,
+      vote: 'OptedOutVote',
+      identity: 'OptedOutId',
+      slotsAssigned: 1,
+      fees: 1_000_000n,
+    });
+    await fixture!.pool.query(
+      `INSERT INTO validators (vote_pubkey, identity_pubkey, first_seen_epoch, last_seen_epoch)
+       VALUES ('OptedOutVote', 'OptedOutId', 502, 502)
+       ON CONFLICT (vote_pubkey) DO NOTHING`,
+    );
+    await fixture!.pool.query(
+      `INSERT INTO validator_claims (vote_pubkey, identity_pubkey, last_nonce_used)
+       VALUES ('OptedOutVote', 'OptedOutId', 'nonce')`,
+    );
+    await fixture!.pool.query(
+      `INSERT INTO validator_profiles (vote_pubkey, opted_out)
+       VALUES ('OptedOutVote', TRUE)`,
+    );
+
+    const [benchmark] = await repo.findIndexedIncomePerSlotBenchmarks([
+      { epoch: 502, isCurrent: false },
+    ]);
+
+    expect(benchmark).toMatchObject({
+      epoch: 502,
+      sampleValidators: 3,
+      sampleSlots: 29,
+      basis: 'income_per_assigned_slot',
+    });
+    expect(Number(benchmark?.medianIncomeLamportsPerSlot)).toBe(200);
+  });
+
+  it('findIndexedIncomePerSlotBenchmarks: suppresses low-sample epochs', async () => {
+    await seedIncomeRow({
+      epoch: 503,
+      vote: 'OnlyVoteA',
+      identity: 'OnlyIdA',
+      slotsAssigned: 10,
+      fees: 1_000n,
+    });
+    await seedIncomeRow({
+      epoch: 503,
+      vote: 'OnlyVoteB',
+      identity: 'OnlyIdB',
+      slotsAssigned: 10,
+      fees: 2_000n,
+    });
+
+    await expect(
+      repo.findIndexedIncomePerSlotBenchmarks([{ epoch: 503, isCurrent: false }]),
+    ).resolves.toEqual([]);
   });
 
   it('findTopNByWindow: excludes pure placeholders but keeps fact-backed skipped slots', async () => {

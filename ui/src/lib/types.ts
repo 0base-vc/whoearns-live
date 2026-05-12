@@ -75,6 +75,15 @@ export interface ValidatorEpochRecord {
     medianBlockFeeLamports: string | null;
     medianBlockTipLamports: string | null;
   } | null;
+
+  peerBenchmark: {
+    sample: 'indexed_validators';
+    sampleValidators: number;
+    sampleSlots: number;
+    medianIncomeLamportsPerSlot: string;
+    medianIncomeSolPerSlot: string;
+    basis: 'income_per_assigned_slot' | 'income_per_elapsed_assigned_slot';
+  } | null;
 }
 
 export interface CurrentEpoch {

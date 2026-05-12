@@ -151,6 +151,18 @@ export interface EpochAggregate {
   computedAt: Date;
 }
 
+export type PeerBenchmarkBasis = 'income_per_assigned_slot' | 'income_per_elapsed_assigned_slot';
+
+export interface EpochPeerBenchmark {
+  epoch: Epoch;
+  sample: 'indexed_validators';
+  sampleValidators: number;
+  sampleSlots: number;
+  medianIncomeLamportsPerSlot: string;
+  medianIncomeSolPerSlot: string;
+  basis: PeerBenchmarkBasis;
+}
+
 export type ProcessedBlockStatus = 'produced' | 'skipped' | 'missing';
 
 export interface ProcessedBlock {
@@ -402,6 +414,20 @@ export interface ValidatorCurrentEpochResponse {
     sampleBlockCount: number;
     medianBlockFeeLamports: string | null;
     medianBlockTipLamports: string | null;
+  } | null;
+
+  /**
+   * Indexed-validator peer benchmark for total income per scheduled leader
+   * slot. Current epochs use elapsed assigned slots; closed epochs use the
+   * final assigned slot count.
+   */
+  peerBenchmark: {
+    sample: 'indexed_validators';
+    sampleValidators: number;
+    sampleSlots: number;
+    medianIncomeLamportsPerSlot: string;
+    medianIncomeSolPerSlot: string;
+    basis: PeerBenchmarkBasis;
   } | null;
 }
 

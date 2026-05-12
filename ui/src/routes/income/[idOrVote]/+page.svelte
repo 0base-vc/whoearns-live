@@ -231,7 +231,7 @@
   const titleLabel = $derived(history.name ?? shortVote);
   const pageTitle = $derived(`${titleLabel} — Solana validator income | ${SITE_NAME}`);
   const pageDescription = $derived(
-    `Per-epoch income for Solana validator ${history.vote}: block fees, on-chain Jito tips, slot production, and cluster-median comparison over the last ${history.items.length} epochs.`,
+    `Per-epoch income for Solana validator ${history.vote}: block fees, on-chain Jito tips, slot production, and indexed-validator median income per leader slot over the last ${history.items.length} epochs.`,
   );
 
   /**

@@ -257,7 +257,7 @@ Solana block data. For every validator in the watched set it records:
   slotsSkipped, skipRate.
 - Block fees: total base fees + priority fees earned as block producer.
 - MEV tips: on-chain Jito tips derived from produced blocks.
-- Cluster benchmarks: top-100 validator medians for each epoch.
+- Peer benchmarks: indexed-validator median income per leader slot for each epoch.
 
 Data is indexed directly from the Solana JSON-RPC API.
 It is not simulated or estimated. All derived data is released under
@@ -325,7 +325,8 @@ Per-epoch history for a specific validator. Pass either a vote or
 identity pubkey. Returns { vote, identity, name, iconUrl, website,
 items: ValidatorEpochRecord[], claimed, profile }. Items are newest-
 first. Each item carries a full fee decomposition (base/priority/tip
-totals + medians) and a per-epoch cluster benchmark block.
+totals + medians) and peerBenchmark, the indexed-validator median
+income per leader slot when the epoch sample has at least 3 validators.
 
 ### GET /v1/validators/{idOrVote}/current-epoch
 Same as one history item but for the running epoch only. Cheaper.

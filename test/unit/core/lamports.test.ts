@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  decimalLamportsToSol,
   lamportsToSol,
   lamportsToString,
   solToLamports,
@@ -52,6 +53,18 @@ describe('lamportsToSol', () => {
   });
   it('handles negatives', () => {
     expect(lamportsToSol(-LAMPORTS_PER_SOL)).toBe('-1');
+  });
+});
+
+describe('decimalLamportsToSol', () => {
+  it('formats fractional lamports without losing precision', () => {
+    expect(decimalLamportsToSol('12345.5')).toBe('0.0000123455');
+    expect(decimalLamportsToSol('0.5')).toBe('0.0000000005');
+  });
+
+  it('handles whole lamports and zero', () => {
+    expect(decimalLamportsToSol('1000000000')).toBe('1');
+    expect(decimalLamportsToSol('0.0')).toBe('0');
   });
 });
 

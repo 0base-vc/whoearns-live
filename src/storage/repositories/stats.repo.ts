@@ -1,9 +1,11 @@
 import type pg from 'pg';
-import { toLamports } from '../../core/lamports.js';
+import { decimalLamportsToSol, toLamports } from '../../core/lamports.js';
 import type {
   Epoch,
+  EpochPeerBenchmark,
   EpochValidatorStats,
   IdentityPubkey,
+  PeerBenchmarkBasis,
   Slot,
   VotePubkey,
 } from '../../types/domain.js';
@@ -182,6 +184,8 @@ const STATS_COLS = `epoch, vote_pubkey, identity_pubkey,
   median_base_fee_updated_at, median_priority_fee_updated_at,
   tips_updated_at, median_tip_updated_at, median_total_updated_at`;
 
+const PEER_BENCHMARK_MIN_VALIDATORS = 3;
+
 /**
  * Supported ordering modes for `findTopNByEpoch`.
  *
@@ -249,6 +253,19 @@ interface WindowedLeaderboardStatsRow {
   slot_window_updated_at: Date | null;
   last_updated_at: Date | null;
   activated_stake_lamports: string | null;
+}
+
+export interface IndexedIncomePerSlotBenchmarkRequest {
+  epoch: Epoch;
+  isCurrent: boolean;
+}
+
+interface IndexedIncomePerSlotBenchmarkRow {
+  epoch: string;
+  basis: PeerBenchmarkBasis;
+  sample_validators: number;
+  sample_slots: string;
+  median_income_lamports_per_slot: string;
 }
 
 export interface WindowedLeaderboardStats {
@@ -350,10 +367,9 @@ export class StatsRepository {
   }
 
   /**
-   * Materialise stats rows without touching existing rows. The fee
-   * ingester calls this before applying income deltas so a first tick
-   * cannot lose deltas just because the slot ingester has not upserted
-   * its counters yet.
+   * Materialise stats rows before applying income deltas. Existing rows keep
+   * their income untouched, but their elapsed leader-slot window is refreshed
+   * so current-epoch income-per-slot denominators do not lag behind fee scans.
    */
   async ensureSlotStatsRows(rows: EnsureSlotStatsRowArgs[]): Promise<number> {
     if (rows.length === 0) return 0;
@@ -379,30 +395,62 @@ export class StatsRepository {
       );
     }
 
-    const { rowCount } = await this.pool.query(
-      `INSERT INTO epoch_validator_stats (
-         epoch, vote_pubkey, identity_pubkey,
-         slots_assigned, slots_elapsed_assigned, slots_produced, slots_skipped,
-         activated_stake_lamports, slots_updated_at, slot_window_last_slot, slot_window_updated_at
-       )
-       SELECT
-         v.epoch,
-         v.vote_pubkey,
-         v.identity_pubkey,
-         v.slots_assigned,
-         v.slots_elapsed_assigned,
-         0,
-         0,
-         v.activated_stake_lamports,
-         NOW(),
-         v.slot_window_last_slot,
-         CASE WHEN v.slot_window_last_slot IS NULL THEN NULL ELSE NOW() END
-       FROM (VALUES ${values.join(', ')})
-         AS v(epoch, vote_pubkey, identity_pubkey, slots_assigned, slots_elapsed_assigned, slot_window_last_slot, activated_stake_lamports)
-       ON CONFLICT (epoch, vote_pubkey) DO NOTHING`,
+    const { rows: resultRows } = await this.pool.query<{ inserted: string }>(
+      `WITH incoming(epoch, vote_pubkey, identity_pubkey, slots_assigned, slots_elapsed_assigned, slot_window_last_slot, activated_stake_lamports) AS (
+          VALUES ${values.join(', ')}
+        ),
+        inserted AS (
+          INSERT INTO epoch_validator_stats (
+            epoch, vote_pubkey, identity_pubkey,
+            slots_assigned, slots_elapsed_assigned, slots_produced, slots_skipped,
+            activated_stake_lamports, slots_updated_at, slot_window_last_slot, slot_window_updated_at
+          )
+          SELECT
+            v.epoch,
+            v.vote_pubkey,
+            v.identity_pubkey,
+            v.slots_assigned,
+            v.slots_elapsed_assigned,
+            0,
+            0,
+            v.activated_stake_lamports,
+            NOW(),
+            v.slot_window_last_slot,
+            CASE WHEN v.slot_window_last_slot IS NULL THEN NULL ELSE NOW() END
+          FROM incoming v
+          ON CONFLICT (epoch, vote_pubkey) DO NOTHING
+          RETURNING 1
+        ),
+        refreshed AS (
+          UPDATE epoch_validator_stats evs
+             SET slots_elapsed_assigned = GREATEST(
+                   COALESCE(evs.slots_elapsed_assigned, 0),
+                   incoming.slots_elapsed_assigned
+                 ),
+                 slots_updated_at = COALESCE(evs.slots_updated_at, NOW()),
+                 slot_window_last_slot = CASE
+                   WHEN incoming.slot_window_last_slot IS NULL THEN evs.slot_window_last_slot
+                   WHEN evs.slot_window_last_slot IS NULL THEN incoming.slot_window_last_slot
+                   ELSE GREATEST(evs.slot_window_last_slot, incoming.slot_window_last_slot)
+                 END,
+                 slot_window_updated_at = CASE
+                   WHEN incoming.slot_window_last_slot IS NULL THEN evs.slot_window_updated_at
+                   WHEN evs.slot_window_last_slot IS NULL
+                     OR incoming.slot_window_last_slot > evs.slot_window_last_slot
+                   THEN NOW()
+                   ELSE evs.slot_window_updated_at
+                 END
+            FROM incoming
+           WHERE evs.epoch = incoming.epoch
+             AND evs.vote_pubkey = incoming.vote_pubkey
+          RETURNING 1
+        )
+        SELECT
+          (SELECT COUNT(*) FROM inserted)::text AS inserted,
+          (SELECT COUNT(*) FROM refreshed)::text AS refreshed`,
       params,
     );
-    return rowCount ?? 0;
+    return Number(resultRows[0]?.inserted ?? 0);
   }
 
   async addFeeDelta(args: AddFeeDeltaArgs): Promise<void> {
@@ -777,6 +825,101 @@ export class StatsRepository {
       [vote, safe],
     );
     return rows.map(rowToStats);
+  }
+
+  async findIndexedIncomePerSlotBenchmarks(
+    requested: IndexedIncomePerSlotBenchmarkRequest[],
+  ): Promise<EpochPeerBenchmark[]> {
+    if (requested.length === 0) return [];
+
+    const unique = new Map<Epoch, boolean>();
+    for (const item of requested) {
+      unique.set(item.epoch, item.isCurrent);
+    }
+
+    const params: Array<number | boolean | PeerBenchmarkBasis> = [];
+    const valuesSql: string[] = [];
+    let param = 1;
+    for (const [epoch, isCurrent] of unique.entries()) {
+      const basis: PeerBenchmarkBasis = isCurrent
+        ? 'income_per_elapsed_assigned_slot'
+        : 'income_per_assigned_slot';
+      valuesSql.push(`($${param++}::bigint, $${param++}::boolean, $${param++}::text)`);
+      params.push(epoch, isCurrent, basis);
+    }
+
+    const { rows } = await this.pool.query<IndexedIncomePerSlotBenchmarkRow>(
+      `WITH requested(epoch, is_current, basis) AS (
+          VALUES ${valuesSql.join(', ')}
+        ),
+        scored AS (
+          SELECT
+            r.epoch,
+            r.basis::text AS basis,
+            CASE
+              WHEN r.is_current THEN COALESCE(evs.slots_elapsed_assigned, 0)
+              ELSE evs.slots_assigned
+            END AS denominator,
+            (
+              COALESCE(evs.block_fees_total_lamports, 0)
+              + COALESCE(evs.block_tips_total_lamports, 0)
+            )::numeric AS income_lamports
+          FROM requested r
+          JOIN epoch_validator_stats evs ON evs.epoch = r.epoch
+          WHERE evs.slots_updated_at IS NOT NULL
+            AND (
+              evs.fees_updated_at IS NOT NULL
+              OR evs.tips_updated_at IS NOT NULL
+              OR EXISTS (
+                SELECT 1
+                  FROM processed_blocks pb
+                 WHERE pb.epoch = evs.epoch
+                   AND pb.leader_identity = evs.identity_pubkey
+                 LIMIT 1
+              )
+            )
+            AND CASE
+              WHEN r.is_current THEN COALESCE(evs.slots_elapsed_assigned, 0)
+              ELSE evs.slots_assigned
+            END > 0
+            AND NOT EXISTS (
+              SELECT 1
+                FROM validator_profiles vp
+               WHERE vp.vote_pubkey = evs.vote_pubkey
+                 AND vp.opted_out = TRUE
+            )
+        ),
+        per_validator AS (
+          SELECT
+            epoch,
+            basis,
+            denominator,
+            income_lamports / denominator::numeric AS income_per_slot
+          FROM scored
+        )
+        SELECT
+          epoch::text AS epoch,
+          basis,
+          COUNT(*)::int AS sample_validators,
+          COALESCE(SUM(denominator), 0)::bigint::text AS sample_slots,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY income_per_slot)::numeric::text
+            AS median_income_lamports_per_slot
+        FROM per_validator
+        GROUP BY epoch, basis
+        HAVING COUNT(*) >= ${PEER_BENCHMARK_MIN_VALIDATORS}
+        ORDER BY epoch DESC`,
+      params,
+    );
+
+    return rows.map((row) => ({
+      epoch: Number(row.epoch),
+      sample: 'indexed_validators',
+      sampleValidators: Number(row.sample_validators),
+      sampleSlots: Number(row.sample_slots),
+      medianIncomeLamportsPerSlot: row.median_income_lamports_per_slot,
+      medianIncomeSolPerSlot: decimalLamportsToSol(row.median_income_lamports_per_slot),
+      basis: row.basis,
+    }));
   }
 
   /**

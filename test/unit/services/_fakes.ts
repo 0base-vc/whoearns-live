@@ -15,6 +15,7 @@ import type {
   AddFeeDeltaArgs,
   AddIncomeDeltaArgs,
   EnsureSlotStatsRowArgs,
+  IndexedIncomePerSlotBenchmarkRequest,
   LeaderboardWindowEpoch,
   LeaderboardWindowSort,
   WindowedLeaderboardStats,
@@ -23,6 +24,7 @@ import type {
   Epoch,
   EpochAggregate,
   EpochInfo,
+  EpochPeerBenchmark,
   EpochValidatorStats,
   IdentityPubkey,
   ProcessedBlock,
@@ -309,6 +311,7 @@ export class FakeStatsRepo {
   readonly feeCalls: AddFeeDeltaArgs[] = [];
   // Materialised rows keyed by `${epoch}:${vote}`.
   readonly rows = new Map<string, EpochValidatorStats>();
+  readonly peerBenchmarks = new Map<Epoch, EpochPeerBenchmark>();
 
   private key(epoch: Epoch, vote: VotePubkey): string {
     return `${epoch}:${vote}`;
@@ -360,7 +363,27 @@ export class FakeStatsRepo {
     let inserted = 0;
     for (const row of rows) {
       const k = this.key(row.epoch, row.votePubkey);
-      if (this.rows.has(k)) continue;
+      const existing = this.rows.get(k);
+      if (existing) {
+        const incomingElapsed = row.slotsElapsedAssigned ?? 0;
+        const incomingWindow = row.slotWindowLastSlot ?? null;
+        const windowAdvanced =
+          incomingWindow !== null &&
+          (existing.slotWindowLastSlot === null || incomingWindow > existing.slotWindowLastSlot);
+        this.rows.set(k, {
+          ...existing,
+          slotsElapsedAssigned: Math.max(existing.slotsElapsedAssigned, incomingElapsed),
+          slotsUpdatedAt: existing.slotsUpdatedAt ?? new Date(),
+          slotWindowLastSlot:
+            incomingWindow === null
+              ? existing.slotWindowLastSlot
+              : existing.slotWindowLastSlot === null
+                ? incomingWindow
+                : Math.max(existing.slotWindowLastSlot, incomingWindow),
+          slotWindowUpdatedAt: windowAdvanced ? new Date() : (existing.slotWindowUpdatedAt ?? null),
+        });
+        continue;
+      }
       inserted += 1;
       this.rows.set(k, {
         epoch: row.epoch,
@@ -844,6 +867,18 @@ export class FakeStatsRepo {
     const rows = [...this.rows.values()].filter((r) => r.votePubkey === vote);
     rows.sort((a, b) => b.epoch - a.epoch);
     return rows.slice(0, safeLimit);
+  }
+
+  putPeerBenchmark(benchmark: EpochPeerBenchmark): void {
+    this.peerBenchmarks.set(benchmark.epoch, benchmark);
+  }
+
+  async findIndexedIncomePerSlotBenchmarks(
+    requested: IndexedIncomePerSlotBenchmarkRequest[],
+  ): Promise<EpochPeerBenchmark[]> {
+    return requested
+      .map((item) => this.peerBenchmarks.get(item.epoch) ?? null)
+      .filter((item): item is EpochPeerBenchmark => item !== null);
   }
 }
 

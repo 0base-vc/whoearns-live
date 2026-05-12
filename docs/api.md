@@ -233,11 +233,18 @@ vote account pubkey or identity/node pubkey.
 
 Query params:
 
-- `limit` — 1-50, default 20.
+- `limit` — 1-200, default 50.
 
 The response wraps `items: ValidatorEpochRecord[]` with validator metadata,
 claim/profile state, and a `tracking` boolean that is true when the lookup
 caused the validator to be added to the watched set.
+
+Each item also includes `peerBenchmark`, an indexed-validator median for
+`totalIncome / leaderSlots` in the same epoch. Closed epochs use
+`slotsAssigned`; the running epoch uses `slotsElapsedAssigned`. The benchmark
+is `null` until at least three indexed validators have income/slot facts. This
+benchmark is populated on the history endpoint; single-epoch endpoints that
+reuse `ValidatorEpochRecord` may return `peerBenchmark: null`.
 
 ## `GET /v1/validators/:idOrVote/current-epoch`
 
@@ -257,6 +264,7 @@ known validator, even when some metric families have no data yet.
   "hasIncome": true,
 
   "slotsAssigned": 432,
+  "slotsElapsedAssigned": 150,
   "slotsProduced": 120,
   "slotsSkipped": 3,
 
@@ -276,7 +284,8 @@ known validator, even when some metric families have no data yet.
     "slotsUpdatedAt": "2026-04-15T08:10:00.000Z",
     "feesUpdatedAt": "2026-04-15T08:10:00.000Z",
     "tipsUpdatedAt": "2026-04-15T08:10:00.000Z"
-  }
+  },
+  "peerBenchmark": null
 }
 ```
 

@@ -5,7 +5,7 @@
     1. Hero — brand headline + one-line pitch + slim search ("know the pubkey? jump to it")
     2. Leaderboard — the PRIMARY discovery surface. Top validators by
        live-trend income per slot; each row is a click-through.
-    3. Features — three-card explainer (per-epoch / cluster benchmark / open data).
+    3. Features — three-card explainer (per-epoch / peer benchmark / open data).
 
   Why search was demoted: the original "enter a 44-char pubkey" form as
   the top CTA implied visitors already knew who to look up. For SEO +
@@ -42,8 +42,8 @@
       body: 'Slots assigned / produced, skip rate, block fees, and on-chain Jito tips — final rows for closed epochs, with running totals for the live one.',
     },
     {
-      title: 'Cluster benchmark',
-      body: 'Every median is contextualized against the top-100 validator sample so you can see whether a validator is earning above or below its peers.',
+      title: 'Peer benchmark',
+      body: 'Income is normalized per leader slot and compared against the indexed-validator median, so stake size does not hide execution quality.',
     },
     {
       title: 'Open data',

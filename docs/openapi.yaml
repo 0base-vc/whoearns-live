@@ -206,8 +206,8 @@ paths:
           schema:
             type: integer
             minimum: 1
-            maximum: 50
-            default: 20
+            maximum: 200
+            default: 50
       responses:
         '200':
           description: Validator is known, or was added to the watched set on demand.
@@ -545,6 +545,7 @@ components:
         - hasSlots
         - hasIncome
         - slotsAssigned
+        - slotsElapsedAssigned
         - slotsProduced
         - slotsSkipped
         - blockFeesTotalLamports
@@ -555,6 +556,8 @@ components:
         - totalIncomeSol
         - lastUpdatedAt
         - freshness
+        - cluster
+        - peerBenchmark
       properties:
         vote: { type: string }
         identity: { type: string }
@@ -577,6 +580,14 @@ components:
           description: |
             Full leader-schedule total for the validator in this epoch.
             Stable across the epoch — does NOT grow as blocks are produced.
+            null when hasSlots=false.
+        slotsElapsedAssigned:
+          type: [integer, 'null']
+          minimum: 0
+          description: |
+            Current-epoch leader slots that have elapsed through the
+            finalized safe window. Closed epochs may return 0 for older
+            rows; use `slotsAssigned` for final-epoch denominators.
             null when hasSlots=false.
         slotsProduced:
           type: [integer, 'null']
@@ -649,6 +660,56 @@ components:
             tipsUpdatedAt: { type: [string, 'null'], format: date-time }
             medianTipUpdatedAt: { type: [string, 'null'], format: date-time }
             medianTotalUpdatedAt: { type: [string, 'null'], format: date-time }
+        cluster:
+          type: [object, 'null']
+          description: |
+            Legacy cluster top-N benchmark for this epoch. Retained for
+            compatibility; income charts should prefer `peerBenchmark`
+            because it is normalized by leader-slot opportunity.
+          required:
+            [
+              topN,
+              sampleValidators,
+              sampleBlockCount,
+              medianBlockFeeLamports,
+              medianBlockTipLamports,
+            ]
+          properties:
+            topN: { type: integer, minimum: 1 }
+            sampleValidators: { type: integer, minimum: 0 }
+            sampleBlockCount: { type: integer, minimum: 0 }
+            medianBlockFeeLamports: { type: [string, 'null'] }
+            medianBlockTipLamports: { type: [string, 'null'] }
+        peerBenchmark:
+          type: [object, 'null']
+          description: |
+            Indexed-validator median total income per scheduled leader
+            slot for the same epoch. Current epochs use elapsed assigned
+            slots; closed epochs use final assigned slots. Populated on
+            `/v1/validators/{idOrVote}/history`; other endpoints that
+            reuse this record shape may return null.
+          required:
+            [
+              sample,
+              sampleValidators,
+              sampleSlots,
+              medianIncomeLamportsPerSlot,
+              medianIncomeSolPerSlot,
+              basis,
+            ]
+          properties:
+            sample:
+              type: string
+              enum: [indexed_validators]
+            sampleValidators: { type: integer, minimum: 0 }
+            sampleSlots: { type: integer, minimum: 0 }
+            medianIncomeLamportsPerSlot:
+              type: string
+              description: Decimal lamports per leader slot; may include fractional lamports.
+            medianIncomeSolPerSlot: { type: string }
+            basis:
+              type: string
+              enum: [income_per_assigned_slot, income_per_elapsed_assigned_slot]
 
     ValidatorEpochLeaderSlots:
       type: object
