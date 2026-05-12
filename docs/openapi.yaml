@@ -252,7 +252,8 @@ paths:
           - `skip_rate`: `slots_skipped / windowSlots`, ASC. Lower is better.
 
         Rows below `minWindowSlots` are filtered. Returned rows also include a
-        `sampleStatus` hint (`low`, `medium`, `normal`) for UI dimming.
+        `sampleStatus` hint (`low`, `medium`, `normal`) for clients that want
+        to label small denominators.
         Compatibility: bare `?epoch=N` is treated as
         `window=final_epoch&epoch=N`; legacy sort aliases `performance` and
         `income_per_stake` map to `income_per_slot`, and `median_fee` maps to

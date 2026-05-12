@@ -149,10 +149,6 @@
     void load(sort, next);
   }
 
-  function isSmallSample(item: LeaderboardItem): boolean {
-    return item.sampleStatus === 'low';
-  }
-
   function skipRateText(item: LeaderboardItem): string {
     if (item.skipRate == null) return '-';
     return `${(item.skipRate * 100).toFixed(2)}%`;
@@ -217,8 +213,7 @@
         </h2>
         <p class="text-xs text-[color:var(--color-text-subtle)]">
           Ranked by <span class="font-semibold">{activeCol.label.toLowerCase()}</span> across
-          <span class="font-semibold">{activeWindow.label.toLowerCase()}</span>. Low-sample rows are
-          dimmed.
+          <span class="font-semibold">{activeWindow.label.toLowerCase()}</span>.
         </p>
       </div>
 
@@ -235,11 +230,6 @@
               content={activeWindow.detail}
             />
           </span>
-          {#if data.safeUpperSlot !== null}
-            <span class="font-mono text-[color:var(--color-text-subtle)]">
-              as of slot {data.safeUpperSlot}
-            </span>
-          {/if}
           {#if runningEpochProgress !== null}
             <div class="flex items-center gap-2">
               <span class="text-[color:var(--color-text-subtle)]">
@@ -372,12 +362,7 @@
         </thead>
         <tbody class="divide-y divide-[color:var(--color-border-default)]">
           {#each data.items as item (item.vote)}
-            {@const small = isSmallSample(item)}
-            <tr
-              class="transition-colors hover:bg-[color:var(--color-surface-muted)]"
-              style:opacity={small ? '0.5' : undefined}
-              title={small ? `Limited sample: ${item.windowSlots} window slots.` : undefined}
-            >
+            <tr class="transition-colors hover:bg-[color:var(--color-surface-muted)]">
               <td class="px-4 py-2.5 text-left">
                 <span class="font-mono text-xs font-semibold text-[color:var(--color-text-subtle)]">
                   {item.rank}
@@ -442,11 +427,7 @@
       class:opacity-60={loading}
     >
       {#each data.items as item (item.vote)}
-        {@const small = isSmallSample(item)}
-        <li
-          style:opacity={small ? '0.5' : undefined}
-          title={small ? `Limited sample: ${item.windowSlots} window slots.` : undefined}
-        >
+        <li>
           <a
             href={`/income/${item.vote}`}
             class="group block px-5 py-3 transition-colors hover:bg-[color:var(--color-surface-muted)]"
