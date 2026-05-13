@@ -65,6 +65,7 @@ export interface EpochValidatorStats {
   votePubkey: VotePubkey;
   identityPubkey: IdentityPubkey;
   slotsAssigned: number;
+  slotsElapsedAssigned: number;
   slotsProduced: number;
   slotsSkipped: number;
   /**
@@ -123,6 +124,8 @@ export interface EpochValidatorStats {
    */
   activatedStakeLamports: bigint | null;
   slotsUpdatedAt: Date | null;
+  slotWindowLastSlot: Slot | null;
+  slotWindowUpdatedAt: Date | null;
   feesUpdatedAt: Date | null;
   medianFeeUpdatedAt: Date | null;
   medianBaseFeeUpdatedAt: Date | null;
@@ -146,6 +149,18 @@ export interface EpochAggregate {
   medianFeeLamports: bigint | null;
   medianTipLamports: bigint | null;
   computedAt: Date;
+}
+
+export type PeerBenchmarkBasis = 'income_per_assigned_slot' | 'income_per_elapsed_assigned_slot';
+
+export interface EpochPeerBenchmark {
+  epoch: Epoch;
+  sample: 'indexed_validators';
+  sampleValidators: number;
+  sampleSlots: number;
+  medianIncomeLamportsPerSlot: string;
+  medianIncomeSolPerSlot: string;
+  basis: PeerBenchmarkBasis;
 }
 
 export type ProcessedBlockStatus = 'produced' | 'skipped' | 'missing';
@@ -214,6 +229,18 @@ export interface ProcessedBlock {
   maxPriorityFeeLamports: bigint;
   /** Sum of `meta.computeUnitsConsumed` when providers expose it. */
   computeUnitsConsumed: bigint;
+  /** Sum of provider-supplied `meta.costUnits` when available. */
+  costUnits: bigint;
+  /** Sum of explicit ComputeBudget SetComputeUnitLimit requests. */
+  computeBudgetRequestedUnits: bigint;
+  /** Transactions that set an explicit ComputeBudget unit limit. */
+  computeBudgetLimitTxCount: number;
+  /** Transactions that set an explicit ComputeBudget unit price. */
+  computeBudgetPriceTxCount: number;
+  /** Largest explicit ComputeBudget unit limit observed in this block. */
+  maxComputeUnitLimit: bigint;
+  /** Largest explicit ComputeBudget unit price, in micro-lamports per CU. */
+  maxComputeUnitPriceMicroLamports: bigint;
   /** Null for rows created before block-level slot facts were captured. */
   factsCapturedAt: Date | null;
   processedAt: Date;
@@ -254,6 +281,19 @@ export interface ValidatorEpochSlotStats {
     maxPriorityFeeLamports: bigint;
     maxTipLamports: bigint;
     computeUnitsConsumed: bigint;
+    costUnits: bigint;
+    computeBudgetRequestedUnits: bigint;
+    computeBudgetLimitTxCount: number;
+    computeBudgetPriceTxCount: number;
+    maxComputeUnitLimit: bigint;
+    maxComputeUnitPriceMicroLamports: bigint;
+    avgComputeUnitsPerProducedBlock: bigint | null;
+    avgComputeUnitsPerTransaction: bigint | null;
+    avgCostUnitsPerProducedBlock: bigint | null;
+    avgCostUnitsPerTransaction: bigint | null;
+    incomeLamportsPerMillionComputeUnit: bigint | null;
+    priorityFeeLamportsPerMillionComputeUnit: bigint | null;
+    tipLamportsPerMillionComputeUnit: bigint | null;
     bestBlockSlot: Slot | null;
     bestBlockIncomeLamports: bigint | null;
   };
@@ -287,6 +327,12 @@ export interface ValidatorCurrentEpochResponse {
   hasIncome: boolean;
 
   slotsAssigned: number | null;
+  /**
+   * Current-epoch leader slots that have elapsed through the finalized safe
+   * window. Null on rows without slot data. Closed epochs may return 0 for
+   * legacy rows; use `slotsAssigned` for final-epoch denominators.
+   */
+  slotsElapsedAssigned: number | null;
   slotsProduced: number | null;
   slotsSkipped: number | null;
 
@@ -368,6 +414,20 @@ export interface ValidatorCurrentEpochResponse {
     sampleBlockCount: number;
     medianBlockFeeLamports: string | null;
     medianBlockTipLamports: string | null;
+  } | null;
+
+  /**
+   * Indexed-validator peer benchmark for total income per scheduled leader
+   * slot. Current epochs use elapsed assigned slots; closed epochs use the
+   * final assigned slot count.
+   */
+  peerBenchmark: {
+    sample: 'indexed_validators';
+    sampleValidators: number;
+    sampleSlots: number;
+    medianIncomeLamportsPerSlot: string;
+    medianIncomeSolPerSlot: string;
+    basis: PeerBenchmarkBasis;
   } | null;
 }
 

@@ -15,11 +15,16 @@ import type {
   AddFeeDeltaArgs,
   AddIncomeDeltaArgs,
   EnsureSlotStatsRowArgs,
+  IndexedIncomePerSlotBenchmarkRequest,
+  LeaderboardWindowEpoch,
+  LeaderboardWindowSort,
+  WindowedLeaderboardStats,
 } from '../../../src/storage/repositories/stats.repo.js';
 import type {
   Epoch,
   EpochAggregate,
   EpochInfo,
+  EpochPeerBenchmark,
   EpochValidatorStats,
   IdentityPubkey,
   ProcessedBlock,
@@ -156,6 +161,38 @@ export class FakeValidatorsRepo {
     return out;
   }
 
+  async searchByText(
+    query: string,
+    limit: number,
+    optedOutVotes: Set<VotePubkey> = new Set(),
+  ): Promise<Validator[]> {
+    const q = query.trim().toLowerCase();
+    if (q.length < 2) return [];
+    return [...this.rows.values()]
+      .filter((row) => !optedOutVotes.has(row.votePubkey))
+      .filter((row) => {
+        return (
+          row.votePubkey.toLowerCase().startsWith(q) ||
+          row.identityPubkey.toLowerCase().startsWith(q) ||
+          (row.name?.toLowerCase().includes(q) ?? false) ||
+          (row.keybaseUsername?.toLowerCase().includes(q) ?? false)
+        );
+      })
+      .sort((a, b) => {
+        const ar =
+          a.votePubkey.toLowerCase().startsWith(q) || a.identityPubkey.toLowerCase().startsWith(q)
+            ? 0
+            : 1;
+        const br =
+          b.votePubkey.toLowerCase().startsWith(q) || b.identityPubkey.toLowerCase().startsWith(q)
+            ? 0
+            : 1;
+        if (ar !== br) return ar - br;
+        return b.lastSeenEpoch - a.lastSeenEpoch || (a.name ?? '').localeCompare(b.name ?? '');
+      })
+      .slice(0, Math.max(1, Math.min(limit, 25)));
+  }
+
   /**
    * Stub mirror of the production `findAllVotesForSitemap` method —
    * returns every vote pubkey in deterministic order. The fake doesn't
@@ -248,6 +285,38 @@ export class FakeEpochsRepo {
     return best;
   }
 
+  async findLatestClosedEpochs(limit: number): Promise<EpochInfo[]> {
+    if (limit <= 0) return [];
+    return [...this.rows.values()]
+      .filter((row) => row.isClosed)
+      .sort((a, b) => b.epoch - a.epoch)
+      .slice(0, Math.min(limit, 10));
+  }
+
+  async findLatestCompleteClosedEpochBlock(blockSize: number): Promise<EpochInfo[]> {
+    if (!Number.isInteger(blockSize) || blockSize <= 0) return [];
+    const safe = Math.max(1, Math.min(blockSize, 100));
+    const closed = [...this.rows.values()].filter((row) => row.isClosed);
+    const latestClosed = closed.reduce<number | null>(
+      (best, row) => (best === null || row.epoch > best ? row.epoch : best),
+      null,
+    );
+    if (latestClosed === null) return [];
+
+    let epochEnd = Math.floor((latestClosed + 1) / safe) * safe - 1;
+    while (epochEnd >= safe - 1) {
+      const rows: EpochInfo[] = [];
+      for (let epoch = epochEnd; epoch > epochEnd - safe; epoch -= 1) {
+        const row = this.rows.get(epoch);
+        if (row === undefined || !row.isClosed) break;
+        rows.push(row);
+      }
+      if (rows.length === safe) return rows;
+      epochEnd -= safe;
+    }
+    return [];
+  }
+
   async markClosed(epoch: Epoch, closedAt: Date): Promise<void> {
     const row = this.rows.get(epoch);
     if (row) {
@@ -266,6 +335,7 @@ export class FakeStatsRepo {
   readonly feeCalls: AddFeeDeltaArgs[] = [];
   // Materialised rows keyed by `${epoch}:${vote}`.
   readonly rows = new Map<string, EpochValidatorStats>();
+  readonly peerBenchmarks = new Map<Epoch, EpochPeerBenchmark>();
 
   private key(epoch: Epoch, vote: VotePubkey): string {
     return `${epoch}:${vote}`;
@@ -286,6 +356,7 @@ export class FakeStatsRepo {
       votePubkey: args.votePubkey,
       identityPubkey: args.identityPubkey,
       slotsAssigned: args.slotsAssigned,
+      slotsElapsedAssigned: args.slotsElapsedAssigned ?? prev?.slotsElapsedAssigned ?? 0,
       slotsProduced: args.slotsProduced,
       slotsSkipped: args.slotsSkipped,
       blockFeesTotalLamports: prev?.blockFeesTotalLamports ?? 0n,
@@ -299,6 +370,9 @@ export class FakeStatsRepo {
       medianTotalLamports: prev?.medianTotalLamports ?? null,
       activatedStakeLamports: nextStake,
       slotsUpdatedAt: new Date(),
+      slotWindowLastSlot: args.slotWindowLastSlot ?? prev?.slotWindowLastSlot ?? null,
+      slotWindowUpdatedAt:
+        args.slotWindowLastSlot !== undefined ? new Date() : (prev?.slotWindowUpdatedAt ?? null),
       feesUpdatedAt: prev?.feesUpdatedAt ?? null,
       medianFeeUpdatedAt: prev?.medianFeeUpdatedAt ?? null,
       medianBaseFeeUpdatedAt: prev?.medianBaseFeeUpdatedAt ?? null,
@@ -313,13 +387,34 @@ export class FakeStatsRepo {
     let inserted = 0;
     for (const row of rows) {
       const k = this.key(row.epoch, row.votePubkey);
-      if (this.rows.has(k)) continue;
+      const existing = this.rows.get(k);
+      if (existing) {
+        const incomingElapsed = row.slotsElapsedAssigned ?? 0;
+        const incomingWindow = row.slotWindowLastSlot ?? null;
+        const windowAdvanced =
+          incomingWindow !== null &&
+          (existing.slotWindowLastSlot === null || incomingWindow > existing.slotWindowLastSlot);
+        this.rows.set(k, {
+          ...existing,
+          slotsElapsedAssigned: Math.max(existing.slotsElapsedAssigned, incomingElapsed),
+          slotsUpdatedAt: existing.slotsUpdatedAt ?? new Date(),
+          slotWindowLastSlot:
+            incomingWindow === null
+              ? existing.slotWindowLastSlot
+              : existing.slotWindowLastSlot === null
+                ? incomingWindow
+                : Math.max(existing.slotWindowLastSlot, incomingWindow),
+          slotWindowUpdatedAt: windowAdvanced ? new Date() : (existing.slotWindowUpdatedAt ?? null),
+        });
+        continue;
+      }
       inserted += 1;
       this.rows.set(k, {
         epoch: row.epoch,
         votePubkey: row.votePubkey,
         identityPubkey: row.identityPubkey,
         slotsAssigned: row.slotsAssigned,
+        slotsElapsedAssigned: row.slotsElapsedAssigned ?? 0,
         slotsProduced: 0,
         slotsSkipped: 0,
         blockFeesTotalLamports: 0n,
@@ -333,6 +428,8 @@ export class FakeStatsRepo {
         medianTotalLamports: null,
         activatedStakeLamports: row.activatedStakeLamports ?? null,
         slotsUpdatedAt: new Date(),
+        slotWindowLastSlot: row.slotWindowLastSlot ?? null,
+        slotWindowUpdatedAt: row.slotWindowLastSlot === undefined ? null : new Date(),
         feesUpdatedAt: null,
         medianFeeUpdatedAt: null,
         medianBaseFeeUpdatedAt: null,
@@ -646,6 +743,112 @@ export class FakeStatsRepo {
     return rows.slice(0, safeLimit);
   }
 
+  async findTopNByWindow(args: {
+    epochs: LeaderboardWindowEpoch[];
+    limit: number;
+    sort?: LeaderboardWindowSort;
+    minWindowSlots?: number;
+    requiredClosedEpochs?: number;
+    excludedVotes?: string[];
+  }): Promise<WindowedLeaderboardStats[]> {
+    const safeLimit = Math.max(1, Math.min(args.limit, 500));
+    const minWindowSlots = Math.max(1, args.minWindowSlots ?? 4);
+    const requiredClosedEpochs = Math.max(0, args.requiredClosedEpochs ?? 0);
+    const excludedVotes = new Set(args.excludedVotes ?? []);
+    const epochs = new Map(args.epochs.map((e) => [e.epoch, e.isCurrent]));
+    const byVote = new Map<VotePubkey, WindowedLeaderboardStats>();
+
+    for (const row of this.rows.values()) {
+      const isCurrent = epochs.get(row.epoch);
+      if (isCurrent === undefined) continue;
+      if (excludedVotes.has(row.votePubkey)) continue;
+      if (row.slotsUpdatedAt === null) continue;
+      const denominator = isCurrent ? row.slotsElapsedAssigned : row.slotsAssigned;
+      const currentIncome = isCurrent
+        ? row.blockFeesTotalLamports + row.blockTipsTotalLamports
+        : 0n;
+      const existing = byVote.get(row.votePubkey);
+      const next: WindowedLeaderboardStats = existing ?? {
+        votePubkey: row.votePubkey,
+        identityPubkey: row.identityPubkey,
+        windowSlots: 0,
+        slotsAssigned: 0,
+        slotsElapsedAssigned: 0,
+        slotsProduced: 0,
+        slotsSkipped: 0,
+        blockFeesTotalLamports: 0n,
+        blockTipsTotalLamports: 0n,
+        currentIncomeLamports: 0n,
+        currentElapsedAssignedSlots: 0,
+        closedEpochsIncluded: 0,
+        slotWindowLastSlot: null,
+        slotWindowUpdatedAt: null,
+        lastUpdatedAt: null,
+        activatedStakeLamports: row.activatedStakeLamports,
+      };
+      next.identityPubkey = isCurrent ? row.identityPubkey : next.identityPubkey;
+      next.windowSlots += denominator;
+      next.slotsAssigned += row.slotsAssigned;
+      next.slotsElapsedAssigned += isCurrent ? row.slotsElapsedAssigned : 0;
+      next.slotsProduced += row.slotsProduced;
+      next.slotsSkipped += row.slotsSkipped;
+      next.blockFeesTotalLamports += row.blockFeesTotalLamports;
+      next.blockTipsTotalLamports += row.blockTipsTotalLamports;
+      next.currentIncomeLamports += currentIncome;
+      next.currentElapsedAssignedSlots += isCurrent ? row.slotsElapsedAssigned : 0;
+      next.closedEpochsIncluded += isCurrent ? 0 : 1;
+      next.slotWindowLastSlot = isCurrent ? row.slotWindowLastSlot : next.slotWindowLastSlot;
+      next.slotWindowUpdatedAt = isCurrent ? row.slotWindowUpdatedAt : next.slotWindowUpdatedAt;
+      const rowUpdated =
+        row.feesUpdatedAt ??
+        row.tipsUpdatedAt ??
+        row.slotsUpdatedAt ??
+        row.slotWindowUpdatedAt ??
+        null;
+      if (rowUpdated !== null && (next.lastUpdatedAt === null || rowUpdated > next.lastUpdatedAt)) {
+        next.lastUpdatedAt = rowUpdated;
+      }
+      if (isCurrent && row.activatedStakeLamports !== null) {
+        next.activatedStakeLamports = row.activatedStakeLamports;
+      }
+      byVote.set(row.votePubkey, next);
+    }
+
+    const rows = [...byVote.values()].filter(
+      (r) => r.windowSlots >= minWindowSlots && r.closedEpochsIncluded >= requiredClosedEpochs,
+    );
+    const total = (r: WindowedLeaderboardStats) =>
+      r.blockFeesTotalLamports + r.blockTipsTotalLamports;
+    const compareBigIntDesc = (a: bigint, b: bigint): number => (a === b ? 0 : a > b ? -1 : 1);
+    const compareRatioDesc = (aNum: bigint, aDen: number, bNum: bigint, bDen: number): number => {
+      if (aDen <= 0 && bDen <= 0) return 0;
+      if (aDen <= 0) return 1;
+      if (bDen <= 0) return -1;
+      const left = aNum * BigInt(bDen);
+      const right = bNum * BigInt(aDen);
+      return compareBigIntDesc(left, right);
+    };
+    switch (args.sort ?? 'income_per_slot') {
+      case 'total_income':
+        rows.sort((a, b) => compareBigIntDesc(total(a), total(b)));
+        break;
+      case 'mev_tips':
+        rows.sort((a, b) => compareBigIntDesc(a.blockTipsTotalLamports, b.blockTipsTotalLamports));
+        break;
+      case 'fees':
+        rows.sort((a, b) => compareBigIntDesc(a.blockFeesTotalLamports, b.blockFeesTotalLamports));
+        break;
+      case 'skip_rate':
+        rows.sort((a, b) => a.slotsSkipped / a.windowSlots - b.slotsSkipped / b.windowSlots);
+        break;
+      case 'income_per_slot':
+      default:
+        rows.sort((a, b) => compareRatioDesc(total(a), a.windowSlots, total(b), b.windowSlots));
+        break;
+    }
+    return rows.slice(0, safeLimit);
+  }
+
   async backfillMissingMedianFees(
     identities: IdentityPubkey[],
     maxLookback = 50,
@@ -704,6 +907,18 @@ export class FakeStatsRepo {
     const rows = [...this.rows.values()].filter((r) => r.votePubkey === vote);
     rows.sort((a, b) => b.epoch - a.epoch);
     return rows.slice(0, safeLimit);
+  }
+
+  putPeerBenchmark(benchmark: EpochPeerBenchmark): void {
+    this.peerBenchmarks.set(benchmark.epoch, benchmark);
+  }
+
+  async findIndexedIncomePerSlotBenchmarks(
+    requested: IndexedIncomePerSlotBenchmarkRequest[],
+  ): Promise<EpochPeerBenchmark[]> {
+    return requested
+      .map((item) => this.peerBenchmarks.get(item.epoch) ?? null)
+      .filter((item): item is EpochPeerBenchmark => item !== null);
   }
 }
 
@@ -880,6 +1095,10 @@ export class FakeProcessedBlocksRepo {
     ).length;
     const totalFees = produced.reduce((acc, row) => acc + row.feesLamports, 0n);
     const totalTips = produced.reduce((acc, row) => acc + row.tipsLamports, 0n);
+    const totalIncome = totalFees + totalTips;
+    const totalPriorityFees = produced.reduce((acc, row) => acc + row.priorityFeesLamports, 0n);
+    const totalComputeUnits = produced.reduce((acc, row) => acc + row.computeUnitsConsumed, 0n);
+    const totalCostUnits = produced.reduce((acc, row) => acc + row.costUnits, 0n);
     const best = produced
       .map((row) => ({ slot: row.slot, income: row.feesLamports + row.tipsLamports }))
       .sort((a, b) => (b.income > a.income ? 1 : b.income < a.income ? -1 : a.slot - b.slot))[0];
@@ -910,7 +1129,7 @@ export class FakeProcessedBlocksRepo {
       },
       summary: {
         producedBlocks: produced.length,
-        totalIncomeLamports: totalFees + totalTips,
+        totalIncomeLamports: totalIncome,
         totalFeesLamports: totalFees,
         totalTipsLamports: totalTips,
         txCount,
@@ -941,7 +1160,41 @@ export class FakeProcessedBlocksRepo {
           (max, row) => (row.maxTipLamports > max ? row.maxTipLamports : max),
           0n,
         ),
-        computeUnitsConsumed: produced.reduce((acc, row) => acc + row.computeUnitsConsumed, 0n),
+        computeUnitsConsumed: totalComputeUnits,
+        costUnits: totalCostUnits,
+        computeBudgetRequestedUnits: produced.reduce(
+          (acc, row) => acc + row.computeBudgetRequestedUnits,
+          0n,
+        ),
+        computeBudgetLimitTxCount: produced.reduce(
+          (acc, row) => acc + row.computeBudgetLimitTxCount,
+          0,
+        ),
+        computeBudgetPriceTxCount: produced.reduce(
+          (acc, row) => acc + row.computeBudgetPriceTxCount,
+          0,
+        ),
+        maxComputeUnitLimit: produced.reduce(
+          (max, row) => (row.maxComputeUnitLimit > max ? row.maxComputeUnitLimit : max),
+          0n,
+        ),
+        maxComputeUnitPriceMicroLamports: produced.reduce(
+          (max, row) =>
+            row.maxComputeUnitPriceMicroLamports > max ? row.maxComputeUnitPriceMicroLamports : max,
+          0n,
+        ),
+        avgComputeUnitsPerProducedBlock:
+          produced.length > 0 ? totalComputeUnits / BigInt(produced.length) : null,
+        avgComputeUnitsPerTransaction: txCount > 0 ? totalComputeUnits / BigInt(txCount) : null,
+        avgCostUnitsPerProducedBlock:
+          produced.length > 0 ? totalCostUnits / BigInt(produced.length) : null,
+        avgCostUnitsPerTransaction: txCount > 0 ? totalCostUnits / BigInt(txCount) : null,
+        incomeLamportsPerMillionComputeUnit:
+          totalComputeUnits > 0n ? (totalIncome * 1_000_000n) / totalComputeUnits : null,
+        priorityFeeLamportsPerMillionComputeUnit:
+          totalComputeUnits > 0n ? (totalPriorityFees * 1_000_000n) / totalComputeUnits : null,
+        tipLamportsPerMillionComputeUnit:
+          totalComputeUnits > 0n ? (totalTips * 1_000_000n) / totalComputeUnits : null,
         bestBlockSlot: best?.slot ?? null,
         bestBlockIncomeLamports: best?.income ?? null,
       },
@@ -1114,6 +1367,12 @@ export function makeProcessedBlock(
     maxTipLamports: 0n,
     maxPriorityFeeLamports: 0n,
     computeUnitsConsumed: 0n,
+    costUnits: 0n,
+    computeBudgetRequestedUnits: 0n,
+    computeBudgetLimitTxCount: 0,
+    computeBudgetPriceTxCount: 0,
+    maxComputeUnitLimit: 0n,
+    maxComputeUnitPriceMicroLamports: 0n,
     factsCapturedAt: new Date(),
     processedAt: new Date(),
   };
@@ -1131,6 +1390,7 @@ export function makeStats(
     votePubkey: vote,
     identityPubkey: identity,
     slotsAssigned: 0,
+    slotsElapsedAssigned: 0,
     slotsProduced: 0,
     slotsSkipped: 0,
     blockFeesTotalLamports: 0n,
@@ -1144,6 +1404,8 @@ export function makeStats(
     medianTotalLamports: null,
     activatedStakeLamports: null,
     slotsUpdatedAt: null,
+    slotWindowLastSlot: null,
+    slotWindowUpdatedAt: null,
     feesUpdatedAt: null,
     medianFeeUpdatedAt: null,
     medianBaseFeeUpdatedAt: null,

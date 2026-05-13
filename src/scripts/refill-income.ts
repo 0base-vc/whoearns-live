@@ -1,28 +1,25 @@
 /**
- * Reset + refill income data for recent closed epochs (migration 0010).
+ * Reset + refill income and leader-slot fact data for recent epochs.
  *
  * Supersedes `backfill-tips.ts`. Does more than the old script:
  *
- *   1. ZEROES per-block fee/tip columns (`fees_lamports`,
- *      `base_fees_lamports`, `priority_fees_lamports`, `tips_lamports`)
- *      on every produced block for the target (epoch, identity) pairs.
- *   2. RE-FETCHES each block with `transactionDetails: 'full'` and
+ *   1. RE-FETCHES each produced block with `transactionDetails: 'full'` and
  *      re-computes the four-way income decomposition (leader post-burn
- *      fees + gross base + gross priority + MEV tips).
- *   3. OVERWRITES the per-block row with the freshly computed values.
- *   4. RESETS the per-epoch aggregate totals to 0 (via
- *      `StatsRepository.resetEpochTotals`) and re-applies per-block
- *      deltas via `addIncomeDelta` as the script walks the blocks —
- *      so `block_*_total_lamports` ends at exactly `sum(processed_blocks)`
- *      without double-count from any previous partial backfill.
- *   5. RECOMPUTES the five medians (fees, base, priority, tips, total)
+ *      fees + leader net base share + priority fees + MEV tips).
+ *   2. OVERWRITES the per-block row with the freshly computed values,
+ *      including tx counts, compute units, cost units, and ComputeBudget
+ *      request aggregates.
+ *   3. REBUILDS the per-epoch aggregate totals from `processed_blocks`
+ *      after each identity finishes. A slot that fails to re-fetch keeps
+ *      its previous fact row, so partial refill failures cannot zero out
+ *      already-good aggregate income.
+ *   4. RECOMPUTES the five medians (fees, base, priority, tips, total)
  *      at end of each epoch.
  *
- * Why reset rather than diff: pre-migration-0010 rows have `base=0`
+ * Why rebuild rather than delta: pre-migration-0010 rows have `base=0`
  * and `priority=0` populated as the column default, not the real
- * gross amounts. Merging those 0s into the re-scan would be a mess;
- * it's simpler and faster to blow away the numeric columns and
- * recompute in one deterministic pass.
+ * amounts. Rebuilding aggregates from the fact table after repairs is
+ * deterministic and preserves rows whose RPC refetch failed this run.
  *
  * Idempotency: safe to re-run. Each invocation wipes and refills
  * scope. Re-running always converges to the same numbers (assuming
@@ -33,6 +30,16 @@
  * to scan the last two, etc. We cap at 10 for safety — that's
  * ~20 days of epochs and would mean ~4000+ `getBlock(full)` calls
  * which at ~3MB/block is a lot of bandwidth (>12GB).
+ *
+ * For targeted repairs, use an explicit comma-separated list:
+ *   BACKFILL_EPOCH_LIST=959,958,957,956 pnpm backfill:income
+ * This bypasses the recent-epoch window and only scans those epochs,
+ * unless `INCLUDE_RUNNING=1` is also set, in which case the running
+ * epoch is prepended.
+ *
+ * Set `BACKFILL_CONCURRENCY=1..8` to tune refill-local parallelism.
+ * This is separate from `SOLANA_RPC_CONCURRENCY`; use both when a
+ * provider is rate-limiting historical getBlock(full) calls.
  *
  * Set `INCLUDE_RUNNING=1` to ALSO re-scan the currently-running
  * epoch. Useful after fixing a live-ingestion bug (e.g. the
@@ -53,6 +60,9 @@
  *   # Last two closed epochs
  *   BACKFILL_EPOCHS=2 POSTGRES_URL=... pnpm backfill:income
  *
+ *   # Specific older epochs with lower concurrency
+ *   BACKFILL_EPOCH_LIST=959,958,957,956 BACKFILL_CONCURRENCY=2 POSTGRES_URL=... pnpm backfill:income
+ *
  *   # Inside a pod (production image ships compiled JS)
  *   kubectl exec -it whoearns-live-0 -- node dist/scripts/refill-income.js
  */
@@ -64,7 +74,7 @@ import { SolanaRpcClient } from '../clients/solana-rpc.js';
 import { TokenBucket } from '../clients/token-bucket.js';
 import { loadConfig } from '../core/config.js';
 import { createLogger } from '../core/logger.js';
-import { decomposeBlockIncome, extractLeaderFees } from '../services/fee.service.js';
+import { analyzeBlockTransactions, extractLeaderFees } from '../services/fee.service.js';
 import { ValidatorService } from '../services/validator.service.js';
 import { closePool, createPool } from '../storage/db.js';
 import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
@@ -72,17 +82,22 @@ import { ProcessedBlocksRepository } from '../storage/repositories/processed-blo
 import { StatsRepository } from '../storage/repositories/stats.repo.js';
 import { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
-import type { Epoch } from '../types/domain.js';
+import type { Epoch, ProcessedBlock } from '../types/domain.js';
 
-const BACKFILL_CONCURRENCY = 4;
+const DB_REWRITE_BATCH_SIZE = 200;
 
 async function main(): Promise<number> {
   const cfg = loadConfig();
   const log = createLogger(cfg);
   log.info('refill-income: starting');
 
-  const epochsToBackfill = Math.max(1, Math.min(10, Number(process.env['BACKFILL_EPOCHS'] ?? '1')));
-  log.info({ epochsToBackfill }, 'refill-income: epoch count resolved');
+  const epochsToBackfill = parseBoundedIntegerEnv('BACKFILL_EPOCHS', 1, 1, 10);
+  const backfillConcurrency = parseBoundedIntegerEnv('BACKFILL_CONCURRENCY', 4, 1, 8);
+  const explicitEpochs = parseEpochList(process.env['BACKFILL_EPOCH_LIST']);
+  log.info(
+    { epochsToBackfill, backfillConcurrency, explicitEpochs },
+    'refill-income: options resolved',
+  );
 
   const pool = createPool(cfg);
   try {
@@ -140,27 +155,38 @@ async function main(): Promise<number> {
       log.info('refill-income: no closed epochs yet, nothing to do');
       return 0;
     }
+    const includeRunning = process.env['INCLUDE_RUNNING'] === '1';
     const targetEpochs: Epoch[] = [];
 
-    // Optionally include the running epoch at the head of the list.
-    // Use case: a live-ingestion bug corrupted per-block rows for the
-    // current epoch (e.g. bigint fee handling regression); re-scanning
-    // all produced blocks fixes the numbers without waiting for the
-    // epoch to close. Scan order matters here — do running epoch
-    // FIRST so the user sees correct running-epoch numbers as soon as
-    // the script gets to its end; historical epochs get fixed after.
-    const includeRunning = process.env['INCLUDE_RUNNING'] === '1';
-    if (includeRunning) {
+    const pushUniqueTargetEpoch = (epoch: Epoch): void => {
+      if (!targetEpochs.includes(epoch)) targetEpochs.push(epoch);
+    };
+    const maybePrependRunningEpoch = async (): Promise<void> => {
+      if (!includeRunning) return;
       const current = await epochsRepo.findCurrent();
       if (current !== null && !current.isClosed && current.epoch > latestClosed.epoch) {
-        targetEpochs.push(current.epoch);
+        pushUniqueTargetEpoch(current.epoch);
       }
-    }
+    };
 
-    for (let i = 0; i < epochsToBackfill; i++) {
-      const e = latestClosed.epoch - i;
-      if (e < 0) break;
-      targetEpochs.push(e);
+    if (explicitEpochs !== null) {
+      await maybePrependRunningEpoch();
+      for (const epoch of explicitEpochs) pushUniqueTargetEpoch(epoch);
+    } else {
+      // Optionally include the running epoch at the head of the list.
+      // Use case: a live-ingestion bug corrupted per-block rows for the
+      // current epoch (e.g. bigint fee handling regression); re-scanning
+      // all produced blocks fixes the numbers without waiting for the
+      // epoch to close. Scan order matters here — do running epoch
+      // FIRST so the user sees correct running-epoch numbers as soon as
+      // the script gets to its end; historical epochs get fixed after.
+      await maybePrependRunningEpoch();
+
+      for (let i = 0; i < epochsToBackfill; i++) {
+        const e = latestClosed.epoch - i;
+        if (e < 0) break;
+        pushUniqueTargetEpoch(e);
+      }
     }
     log.info({ targetEpochs, includeRunning }, 'refill-income: epoch plan');
 
@@ -169,7 +195,7 @@ async function main(): Promise<number> {
     const topN =
       cfg.VALIDATORS_WATCH_LIST.mode === 'top' ? cfg.VALIDATORS_WATCH_LIST.topN : undefined;
 
-    const fetchLimit = pLimit(BACKFILL_CONCURRENCY);
+    const fetchLimit = pLimit(backfillConcurrency);
 
     for (const epoch of targetEpochs) {
       const votes = await validatorService.getActiveVotePubkeys(
@@ -196,12 +222,6 @@ async function main(): Promise<number> {
         const slots = await processedBlocksRepo.findProducedSlotsForIdentity(epoch, identity);
         if (slots.length === 0) continue;
 
-        // STEP 1 of the reset: zero the per-epoch aggregate row. The
-        // re-scan below then builds the four totals back up via
-        // `addIncomeDelta`, so the end state = sum of freshly-
-        // computed per-block values. No double-count risk on re-runs.
-        await statsRepo.resetEpochTotals(epoch, identity);
-
         log.info(
           { epoch, identity, total: slots.length },
           'refill-income: re-scanning all produced blocks (reset+refill)',
@@ -211,7 +231,7 @@ async function main(): Promise<number> {
         let identityPriority = 0n;
         let identityTips = 0n;
         let identityLeader = 0n;
-        let identityBlocks = 0;
+        const repairedBlocks: ProcessedBlock[] = [];
 
         await Promise.all(
           slots.map((slot) =>
@@ -225,7 +245,7 @@ async function main(): Promise<number> {
                 });
                 if (block === null) return;
                 const leaderFees = extractLeaderFees(block.rewards, identity);
-                const income = decomposeBlockIncome(block.transactions);
+                const { income, slotFacts } = analyzeBlockTransactions(block.transactions);
                 // Derive leader's NET base share (rewards - priority).
                 // See `fee.service.ingestPendingBlocks` for the full
                 // derivation — same rule applies here so backfill and
@@ -236,21 +256,39 @@ async function main(): Promise<number> {
                 // reflects the new decomposition. Skipped rows keep
                 // their 0s untouched (not in `slots` since we filter
                 // to `block_status = 'produced'`).
-                const ok = await processedBlocksRepo.replaceIncomeForBlock({
+                const processedAt = new Date();
+                repairedBlocks.push({
                   epoch,
                   slot,
+                  leaderIdentity: identity,
                   feesLamports: leaderFees,
                   baseFeesLamports: leaderBase,
                   priorityFeesLamports: income.priorityFees,
                   tipsLamports: income.mevTips,
+                  blockStatus: 'produced',
+                  blockTime: blockTimeFromUnixSeconds(block.blockTime),
+                  txCount: slotFacts.txCount,
+                  successfulTxCount: slotFacts.successfulTxCount,
+                  failedTxCount: slotFacts.failedTxCount,
+                  unknownMetaTxCount: slotFacts.unknownMetaTxCount,
+                  signatureCount: slotFacts.signatureCount,
+                  tipTxCount: slotFacts.tipTxCount,
+                  maxTipLamports: slotFacts.maxTipLamports,
+                  maxPriorityFeeLamports: slotFacts.maxPriorityFeeLamports,
+                  computeUnitsConsumed: slotFacts.computeUnitsConsumed,
+                  costUnits: slotFacts.costUnits,
+                  computeBudgetRequestedUnits: slotFacts.computeBudgetRequestedUnits,
+                  computeBudgetLimitTxCount: slotFacts.computeBudgetLimitTxCount,
+                  computeBudgetPriceTxCount: slotFacts.computeBudgetPriceTxCount,
+                  maxComputeUnitLimit: slotFacts.maxComputeUnitLimit,
+                  maxComputeUnitPriceMicroLamports: slotFacts.maxComputeUnitPriceMicroLamports,
+                  factsCapturedAt: processedAt,
+                  processedAt,
                 });
-                if (ok) {
-                  identityLeader += leaderFees;
-                  identityBase += leaderBase;
-                  identityPriority += income.priorityFees;
-                  identityTips += income.mevTips;
-                  identityBlocks += 1;
-                }
+                identityLeader += leaderFees;
+                identityBase += leaderBase;
+                identityPriority += income.priorityFees;
+                identityTips += income.mevTips;
               } catch (err) {
                 log.warn(
                   { err, epoch, identity, slot },
@@ -261,25 +299,15 @@ async function main(): Promise<number> {
           ),
         );
 
-        // Re-apply the aggregate delta now that all blocks are
-        // rewritten. `resetEpochTotals` zeroed the four columns;
-        // this single call restores them to `sum(processed_blocks)`
-        // for THIS identity.
-        if (
-          identityLeader > 0n ||
-          identityBase > 0n ||
-          identityPriority > 0n ||
-          identityTips > 0n
-        ) {
-          await statsRepo.addIncomeDelta({
-            epoch,
-            identityPubkey: identity,
-            leaderFeeDeltaLamports: identityLeader,
-            baseFeeDeltaLamports: identityBase,
-            priorityFeeDeltaLamports: identityPriority,
-            tipDeltaLamports: identityTips,
-          });
+        let identityBlocks = 0;
+        for (const chunk of chunkArray(repairedBlocks, DB_REWRITE_BATCH_SIZE)) {
+          identityBlocks += await processedBlocksRepo.replaceProducedBlockFactsBatch(chunk);
         }
+
+        // Rebuild from the complete fact table, not from just the
+        // successfully-refetched subset. If one slot fails above, its
+        // prior processed_blocks row remains and must stay counted.
+        await statsRepo.rebuildIncomeTotalsFromProcessedBlocks(epoch, [identity]);
 
         totalBlocksScanned += slots.length;
         totalBlocksUpdated += identityBlocks;
@@ -343,6 +371,53 @@ function lamportsToSolDisplay(lamports: bigint): string {
   if (lamports === 0n) return '0';
   const sol = Number(lamports) / 1_000_000_000;
   return sol.toFixed(6).replace(/\.?0+$/, '');
+}
+
+function blockTimeFromUnixSeconds(value: number | null | undefined): Date | null {
+  if (value === null || value === undefined) return null;
+  if (!Number.isFinite(value)) return null;
+  return new Date(value * 1000);
+}
+
+function parseBoundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function parseEpochList(raw: string | undefined): Epoch[] | null {
+  if (raw === undefined || raw.trim() === '') return null;
+
+  const epochs: Epoch[] = [];
+  const seen = new Set<number>();
+  for (const part of raw.split(',')) {
+    const trimmed = part.trim();
+    if (trimmed === '') continue;
+    const parsed = Number(trimmed);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      throw new Error(`Invalid BACKFILL_EPOCH_LIST entry: ${trimmed}`);
+    }
+    if (!seen.has(parsed)) {
+      seen.add(parsed);
+      epochs.push(parsed);
+    }
+  }
+
+  if (epochs.length === 0) {
+    throw new Error('BACKFILL_EPOCH_LIST did not contain any valid epochs');
+  }
+
+  return epochs;
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
 }
 
 main()

@@ -28,6 +28,7 @@ const baseStats: EpochValidatorStats = {
   votePubkey: 'Vote111111111111111111111111111111111111111',
   identityPubkey: 'Node111111111111111111111111111111111111111',
   slotsAssigned: 432,
+  slotsElapsedAssigned: 432,
   slotsProduced: 430,
   slotsSkipped: 2,
   blockFeesTotalLamports: 1_500_000_000n,
@@ -41,6 +42,8 @@ const baseStats: EpochValidatorStats = {
   medianTotalLamports: 4_800_000n,
   activatedStakeLamports: null,
   slotsUpdatedAt: new Date('2026-04-15T10:00:00.000Z'),
+  slotWindowLastSlot: 216_431_999,
+  slotWindowUpdatedAt: new Date('2026-04-15T10:00:00.000Z'),
   feesUpdatedAt: new Date('2026-04-15T10:05:00.000Z'),
   medianFeeUpdatedAt: new Date('2026-04-15T10:05:10.000Z'),
   medianBaseFeeUpdatedAt: new Date('2026-04-15T10:05:10.000Z'),
@@ -129,6 +132,27 @@ describe('serializeValidator', () => {
     expect(out.blockFeesTotalLamports).toBe('0');
     expect(out.blockTipsTotalLamports).toBe('0');
     expect(out.totalIncomeLamports).toBe('0');
+  });
+
+  it('attaches indexed-validator peer benchmark when provided', () => {
+    const out = serializeValidator(baseStats, closedEpoch, {}, null, {
+      epoch: 500,
+      sample: 'indexed_validators',
+      sampleValidators: 25,
+      sampleSlots: 1000,
+      medianIncomeLamportsPerSlot: '12345.5',
+      medianIncomeSolPerSlot: '0.0000123455',
+      basis: 'income_per_assigned_slot',
+    });
+
+    expect(out.peerBenchmark).toEqual({
+      sample: 'indexed_validators',
+      sampleValidators: 25,
+      sampleSlots: 1000,
+      medianIncomeLamportsPerSlot: '12345.5',
+      medianIncomeSolPerSlot: '0.0000123455',
+      basis: 'income_per_assigned_slot',
+    });
   });
 });
 

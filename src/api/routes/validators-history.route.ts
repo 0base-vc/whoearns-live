@@ -12,8 +12,10 @@ import type { WatchedDynamicRepository } from '../../storage/repositories/watche
 import type {
   EpochAggregate,
   EpochInfo,
+  EpochPeerBenchmark,
   ValidatorCurrentEpochResponse,
 } from '../../types/domain.js';
+import { setNoStoreCache } from '../cache-headers.js';
 import { HistoryQuerySchema, VoteOrIdentityParamSchema } from '../schemas/requests.js';
 import { serializeValidator } from '../serializers/validator-response.js';
 
@@ -26,7 +28,7 @@ import { serializeValidator } from '../serializers/validator-response.js';
 const DEFAULT_CLUSTER_TOP_N = 100;
 
 export interface ValidatorsHistoryRoutesDeps {
-  statsRepo: Pick<StatsRepository, 'findHistoryByVote'>;
+  statsRepo: Pick<StatsRepository, 'findHistoryByVote' | 'findIndexedIncomePerSlotBenchmarks'>;
   validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>;
   epochsRepo: Pick<EpochsRepository, 'findByEpoch' | 'findCurrent'>;
   aggregatesRepo: Pick<AggregatesRepository, 'findManyByEpochsTopN'>;
@@ -148,7 +150,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
   } = opts;
   const serialCtx = {};
 
-  app.get('/v1/validators/:idOrVote/history', async (request, _reply): Promise<HistoryResponse> => {
+  app.get('/v1/validators/:idOrVote/history', async (request, reply): Promise<HistoryResponse> => {
     const params = unwrap(VoteOrIdentityParamSchema.safeParse(request.params), 'path parameter');
     const query = unwrap(HistoryQuerySchema.safeParse(request.query), 'query parameter');
 
@@ -174,6 +176,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
       // Freshly-tracked validator — no info record has been fetched
       // yet (that happens on the next validator-info-refresh tick).
       // UI falls back to pubkey display.
+      setNoStoreCache(reply);
       return {
         vote: result.votePubkey,
         identity: result.identityPubkey,
@@ -243,6 +246,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // that asked not to be advertised, even if their on-chain
     // validator-info publish is public.
     if (profile !== null && profile.optedOut) {
+      setNoStoreCache(reply);
       return {
         vote: validator.votePubkey,
         identity: validator.identityPubkey,
@@ -264,10 +268,9 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     }
 
     // For each row, determine whether the epoch is closed (needed by
-    // the serializer to set isFinal/isCurrentEpoch) AND fetch the cluster
-    // benchmark (used to render "% of cluster median" on the UI chart
-    // and table). Both are bulk-fetched by distinct epoch to keep the
-    // round-trip count at O(1) per response regardless of `limit`.
+    // the serializer to set isFinal/isCurrentEpoch) and fetch the
+    // benchmark blocks. Both are bulk-fetched by distinct epoch to keep
+    // the round-trip count at O(1) per response regardless of `limit`.
     const distinctEpochs = Array.from(new Set(rows.map((r) => r.epoch)));
     const [epochInfos, aggregates] = await Promise.all([
       Promise.all(distinctEpochs.map((e) => epochsRepo.findByEpoch(e))),
@@ -279,11 +282,21 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
       epochByNumber.set(e, info ?? synthEpochInfo(e));
     });
     const aggregateByEpoch = new Map<number, EpochAggregate>(aggregates.map((a) => [a.epoch, a]));
+    const peerBenchmarks = await statsRepo.findIndexedIncomePerSlotBenchmarks(
+      distinctEpochs.map((epoch) => ({
+        epoch,
+        isCurrent: !(epochByNumber.get(epoch) ?? synthEpochInfo(epoch)).isClosed,
+      })),
+    );
+    const peerBenchmarkByEpoch = new Map<number, EpochPeerBenchmark>(
+      peerBenchmarks.map((b) => [b.epoch, b]),
+    );
 
     const items = rows.map((row) => {
       const info = epochByNumber.get(row.epoch) ?? synthEpochInfo(row.epoch);
       const aggregate = aggregateByEpoch.get(row.epoch) ?? null;
-      return serializeValidator(row, info, serialCtx, aggregate);
+      const peerBenchmark = peerBenchmarkByEpoch.get(row.epoch) ?? null;
+      return serializeValidator(row, info, serialCtx, aggregate, peerBenchmark);
     });
 
     // Moniker comes straight off the `validators` row the lookup
@@ -293,6 +306,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // can show the operator's Twitter link and honour the footer
     // mute. Absent = never-claimed OR claimed-but-never-edited —
     // UI treats both identically (no overrides).
+    setNoStoreCache(reply);
     return {
       vote: validator.votePubkey,
       identity: validator.identityPubkey,

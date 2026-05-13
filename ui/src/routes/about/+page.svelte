@@ -105,12 +105,12 @@
   <p class="mt-4 max-w-2xl text-base text-[color:var(--color-text-muted)]">
     {#if locale === 'ko'}
       <span lang="en">{SITE_NAME}</span>은 Solana 밸리데이터의 epoch별 경제 활동 — 블록 수수료, MEV
-      보상, 슬롯 생산량, 클러스터 벤치마크 — 를 들여다보는 오픈 대시보드입니다. Solana 메인넷
+      보상, 슬롯 생산량, indexed peer benchmark — 를 들여다보는 오픈 대시보드입니다. Solana 메인넷
       밸리데이터 운영자인 0base.vc가 운영하며, 생태계에 대한 OSS 기여로 공개합니다.
     {:else}
       {SITE_NAME} is an AI-assisted open dashboard for inspecting per-epoch Solana validator economics
-      — block fees, on-chain Jito tips, slot production, and cluster benchmarks. It's maintained by 0base.vc,
-      operator of a Solana mainnet validator, and shipped as an OSS contribution to the ecosystem.
+      — block fees, on-chain Jito tips, slot production, and indexed peer benchmarks. It's maintained
+      by 0base.vc, operator of a Solana mainnet validator, and shipped as an OSS contribution to the ecosystem.
     {/if}
   </p>
 </section>
@@ -172,14 +172,14 @@
       </h3>
       <p class="mt-2">
         {#if locale === 'ko'}
-          밸리데이터 수익을 한눈에 비교하세요. 블록 수수료 확보나 MEV 참여에서 클러스터 중앙값을
+          밸리데이터 수익을 한눈에 비교하세요. leader slot당 수익에서 indexed validator 중앙값을
           꾸준히 앞서는 운영자를 식별할 수 있습니다. 홈페이지의 <a
             href="/"
             class="font-medium text-[color:var(--color-brand-500)] hover:underline">리더보드</a
           >를 확인하세요.
         {:else}
           Compare validator earnings side by side. Identify operators who consistently beat the
-          cluster median on block-fee capture or MEV participation. Open the
+          indexed median in income per leader slot. Open the
           <a href="/" class="font-medium text-[color:var(--color-brand-500)] hover:underline"
             >leaderboard</a
           > on the homepage.
@@ -192,8 +192,8 @@
       </h3>
       <p class="mt-2">
         {t(
-          'Benchmark your validator against the top-100 cluster sample for every closed epoch. Identify when a configuration change actually lifted your median block fee vs. when you were riding a cluster-wide uplift.',
-          '닫힌 epoch마다 본인의 밸리데이터를 top-100 클러스터 샘플과 벤치마크하세요. 설정 변경이 실제로 중앙 블록 수수료를 끌어올렸는지, 아니면 클러스터 전체의 상승세에 편승한 것인지 구분할 수 있습니다.',
+          'Benchmark your validator against the indexed-validator median for every epoch. Identify when a configuration change actually lifted income per leader slot instead of only increasing absolute income through more stake.',
+          '각 epoch에서 본인의 밸리데이터를 indexed validator median과 벤치마크하세요. 설정 변경이 단순히 stake 증가로 총수익만 올린 것인지, leader slot당 수익까지 실제로 끌어올렸는지 구분할 수 있습니다.',
         )}
       </p>
     </div>

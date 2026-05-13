@@ -14,6 +14,7 @@ export interface ValidatorEpochRecord {
   hasIncome: boolean;
 
   slotsAssigned: number | null;
+  slotsElapsedAssigned: number | null;
   slotsProduced: number | null;
   slotsSkipped: number | null;
 
@@ -73,6 +74,15 @@ export interface ValidatorEpochRecord {
     sampleBlockCount: number;
     medianBlockFeeLamports: string | null;
     medianBlockTipLamports: string | null;
+  } | null;
+
+  peerBenchmark: {
+    sample: 'indexed_validators';
+    sampleValidators: number;
+    sampleSlots: number;
+    medianIncomeLamportsPerSlot: string;
+    medianIncomeSolPerSlot: string;
+    basis: 'income_per_assigned_slot' | 'income_per_elapsed_assigned_slot';
   } | null;
 }
 
@@ -169,14 +179,21 @@ export interface ClaimChallenge {
  * Sort modes supported by the leaderboard endpoint. Mirrors the
  * server-side `LeaderboardSort` enum in `stats.repo.ts`; keep these
  * in sync. Consumers should treat an unknown string as a client/server
- * version mismatch (fall back to `performance`).
+ * version mismatch (fall back to `income_per_slot`).
  */
+export type LeaderboardWindow =
+  | 'live_trend'
+  | 'current_only'
+  | 'stable_trend'
+  | 'final_epoch'
+  | 'decade_epoch';
+
 export type LeaderboardSort =
-  | 'performance'
+  | 'income_per_slot'
   | 'total_income'
-  | 'income_per_stake'
-  | 'skip_rate'
-  | 'median_fee';
+  | 'mev_tips'
+  | 'fees'
+  | 'skip_rate';
 
 /** One row of the homepage top-N leaderboard. */
 export interface LeaderboardItem {
@@ -192,6 +209,7 @@ export interface LeaderboardItem {
   iconUrl: string | null;
   website: string | null;
   slotsAssigned: number;
+  slotsElapsedAssigned: number;
   slotsProduced: number;
   slotsSkipped: number;
   skipRate: number | null;
@@ -201,16 +219,22 @@ export interface LeaderboardItem {
   blockTipsTotalSol: string;
   totalIncomeLamports: string;
   totalIncomeSol: string;
-  /**
-   * Performance — income per assigned slot. Stake-neutral and
-   * commission-neutral; combines block-quality + on-chain tip capture +
-   * reliability into a single skill number. Null when
-   * `slots_assigned === 0` (edge case).
-   */
+  /** Backward-compatible aliases for the current `income*PerSlot` fields. */
   performanceLamportsPerSlot: string | null;
   performanceSolPerSlot: string | null;
-  medianFeeLamports: string | null;
-  medianFeeSol: string | null;
+  windowSlots: number;
+  windowIncomeLamports: string;
+  windowIncomeSol: string;
+  incomeLamportsPerSlot: string | null;
+  incomeSolPerSlot: string | null;
+  currentElapsedAssignedSlots: number;
+  currentIncomeLamports: string;
+  currentIncomeSol: string;
+  closedEpochsIncluded: number;
+  sampleStatus: 'low' | 'medium' | 'normal';
+  slotWindowLastSlot: number | null;
+  slotWindowUpdatedAt: string | null;
+  lastUpdatedAt: string | null;
   activatedStakeLamports: string | null;
   activatedStakeSol: string | null;
   /** APR-equivalent (income / stake). Null when stake data is missing
@@ -222,11 +246,31 @@ export interface LeaderboardItem {
    * "verified" badge inline next to the moniker when true.
    */
   claimed: boolean;
+  /**
+   * Latest complete 10-epoch Top 3 badge. Null when the validator was
+   * not ranked #1-#3 by income per leader slot across the complete
+   * decade window, or when it lacks all 10 epoch rows.
+   */
+  decadeEpochStart?: number | null;
+  decadeEpochEnd?: number | null;
+  decadeRank?: 1 | 2 | 3 | null;
 }
 
 export interface Leaderboard {
   epoch: number;
   epochClosedAt: string | null;
+  window: LeaderboardWindow;
+  isFinal: boolean;
+  currentEpoch: number | null;
+  closedEpochsIncluded: number[];
+  asOfSlot: number | null;
+  safeUpperSlot: number | null;
+  slotDenominator: 'window_slots';
+  samplePolicy: {
+    minWindowSlots: number;
+    lowBelow: number;
+    mediumBelow: number;
+  };
   /** Echoed back so the UI can highlight the matching tab. */
   sort: LeaderboardSort;
   count: number;
@@ -238,6 +282,88 @@ export interface Leaderboard {
     medianBlockFeeLamports: string | null;
     medianBlockTipLamports: string | null;
   } | null;
+}
+
+export interface ValidatorSearchItem {
+  vote: string;
+  identity: string;
+  name: string | null;
+  iconUrl: string | null;
+  website: string | null;
+  claimed: boolean;
+}
+
+export interface ValidatorSearchResponse {
+  query: string;
+  limit: number;
+  count: number;
+  items: ValidatorSearchItem[];
+}
+
+export interface ValidatorEpochLeaderSlots {
+  epoch: number;
+  vote: string;
+  identity: string;
+  hasData: boolean;
+  isFinal: boolean;
+  quality: {
+    slotsAssigned: number;
+    slotsProduced: number;
+    slotsSkipped: number;
+    processedSlots: number;
+    factCapturedSlots: number;
+    missingFactSlots: number;
+    pendingSlots: number;
+    fetchErrorSlots: number;
+    complete: boolean;
+  };
+  summary: {
+    producedBlocks: number;
+    totalIncomeLamports: string;
+    totalIncomeSol: string;
+    totalFeesLamports: string;
+    totalFeesSol: string;
+    totalTipsLamports: string;
+    totalTipsSol: string;
+    txCount: number;
+    successfulTxCount: number;
+    failedTxCount: number;
+    unknownMetaTxCount: number;
+    failedTxRate: number | null;
+    signatureCount: number;
+    tipTxCount: number;
+    tipBearingBlockCount: number;
+    tipBearingBlockRatio: number | null;
+    avgPriorityFeePerProducedBlockLamports: string | null;
+    avgPriorityFeePerProducedBlockSol: string | null;
+    avgTipPerProducedBlockLamports: string | null;
+    avgTipPerProducedBlockSol: string | null;
+    maxPriorityFeeLamports: string;
+    maxPriorityFeeSol: string;
+    maxTipLamports: string;
+    maxTipSol: string;
+    computeUnitsConsumed: string;
+    costUnits: string;
+    computeBudgetRequestedUnits: string;
+    computeBudgetLimitTxCount: number;
+    computeBudgetPriceTxCount: number;
+    maxComputeUnitLimit: string;
+    maxComputeUnitPriceMicroLamports: string;
+    avgComputeUnitsPerProducedBlock: string | null;
+    avgComputeUnitsPerTransaction: string | null;
+    avgCostUnitsPerProducedBlock: string | null;
+    avgCostUnitsPerTransaction: string | null;
+    incomeLamportsPerMillionComputeUnit: string | null;
+    incomeSolPerMillionComputeUnit: string | null;
+    priorityFeeLamportsPerMillionComputeUnit: string | null;
+    priorityFeeSolPerMillionComputeUnit: string | null;
+    tipLamportsPerMillionComputeUnit: string | null;
+    tipSolPerMillionComputeUnit: string | null;
+    bestBlockSlot: number | null;
+    bestBlockIncomeLamports: string | null;
+    bestBlockIncomeSol: string | null;
+  };
+  updatedAt: string | null;
 }
 
 export interface ApiError {

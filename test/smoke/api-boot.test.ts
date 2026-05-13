@@ -1,6 +1,14 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { pino } from 'pino';
 import { describe, expect, it } from 'vitest';
 import type pg from 'pg';
+import {
+  HTML_CACHE_CONTROL,
+  IMMUTABLE_ASSET_CACHE_CONTROL,
+  STATIC_ASSET_CACHE_CONTROL,
+} from '../../src/api/cache-headers.js';
 import { buildServer } from '../../src/api/server.js';
 import type { AppConfig } from '../../src/core/config.js';
 import type { ValidatorService } from '../../src/services/validator.service.js';
@@ -22,6 +30,7 @@ import {
   FakeValidatorService,
   FakeValidatorsRepo,
   FakeWatchedDynamicRepo,
+  makeEpochInfo,
 } from '../unit/api/_fakes.js';
 
 const silent = pino({ level: 'silent' });
@@ -135,6 +144,46 @@ describe('smoke: api server boots and routes 200/degraded', () => {
     }
   });
 
+  it('serves immutable assets for one year while keeping HTML revalidated', async () => {
+    const uiDir = await mkdtemp(join(tmpdir(), 'whoearns-ui-build-'));
+    await mkdir(join(uiDir, '_app', 'immutable', 'entry'), { recursive: true });
+    await mkdir(join(uiDir, '_app'), { recursive: true });
+    await mkdir(join(uiDir, 'brand'), { recursive: true });
+    await writeFile(join(uiDir, 'index.html'), '<!doctype html><title>WhoEarns</title>');
+    await writeFile(join(uiDir, 'spa-fallback.html'), '<!doctype html><title>WhoEarns</title>');
+    await writeFile(join(uiDir, '_app', 'env.js'), 'export {};');
+    await writeFile(join(uiDir, '_app', 'immutable', 'entry', 'start.fake.js'), 'export {};');
+    await writeFile(join(uiDir, 'brand', 'logo.svg'), '<svg></svg>');
+
+    const deps = makeDeps();
+    deps.uiBuildDir = uiDir;
+    const app = await buildServer(deps);
+
+    try {
+      const asset = await app.inject({
+        method: 'GET',
+        url: '/_app/immutable/entry/start.fake.js',
+      });
+      expect(asset.statusCode).toBe(200);
+      expect(asset.headers['cache-control']).toBe(IMMUTABLE_ASSET_CACHE_CONTROL);
+
+      const html = await app.inject({ method: 'GET', url: '/' });
+      expect(html.statusCode).toBe(200);
+      expect(html.headers['cache-control']).toBe(HTML_CACHE_CONTROL);
+
+      const env = await app.inject({ method: 'GET', url: '/_app/env.js' });
+      expect(env.statusCode).toBe(200);
+      expect(env.headers['cache-control']).toBe(HTML_CACHE_CONTROL);
+
+      const brand = await app.inject({ method: 'GET', url: '/brand/logo.svg' });
+      expect(brand.statusCode).toBe(200);
+      expect(brand.headers['cache-control']).toBe(STATIC_ASSET_CACHE_CONTROL);
+    } finally {
+      await app.close();
+      await rm(uiDir, { recursive: true, force: true });
+    }
+  });
+
   // ─────────────── Phase 2 SEO route smoke tests ───────────────
   // Each verifies the route registers, returns the right content-type,
   // and (where it matters) bakes the configured SITE_URL into the body
@@ -183,6 +232,10 @@ describe('smoke: api server boots and routes 200/degraded', () => {
       expect(full.statusCode).toBe(200);
       expect(full.body).toContain('Streamable HTTP');
       expect(full.body).toContain('https://test.example.com');
+      expect(full.body).toContain('window=live_trend');
+      expect(full.body).toContain('income_per_slot');
+      expect(full.body).toContain('/v1/validators/search');
+      expect(full.body).not.toContain('Ranked validators for the latest\n  closed epoch');
     } finally {
       await app.close();
     }
@@ -294,6 +347,54 @@ describe('smoke: api server boots and routes 200/degraded', () => {
         'get_validator',
         'get_validator_leader_slots',
       ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns current epoch slotsElapsed with the same inclusive clamp as /v1/epoch/current', async () => {
+    const deps = makeDeps();
+    const epochs = deps.repos.epochs as unknown as FakeEpochsRepo;
+    epochs.rows.set(
+      500,
+      makeEpochInfo(500, 1_000, 1_099, {
+        isClosed: false,
+        currentSlot: 1_150,
+      }),
+    );
+    const app = await buildServer(deps);
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/mcp',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        payload: {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'get_current_epoch', arguments: {} },
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { result?: { content?: Array<{ text?: string }> } };
+      const payload = JSON.parse(body.result?.content?.[0]?.text ?? '{}') as {
+        slotsElapsed?: number;
+      };
+      expect(payload.slotsElapsed).toBe(100);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects public MCP streaming verbs', async () => {
+    const app = await buildServer(makeDeps());
+    try {
+      const res = await app.inject({ method: 'GET', url: '/mcp' });
+      expect(res.statusCode).toBe(405);
+      expect(res.headers.allow).toBe('POST');
     } finally {
       await app.close();
     }

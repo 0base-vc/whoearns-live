@@ -1,106 +1,100 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import { AppError, NotFoundError, ValidationError } from '../../core/errors.js';
 import { lamportsToSol, lamportsToString } from '../../core/lamports.js';
-import { NotFoundError, ValidationError } from '../../core/errors.js';
+import { TtlCache } from '../../core/ttl-cache.js';
 import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
 import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
-import type { LeaderboardSort, StatsRepository } from '../../storage/repositories/stats.repo.js';
+import type {
+  LeaderboardWindow,
+  LeaderboardWindowEpoch,
+  LeaderboardWindowSort,
+  StatsRepository,
+  WindowedLeaderboardStats,
+} from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
-import type { Epoch, EpochValidatorStats, IdentityPubkey } from '../../types/domain.js';
-
-/**
- * Cluster top-N leaderboard — ranked validators for a given closed
- * epoch, by total leader income (block fees + on-chain Jito tips).
- *
- * Used by the homepage to replace the old "search your validator"
- * single-shot flow with a populated landscape view. Same data path as
- * `/v1/validators/:idOrVote/current-epoch` but aggregated into one row
- * per validator across the cluster instead of per-validator per-epoch.
- *
- * Two important constraints:
- *
- *   1. Ranks against the MOST RECENT CLOSED EPOCH. Ranking during a
- *      running epoch is meaningless because every leader is still
- *      accumulating income. The route looks up `findLatestClosed` and
- *      uses that as the default; callers can force an epoch via
- *      `?epoch=N`.
- *
- *   2. Only returns rows where `fees_updated_at IS NOT NULL`. The
- *      watched validator set might be a strict subset of the cluster
- *      (e.g. `top:100`) — we don't pad the response with placeholder
- *      rows for validators we haven't ingested yet.
- */
+import type { EpochInfo, IdentityPubkey } from '../../types/domain.js';
+import { setClientReadCache } from '../cache-headers.js';
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
+const DEFAULT_MIN_WINDOW_SLOTS = 4;
+const LEADERBOARD_CACHE_TTL_MS = 10_000;
+const LEADERBOARD_CACHE_MAX_ENTRIES = 256;
+const DECADE_EPOCH_COUNT = 10;
+const DECADE_RANK_LIMIT = 3;
 
-/**
- * API-surface sort values mirror the repo enum 1:1. Zod enum gives us
- * server-side validation + a 400 with a helpful message if the client
- * passes `sort=bogus`. Default is `performance` (income per assigned
- * slot) — the stake-neutral + commission-neutral skill metric. See
- * the `LeaderboardSort` comment in stats.repo.ts for the full
- * derivation.
- */
-const SortEnumSchema = z.enum([
-  'performance',
-  'total_income',
-  'income_per_stake',
-  'skip_rate',
-  'median_fee',
+const WindowEnumSchema = z.enum([
+  'live_trend',
+  'current_only',
+  'stable_trend',
+  'final_epoch',
+  'decade_epoch',
 ]);
 
-const LeaderboardQuerySchema = z.object({
-  epoch: z.coerce.number().int().nonnegative().optional(),
-  limit: z.coerce.number().int().positive().max(MAX_LIMIT).default(DEFAULT_LIMIT),
-  sort: SortEnumSchema.default('performance'),
-});
+const SortEnumSchema = z.preprocess(
+  (value) => {
+    switch (value) {
+      case 'performance':
+      case 'income_per_stake':
+        return 'income_per_slot';
+      case 'median_fee':
+        return 'fees';
+      default:
+        return value;
+    }
+  },
+  z
+    .enum(['income_per_slot', 'total_income', 'mev_tips', 'fees', 'skip_rate'])
+    .default('income_per_slot'),
+);
+
+const LeaderboardQuerySchema = z
+  .object({
+    epoch: z.coerce.number().int().nonnegative().optional(),
+    limit: z.coerce.number().int().positive().max(MAX_LIMIT).default(DEFAULT_LIMIT),
+    minWindowSlots: z.coerce.number().int().positive().max(500).default(DEFAULT_MIN_WINDOW_SLOTS),
+    sort: SortEnumSchema,
+    window: WindowEnumSchema.optional(),
+  })
+  .transform((query) => ({
+    ...query,
+    window: query.window ?? (query.epoch === undefined ? 'live_trend' : 'final_epoch'),
+  }));
 
 export interface LeaderboardRoutesDeps {
-  statsRepo: Pick<StatsRepository, 'findTopNByEpoch'>;
-  epochsRepo: Pick<EpochsRepository, 'findLatestClosed' | 'findByEpoch'>;
+  statsRepo: Pick<StatsRepository, 'findTopNByWindow'>;
+  epochsRepo: Pick<
+    EpochsRepository,
+    'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs' | 'findLatestCompleteClosedEpochBlock'
+  >;
   aggregatesRepo: Pick<AggregatesRepository, 'findByEpochTopN'>;
-  /**
-   * Validator metadata lookup (name / icon / website). Optional — the
-   * route degrades gracefully when the repo is omitted, returning null
-   * for all info fields. Keeping it optional means test harnesses and
-   * legacy callers don't need to wire it just to exercise the ranking
-   * logic.
-   */
   validatorsRepo?: Pick<ValidatorsRepository, 'getInfosByIdentities'>;
-  /**
-   * Phase 3 profile decoration. Used ONLY to exclude validators that
-   * have opted out (`opted_out = TRUE`) from the leaderboard —
-   * twitter / hideFooter etc. are not relevant to a cluster
-   * ranking. Optional for the same reason as `validatorsRepo`:
-   * a test can stub without wiring the full profile layer.
-   */
   profilesRepo?: Pick<ProfilesRepository, 'findOptedOutVotes'>;
-  /**
-   * Phase 3 claim lookup. Used to mark each row with a `claimed:
-   * boolean` flag — the UI renders a small "verified" badge next
-   * to claimed validators so visitors can see operator-attested
-   * legitimacy at a glance. Optional, same reason as the others.
-   */
   claimsRepo?: Pick<ClaimsRepository, 'findClaimedVotes'>;
+}
+
+type SampleStatus = 'low' | 'medium' | 'normal';
+type DecadeRank = 1 | 2 | 3;
+
+interface DecadeBadge {
+  epochStart: number;
+  epochEnd: number;
+  rank: DecadeRank;
 }
 
 interface LeaderboardRow {
   rank: number;
   vote: string;
   identity: string;
-  /**
-   * On-chain validator moniker — from `solana validator-info publish`.
-   * Null when the validator hasn't published an info record, or
-   * when the info-refresh job hasn't seen it yet.
-   */
   name: string | null;
   iconUrl: string | null;
   website: string | null;
   slotsAssigned: number;
+  slotsElapsedAssigned: number;
   slotsProduced: number;
   slotsSkipped: number;
   skipRate: number | null;
@@ -108,132 +102,57 @@ interface LeaderboardRow {
   blockFeesTotalSol: string;
   blockTipsTotalLamports: string;
   blockTipsTotalSol: string;
-  /**
-   * `blockFees + blockTips` in lamports. This is the rank key — surfacing
-   * it on the row saves clients from re-computing it for display.
-   */
   totalIncomeLamports: string;
   totalIncomeSol: string;
-  /**
-   * Performance — `(block_fees + block_tips) / slots_assigned` in lamports
-   * per assigned slot. Stake-neutral and commission-neutral; captures
-   * operational skill (block quality + Jito-tip capture + reliability) in
-   * a single number. `null` when `slots_assigned === 0` (placeholder
-   * rows) — shouldn't normally hit this path on the
-   * leaderboard since rows without fees are filtered out, but kept
-   * nullable for safety.
-   */
   performanceLamportsPerSlot: string | null;
   performanceSolPerSlot: string | null;
-  /** Per-validator median block fee (lamports + SOL). Null when the
-   * ingester hasn't recorded any produced blocks yet. */
-  medianFeeLamports: string | null;
-  medianFeeSol: string | null;
-  /** Activated stake snapshot at the time of the last slot-ingest
-   * tick. Null for rows written before migration 0006 ran. */
+  windowSlots: number;
+  windowIncomeLamports: string;
+  windowIncomeSol: string;
+  incomeLamportsPerSlot: string | null;
+  incomeSolPerSlot: string | null;
+  currentElapsedAssignedSlots: number;
+  currentIncomeLamports: string;
+  currentIncomeSol: string;
+  closedEpochsIncluded: number;
+  sampleStatus: SampleStatus;
+  slotWindowLastSlot: number | null;
+  slotWindowUpdatedAt: string | null;
+  lastUpdatedAt: string | null;
   activatedStakeLamports: string | null;
   activatedStakeSol: string | null;
-  /**
-   * APR-equivalent (`total_income / activated_stake`), returned as a
-   * floating point ratio (e.g. 0.000042 = 0.0042% per epoch). Null
-   * when stake data is missing. Surfaced on the row so clients don't
-   * have to re-compute it for display / sorting.
-   */
   incomePerStake: number | null;
-  /**
-   * Phase 3: `true` when the validator's operator has gone through
-   * the Ed25519 claim flow at least once. Drives the UI's "verified"
-   * badge — a small visual cue that the operator has self-attested
-   * via signed message against their on-chain identity key.
-   *
-   * `false` for never-claimed validators (the vast majority on a
-   * fresh launch). NOT a security guarantee on its own; the
-   * meaningful signal is "this validator's operator interacted
-   * with the explorer", which combined with the on-chain
-   * `validator-info publish` data gives delegators a richer trust
-   * picture than either source alone.
-   */
   claimed: boolean;
+  decadeEpochStart: number | null;
+  decadeEpochEnd: number | null;
+  decadeRank: DecadeRank | null;
 }
 
 interface LeaderboardResponse {
   epoch: number;
   epochClosedAt: string | null;
-  /** Sort mode used. Echoed back so clients can render a selected-tab
-   * state without having to track the request themselves. */
-  sort: LeaderboardSort;
-  /** Number of validators returned (may be less than `limit`). */
+  window: LeaderboardWindow;
+  sort: LeaderboardWindowSort;
+  isFinal: boolean;
+  currentEpoch: number | null;
+  closedEpochsIncluded: number[];
+  asOfSlot: number | null;
+  safeUpperSlot: number | null;
+  slotDenominator: 'window_slots';
+  samplePolicy: {
+    minWindowSlots: number;
+    lowBelow: number;
+    mediumBelow: number;
+  };
   count: number;
-  /** `limit` the client asked for (post-clamp). */
   limit: number;
   items: LeaderboardRow[];
-  /**
-   * Top-N cluster aggregates for this epoch, when published. Clients
-   * use it to render a "you're X% above/below median" badge next to
-   * each row without doing the math on the client.
-   */
   cluster: {
     topN: number;
     sampleValidators: number;
     medianBlockFeeLamports: string | null;
     medianBlockTipLamports: string | null;
   } | null;
-}
-
-function toRow(
-  stats: EpochValidatorStats,
-  rank: number,
-  info: { name: string | null; iconUrl: string | null; website: string | null } | undefined,
-  claimed: boolean,
-): LeaderboardRow {
-  const blockFees = stats.blockFeesTotalLamports;
-  const blockTips = stats.blockTipsTotalLamports;
-  const total = blockFees + blockTips;
-  const skipRate = stats.slotsAssigned > 0 ? stats.slotsSkipped / stats.slotsAssigned : null;
-  const stake = stats.activatedStakeLamports;
-  // Use Number division for the ratio — total and stake fit well
-  // inside IEEE 754 precision at the magnitudes we care about
-  // (lamports per lamport = dimensionless, < 1 by many orders of
-  // magnitude). If we ever need full-precision APR, switch to a
-  // decimal library.
-  const incomePerStake = stake !== null && stake > 0n ? Number(total) / Number(stake) : null;
-  // Performance: lamports per assigned slot. bigint division (round
-  // toward zero) is fine here — the magnitudes we care about (typical
-  // lamports per slot range from hundreds of thousands to tens of
-  // millions) are plenty above the truncation threshold, and the
-  // client uses this for display/sort, not accounting.
-  const performance = stats.slotsAssigned > 0 ? total / BigInt(stats.slotsAssigned) : null;
-  return {
-    rank,
-    vote: stats.votePubkey,
-    identity: stats.identityPubkey,
-    name: info?.name ?? null,
-    iconUrl: normaliseHttpUrlOrNull(info?.iconUrl),
-    website: normaliseHttpUrlOrNull(info?.website),
-    slotsAssigned: stats.slotsAssigned,
-    slotsProduced: stats.slotsProduced,
-    slotsSkipped: stats.slotsSkipped,
-    skipRate,
-    // `lamportsToString` is typed to accept null; non-null inputs
-    // always produce non-null outputs, but TS can't see through the
-    // overload-less signature. Convert the bigint directly via
-    // `toString()` for the lamports fields; SOL formatting still uses
-    // the helper because it handles digit padding + trailing zeros.
-    blockFeesTotalLamports: blockFees.toString(),
-    blockFeesTotalSol: lamportsToSol(blockFees),
-    blockTipsTotalLamports: blockTips.toString(),
-    blockTipsTotalSol: lamportsToSol(blockTips),
-    totalIncomeLamports: total.toString(),
-    totalIncomeSol: lamportsToSol(total),
-    performanceLamportsPerSlot: performance === null ? null : performance.toString(),
-    performanceSolPerSlot: performance === null ? null : lamportsToSol(performance),
-    medianFeeLamports: stats.medianFeeLamports === null ? null : stats.medianFeeLamports.toString(),
-    medianFeeSol: stats.medianFeeLamports === null ? null : lamportsToSol(stats.medianFeeLamports),
-    activatedStakeLamports: stake === null ? null : stake.toString(),
-    activatedStakeSol: stake === null ? null : lamportsToSol(stake),
-    incomePerStake,
-    claimed,
-  };
 }
 
 function unwrap<T>(
@@ -246,120 +165,349 @@ function unwrap<T>(
   });
 }
 
+function sampleStatus(slots: number): SampleStatus {
+  if (slots < 16) return 'low';
+  if (slots < 64) return 'medium';
+  return 'normal';
+}
+
+function toRow(
+  stats: WindowedLeaderboardStats,
+  rank: number,
+  info: { name: string | null; iconUrl: string | null; website: string | null } | undefined,
+  claimed: boolean,
+  decadeBadge: DecadeBadge | undefined,
+): LeaderboardRow {
+  const total = stats.blockFeesTotalLamports + stats.blockTipsTotalLamports;
+  const perSlot = stats.windowSlots > 0 ? total / BigInt(stats.windowSlots) : null;
+  const skipRate = stats.windowSlots > 0 ? stats.slotsSkipped / stats.windowSlots : null;
+  const stake = stats.activatedStakeLamports;
+  const incomePerStake = stake !== null && stake > 0n ? Number(total) / Number(stake) : null;
+
+  return {
+    rank,
+    vote: stats.votePubkey,
+    identity: stats.identityPubkey,
+    name: info?.name ?? null,
+    iconUrl: normaliseHttpUrlOrNull(info?.iconUrl),
+    website: normaliseHttpUrlOrNull(info?.website),
+    slotsAssigned: stats.slotsAssigned,
+    slotsElapsedAssigned: stats.slotsElapsedAssigned,
+    slotsProduced: stats.slotsProduced,
+    slotsSkipped: stats.slotsSkipped,
+    skipRate,
+    blockFeesTotalLamports: stats.blockFeesTotalLamports.toString(),
+    blockFeesTotalSol: lamportsToSol(stats.blockFeesTotalLamports),
+    blockTipsTotalLamports: stats.blockTipsTotalLamports.toString(),
+    blockTipsTotalSol: lamportsToSol(stats.blockTipsTotalLamports),
+    totalIncomeLamports: total.toString(),
+    totalIncomeSol: lamportsToSol(total),
+    performanceLamportsPerSlot: perSlot === null ? null : perSlot.toString(),
+    performanceSolPerSlot: perSlot === null ? null : lamportsToSol(perSlot),
+    windowSlots: stats.windowSlots,
+    windowIncomeLamports: total.toString(),
+    windowIncomeSol: lamportsToSol(total),
+    incomeLamportsPerSlot: perSlot === null ? null : perSlot.toString(),
+    incomeSolPerSlot: perSlot === null ? null : lamportsToSol(perSlot),
+    currentElapsedAssignedSlots: stats.currentElapsedAssignedSlots,
+    currentIncomeLamports: stats.currentIncomeLamports.toString(),
+    currentIncomeSol: lamportsToSol(stats.currentIncomeLamports),
+    closedEpochsIncluded: stats.closedEpochsIncluded,
+    sampleStatus: sampleStatus(stats.windowSlots),
+    slotWindowLastSlot: stats.slotWindowLastSlot,
+    slotWindowUpdatedAt:
+      stats.slotWindowUpdatedAt === null ? null : stats.slotWindowUpdatedAt.toISOString(),
+    lastUpdatedAt: stats.lastUpdatedAt === null ? null : stats.lastUpdatedAt.toISOString(),
+    activatedStakeLamports: stake === null ? null : stake.toString(),
+    activatedStakeSol: stake === null ? null : lamportsToSol(stake),
+    incomePerStake,
+    claimed,
+    decadeEpochStart: decadeBadge?.epochStart ?? null,
+    decadeEpochEnd: decadeBadge?.epochEnd ?? null,
+    decadeRank: decadeBadge?.rank ?? null,
+  };
+}
+
+function toDecadeRank(rank: number): DecadeRank | null {
+  return rank === 1 || rank === 2 || rank === 3 ? rank : null;
+}
+
+async function resolveLatestCompleteDecade(
+  epochsRepo: Pick<EpochsRepository, 'findLatestCompleteClosedEpochBlock'>,
+): Promise<EpochInfo[]> {
+  return epochsRepo.findLatestCompleteClosedEpochBlock(DECADE_EPOCH_COUNT);
+}
+
+function buildDecadeRankMapFromRows(
+  rows: WindowedLeaderboardStats[],
+  closed: EpochInfo[],
+): Map<string, DecadeBadge> {
+  if (closed.length !== DECADE_EPOCH_COUNT) return new Map();
+  const epochEnd = closed[0]!.epoch;
+  const epochStart = closed[closed.length - 1]!.epoch;
+  const out = new Map<string, DecadeBadge>();
+  rows
+    .filter((row) => row.closedEpochsIncluded === DECADE_EPOCH_COUNT)
+    .slice(0, DECADE_RANK_LIMIT)
+    .forEach((row, index) => {
+      const rank = toDecadeRank(index + 1);
+      if (rank === null) return;
+      out.set(row.votePubkey, { epochStart, epochEnd, rank });
+    });
+  return out;
+}
+
+async function buildDecadeRankMap(
+  statsRepo: Pick<StatsRepository, 'findTopNByWindow'>,
+  epochsRepo: Pick<EpochsRepository, 'findLatestCompleteClosedEpochBlock'>,
+  optedOutVotes: Set<string>,
+  minWindowSlots: number,
+): Promise<Map<string, DecadeBadge>> {
+  const closed = await resolveLatestCompleteDecade(epochsRepo);
+  if (closed.length !== DECADE_EPOCH_COUNT) return new Map();
+
+  const rows = await statsRepo.findTopNByWindow({
+    epochs: closed.map((row) => ({ epoch: row.epoch, isCurrent: false })),
+    limit: MAX_LIMIT,
+    sort: 'income_per_slot',
+    minWindowSlots,
+    requiredClosedEpochs: DECADE_EPOCH_COUNT,
+    excludedVotes: Array.from(optedOutVotes),
+  });
+  return buildDecadeRankMapFromRows(rows, closed);
+}
+
+function closedCountForWindow(window: LeaderboardWindow): number {
+  switch (window) {
+    case 'stable_trend':
+      return 2;
+    case 'live_trend':
+    case 'final_epoch':
+      return 1;
+    case 'decade_epoch':
+    case 'current_only':
+    default:
+      return 0;
+  }
+}
+
+function requiredClosedEpochsForWindow(window: LeaderboardWindow): number {
+  return window === 'decade_epoch' ? DECADE_EPOCH_COUNT : closedCountForWindow(window);
+}
+
+async function resolveWindowEpochs(
+  window: LeaderboardWindow,
+  epochOverride: number | undefined,
+  epochsRepo: Pick<
+    EpochsRepository,
+    'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs' | 'findLatestCompleteClosedEpochBlock'
+  >,
+): Promise<{
+  epochs: LeaderboardWindowEpoch[];
+  current: EpochInfo | null;
+  closed: EpochInfo[];
+  epochClosedAt: string | null;
+}> {
+  if (epochOverride !== undefined && window !== 'final_epoch') {
+    throw new AppError(
+      'invalid_leaderboard_window',
+      'epoch override is only supported with window=final_epoch',
+      400,
+      { epoch: epochOverride, window },
+    );
+  }
+
+  if (epochOverride !== undefined) {
+    const epoch = await epochsRepo.findByEpoch(epochOverride);
+    if (epoch === null) throw new NotFoundError('epoch', String(epochOverride));
+    if (!epoch.isClosed) {
+      throw new AppError(
+        'epoch_not_closed',
+        'explicit leaderboard epoch is still open; use a live window instead',
+        409,
+        { epoch: epochOverride },
+      );
+    }
+    return {
+      epochs: [{ epoch: epoch.epoch, isCurrent: false }],
+      current: null,
+      closed: [epoch],
+      epochClosedAt: epoch.closedAt?.toISOString() ?? null,
+    };
+  }
+
+  if (window === 'decade_epoch') {
+    const closed = await resolveLatestCompleteDecade(epochsRepo);
+    return {
+      epochs: closed.map((row) => ({ epoch: row.epoch, isCurrent: false })),
+      current: null,
+      closed,
+      epochClosedAt: closed[0]?.closedAt?.toISOString() ?? null,
+    };
+  }
+
+  const closedCount = closedCountForWindow(window);
+  const [current, closed] = await Promise.all([
+    epochsRepo.findCurrent(),
+    closedCount > 0 ? epochsRepo.findLatestClosedEpochs(closedCount) : Promise.resolve([]),
+  ]);
+
+  const out: LeaderboardWindowEpoch[] = [];
+  if (window !== 'final_epoch' && current !== null && !current.isClosed) {
+    out.push({ epoch: current.epoch, isCurrent: true });
+  }
+  for (const row of closed) {
+    out.push({ epoch: row.epoch, isCurrent: false });
+  }
+
+  return {
+    epochs: out,
+    current,
+    closed,
+    epochClosedAt: closed[0]?.closedAt?.toISOString() ?? null,
+  };
+}
+
 const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
   app: FastifyInstance,
   opts: LeaderboardRoutesDeps,
 ) => {
   const { statsRepo, epochsRepo, aggregatesRepo, validatorsRepo, profilesRepo, claimsRepo } = opts;
+  const responseCache = new TtlCache<string, LeaderboardResponse>(LEADERBOARD_CACHE_MAX_ENTRIES);
 
-  app.get('/v1/leaderboard', async (request, _reply): Promise<LeaderboardResponse> => {
+  app.get('/v1/leaderboard', async (request, reply): Promise<LeaderboardResponse> => {
     const query = unwrap(LeaderboardQuerySchema.safeParse(request.query), 'query parameter');
-
-    // Resolve target epoch: explicit `?epoch=` beats the default.
-    let targetEpoch: Epoch;
-    let epochClosedAt: string | null = null;
-    if (query.epoch !== undefined) {
-      const epochInfo = await epochsRepo.findByEpoch(query.epoch);
-      if (epochInfo === null) {
-        throw new NotFoundError('epoch', String(query.epoch));
-      }
-      targetEpoch = epochInfo.epoch;
-      epochClosedAt = epochInfo.closedAt?.toISOString() ?? null;
-    } else {
-      const latest = await epochsRepo.findLatestClosed();
-      if (latest === null) {
-        // No closed epoch observed yet — first-boot state. Return an
-        // empty list rather than a 404 so the UI can render its own
-        // "no data yet" empty state.
-        return {
-          epoch: 0,
-          epochClosedAt: null,
-          sort: query.sort,
-          count: 0,
-          limit: query.limit,
-          items: [],
-          cluster: null,
-        };
-      }
-      targetEpoch = latest.epoch;
-      epochClosedAt = latest.closedAt?.toISOString() ?? null;
+    const cacheKey = JSON.stringify(query);
+    const now = Date.now();
+    const cached = responseCache.get(cacheKey, now);
+    if (cached !== undefined) {
+      setClientReadCache(reply);
+      return cached;
     }
 
-    // Pull the opt-out set in parallel with the main query. A
-    // validator that has set `profile.optedOut = true` should not
-    // appear in the cluster ranking (the operator has explicitly
-    // asked us not to show them); we over-fetch from stats and
-    // drop the hidden rows client-side. Over-fetching slightly
-    // (by `limit × maxOptOutRate`) keeps the filter cheap without
-    // a more complex query. In practice the opt-out rate is
-    // vanishingly small — partial index on `idx_validator_profiles_opted_out`
-    // keeps the set lookup O(count of opted-out rows).
-    const [rows, clusterAgg, optedOutVotes] = await Promise.all([
-      statsRepo.findTopNByEpoch(targetEpoch, query.limit, query.sort),
-      aggregatesRepo.findByEpochTopN(targetEpoch, 100),
-      profilesRepo === undefined
-        ? Promise.resolve(new Set<string>())
-        : profilesRepo.findOptedOutVotes(),
+    const resolved = await resolveWindowEpochs(query.window, query.epoch, epochsRepo);
+
+    if (resolved.epochs.length === 0) {
+      const body: LeaderboardResponse = {
+        epoch: 0,
+        epochClosedAt: null,
+        window: query.window,
+        sort: query.sort,
+        isFinal: query.window === 'final_epoch' || query.window === 'decade_epoch',
+        currentEpoch: null,
+        closedEpochsIncluded: [],
+        asOfSlot: null,
+        safeUpperSlot: null,
+        slotDenominator: 'window_slots',
+        samplePolicy: { minWindowSlots: query.minWindowSlots, lowBelow: 16, mediumBelow: 64 },
+        count: 0,
+        limit: query.limit,
+        items: [],
+        cluster: null,
+      };
+      responseCache.set(cacheKey, body, LEADERBOARD_CACHE_TTL_MS, now);
+      setClientReadCache(reply);
+      return body;
+    }
+
+    const requiredClosedEpochs = requiredClosedEpochsForWindow(query.window);
+    const optedOutVotes =
+      profilesRepo === undefined ? new Set<string>() : await profilesRepo.findOptedOutVotes();
+    const rows = await statsRepo.findTopNByWindow({
+      epochs: resolved.epochs,
+      limit: query.limit,
+      sort: query.sort,
+      minWindowSlots: query.minWindowSlots,
+      requiredClosedEpochs,
+      excludedVotes: Array.from(optedOutVotes),
+    });
+    const visibleRows = rows.slice(0, query.limit);
+
+    const identities = Array.from(new Set(visibleRows.map((r) => r.identityPubkey)));
+    const votes = visibleRows.map((r) => r.votePubkey);
+    const decadeRanksPromise =
+      query.window === 'decade_epoch' && query.sort === 'income_per_slot'
+        ? Promise.resolve(buildDecadeRankMapFromRows(rows, resolved.closed))
+        : buildDecadeRankMap(statsRepo, epochsRepo, optedOutVotes, query.minWindowSlots);
+    const [infoByIdentity, claimedVotes, decadeRanks] = await Promise.all([
+      validatorsRepo !== undefined && identities.length > 0
+        ? validatorsRepo.getInfosByIdentities(identities)
+        : Promise.resolve(
+            new Map<
+              IdentityPubkey,
+              { name: string | null; iconUrl: string | null; website: string | null }
+            >(),
+          ),
+      claimsRepo !== undefined && votes.length > 0
+        ? claimsRepo.findClaimedVotes(votes)
+        : Promise.resolve(new Set<string>()),
+      decadeRanksPromise,
     ]);
 
-    // Filter out opted-out validators AFTER the repo returned its
-    // sorted list so the ranking stays stable — if we excluded
-    // inside the SQL, borderline ranks would shift around opt-outs
-    // which is confusing for return visitors.
-    const visibleRows =
-      optedOutVotes.size === 0 ? rows : rows.filter((r) => !optedOutVotes.has(r.votePubkey));
-
-    // Batch-fetch validator monikers for the rows we're about to
-    // return, keyed by identity. A single query even for the full
-    // 500-row ceiling; cheaper than joining in the stats query
-    // because info is served by a tiny table (~1-2k rows).
-    let infoByIdentity = new Map<
-      IdentityPubkey,
-      { name: string | null; iconUrl: string | null; website: string | null }
-    >();
-    if (validatorsRepo !== undefined && visibleRows.length > 0) {
-      const identities = Array.from(new Set(visibleRows.map((r) => r.identityPubkey)));
-      infoByIdentity = await validatorsRepo.getInfosByIdentities(identities);
-    }
-
-    // Phase 3 — pull the set of claimed votes among the visible
-    // rows. Single round-trip, scoped to the limited window we're
-    // about to return. Skipped entirely when no `claimsRepo` is
-    // wired (legacy harnesses) — every row gets `claimed: false`
-    // by default in that case.
-    let claimedVotes = new Set<string>();
-    if (claimsRepo !== undefined && visibleRows.length > 0) {
-      const votes = visibleRows.map((r) => r.votePubkey);
-      claimedVotes = await claimsRepo.findClaimedVotes(votes);
-    }
-
     const items = visibleRows.map((row, i) =>
-      toRow(row, i + 1, infoByIdentity.get(row.identityPubkey), claimedVotes.has(row.votePubkey)),
+      toRow(
+        row,
+        i + 1,
+        infoByIdentity.get(row.identityPubkey),
+        claimedVotes.has(row.votePubkey),
+        decadeRanks.get(row.votePubkey),
+      ),
     );
-    const cluster: LeaderboardResponse['cluster'] = clusterAgg
-      ? {
-          topN: clusterAgg.topN,
-          sampleValidators: clusterAgg.sampleValidators,
-          medianBlockFeeLamports:
-            clusterAgg.medianFeeLamports === null
-              ? null
-              : lamportsToString(clusterAgg.medianFeeLamports),
-          medianBlockTipLamports:
-            clusterAgg.medianTipLamports === null
-              ? null
-              : lamportsToString(clusterAgg.medianTipLamports),
-        }
-      : null;
 
-    return {
-      epoch: targetEpoch,
-      epochClosedAt,
+    const finalEpoch = resolved.closed[0];
+    const clusterAgg =
+      query.window === 'final_epoch' && finalEpoch !== undefined
+        ? await aggregatesRepo.findByEpochTopN(finalEpoch.epoch, 100)
+        : null;
+    const cluster: LeaderboardResponse['cluster'] =
+      clusterAgg === null
+        ? null
+        : {
+            topN: clusterAgg.topN,
+            sampleValidators: clusterAgg.sampleValidators,
+            medianBlockFeeLamports:
+              clusterAgg.medianFeeLamports === null
+                ? null
+                : lamportsToString(clusterAgg.medianFeeLamports),
+            medianBlockTipLamports:
+              clusterAgg.medianTipLamports === null
+                ? null
+                : lamportsToString(clusterAgg.medianTipLamports),
+          };
+
+    const currentEpoch =
+      resolved.current !== null && !resolved.current.isClosed ? resolved.current : null;
+    const safeUpperSlot = items.reduce<number | null>((max, row) => {
+      if (row.slotWindowLastSlot === null) return max;
+      return max === null || row.slotWindowLastSlot > max ? row.slotWindowLastSlot : max;
+    }, null);
+
+    const body: LeaderboardResponse = {
+      epoch:
+        query.window === 'final_epoch' || query.window === 'decade_epoch'
+          ? (finalEpoch?.epoch ?? 0)
+          : (currentEpoch?.epoch ?? 0),
+      epochClosedAt:
+        query.window === 'final_epoch' || query.window === 'decade_epoch'
+          ? resolved.epochClosedAt
+          : null,
+      window: query.window,
       sort: query.sort,
+      isFinal: query.window === 'final_epoch' || query.window === 'decade_epoch',
+      currentEpoch: currentEpoch?.epoch ?? null,
+      closedEpochsIncluded: resolved.closed.map((row) => row.epoch),
+      asOfSlot: currentEpoch?.currentSlot ?? null,
+      safeUpperSlot,
+      slotDenominator: 'window_slots',
+      samplePolicy: { minWindowSlots: query.minWindowSlots, lowBelow: 16, mediumBelow: 64 },
       count: items.length,
       limit: query.limit,
       items,
       cluster,
     };
+    responseCache.set(cacheKey, body, LEADERBOARD_CACHE_TTL_MS, now);
+    setClientReadCache(reply);
+    return body;
   });
 };
 

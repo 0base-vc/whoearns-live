@@ -39,9 +39,9 @@
     {
       method: 'GET',
       path: '/v1/leaderboard',
-      summary: 'Top-N validators by a chosen ranking metric',
+      summary: 'Top-N validators by live, final, or Decade window',
       description:
-        'Ranked list for the most recent closed epoch. Five sort modes: `performance` (DEFAULT — `(block_fees + block_tips) / slots_assigned` DESC, stake-neutral + commission-neutral skill), `total_income` (block_fees + block_tips DESC, stake-biased), `income_per_stake` (operator revenue per stake, DESC), `skip_rate` (ASC, reliability), `median_fee` (DESC, per-block packing). Rows without ingested fee data are filtered out; rows without a stake snapshot fall out of `income_per_stake` only. Rows with `slots_assigned < 30` are included but flagged as low-sample.',
+        'Ranked list for a selected window. Default `window=live_trend&sort=income_per_slot`, combining current elapsed leader slots with the latest final epoch. Other windows: `current_only`, `stable_trend`, `final_epoch`, and `decade_epoch`.',
       params: [
         {
           name: 'limit',
@@ -51,17 +51,48 @@
         {
           name: 'epoch',
           type: 'integer',
+          description: 'Override target closed epoch. Only valid with `window=final_epoch`.',
+        },
+        {
+          name: 'window',
+          type: 'enum',
           description:
-            'Override target epoch. Defaults to the most recent closed epoch. 404 if the epoch is unknown.',
+            '`live_trend` | `current_only` | `stable_trend` | `final_epoch` | `decade_epoch`.',
+        },
+        {
+          name: 'minWindowSlots',
+          type: 'integer',
+          description: 'Minimum denominator slots required for a row. Default 4.',
         },
         {
           name: 'sort',
           type: 'enum',
           description:
-            '`performance` | `total_income` | `income_per_stake` | `skip_rate` | `median_fee`. Default `performance`. 400 on unknown values.',
+            '`income_per_slot` | `total_income` | `mev_tips` | `fees` | `skip_rate`. Default `income_per_slot`.',
         },
       ],
-      example: `${SITE_URL}/v1/leaderboard?limit=25&sort=performance`,
+      example: `${SITE_URL}/v1/leaderboard?window=live_trend&limit=25&sort=income_per_slot`,
+    },
+    {
+      method: 'GET',
+      path: '/v1/validators/search',
+      summary: 'Search known validators',
+      description:
+        'DB-only search over validator name, vote pubkey prefix, identity pubkey prefix, and keybase username. Opted-out validators are excluded and the request never calls Solana RPC.',
+      params: [
+        {
+          name: 'q',
+          type: 'string',
+          required: true,
+          description: 'Search text, minimum 2 characters.',
+        },
+        {
+          name: 'limit',
+          type: 'integer',
+          description: 'Result count clamped to 1-25. Default 10.',
+        },
+      ],
+      example: `${SITE_URL}/v1/validators/search?q=0base&limit=10`,
     },
     {
       method: 'GET',
@@ -84,7 +115,7 @@
       path: '/v1/validators/{idOrVote}/epochs/{epoch}/leader-slots',
       summary: 'Leader-slot facts for one validator epoch',
       description:
-        'Aggregates stored facts from watched validator leader slots only. The API call does not trigger Solana RPC; it returns local slot quality fields such as `factCapturedSlots`, `missingFactSlots`, `pendingSlots`, `fetchErrorSlots`, and `complete`, plus block fee, tip, tx, and compute summaries.',
+        'Aggregates stored facts from watched validator leader slots only. The API call does not trigger Solana RPC; it returns slot quality fields plus block fee, tip, tx, CU, cost-unit, ComputeBudget, and income-per-1M-CU summaries.',
       example: `${SITE_URL}/v1/validators/9f7dqiYNBZbgPesAnLeWnKCtxYHSfMg5x1EMZCJwVwG7/epochs/966/leader-slots`,
     },
     {
@@ -92,7 +123,7 @@
       path: '/v1/validators/{idOrVote}/history',
       summary: 'Per-epoch history for a validator',
       description:
-        'Rows returned newest-first. Each row carries `isFinal`, `hasSlots`, `hasIncome`, and an optional `cluster` block for median comparison context.',
+        'Rows returned newest-first. Each row carries `isFinal`, `hasSlots`, `hasIncome`, and `peerBenchmark` for indexed-validator median income per leader slot.',
       params: [
         {
           name: 'limit',
@@ -125,7 +156,7 @@
   <title>{`API reference — ${SITE_NAME}`}</title>
   <meta
     name="description"
-    content={`Public HTTP API for ${SITE_NAME} — per-epoch Solana validator stats, cluster medians, and the homepage leaderboard. Free, versioned, data licensed CC0.`}
+    content={`Public HTTP API for ${SITE_NAME} — per-epoch Solana validator stats, indexed-validator peer benchmarks, and the homepage leaderboard. Free, versioned, data licensed CC0.`}
   />
   <link rel="canonical" href={`${SITE_URL}/api/docs`} />
 </svelte:head>

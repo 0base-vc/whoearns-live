@@ -60,16 +60,28 @@
       a_ko: 'Vote account는 스테이커가 위임하는 온체인 계정이며 validator 평생 표준 식별자로 유지됩니다. Identity pubkey는 validator의 핫 키(hot key)로 블록 서명과 투표에 사용되며, 운영자는 보안을 위해 주기적으로 로테이션하면서 vote account는 그대로 둡니다. 이 사이트의 /income/{pubkey} 페이지는 두 형식 모두 입력으로 받아 같은 validator의 history로 안내합니다.',
     },
     {
-      q_en: 'What does "performance" mean on the leaderboard?',
-      q_ko: '리더보드의 "performance"는 무엇을 의미하나요?',
-      a_en: "Performance = (block fees + on-chain Jito tips) / slots assigned — the income earned PER SCHEDULED BLOCK. It's stake-neutral (a 100k-SOL validator and a 10M-SOL one can be compared directly) and commission-neutral (commission applies after block production). It's the cleanest answer to 'who actually runs their validator well' versus 'who has the most stake'.",
-      a_ko: 'Performance = (블록 수수료 + 온체인 Jito tips) / 할당 슬롯 수 — 스케줄된 블록당 수익입니다. 스테이크 중립적(100k-SOL validator와 10M-SOL validator를 직접 비교 가능)이고 commission 중립적(commission은 블록 생산 후에 적용)입니다. "누가 스테이크가 많은가"가 아니라 "누가 실제로 validator를 잘 운영하는가"에 가장 깨끗한 답입니다.',
+      q_en: 'What does "income / slot" mean on the leaderboard?',
+      q_ko: '리더보드의 "income / slot"은 무엇을 의미하나요?',
+      a_en: "Income / slot = (block fees + on-chain Jito tips) / leader slots in the selected window. In the default live-trend view, current epochs use elapsed assigned slots and final epochs use assigned slots. It's stake-neutral (a 100k-SOL validator and a 10M-SOL one can be compared directly) and commission-neutral (commission applies after block production).",
+      a_ko: 'Income / slot = (블록 수수료 + 온체인 Jito tips) / 선택한 window의 리더 슬롯 수입니다. 기본 live-trend에서는 진행 중 에폭은 현재까지 지난 할당 슬롯을, 종료 에폭은 전체 할당 슬롯을 씁니다. 스테이크 중립적(100k-SOL validator와 10M-SOL validator를 직접 비교 가능)이고 commission 중립적입니다.',
+    },
+    {
+      q_en: 'What is the Decade leaderboard?',
+      q_ko: 'Decade 리더보드는 무엇인가요?',
+      a_en: 'The Decade leaderboard ranks the latest complete 10-epoch block by income / leader slot. A validator must have income rows in all 10 epochs to qualify. This makes the badge harder to game than a one-epoch spike, reduces noise from tiny samples, and gives delegators a more durable operator-quality signal.',
+      a_ko: 'Decade 리더보드는 가장 최근 완성된 10개 에폭 구간을 income / leader slot 기준으로 랭킹합니다. 해당 validator는 10개 에폭 모두에 income row가 있어야 참여할 수 있습니다. 한 에폭짜리 스파이크보다 조작이 어렵고, 작은 샘플 노이즈를 줄이며, delegator에게 더 지속적인 운영 품질 신호를 줍니다.',
+    },
+    {
+      q_en: 'Can I search by validator name?',
+      q_ko: 'validator 이름으로 검색할 수 있나요?',
+      a_en: 'Yes. The homepage and Compare page both let you type part of a validator name, or paste a vote / identity pubkey directly. The search endpoint is DB-only, so it reads known validator metadata without triggering Solana RPC. If you type a name, select a result before submitting so the URL uses the canonical vote pubkey.',
+      a_ko: '네. 홈페이지와 Compare 페이지에서 validator 이름 일부를 입력하거나 vote / identity pubkey를 직접 붙여넣을 수 있습니다. 검색 API는 DB만 읽기 때문에 Solana RPC를 호출하지 않습니다. 이름을 입력했다면 결과를 선택해야 URL에는 표준 vote pubkey가 들어갑니다.',
     },
     {
       q_en: "Why doesn't my favorite validator appear in the leaderboard?",
       q_ko: '제가 좋아하는 validator가 왜 리더보드에 안 보이나요?',
-      a_en: "The leaderboard ranks the most recently CLOSED epoch only — running-epoch numbers aren't included. Validators with very few assigned slots in that epoch (under 4) are de-emphasized to avoid noisy per-slot metrics. If the validator is brand-new or wasn't scheduled, you can still pull their history directly: visit /income/{vote-or-identity-pubkey}.",
-      a_ko: '리더보드는 가장 최근 종료된 에폭만 랭킹합니다 — 진행 중 에폭 숫자는 포함되지 않습니다. 그 에폭에서 할당 슬롯이 매우 적은 validator(4개 미만)는 슬롯당 지표 노이즈를 피하기 위해 약하게 표시됩니다. 신규 validator거나 스케줄되지 않은 경우, /income/{vote-또는-identity-pubkey} 페이지에서 직접 히스토리를 볼 수 있습니다.',
+      a_en: 'The default leaderboard is live-trend, but it still only ranks validators with enough observed leader slots in the selected window. Validators below the minimum window slots are filtered to avoid noisy per-slot metrics. If a validator is brand-new or rarely scheduled, search by name or visit /income/{vote-or-identity-pubkey} directly.',
+      a_ko: '기본 리더보드는 live-trend이지만, 선택한 window에서 관측된 리더 슬롯이 충분한 validator만 랭킹합니다. window 슬롯 수가 최소 기준보다 적으면 슬롯당 지표 노이즈를 피하기 위해 제외됩니다. 신규 validator거나 스케줄이 드문 경우 이름으로 검색하거나 /income/{vote-또는-identity-pubkey}를 직접 방문하세요.',
     },
     {
       q_en: 'Can I use this data in my own dashboard or research?',
@@ -86,8 +98,8 @@
     {
       q_en: 'How does this site differ from solanabeach.io / validators.app / stakewiz.com?',
       q_ko: '이 사이트는 solanabeach.io / validators.app / stakewiz.com과 무엇이 다른가요?',
-      a_en: 'Three differences: (1) every metric is contextualized against the top-100 cluster median for the same epoch, so you can tell if a validator is over- or under-performing peers; (2) MEV tips are derived from each produced block, so current-epoch income can update in near real time; (3) all derived data is CC0 with a documented public API. Other dashboards typically gate this behind login or vendor-specific endpoints.',
-      a_ko: '세 가지 차이가 있습니다. (1) 모든 지표를 같은 에폭의 top-100 클러스터 median과 비교 표시 — 피어 대비 잘하는지 못하는지 즉시 판단 가능; (2) MEV tips를 각 생산 블록에서 도출하므로 진행 중 에폭 수입도 거의 실시간으로 갱신 가능; (3) 모든 파생 데이터가 CC0이고 공개 API로 제공. 타 대시보드는 보통 로그인이나 벤더 엔드포인트 뒤에 둡니다.',
+      a_en: 'Three differences: (1) validator income is normalized per leader slot and compared against the indexed-validator median, so you can tell if a validator is over- or under-performing peers; (2) MEV tips are derived from each produced block, so current-epoch income can update in near real time; (3) all derived data is CC0 with a documented public API. Other dashboards typically gate this behind login or vendor-specific endpoints.',
+      a_ko: '세 가지 차이가 있습니다. (1) validator 수입을 leader slot당 값으로 정규화하고 indexed validator median과 비교해 피어 대비 잘하는지 못하는지 판단 가능; (2) MEV tips를 각 생산 블록에서 도출하므로 진행 중 에폭 수입도 거의 실시간으로 갱신 가능; (3) 모든 파생 데이터가 CC0이고 공개 API로 제공. 타 대시보드는 보통 로그인이나 벤더 엔드포인트 뒤에 둡니다.',
     },
     {
       q_en: "I'm a validator operator — how do I claim my profile here?",

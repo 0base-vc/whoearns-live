@@ -3,6 +3,7 @@ import type {
   Epoch,
   EpochAggregate,
   EpochInfo,
+  EpochPeerBenchmark,
   EpochValidatorStats,
   IdentityPubkey,
   ValidatorCurrentEpochResponse,
@@ -39,6 +40,20 @@ function serializeCluster(
   };
 }
 
+function serializePeerBenchmark(
+  benchmark: EpochPeerBenchmark | null,
+): ValidatorCurrentEpochResponse['peerBenchmark'] {
+  if (benchmark === null) return null;
+  return {
+    sample: benchmark.sample,
+    sampleValidators: benchmark.sampleValidators,
+    sampleSlots: benchmark.sampleSlots,
+    medianIncomeLamportsPerSlot: benchmark.medianIncomeLamportsPerSlot,
+    medianIncomeSolPerSlot: benchmark.medianIncomeSolPerSlot,
+    basis: benchmark.basis,
+  };
+}
+
 /**
  * Serialize a stored (epoch, vote) row into the public API response.
  *
@@ -52,6 +67,7 @@ export function serializeValidator(
   epoch: EpochInfo,
   _ctx?: SerializerContext,
   cluster: EpochAggregate | null = null,
+  peerBenchmark: EpochPeerBenchmark | null = null,
 ): ValidatorCurrentEpochResponse {
   const hasSlots = stats.slotsUpdatedAt !== null;
   const hasIncome = stats.feesUpdatedAt !== null;
@@ -87,6 +103,7 @@ export function serializeValidator(
     hasIncome,
 
     slotsAssigned: hasSlots ? stats.slotsAssigned : null,
+    slotsElapsedAssigned: hasSlots ? stats.slotsElapsedAssigned : null,
     slotsProduced: hasSlots ? stats.slotsProduced : null,
     slotsSkipped: hasSlots ? stats.slotsSkipped : null,
 
@@ -161,6 +178,7 @@ export function serializeValidator(
         stats.medianTotalUpdatedAt === null ? null : stats.medianTotalUpdatedAt.toISOString(),
     },
     cluster: serializeCluster(cluster),
+    peerBenchmark: serializePeerBenchmark(peerBenchmark),
   };
 }
 
@@ -176,6 +194,7 @@ export function serializeValidatorPlaceholder(args: {
   isCurrentEpoch?: boolean;
   isFinal?: boolean;
   cluster?: EpochAggregate | null;
+  peerBenchmark?: EpochPeerBenchmark | null;
 }): ValidatorCurrentEpochResponse {
   return {
     vote: args.vote,
@@ -188,6 +207,7 @@ export function serializeValidatorPlaceholder(args: {
     hasIncome: false,
 
     slotsAssigned: null,
+    slotsElapsedAssigned: null,
     slotsProduced: null,
     slotsSkipped: null,
 
@@ -228,5 +248,6 @@ export function serializeValidatorPlaceholder(args: {
       medianTotalUpdatedAt: null,
     },
     cluster: serializeCluster(args.cluster ?? null),
+    peerBenchmark: serializePeerBenchmark(args.peerBenchmark ?? null),
   };
 }

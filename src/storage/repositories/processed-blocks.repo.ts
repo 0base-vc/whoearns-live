@@ -29,6 +29,12 @@ interface ProcessedBlockRow {
   max_tip_lamports: string;
   max_priority_fee_lamports: string;
   compute_units_consumed: string;
+  cost_units: string;
+  compute_budget_requested_units: string;
+  compute_budget_limit_tx_count: number;
+  compute_budget_price_tx_count: number;
+  max_compute_unit_limit: string;
+  max_compute_unit_price_micro_lamports: string;
   facts_captured_at: Date | null;
   processed_at: Date;
 }
@@ -40,6 +46,7 @@ interface SlotStatsAggregateRow {
   produced_blocks: string;
   total_income_lamports: string;
   total_fees_lamports: string;
+  total_priority_fees_lamports: string;
   total_tips_lamports: string;
   tx_count: string;
   successful_tx_count: string;
@@ -53,6 +60,12 @@ interface SlotStatsAggregateRow {
   max_priority_fee_lamports: string;
   max_tip_lamports: string;
   compute_units_consumed: string;
+  cost_units: string;
+  compute_budget_requested_units: string;
+  compute_budget_limit_tx_count: string;
+  compute_budget_price_tx_count: string;
+  max_compute_unit_limit: string;
+  max_compute_unit_price_micro_lamports: string;
   best_block_slot: string | null;
   best_block_income_lamports: string | null;
   last_processed_at: Date | null;
@@ -84,6 +97,18 @@ function rowToBlock(row: ProcessedBlockRow): ProcessedBlock {
     maxTipLamports: toLamports(row.max_tip_lamports ?? '0'),
     maxPriorityFeeLamports: toLamports(row.max_priority_fee_lamports ?? '0'),
     computeUnitsConsumed: toIntegerBigInt(row.compute_units_consumed ?? '0', 'compute units'),
+    costUnits: toIntegerBigInt(row.cost_units ?? '0', 'cost units'),
+    computeBudgetRequestedUnits: toIntegerBigInt(
+      row.compute_budget_requested_units ?? '0',
+      'compute budget requested units',
+    ),
+    computeBudgetLimitTxCount: row.compute_budget_limit_tx_count ?? 0,
+    computeBudgetPriceTxCount: row.compute_budget_price_tx_count ?? 0,
+    maxComputeUnitLimit: toIntegerBigInt(row.max_compute_unit_limit ?? '0', 'max CU limit'),
+    maxComputeUnitPriceMicroLamports: toIntegerBigInt(
+      row.max_compute_unit_price_micro_lamports ?? '0',
+      'max CU price',
+    ),
     factsCapturedAt: row.facts_captured_at,
     processedAt: row.processed_at,
   };
@@ -92,6 +117,16 @@ function rowToBlock(row: ProcessedBlockRow): ProcessedBlock {
 function ratio(numerator: number, denominator: number): number | null {
   if (denominator <= 0) return null;
   return Math.round((numerator / denominator) * 1_000_000) / 1_000_000;
+}
+
+function bigintAverage(total: bigint, count: number): bigint | null {
+  if (count <= 0) return null;
+  return total / BigInt(count);
+}
+
+function lamportsPerMillionComputeUnit(lamports: bigint, computeUnits: bigint): bigint | null {
+  if (computeUnits <= 0n) return null;
+  return (lamports * 1_000_000n) / computeUnits;
 }
 
 function toIntegerBigInt(input: bigint | number | string, fieldName: string): bigint {
@@ -124,20 +159,22 @@ export class ProcessedBlocksRepository {
     if (blocks.length === 0) return new Set();
 
     // Build a multi-row VALUES clause. We cap the number of parameters at
-    // 65535 (Postgres wire limit) / 20 per row ≈ 3276 rows — well above any
+    // 65535 (Postgres wire limit) / 26 per row ≈ 2520 rows — well above any
     // realistic batch size. Callers are still expected to chunk.
     const params: unknown[] = [];
     const rowClauses: string[] = [];
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i]!;
-      const base = i * 20;
+      const base = i * 26;
       rowClauses.push(
         `($${base + 1}::bigint, $${base + 2}::bigint, $${base + 3}, $${base + 4}::numeric, ` +
           `$${base + 5}::numeric, $${base + 6}::numeric, $${base + 7}::numeric, ` +
           `$${base + 8}, $${base + 9}::timestamptz, $${base + 10}::int, $${base + 11}::int, ` +
           `$${base + 12}::int, $${base + 13}::int, $${base + 14}::int, ` +
           `$${base + 15}::int, $${base + 16}::numeric, $${base + 17}::numeric, ` +
-          `$${base + 18}::numeric, $${base + 19}::timestamptz, $${base + 20}::timestamptz)`,
+          `$${base + 18}::numeric, $${base + 19}::numeric, $${base + 20}::numeric, ` +
+          `$${base + 21}::int, $${base + 22}::int, $${base + 23}::numeric, ` +
+          `$${base + 24}::numeric, $${base + 25}::timestamptz, $${base + 26}::timestamptz)`,
       );
       params.push(
         b.slot,
@@ -158,6 +195,12 @@ export class ProcessedBlocksRepository {
         b.maxTipLamports.toString(),
         b.maxPriorityFeeLamports.toString(),
         b.computeUnitsConsumed.toString(),
+        b.costUnits.toString(),
+        b.computeBudgetRequestedUnits.toString(),
+        b.computeBudgetLimitTxCount,
+        b.computeBudgetPriceTxCount,
+        b.maxComputeUnitLimit.toString(),
+        b.maxComputeUnitPriceMicroLamports.toString(),
         b.factsCapturedAt,
         b.processedAt,
       );
@@ -174,7 +217,10 @@ export class ProcessedBlocksRepository {
           fees_lamports, base_fees_lamports, priority_fees_lamports, tips_lamports,
           block_status, block_time, tx_count, successful_tx_count, failed_tx_count,
           unknown_meta_tx_count, signature_count, tip_tx_count, max_tip_lamports,
-          max_priority_fee_lamports, compute_units_consumed, facts_captured_at, processed_at)
+          max_priority_fee_lamports, compute_units_consumed, cost_units,
+          compute_budget_requested_units, compute_budget_limit_tx_count,
+          compute_budget_price_tx_count, max_compute_unit_limit,
+          max_compute_unit_price_micro_lamports, facts_captured_at, processed_at)
        VALUES ${rowClauses.join(', ')}
        ON CONFLICT (epoch, slot) DO NOTHING
        RETURNING slot`,
@@ -197,14 +243,16 @@ export class ProcessedBlocksRepository {
     const rowClauses: string[] = [];
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i]!;
-      const base = i * 20;
+      const base = i * 26;
       rowClauses.push(
         `($${base + 1}::bigint, $${base + 2}::bigint, $${base + 3}, $${base + 4}::numeric, ` +
           `$${base + 5}::numeric, $${base + 6}::numeric, $${base + 7}::numeric, ` +
           `$${base + 8}, $${base + 9}::timestamptz, $${base + 10}::int, $${base + 11}::int, ` +
           `$${base + 12}::int, $${base + 13}::int, $${base + 14}::int, ` +
           `$${base + 15}::int, $${base + 16}::numeric, $${base + 17}::numeric, ` +
-          `$${base + 18}::numeric, $${base + 19}::timestamptz, $${base + 20}::timestamptz)`,
+          `$${base + 18}::numeric, $${base + 19}::numeric, $${base + 20}::numeric, ` +
+          `$${base + 21}::int, $${base + 22}::int, $${base + 23}::numeric, ` +
+          `$${base + 24}::numeric, $${base + 25}::timestamptz, $${base + 26}::timestamptz)`,
       );
       params.push(
         b.slot,
@@ -225,6 +273,12 @@ export class ProcessedBlocksRepository {
         b.maxTipLamports.toString(),
         b.maxPriorityFeeLamports.toString(),
         b.computeUnitsConsumed.toString(),
+        b.costUnits.toString(),
+        b.computeBudgetRequestedUnits.toString(),
+        b.computeBudgetLimitTxCount,
+        b.computeBudgetPriceTxCount,
+        b.maxComputeUnitLimit.toString(),
+        b.maxComputeUnitPriceMicroLamports.toString(),
         b.factsCapturedAt,
         b.processedAt,
       );
@@ -236,7 +290,10 @@ export class ProcessedBlocksRepository {
           fees_lamports, base_fees_lamports, priority_fees_lamports, tips_lamports,
           block_status, block_time, tx_count, successful_tx_count, failed_tx_count,
           unknown_meta_tx_count, signature_count, tip_tx_count, max_tip_lamports,
-          max_priority_fee_lamports, compute_units_consumed, facts_captured_at, processed_at
+          max_priority_fee_lamports, compute_units_consumed, cost_units,
+          compute_budget_requested_units, compute_budget_limit_tx_count,
+          compute_budget_price_tx_count, max_compute_unit_limit,
+          max_compute_unit_price_micro_lamports, facts_captured_at, processed_at
         ) AS (
           VALUES ${rowClauses.join(', ')}
         )
@@ -257,6 +314,13 @@ export class ProcessedBlocksRepository {
               max_tip_lamports = incoming.max_tip_lamports,
               max_priority_fee_lamports = incoming.max_priority_fee_lamports,
               compute_units_consumed = incoming.compute_units_consumed,
+              cost_units = incoming.cost_units,
+              compute_budget_requested_units = incoming.compute_budget_requested_units,
+              compute_budget_limit_tx_count = incoming.compute_budget_limit_tx_count,
+              compute_budget_price_tx_count = incoming.compute_budget_price_tx_count,
+              max_compute_unit_limit = incoming.max_compute_unit_limit,
+              max_compute_unit_price_micro_lamports =
+                incoming.max_compute_unit_price_micro_lamports,
               facts_captured_at = incoming.facts_captured_at,
               processed_at = incoming.processed_at
          FROM incoming
@@ -491,6 +555,187 @@ export class ProcessedBlocksRepository {
   }
 
   /**
+   * Overwrite the full derived fact payload for an existing produced block.
+   * Used by refill jobs after extractor changes. This intentionally does not
+   * insert missing rows; the caller should only repair leader slots that the
+   * ingester has already materialised.
+   */
+  async replaceProducedBlockFacts(block: ProcessedBlock): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE processed_blocks
+          SET leader_identity = $3,
+              fees_lamports = $4::numeric,
+              base_fees_lamports = $5::numeric,
+              priority_fees_lamports = $6::numeric,
+              tips_lamports = $7::numeric,
+              block_time = $8::timestamptz,
+              tx_count = $9::int,
+              successful_tx_count = $10::int,
+              failed_tx_count = $11::int,
+              unknown_meta_tx_count = $12::int,
+              signature_count = $13::int,
+              tip_tx_count = $14::int,
+              max_tip_lamports = $15::numeric,
+              max_priority_fee_lamports = $16::numeric,
+              compute_units_consumed = $17::numeric,
+              cost_units = $18::numeric,
+              compute_budget_requested_units = $19::numeric,
+              compute_budget_limit_tx_count = $20::int,
+              compute_budget_price_tx_count = $21::int,
+              max_compute_unit_limit = $22::numeric,
+              max_compute_unit_price_micro_lamports = $23::numeric,
+              facts_captured_at = $24::timestamptz,
+              processed_at = $25::timestamptz
+        WHERE epoch = $1
+          AND slot = $2
+          AND block_status = 'produced'`,
+      [
+        block.epoch,
+        block.slot,
+        block.leaderIdentity,
+        block.feesLamports.toString(),
+        block.baseFeesLamports.toString(),
+        block.priorityFeesLamports.toString(),
+        block.tipsLamports.toString(),
+        block.blockTime,
+        block.txCount,
+        block.successfulTxCount,
+        block.failedTxCount,
+        block.unknownMetaTxCount,
+        block.signatureCount,
+        block.tipTxCount,
+        block.maxTipLamports.toString(),
+        block.maxPriorityFeeLamports.toString(),
+        block.computeUnitsConsumed.toString(),
+        block.costUnits.toString(),
+        block.computeBudgetRequestedUnits.toString(),
+        block.computeBudgetLimitTxCount,
+        block.computeBudgetPriceTxCount,
+        block.maxComputeUnitLimit.toString(),
+        block.maxComputeUnitPriceMicroLamports.toString(),
+        block.factsCapturedAt,
+        block.processedAt,
+      ],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Batch variant of `replaceProducedBlockFacts` for refill jobs. Keeps the
+   * same "update existing produced rows only" contract while avoiding one DB
+   * round-trip per slot.
+   */
+  async replaceProducedBlockFactsBatch(blocks: ProcessedBlock[]): Promise<number> {
+    if (blocks.length === 0) return 0;
+    const params: unknown[] = [];
+    const values: string[] = [];
+    for (let i = 0; i < blocks.length; i += 1) {
+      const block = blocks[i]!;
+      const base = i * 25;
+      values.push(`(
+        $${base + 1}::bigint,
+        $${base + 2}::bigint,
+        $${base + 3}::text,
+        $${base + 4}::numeric,
+        $${base + 5}::numeric,
+        $${base + 6}::numeric,
+        $${base + 7}::numeric,
+        $${base + 8}::timestamptz,
+        $${base + 9}::int,
+        $${base + 10}::int,
+        $${base + 11}::int,
+        $${base + 12}::int,
+        $${base + 13}::int,
+        $${base + 14}::int,
+        $${base + 15}::numeric,
+        $${base + 16}::numeric,
+        $${base + 17}::numeric,
+        $${base + 18}::numeric,
+        $${base + 19}::numeric,
+        $${base + 20}::int,
+        $${base + 21}::int,
+        $${base + 22}::numeric,
+        $${base + 23}::numeric,
+        $${base + 24}::timestamptz,
+        $${base + 25}::timestamptz
+      )`);
+      params.push(
+        block.epoch,
+        block.slot,
+        block.leaderIdentity,
+        block.feesLamports.toString(),
+        block.baseFeesLamports.toString(),
+        block.priorityFeesLamports.toString(),
+        block.tipsLamports.toString(),
+        block.blockTime,
+        block.txCount,
+        block.successfulTxCount,
+        block.failedTxCount,
+        block.unknownMetaTxCount,
+        block.signatureCount,
+        block.tipTxCount,
+        block.maxTipLamports.toString(),
+        block.maxPriorityFeeLamports.toString(),
+        block.computeUnitsConsumed.toString(),
+        block.costUnits.toString(),
+        block.computeBudgetRequestedUnits.toString(),
+        block.computeBudgetLimitTxCount,
+        block.computeBudgetPriceTxCount,
+        block.maxComputeUnitLimit.toString(),
+        block.maxComputeUnitPriceMicroLamports.toString(),
+        block.factsCapturedAt,
+        block.processedAt,
+      );
+    }
+
+    const { rowCount } = await this.pool.query(
+      `WITH incoming (
+         epoch, slot, leader_identity, fees_lamports, base_fees_lamports,
+         priority_fees_lamports, tips_lamports, block_time, tx_count,
+         successful_tx_count, failed_tx_count, unknown_meta_tx_count,
+         signature_count, tip_tx_count, max_tip_lamports,
+         max_priority_fee_lamports, compute_units_consumed, cost_units,
+         compute_budget_requested_units, compute_budget_limit_tx_count,
+         compute_budget_price_tx_count, max_compute_unit_limit,
+         max_compute_unit_price_micro_lamports, facts_captured_at, processed_at
+       ) AS (
+         VALUES ${values.join(', ')}
+       )
+       UPDATE processed_blocks pb
+          SET leader_identity = incoming.leader_identity,
+              fees_lamports = incoming.fees_lamports,
+              base_fees_lamports = incoming.base_fees_lamports,
+              priority_fees_lamports = incoming.priority_fees_lamports,
+              tips_lamports = incoming.tips_lamports,
+              block_time = incoming.block_time,
+              tx_count = incoming.tx_count,
+              successful_tx_count = incoming.successful_tx_count,
+              failed_tx_count = incoming.failed_tx_count,
+              unknown_meta_tx_count = incoming.unknown_meta_tx_count,
+              signature_count = incoming.signature_count,
+              tip_tx_count = incoming.tip_tx_count,
+              max_tip_lamports = incoming.max_tip_lamports,
+              max_priority_fee_lamports = incoming.max_priority_fee_lamports,
+              compute_units_consumed = incoming.compute_units_consumed,
+              cost_units = incoming.cost_units,
+              compute_budget_requested_units = incoming.compute_budget_requested_units,
+              compute_budget_limit_tx_count = incoming.compute_budget_limit_tx_count,
+              compute_budget_price_tx_count = incoming.compute_budget_price_tx_count,
+              max_compute_unit_limit = incoming.max_compute_unit_limit,
+              max_compute_unit_price_micro_lamports =
+                incoming.max_compute_unit_price_micro_lamports,
+              facts_captured_at = incoming.facts_captured_at,
+              processed_at = incoming.processed_at
+         FROM incoming
+        WHERE pb.epoch = incoming.epoch
+          AND pb.slot = incoming.slot
+          AND pb.block_status = 'produced'`,
+      params,
+    );
+    return rowCount ?? 0;
+  }
+
+  /**
    * Convenience: fetch a single block by slot. Not part of the required
    * API but useful in tests; kept internal to the repository.
    */
@@ -500,7 +745,10 @@ export class ProcessedBlocksRepository {
               fees_lamports, base_fees_lamports, priority_fees_lamports, tips_lamports,
               block_status, block_time, tx_count, successful_tx_count, failed_tx_count,
               unknown_meta_tx_count, signature_count, tip_tx_count, max_tip_lamports,
-              max_priority_fee_lamports, compute_units_consumed, facts_captured_at, processed_at
+              max_priority_fee_lamports, compute_units_consumed, cost_units,
+              compute_budget_requested_units, compute_budget_limit_tx_count,
+              compute_budget_price_tx_count, max_compute_unit_limit,
+              max_compute_unit_price_micro_lamports, facts_captured_at, processed_at
          FROM processed_blocks
         WHERE slot = $1`,
       [slot],
@@ -545,6 +793,7 @@ export class ProcessedBlocksRepository {
            COUNT(*) FILTER (WHERE block_status = 'produced')::bigint AS produced_blocks,
            COALESCE(SUM(fees_lamports + tips_lamports) FILTER (WHERE block_status = 'produced'), 0)::numeric AS total_income_lamports,
            COALESCE(SUM(fees_lamports) FILTER (WHERE block_status = 'produced'), 0)::numeric AS total_fees_lamports,
+           COALESCE(SUM(priority_fees_lamports) FILTER (WHERE block_status = 'produced'), 0)::numeric AS total_priority_fees_lamports,
            COALESCE(SUM(tips_lamports) FILTER (WHERE block_status = 'produced'), 0)::numeric AS total_tips_lamports,
            COALESCE(SUM(tx_count) FILTER (WHERE block_status = 'produced'), 0)::bigint AS tx_count,
            COALESCE(SUM(successful_tx_count) FILTER (WHERE block_status = 'produced'), 0)::bigint AS successful_tx_count,
@@ -562,6 +811,12 @@ export class ProcessedBlocksRepository {
            COALESCE(MAX(max_priority_fee_lamports) FILTER (WHERE block_status = 'produced'), 0)::numeric AS max_priority_fee_lamports,
            COALESCE(MAX(max_tip_lamports) FILTER (WHERE block_status = 'produced'), 0)::numeric AS max_tip_lamports,
            COALESCE(SUM(compute_units_consumed) FILTER (WHERE block_status = 'produced'), 0)::numeric AS compute_units_consumed,
+           COALESCE(SUM(cost_units) FILTER (WHERE block_status = 'produced'), 0)::numeric AS cost_units,
+           COALESCE(SUM(compute_budget_requested_units) FILTER (WHERE block_status = 'produced'), 0)::numeric AS compute_budget_requested_units,
+           COALESCE(SUM(compute_budget_limit_tx_count) FILTER (WHERE block_status = 'produced'), 0)::bigint AS compute_budget_limit_tx_count,
+           COALESCE(SUM(compute_budget_price_tx_count) FILTER (WHERE block_status = 'produced'), 0)::bigint AS compute_budget_price_tx_count,
+           COALESCE(MAX(max_compute_unit_limit) FILTER (WHERE block_status = 'produced'), 0)::numeric AS max_compute_unit_limit,
+           COALESCE(MAX(max_compute_unit_price_micro_lamports) FILTER (WHERE block_status = 'produced'), 0)::numeric AS max_compute_unit_price_micro_lamports,
            (SELECT slot::text FROM best) AS best_block_slot,
            (SELECT income::text FROM best) AS best_block_income_lamports,
            (SELECT MAX(processed_at) FROM blocks) AS last_processed_at
@@ -598,6 +853,15 @@ export class ProcessedBlocksRepository {
           ? lastProcessedAt
           : lastErrorAt
         : (lastProcessedAt ?? lastErrorAt);
+    const totalIncomeLamports = toLamports(agg?.total_income_lamports ?? '0');
+    const totalFeesLamports = toLamports(agg?.total_fees_lamports ?? '0');
+    const totalPriorityFeesLamports = toLamports(agg?.total_priority_fees_lamports ?? '0');
+    const totalTipsLamports = toLamports(agg?.total_tips_lamports ?? '0');
+    const computeUnitsConsumed = toIntegerBigInt(
+      agg?.compute_units_consumed ?? '0',
+      'compute units',
+    );
+    const costUnits = toIntegerBigInt(agg?.cost_units ?? '0', 'cost units');
 
     return {
       epoch: args.epoch,
@@ -621,9 +885,9 @@ export class ProcessedBlocksRepository {
       },
       summary: {
         producedBlocks,
-        totalIncomeLamports: toLamports(agg?.total_income_lamports ?? '0'),
-        totalFeesLamports: toLamports(agg?.total_fees_lamports ?? '0'),
-        totalTipsLamports: toLamports(agg?.total_tips_lamports ?? '0'),
+        totalIncomeLamports,
+        totalFeesLamports,
+        totalTipsLamports,
         txCount,
         successfulTxCount: Number(agg?.successful_tx_count ?? '0'),
         failedTxCount,
@@ -645,7 +909,35 @@ export class ProcessedBlocksRepository {
             : toLamports(agg.avg_tip_per_produced_block_lamports),
         maxPriorityFeeLamports: toLamports(agg?.max_priority_fee_lamports ?? '0'),
         maxTipLamports: toLamports(agg?.max_tip_lamports ?? '0'),
-        computeUnitsConsumed: toIntegerBigInt(agg?.compute_units_consumed ?? '0', 'compute units'),
+        computeUnitsConsumed,
+        costUnits,
+        computeBudgetRequestedUnits: toIntegerBigInt(
+          agg?.compute_budget_requested_units ?? '0',
+          'compute budget requested units',
+        ),
+        computeBudgetLimitTxCount: Number(agg?.compute_budget_limit_tx_count ?? '0'),
+        computeBudgetPriceTxCount: Number(agg?.compute_budget_price_tx_count ?? '0'),
+        maxComputeUnitLimit: toIntegerBigInt(agg?.max_compute_unit_limit ?? '0', 'max CU limit'),
+        maxComputeUnitPriceMicroLamports: toIntegerBigInt(
+          agg?.max_compute_unit_price_micro_lamports ?? '0',
+          'max CU price',
+        ),
+        avgComputeUnitsPerProducedBlock: bigintAverage(computeUnitsConsumed, producedBlocks),
+        avgComputeUnitsPerTransaction: bigintAverage(computeUnitsConsumed, txCount),
+        avgCostUnitsPerProducedBlock: bigintAverage(costUnits, producedBlocks),
+        avgCostUnitsPerTransaction: bigintAverage(costUnits, txCount),
+        incomeLamportsPerMillionComputeUnit: lamportsPerMillionComputeUnit(
+          totalIncomeLamports,
+          computeUnitsConsumed,
+        ),
+        priorityFeeLamportsPerMillionComputeUnit: lamportsPerMillionComputeUnit(
+          totalPriorityFeesLamports,
+          computeUnitsConsumed,
+        ),
+        tipLamportsPerMillionComputeUnit: lamportsPerMillionComputeUnit(
+          totalTipsLamports,
+          computeUnitsConsumed,
+        ),
         bestBlockSlot:
           agg?.best_block_slot === null || agg?.best_block_slot === undefined
             ? null

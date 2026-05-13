@@ -11,8 +11,8 @@
  * URL itself is the source of truth (no client-side state needed),
  * so a paste/share/bookmark of `?a=...&b=...` round-trips cleanly.
  */
-import { fetchValidatorHistory } from '$lib/api';
-import type { ValidatorHistory } from '$lib/types';
+import { fetchCurrentEpoch, fetchValidatorHistory } from '$lib/api';
+import type { CurrentEpoch, LeaderboardWindow, ValidatorHistory } from '$lib/types';
 import type { PageLoad } from './$types';
 
 export interface CompareSlot {
@@ -26,6 +26,8 @@ export interface CompareSlot {
 export interface CompareData {
   a: CompareSlot | null;
   b: CompareSlot | null;
+  window: LeaderboardWindow;
+  currentEpoch: CurrentEpoch | null;
 }
 
 async function fetchSlot(input: string, fetchFn: typeof fetch): Promise<CompareSlot> {
@@ -41,16 +43,34 @@ async function fetchSlot(input: string, fetchFn: typeof fetch): Promise<CompareS
   }
 }
 
+async function fetchEpoch(fetchFn: typeof fetch): Promise<CurrentEpoch | null> {
+  try {
+    return await fetchCurrentEpoch(fetchFn);
+  } catch {
+    return null;
+  }
+}
+
 export const load: PageLoad = async ({ url, fetch }): Promise<CompareData> => {
   const a = url.searchParams.get('a')?.trim() ?? '';
   const b = url.searchParams.get('b')?.trim() ?? '';
+  const rawWindow = url.searchParams.get('window');
+  const window: LeaderboardWindow =
+    rawWindow === 'current_only' ||
+    rawWindow === 'stable_trend' ||
+    rawWindow === 'final_epoch' ||
+    rawWindow === 'decade_epoch' ||
+    rawWindow === 'live_trend'
+      ? rawWindow
+      : 'live_trend';
 
   // Parallel fetch — independent calls, no reason to serialise. The
   // common case (both inputs valid) finishes in one round-trip.
-  const [slotA, slotB] = await Promise.all([
+  const [slotA, slotB, currentEpoch] = await Promise.all([
     a.length > 0 ? fetchSlot(a, fetch) : Promise.resolve(null),
     b.length > 0 ? fetchSlot(b, fetch) : Promise.resolve(null),
+    fetchEpoch(fetch),
   ]);
 
-  return { a: slotA, b: slotB };
+  return { a: slotA, b: slotB, window, currentEpoch };
 };

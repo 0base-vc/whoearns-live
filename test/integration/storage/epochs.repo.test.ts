@@ -139,4 +139,52 @@ describe('EpochsRepository', () => {
     expect(e!.isClosed).toBe(true);
     expect(e!.closedAt?.toISOString()).toBe(closedAt.toISOString());
   });
+
+  it('findLatestCompleteClosedEpochBlock: returns the latest aligned complete block', async () => {
+    for (let epoch = 950; epoch <= 970; epoch += 1) {
+      await repo.upsert({
+        epoch,
+        firstSlot: epoch * 1_000,
+        lastSlot: epoch * 1_000 + 999,
+        slotCount: 1_000,
+        isClosed: true,
+        closedAt: new Date('2026-04-01T00:00:00Z'),
+      });
+    }
+
+    const rows = await repo.findLatestCompleteClosedEpochBlock(10);
+
+    expect(rows.map((row) => row.epoch)).toEqual([
+      969, 968, 967, 966, 965, 964, 963, 962, 961, 960,
+    ]);
+  });
+
+  it('findLatestCompleteClosedEpochBlock: skips incomplete latest blocks', async () => {
+    for (let epoch = 950; epoch <= 959; epoch += 1) {
+      await repo.upsert({
+        epoch,
+        firstSlot: epoch * 1_000,
+        lastSlot: epoch * 1_000 + 999,
+        slotCount: 1_000,
+        isClosed: true,
+        closedAt: new Date('2026-04-01T00:00:00Z'),
+      });
+    }
+    for (const epoch of [960, 961, 962, 963, 964, 965, 966, 968, 969]) {
+      await repo.upsert({
+        epoch,
+        firstSlot: epoch * 1_000,
+        lastSlot: epoch * 1_000 + 999,
+        slotCount: 1_000,
+        isClosed: true,
+        closedAt: new Date('2026-04-02T00:00:00Z'),
+      });
+    }
+
+    const rows = await repo.findLatestCompleteClosedEpochBlock(10);
+
+    expect(rows.map((row) => row.epoch)).toEqual([
+      959, 958, 957, 956, 955, 954, 953, 952, 951, 950,
+    ]);
+  });
 });

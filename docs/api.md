@@ -105,7 +105,8 @@ waiting for a payout API.
 The leader-slot API reads the same watched-leader-slot facts that power income
 totals. It does **not** scan every Solana slot and does **not** call RPC at
 request time. The worker derives tx counts, failed-tx counts, tip-bearing
-transaction counts, max priority fee, max Jito tip, and compute-unit totals
+transaction counts, max priority fee, max Jito tip, compute-unit totals,
+provider cost-unit totals, and explicit ComputeBudget request aggregates
 from the existing `getBlock(transactionDetails='full')` response.
 
 RPC fetch failures are stored separately from true skipped slots. That lets
@@ -161,25 +162,82 @@ Status codes: 200 once the first epoch row is written; 404 before that.
 
 ## `GET /v1/leaderboard`
 
-Returns a ranked validator list for a closed epoch. Without `epoch`, the
-endpoint uses the latest closed epoch observed by the indexer.
+Returns a ranked validator list for a selected sample window. The default is
+`window=live_trend&sort=income_per_slot`, which combines the running epoch so
+far with the latest final epoch.
 
 Query params:
 
-- `epoch` — optional epoch number.
+- `window` — `live_trend` (default), `current_only`, `stable_trend`,
+  `final_epoch`, or `decade_epoch`.
+- `epoch` — optional closed epoch number. Only valid with `window=final_epoch`.
 - `limit` — 1-500, default 100.
-- `sort` — `performance` (default), `total_income`, `income_per_stake`,
-  `skip_rate`, or `median_fee`.
+- `sort` — `income_per_slot` (default), `total_income`, `mev_tips`, `fees`,
+  or `skip_rate`.
+- `minWindowSlots` — 1-500, default 4. Rows below this denominator are
+  filtered.
 
-`performance` is the recommended stake-neutral view:
+Compatibility notes:
 
-```
-(blockFeesTotalLamports + blockTipsTotalLamports) / slotsAssigned
+- A bare `?epoch=N` request is treated as `window=final_epoch&epoch=N`.
+- Legacy sort aliases are accepted: `performance` and `income_per_stake`
+  map to `income_per_slot`; `median_fee` maps to `fees`.
+
+Windows:
+
+- `live_trend` — current epoch elapsed leader slots + latest final epoch.
+- `current_only` — current epoch elapsed leader slots only.
+- `stable_trend` — current epoch elapsed leader slots + two latest final
+  epochs.
+- `final_epoch` — latest final epoch only, or `?epoch=N` when requested.
+- `decade_epoch` — latest complete 10-epoch block. Validators must have
+  rows in all 10 epochs to rank.
+
+Example:
+
+```bash
+curl "https://whoearns.live/v1/leaderboard?window=decade_epoch&sort=income_per_slot&limit=25"
 ```
 
 Rows include validator identity metadata, slot counts, block fee/tip totals,
-performance-per-slot fields, stake snapshot fields when available, and a
-`claimed` boolean.
+window income fields, `incomeSolPerSlot`, stake snapshot fields when
+available, `sampleStatus`, and a `claimed` boolean. Rows that ranked #1-#3 by
+`income_per_slot` in the latest complete 10-epoch block also include
+`decadeEpochStart`, `decadeEpochEnd`, and `decadeRank`; otherwise those fields
+are `null`.
+
+## `GET /v1/validators/search`
+
+Searches known validators from the local database. This endpoint never calls
+Solana RPC and opted-out validators are excluded.
+
+Query params:
+
+- `q` — required, 2-96 chars. Matches vote pubkey prefix, identity pubkey
+  prefix, validator name, and keybase username. Prefix matches are ranked
+  first; if they under-fill `limit`, a bounded name/keybase substring fallback
+  fills the remaining rows.
+- `limit` — clamped to 1-25, default 10.
+
+Response:
+
+```json
+{
+  "query": "0base",
+  "limit": 10,
+  "count": 1,
+  "items": [
+    {
+      "vote": "5BAi9YGCipHq4ZcXuen5vagRQqRTVTRszXNqBZC6uBPZ",
+      "identity": "zeroT6PTAEjipvZuACTh1mbGCqTHgA6i1ped9DcuidX",
+      "name": "0base.vc",
+      "iconUrl": "https://example.com/icon.png",
+      "website": "https://example.com",
+      "claimed": true
+    }
+  ]
+}
+```
 
 ## `GET /v1/validators/:idOrVote/history`
 
@@ -188,11 +246,18 @@ vote account pubkey or identity/node pubkey.
 
 Query params:
 
-- `limit` — 1-50, default 20.
+- `limit` — 1-200, default 50.
 
 The response wraps `items: ValidatorEpochRecord[]` with validator metadata,
 claim/profile state, and a `tracking` boolean that is true when the lookup
 caused the validator to be added to the watched set.
+
+Each item also includes `peerBenchmark`, an indexed-validator median for
+`totalIncome / leaderSlots` in the same epoch. Closed epochs use
+`slotsAssigned`; the running epoch uses `slotsElapsedAssigned`. The benchmark
+is `null` until at least three indexed validators have income/slot facts. This
+benchmark is populated on the history endpoint; single-epoch endpoints that
+reuse `ValidatorEpochRecord` may return `peerBenchmark: null`.
 
 ## `GET /v1/validators/:idOrVote/current-epoch`
 
@@ -212,6 +277,7 @@ known validator, even when some metric families have no data yet.
   "hasIncome": true,
 
   "slotsAssigned": 432,
+  "slotsElapsedAssigned": 150,
   "slotsProduced": 120,
   "slotsSkipped": 3,
 
@@ -231,7 +297,8 @@ known validator, even when some metric families have no data yet.
     "slotsUpdatedAt": "2026-04-15T08:10:00.000Z",
     "feesUpdatedAt": "2026-04-15T08:10:00.000Z",
     "tipsUpdatedAt": "2026-04-15T08:10:00.000Z"
-  }
+  },
+  "peerBenchmark": null
 }
 ```
 
@@ -304,6 +371,22 @@ public claims from these stored slot facts while the income page stays simple.
     "maxTipLamports": "50000000",
     "maxTipSol": "0.05",
     "computeUnitsConsumed": "1234567890",
+    "costUnits": "1300000000",
+    "computeBudgetRequestedUnits": "4200000000",
+    "computeBudgetLimitTxCount": 19400,
+    "computeBudgetPriceTxCount": 12100,
+    "maxComputeUnitLimit": "1400000",
+    "maxComputeUnitPriceMicroLamports": "50000",
+    "avgComputeUnitsPerProducedBlock": "30111411",
+    "avgComputeUnitsPerTransaction": "61728",
+    "avgCostUnitsPerProducedBlock": "31707317",
+    "avgCostUnitsPerTransaction": "65000",
+    "incomeLamportsPerMillionComputeUnit": "996300",
+    "incomeSolPerMillionComputeUnit": "0.0009963",
+    "priorityFeeLamportsPerMillionComputeUnit": "842700",
+    "priorityFeeSolPerMillionComputeUnit": "0.0008427",
+    "tipLamportsPerMillionComputeUnit": "105300",
+    "tipSolPerMillionComputeUnit": "0.0001053",
     "bestBlockSlot": 417000123,
     "bestBlockIncomeLamports": "142000000",
     "bestBlockIncomeSol": "0.142"
@@ -391,9 +474,14 @@ The signed payload binds the purpose (`claim` or `profile`), timestamp, nonce,
 pubkeys, and profile fields, so a profile signature cannot be replayed as a
 different operation.
 
-## `GET /mcp`, `POST /mcp`, `DELETE /mcp`
+## `POST /mcp`
 
 Streamable HTTP MCP endpoint for AI agents. The server exposes four read-only
 tools: `get_current_epoch`, `get_leaderboard`, `get_validator`, and
-`get_validator_leader_slots`. MCP calls use the same public per-IP rate limit
+`get_validator_leader_slots`. `get_leaderboard` supports the same window
+model as `/v1/leaderboard`, including `decade_epoch`, and includes
+`decadeEpochStart`, `decadeEpochEnd`, and `decadeRank` on rows when relevant.
+MCP calls use the same public per-IP rate limit.
+The public stateless transport accepts POST only; GET/DELETE return 405 to
+avoid unauthenticated long-lived stream connections.
 as `/v1/*`; tool schemas also cap response sizes.

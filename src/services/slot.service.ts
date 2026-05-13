@@ -125,7 +125,12 @@ export class SlotService {
         continue;
       }
       // Authoritative total for the whole epoch.
-      const slotsAssigned = leaderSchedule[identity]?.length ?? 0;
+      const assignedOffsets = leaderSchedule[identity] ?? [];
+      const slotsAssigned = assignedOffsets.length;
+      const slotsElapsedAssigned = assignedOffsets.reduce((count, offset) => {
+        const slot = firstSlot + offset;
+        return slot <= lastSlot ? count + 1 : count;
+      }, 0);
       const counts = countsByIdentity.get(identity);
       const slotsProduced = counts?.produced ?? 0;
       const slotsSkipped = counts?.skipped ?? 0;
@@ -139,6 +144,8 @@ export class SlotService {
         votePubkey: vote,
         identityPubkey: identity,
         slotsAssigned,
+        slotsElapsedAssigned,
+        slotWindowLastSlot: lastSlot,
         slotsProduced,
         slotsSkipped,
         activatedStakeLamports: stake,

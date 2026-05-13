@@ -6,9 +6,11 @@ slot production, block fees, and on-chain Jito tips — powered by the
 
 ## Pages
 
-- `/` — search by vote or identity pubkey.
+- `/` — validator search plus live-trend / Decade leaderboard windows.
 - `/income/:idOrVote` — income history for a validator. Accepts either a vote
   pubkey or an identity pubkey; the API resolves both.
+- `/compare` — side-by-side validator comparison by name, vote pubkey, or
+  identity pubkey across the same window modes as the leaderboard.
 
 ## Quickstart
 

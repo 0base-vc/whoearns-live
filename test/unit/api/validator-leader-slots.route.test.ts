@@ -5,6 +5,7 @@ import { setErrorHandler } from '../../../src/api/error-handler.js';
 import validatorLeaderSlotsRoutes from '../../../src/api/routes/validator-leader-slots.route.js';
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
 import type { ProcessedBlocksRepository } from '../../../src/storage/repositories/processed-blocks.repo.js';
+import type { ProfilesRepository } from '../../../src/storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../../src/storage/repositories/validators.repo.js';
 import {
@@ -29,6 +30,7 @@ interface Ctx {
   validators: FakeValidatorsRepo;
   epochs: FakeEpochsRepo;
   blocks: FakeProcessedBlocksRepo;
+  optedOutVotes: Set<string>;
 }
 
 async function makeCtx(): Promise<Ctx> {
@@ -36,6 +38,7 @@ async function makeCtx(): Promise<Ctx> {
   const validators = new FakeValidatorsRepo();
   const epochs = new FakeEpochsRepo();
   const blocks = new FakeProcessedBlocksRepo();
+  const optedOutVotes = new Set<string>();
 
   const app = makeTestApp(silent);
   setErrorHandler(app, silent);
@@ -44,8 +47,21 @@ async function makeCtx(): Promise<Ctx> {
     validatorsRepo: validators as unknown as ValidatorsRepository,
     epochsRepo: epochs as unknown as EpochsRepository,
     processedBlocksRepo: blocks as unknown as ProcessedBlocksRepository,
+    profilesRepo: {
+      findByVote: async (vote: string) =>
+        optedOutVotes.has(vote)
+          ? {
+              votePubkey: vote,
+              twitterHandle: null,
+              hideFooterCta: false,
+              optedOut: true,
+              narrativeOverride: null,
+              updatedAt: new Date(),
+            }
+          : null,
+    } as unknown as ProfilesRepository,
   });
-  return { app, stats, validators, epochs, blocks };
+  return { app, stats, validators, epochs, blocks, optedOutVotes };
 }
 
 describe('GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots', () => {
@@ -72,7 +88,16 @@ describe('GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots', () => {
   it('returns aggregate slot facts without calling RPC', async () => {
     ctx.blocks.rows.set(
       100,
-      makeProcessedBlock(100, 500, IDENTITY_1, 100_000_000n, 'produced', 25_000_000n, 0n, 75n),
+      makeProcessedBlock(
+        100,
+        500,
+        IDENTITY_1,
+        100_000_000n,
+        'produced',
+        25_000_000n,
+        0n,
+        75_000_000n,
+      ),
     );
     const row = ctx.blocks.rows.get(100)!;
     ctx.blocks.rows.set(100, {
@@ -86,6 +111,12 @@ describe('GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots', () => {
       maxTipLamports: 20_000_000n,
       maxPriorityFeeLamports: 50_000_000n,
       computeUnitsConsumed: 123_456n,
+      costUnits: 130_000n,
+      computeBudgetRequestedUnits: 400_000n,
+      computeBudgetLimitTxCount: 2,
+      computeBudgetPriceTxCount: 1,
+      maxComputeUnitLimit: 250_000n,
+      maxComputeUnitPriceMicroLamports: 7_500n,
     });
     ctx.blocks.rows.set(101, makeProcessedBlock(101, 500, IDENTITY_1, 0n, 'skipped', 0n, 0n, 0n));
 
@@ -103,6 +134,19 @@ describe('GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots', () => {
         totalIncomeSol: string;
         failedTxRate: number | null;
         maxTipLamports: string;
+        computeUnitsConsumed: string;
+        costUnits: string;
+        computeBudgetRequestedUnits: string;
+        computeBudgetLimitTxCount: number;
+        computeBudgetPriceTxCount: number;
+        maxComputeUnitLimit: string;
+        maxComputeUnitPriceMicroLamports: string;
+        avgComputeUnitsPerProducedBlock: string | null;
+        avgComputeUnitsPerTransaction: string | null;
+        incomeLamportsPerMillionComputeUnit: string | null;
+        incomeSolPerMillionComputeUnit: string | null;
+        priorityFeeLamportsPerMillionComputeUnit: string | null;
+        tipLamportsPerMillionComputeUnit: string | null;
         bestBlockSlot: number | null;
       };
     };
@@ -112,6 +156,19 @@ describe('GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots', () => {
     expect(body.summary.totalIncomeSol).toBe('0.125');
     expect(body.summary.failedTxRate).toBe(0.333333);
     expect(body.summary.maxTipLamports).toBe('20000000');
+    expect(body.summary.computeUnitsConsumed).toBe('123456');
+    expect(body.summary.costUnits).toBe('130000');
+    expect(body.summary.computeBudgetRequestedUnits).toBe('400000');
+    expect(body.summary.computeBudgetLimitTxCount).toBe(2);
+    expect(body.summary.computeBudgetPriceTxCount).toBe(1);
+    expect(body.summary.maxComputeUnitLimit).toBe('250000');
+    expect(body.summary.maxComputeUnitPriceMicroLamports).toBe('7500');
+    expect(body.summary.avgComputeUnitsPerProducedBlock).toBe('123456');
+    expect(body.summary.avgComputeUnitsPerTransaction).toBe('41152');
+    expect(body.summary.incomeLamportsPerMillionComputeUnit).toBe('1012506480');
+    expect(body.summary.incomeSolPerMillionComputeUnit).toBe('1.01250648');
+    expect(body.summary.priorityFeeLamportsPerMillionComputeUnit).toBe('607503888');
+    expect(body.summary.tipLamportsPerMillionComputeUnit).toBe('202501296');
     expect(body.summary.bestBlockSlot).toBe(100);
     await ctx.app.close();
   });
@@ -120,6 +177,16 @@ describe('GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots', () => {
     const res = await ctx.app.inject({
       method: 'GET',
       url: `/v1/validators/${VOTE_2}/epochs/500/leader-slots`,
+    });
+    expect(res.statusCode).toBe(404);
+    await ctx.app.close();
+  });
+
+  it('redacts opted-out validators', async () => {
+    ctx.optedOutVotes.add(VOTE_1);
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/epochs/500/leader-slots`,
     });
     expect(res.statusCode).toBe(404);
     await ctx.app.close();

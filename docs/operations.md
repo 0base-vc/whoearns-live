@@ -68,7 +68,7 @@ helm upgrade --install whoearns-live deploy/helm/whoearns-live \
 helm upgrade whoearns-live deploy/helm/whoearns-live \
   --namespace whoearns-live \
   --reuse-values \
-  --set image.tag="0.3.0"
+  --set image.tag="0.4.0"
 ```
 
 Migrations run inside the container on start before the API and worker boot.
@@ -136,9 +136,57 @@ SQL migrations live in `src/storage/migrations/` and are applied by
   consumes the HTTP API.
 - **AI-agent surfaces.** `/llms.txt`, `/llms-full.txt`, OpenAPI, and MCP are
   public read surfaces. Treat them like docs: keep claims tied to closed
-  epochs, tracked-sample boundaries, and reproducible API fields.
+  epochs, Decade/window sample boundaries, and reproducible API fields.
 - **Health.** `/healthz` is appropriate for both liveness and
   readiness.
+
+## Cloudflare cache and purge
+
+WhoEarns is a static SPA shell plus public JSON API. Keep those cache classes
+separate:
+
+- HTML shells (`/`, `/index.html`, `/spa-fallback.html`, prerendered `*.html`)
+  stay `Cache-Control: no-cache`. This prevents stale HTML from referencing
+  old content-hashed chunks after a deployment.
+- Vite/SvelteKit immutable assets under `/_app/immutable/*` ship as
+  `Cache-Control: public, max-age=31536000, immutable`.
+- `/v1/epoch/current` ships as
+  `Cache-Control: public, max-age=60, s-maxage=60, stale-while-revalidate=300`.
+- `/v1/leaderboard` uses a short browser-only cache
+  (`Cache-Control: private, max-age=10`) so homepage preload can be reused
+  without putting operator opt-out state into a shared CDN cache.
+- `/v1/validators/:id/history` is `Cache-Control: no-store` because it
+  includes profile, claim, opt-out, and auto-track state.
+
+Add a Cloudflare Cache Rule for immutable assets:
+
+- Expression:
+  `(http.host eq "whoearns.live" and starts_with(http.request.uri.path, "/_app/immutable/"))`
+- Cache eligibility: eligible for cache.
+- Edge TTL: override origin, 1 year.
+- Browser TTL: override origin, 1 year.
+
+Cloudflare documents these settings as `cache`, `edge_ttl`, and
+`browser_ttl` on Cache Rules. Use a dashboard rule or Terraform/API; do not
+make HTML shell paths eligible for long-lived edge caching.
+
+After each production deployment, purge the small set of HTML shell URLs in
+the Cloudflare dashboard so the edge immediately discovers the new hashed
+chunks. Use **Caching → Configuration → Purge Cache → Custom Purge → URL**
+and purge:
+
+- `https://whoearns.live/`
+- `https://whoearns.live/index.html`
+- `https://whoearns.live/spa-fallback.html`
+- `https://whoearns.live/about`
+- `https://whoearns.live/faq`
+- `https://whoearns.live/glossary`
+- `https://whoearns.live/api/docs`
+- `https://whoearns.live/api/reference`
+
+Avoid "Purge Everything" as the normal deploy path; it throws away the
+long-lived immutable asset cache that keeps first visits fast after the first
+deployment hit.
 
 ## Troubleshooting
 

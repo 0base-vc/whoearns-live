@@ -1,6 +1,10 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
+import { z } from 'zod';
 import { AppError, NotFoundError, ValidationError } from '../../core/errors.js';
+import { normaliseHttpUrlOrNull } from '../../core/url.js';
+import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
+import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import type {
@@ -24,14 +28,40 @@ export interface ValidatorsRoutesDeps {
     StatsRepository,
     'findByVoteEpoch' | 'findManyByVotesCurrentEpoch' | 'findManyByVotesEpoch'
   >;
-  validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity' | 'findManyByVotes'>;
+  validatorsRepo: Pick<
+    ValidatorsRepository,
+    'findByVote' | 'findByIdentity' | 'findManyByVotes' | 'searchByText'
+  >;
   epochsRepo: Pick<EpochsRepository, 'findCurrent' | 'findByEpoch'>;
+  profilesRepo: Pick<ProfilesRepository, 'findOptedOutVotes'>;
+  claimsRepo?: Pick<ClaimsRepository, 'findClaimedVotes'>;
 }
 
 interface BatchResponse {
   epoch: number;
   results: ValidatorCurrentEpochResponse[];
   missing: string[];
+}
+
+const SearchQuerySchema = z.object({
+  q: z.string().trim().min(2).max(96),
+  limit: z
+    .preprocess((value) => value ?? 10, z.coerce.number().int())
+    .transform((value) => Math.min(25, Math.max(1, value))),
+});
+
+interface ValidatorSearchResponse {
+  query: string;
+  limit: number;
+  count: number;
+  items: Array<{
+    vote: string;
+    identity: string;
+    name: string | null;
+    iconUrl: string | null;
+    website: string | null;
+    claimed: boolean;
+  }>;
 }
 
 function unwrap<T>(
@@ -75,8 +105,32 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
   app: FastifyInstance,
   opts: ValidatorsRoutesDeps,
 ) => {
-  const { statsRepo, validatorsRepo, epochsRepo } = opts;
+  const { statsRepo, validatorsRepo, epochsRepo, profilesRepo, claimsRepo } = opts;
   const serialCtx = {};
+
+  app.get('/v1/validators/search', async (request, _reply): Promise<ValidatorSearchResponse> => {
+    const query = unwrap(SearchQuerySchema.safeParse(request.query), 'query parameter');
+    const optedOutVotes = await profilesRepo.findOptedOutVotes();
+    const rows = await validatorsRepo.searchByText(query.q, query.limit, optedOutVotes);
+    const claimedVotes =
+      claimsRepo === undefined || rows.length === 0
+        ? new Set<string>()
+        : await claimsRepo.findClaimedVotes(rows.map((r) => r.votePubkey));
+
+    return {
+      query: query.q,
+      limit: query.limit,
+      count: rows.length,
+      items: rows.map((row) => ({
+        vote: row.votePubkey,
+        identity: row.identityPubkey,
+        name: row.name,
+        iconUrl: normaliseHttpUrlOrNull(row.iconUrl),
+        website: normaliseHttpUrlOrNull(row.website),
+        claimed: claimedVotes.has(row.votePubkey),
+      })),
+    };
+  });
 
   /**
    * GET /v1/validators/:idOrVote/current-epoch

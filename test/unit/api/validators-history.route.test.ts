@@ -16,6 +16,7 @@
 import { pino } from 'pino';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import { NO_STORE_CACHE_CONTROL } from '../../../src/api/cache-headers.js';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import validatorsHistoryRoutes from '../../../src/api/routes/validators-history.route.js';
 import type { ValidatorService } from '../../../src/services/validator.service.js';
@@ -109,6 +110,15 @@ describe('GET /v1/validators/:idOrVote/history', () => {
       identityPubkey: row.identityPubkey,
       deltaLamports: 1_000_000n,
     });
+    ctx.stats.putPeerBenchmark({
+      epoch: 500,
+      sample: 'indexed_validators',
+      sampleValidators: 12,
+      sampleSlots: 120,
+      medianIncomeLamportsPerSlot: '100000',
+      medianIncomeSolPerSlot: '0.0001',
+      basis: 'income_per_assigned_slot',
+    });
     await ctx.epochs.upsert(makeEpochInfo(500, 0, 431_999, { isClosed: true }));
 
     const res = await ctx.app.inject({
@@ -116,16 +126,29 @@ describe('GET /v1/validators/:idOrVote/history', () => {
       url: `/v1/validators/${VOTE_1}/history?limit=10`,
     });
     expect(res.statusCode).toBe(200);
+    expect(res.headers['cache-control']).toBe(NO_STORE_CACHE_CONTROL);
     const body = res.json() as {
       vote: string;
       identity: string;
-      items: Array<{ epoch: number }>;
+      items: Array<{
+        epoch: number;
+        peerBenchmark: {
+          sampleValidators: number;
+          medianIncomeLamportsPerSlot: string;
+          basis: string;
+        } | null;
+      }>;
       tracking?: boolean;
     };
     expect(body.vote).toBe(VOTE_1);
     expect(body.identity).toBe(IDENTITY_1);
     expect(body.items).toHaveLength(1);
     expect(body.items[0]?.epoch).toBe(500);
+    expect(body.items[0]?.peerBenchmark).toMatchObject({
+      sampleValidators: 12,
+      medianIncomeLamportsPerSlot: '100000',
+      basis: 'income_per_assigned_slot',
+    });
     // Not an auto-track response.
     expect(body.tracking).toBeUndefined();
     // Fire-and-forget dynamic add was invoked without calling

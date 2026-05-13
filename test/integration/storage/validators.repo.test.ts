@@ -133,4 +133,64 @@ describe('ValidatorsRepository', () => {
     const map = await repo.getIdentitiesForVotes([]);
     expect(map.size).toBe(0);
   });
+
+  it('searchByText: matches validator metadata and pubkey prefixes without opted-out votes', async () => {
+    await repo.upsert({
+      votePubkey: 'VoteAlpha111111111111111111111111111111111',
+      identityPubkey: 'IdentityAlpha1111111111111111111111111111',
+      firstSeenEpoch: 10,
+      lastSeenEpoch: 12,
+    });
+    await repo.upsert({
+      votePubkey: 'VoteBeta2222222222222222222222222222222222',
+      identityPubkey: 'IdentityBeta22222222222222222222222222222',
+      firstSeenEpoch: 10,
+      lastSeenEpoch: 11,
+    });
+    await repo.upsertInfo([
+      {
+        identityPubkey: 'IdentityAlpha1111111111111111111111111111',
+        name: '0base Alpha',
+        details: null,
+        website: 'https://alpha.example',
+        keybaseUsername: 'alpha-keybase',
+        iconUrl: 'https://alpha.example/icon.png',
+      },
+      {
+        identityPubkey: 'IdentityBeta22222222222222222222222222222',
+        name: 'Beta Validator',
+        details: null,
+        website: null,
+        keybaseUsername: 'beta-keybase',
+        iconUrl: null,
+      },
+    ]);
+
+    const byName = await repo.searchByText('0base', 10);
+    expect(byName.map((row) => row.votePubkey)).toEqual([
+      'VoteAlpha111111111111111111111111111111111',
+    ]);
+
+    const byVotePrefix = await repo.searchByText('VoteB', 10);
+    expect(byVotePrefix.map((row) => row.votePubkey)).toEqual([
+      'VoteBeta2222222222222222222222222222222222',
+    ]);
+
+    const byIdentityPrefix = await repo.searchByText('IdentityA', 10);
+    expect(byIdentityPrefix.map((row) => row.votePubkey)).toEqual([
+      'VoteAlpha111111111111111111111111111111111',
+    ]);
+
+    const byKeybase = await repo.searchByText('keybase', 1);
+    expect(byKeybase).toHaveLength(1);
+
+    const optedOut = await repo.searchByText(
+      'Vote',
+      10,
+      new Set(['VoteAlpha111111111111111111111111111111111']),
+    );
+    expect(optedOut.map((row) => row.votePubkey)).toEqual([
+      'VoteBeta2222222222222222222222222222222222',
+    ]);
+  });
 });

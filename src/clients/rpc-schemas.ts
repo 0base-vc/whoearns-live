@@ -27,6 +27,10 @@
 
 import { z } from 'zod';
 
+const Base58PayloadSchema = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]*$/, {
+  message: 'expected base58-encoded instruction data',
+});
+
 /**
  * A u64 lamport value as it arrives on the wire. Solana protocol
  * types u64 as an unsigned 64-bit integer, but the three transports
@@ -123,9 +127,16 @@ export const TxMetaSchema = z.object({
   err: z.unknown().optional(),
   fee: U64Schema,
   computeUnitsConsumed: U64Schema.optional(),
+  costUnits: U64Schema.optional(),
   preBalances: z.array(U64Schema),
   postBalances: z.array(U64Schema),
   loadedAddresses: LoadedAddressesSchema,
+});
+
+export const CompiledInstructionSchema = z.object({
+  programIdIndex: z.number().int().nonnegative(),
+  accounts: z.array(z.number().int().nonnegative()).optional(),
+  data: Base58PayloadSchema,
 });
 
 /**
@@ -138,6 +149,7 @@ export const RpcFullTransactionEntrySchema = z.object({
     signatures: z.array(z.string().min(1)),
     message: z.object({
       accountKeys: z.array(z.string().min(1)),
+      instructions: z.array(CompiledInstructionSchema).optional(),
     }),
   }),
   meta: TxMetaSchema.nullable(),

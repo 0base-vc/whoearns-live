@@ -91,11 +91,17 @@ export interface RpcBlockReward {
  * shape; bandwidth grows ~35% (~2MB → ~3MB per block), which is negligible
  * at our watched-set size.
  *
- * We intentionally type NO instruction fields here even though
- * `'full'` mode carries them — we don't read them, and typing them
- * would lock the shape to one provider's serialisation. If a future
- * feature needs instruction inspection, add the fields then.
+ * `transaction.message.instructions[]` is present in compiled form.
+ * We only inspect ComputeBudget instructions to derive slot-level CU
+ * request facts; every other program is ignored.
  */
+export interface RpcCompiledInstruction {
+  programIdIndex: number;
+  accounts?: number[];
+  /** Base58-encoded compiled instruction data; runtime schema validates this. */
+  data: string;
+}
+
 export interface RpcFullTransactionEntry {
   transaction: {
     /** Signature strings, base58. `.length` drives the base-fee calc. */
@@ -103,7 +109,9 @@ export interface RpcFullTransactionEntry {
     message: {
       /** Static account keys (base58). Does NOT include ALT-loaded. */
       accountKeys: string[];
-      /** `header` / `instructions` / `recentBlockhash` are present but unused. */
+      /** Compiled instructions; only ComputeBudget instructions are inspected. */
+      instructions?: RpcCompiledInstruction[];
+      /** `header` / `recentBlockhash` are present but unused. */
     };
   };
   meta: {
@@ -127,6 +135,11 @@ export interface RpcFullTransactionEntry {
      * We treat absence as unknown/zero in aggregate insight fields.
      */
     computeUnitsConsumed?: number | string | bigint;
+    /**
+     * Provider/runtime cost units. This is distinct from runtime
+     * compute units and is exposed by recent Solana nodes.
+     */
+    costUnits?: number | string | bigint;
     /**
      * Pre-tx balances, parallel to the FULL account list:
      * `accountKeys` (static) ++ `loadedAddresses.writable`

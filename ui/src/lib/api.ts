@@ -4,9 +4,12 @@ import type {
   CurrentEpoch,
   Leaderboard,
   LeaderboardSort,
+  LeaderboardWindow,
   ValidatorEpochRecord,
+  ValidatorEpochLeaderSlots,
   ValidatorHistory,
   ValidatorProfile,
+  ValidatorSearchResponse,
 } from './types';
 
 /**
@@ -88,21 +91,49 @@ export function fetchValidatorCurrent(
 }
 
 /**
- * Top-N cluster leaderboard for the most recent CLOSED epoch (or a
- * specific epoch when `epoch` is passed). The backend caps `limit` at
- * 500 — asking for more returns a 400, so clamp client-side when
- * there's a ceiling you care about.
+ * Top-N cluster leaderboard. Default backend window is `live_trend`
+ * and default sort is `income_per_slot`; explicit `epoch` is valid
+ * only with `window=final_epoch`.
  */
 export function fetchLeaderboard(
-  opts: { limit?: number; epoch?: number; sort?: LeaderboardSort } = {},
+  opts: {
+    limit?: number;
+    epoch?: number;
+    sort?: LeaderboardSort;
+    window?: LeaderboardWindow;
+    minWindowSlots?: number;
+  } = {},
   fetchFn: typeof fetch = fetch,
 ): Promise<Leaderboard> {
   const params = new URLSearchParams();
   if (opts.limit !== undefined) params.set('limit', String(opts.limit));
   if (opts.epoch !== undefined) params.set('epoch', String(opts.epoch));
   if (opts.sort !== undefined) params.set('sort', opts.sort);
+  if (opts.window !== undefined) params.set('window', opts.window);
+  if (opts.minWindowSlots !== undefined) params.set('minWindowSlots', String(opts.minWindowSlots));
   const qs = params.toString();
   return call<Leaderboard>(`/v1/leaderboard${qs ? `?${qs}` : ''}`, fetchFn);
+}
+
+export function searchValidators(
+  q: string,
+  limit = 10,
+  fetchFn: typeof fetch = fetch,
+): Promise<ValidatorSearchResponse> {
+  const params = new URLSearchParams({ q, limit: String(limit) });
+  return call<ValidatorSearchResponse>(`/v1/validators/search?${params.toString()}`, fetchFn);
+}
+
+export function fetchValidatorLeaderSlots(
+  idOrVote: string,
+  epoch: number,
+  fetchFn: typeof fetch = fetch,
+): Promise<ValidatorEpochLeaderSlots> {
+  const safeId = encodeURIComponent(idOrVote);
+  return call<ValidatorEpochLeaderSlots>(
+    `/v1/validators/${safeId}/epochs/${epoch}/leader-slots`,
+    fetchFn,
+  );
 }
 
 // ────────────────────────────────────────────────────────────────────

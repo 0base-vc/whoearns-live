@@ -116,7 +116,8 @@ JSON-RPC polling remains enabled and repairs reconnect gaps.
 
 Recomputes cluster-sample medians from stored facts for the configured
 top-N validator sample. It does not call RPC. These medians power the
-income page's validator-vs-cluster context and leaderboard badges.
+income page's validator-vs-cluster context; Decade leaderboard badges are
+computed from stored 10-epoch leaderboard windows.
 
 ## Data flow
 
@@ -132,6 +133,8 @@ For any `(epoch, vote)`:
    `block_tips_total_lamports`, then updates freshness timestamps.
 4. Aggregates job recomputes cluster medians from `processed_blocks`
    and `epoch_validator_stats`.
+5. History API reads `epoch_validator_stats` in bulk to attach the
+   indexed-validator median income per leader slot for each epoch.
 
 The API reads a single `epoch_validator_stats` row and serialises it.
 Each family's freshness is surfaced as a separate timestamp so a

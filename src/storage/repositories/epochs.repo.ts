@@ -123,6 +123,59 @@ export class EpochsRepository {
     return first ? rowToEpoch(first) : null;
   }
 
+  async findLatestClosedEpochs(limit: number): Promise<EpochInfo[]> {
+    if (limit <= 0) return [];
+    const safe = Math.max(1, Math.min(limit, 10));
+    const { rows } = await this.pool.query<EpochRow>(
+      `SELECT epoch, first_slot, last_slot, slot_count, current_slot, is_closed, observed_at, closed_at
+         FROM epochs
+        WHERE is_closed = TRUE
+        ORDER BY epoch DESC
+        LIMIT $1`,
+      [safe],
+    );
+    return rows.map(rowToEpoch);
+  }
+
+  async findLatestCompleteClosedEpochBlock(blockSize: number): Promise<EpochInfo[]> {
+    if (!Number.isInteger(blockSize) || blockSize <= 0) return [];
+    const safe = Math.max(1, Math.min(blockSize, 100));
+    const { rows } = await this.pool.query<EpochRow>(
+      `WITH latest AS (
+         SELECT MAX(epoch)::bigint AS latest_closed_epoch
+           FROM epochs
+          WHERE is_closed = TRUE
+       ),
+       target AS (
+         SELECT
+           ((latest_closed_epoch + 1) / $1::bigint) * $1::bigint - 1 AS target_end
+           FROM latest
+          WHERE latest_closed_epoch IS NOT NULL
+       ),
+       complete_blocks AS (
+         SELECT
+           (e.epoch / $1::bigint) * $1::bigint AS epoch_start,
+           (e.epoch / $1::bigint) * $1::bigint + $1::bigint - 1 AS epoch_end
+           FROM epochs e
+           JOIN target t ON e.epoch <= t.target_end
+          WHERE e.is_closed = TRUE
+          GROUP BY 1, 2
+         HAVING COUNT(DISTINCT e.epoch) = $1::bigint
+          ORDER BY epoch_end DESC
+          LIMIT 1
+       )
+       SELECT e.epoch, e.first_slot, e.last_slot, e.slot_count, e.current_slot,
+              e.is_closed, e.observed_at, e.closed_at
+         FROM epochs e
+         JOIN complete_blocks b
+           ON e.epoch BETWEEN b.epoch_start AND b.epoch_end
+        WHERE e.is_closed = TRUE
+        ORDER BY e.epoch DESC`,
+      [safe],
+    );
+    return rows.map(rowToEpoch);
+  }
+
   async markClosed(epoch: Epoch, closedAt: Date): Promise<void> {
     await this.pool.query(
       `UPDATE epochs

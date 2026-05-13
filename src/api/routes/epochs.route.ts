@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { NotFoundError } from '../../core/errors.js';
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
+import { setPublicReadCache } from '../cache-headers.js';
 
 export interface EpochsRoutesDeps {
   epochsRepo: Pick<EpochsRepository, 'findCurrent'>;
@@ -27,7 +28,7 @@ const epochsRoutes: FastifyPluginAsync<EpochsRoutesDeps> = async (
   app: FastifyInstance,
   opts: EpochsRoutesDeps,
 ) => {
-  app.get('/v1/epoch/current', async (_request, _reply): Promise<CurrentEpochBody> => {
+  app.get('/v1/epoch/current', async (_request, reply): Promise<CurrentEpochBody> => {
     const current = await opts.epochsRepo.findCurrent();
     if (current === null) {
       throw new NotFoundError('epoch', 'current');
@@ -39,6 +40,7 @@ const epochsRoutes: FastifyPluginAsync<EpochsRoutesDeps> = async (
       slotsElapsed = Math.max(0, Math.min(current.slotCount, clampedTip - current.firstSlot + 1));
     }
 
+    setPublicReadCache(reply);
     return {
       epoch: current.epoch,
       firstSlot: current.firstSlot,
