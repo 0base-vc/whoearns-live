@@ -11,12 +11,15 @@ import { FeeService } from '../services/fee.service.js';
 import { GrpcBlockSubscriber } from '../services/grpc-block-subscriber.service.js';
 import { SlotService } from '../services/slot.service.js';
 import { ValidatorService } from '../services/validator.service.js';
+import { WalletActivityIndexerService } from '../services/wallet-activity-indexer.service.js';
 import { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
 import { CursorsRepository } from '../storage/repositories/cursors.repo.js';
 import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
+import { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
 import { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
 import { StatsRepository } from '../storage/repositories/stats.repo.js';
 import { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
+import { WalletActivityRepository } from '../storage/repositories/wallet-activity.repo.js';
 import { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
 import { createAggregatesComputerJob } from '../jobs/aggregates-computer.job.js';
 import { createEpochWatcherJob } from '../jobs/epoch-watcher.job.js';
@@ -25,6 +28,7 @@ import { createIncomeReconcilerJob } from '../jobs/income-reconciler.job.js';
 import { createClusterNodesIngesterJob } from '../jobs/cluster-nodes-ingester.job.js';
 import { createValidatorInfoRefreshJob } from '../jobs/validator-info-refresh.job.js';
 import { createSlotIngesterJob } from '../jobs/slot-ingester.job.js';
+import { createWalletActivityIngesterJob } from '../jobs/wallet-activity-ingester.job.js';
 import { withRpcFallback } from '../jobs/rpc-fallback.js';
 import { Scheduler } from '../jobs/scheduler.js';
 import { runMigrations } from '../storage/migrations/runner.js';
@@ -266,6 +270,26 @@ export async function startWorker(): Promise<void> {
       rpc,
       validatorsRepo,
       intervalMs: config.CLUSTER_NODES_INTERVAL_MS,
+      logger,
+    }),
+  );
+
+  // Phase 4 — wallet-activity indexer. Runs alongside the validator
+  // jobs because it reads `operator_wallets` (a worker-owned writeable
+  // table) and writes `wallet_daily_activity`. Read by the API
+  // process via the `/v1/operator-wallets/:wallet/activity` endpoint.
+  const operatorWalletsRepo = new OperatorWalletsRepository(pool);
+  const walletActivityRepo = new WalletActivityRepository(pool);
+  const walletActivityIndexer = new WalletActivityIndexerService({
+    rpc,
+    repo: walletActivityRepo,
+    logger,
+  });
+  scheduler.register(
+    createWalletActivityIngesterJob({
+      operatorWalletsRepo,
+      indexer: walletActivityIndexer,
+      intervalMs: config.WALLET_ACTIVITY_INTERVAL_MS,
       logger,
     }),
   );

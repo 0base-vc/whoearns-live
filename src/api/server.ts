@@ -16,6 +16,7 @@ import type { OperatorWalletVerificationService } from '../services/operator-wal
 import type { ValidatorService } from '../services/validator.service.js';
 import type { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
 import type { ValidatorGithubRepository } from '../storage/repositories/validator-github.repo.js';
+import type { WalletActivityRepository } from '../storage/repositories/wallet-activity.repo.js';
 import type { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
@@ -28,6 +29,7 @@ import { setErrorHandler } from './error-handler.js';
 import { registerRequestId } from './request-id.js';
 import badgeRoutes from './routes/badge.route.js';
 import claimRoutes from './routes/claim.route.js';
+import operatorWalletsRoutes from './routes/operator-wallets.route.js';
 import epochsRoutes from './routes/epochs.route.js';
 import healthRoutes from './routes/health.route.js';
 import leaderboardRoutes from './routes/leaderboard.route.js';
@@ -83,6 +85,8 @@ export interface BuildServerDeps {
      */
     validatorGithub?: ValidatorGithubRepository;
     operatorWallets?: OperatorWalletsRepository;
+    /** Phase 4 — wallet daily activity (read surface). */
+    walletActivity?: WalletActivityRepository;
   };
   services: {
     validator: ValidatorService;
@@ -311,6 +315,15 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
         ? { operatorWalletService: deps.services.operatorWallet }
         : {}),
     });
+    // Phase 4 — wallet activity read endpoint. Registered conditionally
+    // so the API can run without P4 wiring (the worker writes the
+    // table; the API just reads).
+    if (deps.repos.walletActivity !== undefined && deps.repos.operatorWallets !== undefined) {
+      await scope.register(operatorWalletsRoutes, {
+        walletActivityRepo: deps.repos.walletActivity,
+        operatorWalletsRepo: deps.repos.operatorWallets,
+      });
+    }
     // SEO + AI-discovery surfaces. Registered BEFORE `fastifyStatic`
     // (below, outside this register scope) so dynamic /sitemap.xml,
     // /robots.txt, /llms.txt, /openapi.yaml, /og/*.png, etc. win

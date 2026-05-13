@@ -201,6 +201,11 @@ export const ConfigSchema = z.object({
   // 30 minutes balances "fresh enough for Firedancer-Pioneer badges
   // around a release" against ~500 KB of payload per tick.
   CLUSTER_NODES_INTERVAL_MS: PositiveInt.default(30 * 60 * 1000),
+  // Phase 4 — wallet-activity indexer cadence. 6 hours is enough
+  // resolution for a daily-bucketed heatmap; cuts RPC pressure by
+  // ~4x vs hourly. Operators expecting near-real-time can lower
+  // this; the indexer is idempotent so partial runs are safe.
+  WALLET_ACTIVITY_INTERVAL_MS: PositiveInt.default(6 * 60 * 60 * 1000),
 
   SLOT_FINALITY_BUFFER: NonNegativeInt.default(32),
 

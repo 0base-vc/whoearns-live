@@ -672,6 +672,42 @@ rejected with `stale_timestamp` (the freshness window is asymmetric
 — 5 min past, 60 s future — so a captured request cannot extend its
 own usable lifetime).
 
+## `GET /v1/operator-wallets/:wallet/activity`
+
+Phase 4 read endpoint. Returns the daily on-chain activity entries
+the worker has indexed for a registered operator wallet.
+
+Query parameters:
+
+- `days` — 1-365, default 365. Window of UTC dates to return.
+
+Response:
+
+```json
+{
+  "wallet": "Wallet11...",
+  "days": 365,
+  "entries": [
+    { "date": "2026-05-13", "txCount": 12, "txFeesLamports": null },
+    { "date": "2026-05-12", "txCount": 4, "txFeesLamports": null }
+  ]
+}
+```
+
+Days with zero activity are omitted; clients zero-fill at render
+time. Newest-first. `txFeesLamports` is the per-day sum of tx fees
+the wallet paid as `feePayer`. Phase 4 ships counts only — the
+field is `null` today (not `"0"`) so a client summing fees can
+detect the unavailable-data state. Backfill ships in a follow-up
+indexer pass (see `docs/roadmap.md`).
+
+The endpoint is gated on registered-wallet membership. Probes for
+unregistered or expired-registration wallets return HTTP 404
+(`not_found`) — the route is not a public existence oracle for
+arbitrary pubkeys.
+
+Cache-Control: `public, max-age=300, s-maxage=1800`.
+
 ## `POST /mcp`
 
 Streamable HTTP MCP endpoint for AI agents. The server exposes four read-only

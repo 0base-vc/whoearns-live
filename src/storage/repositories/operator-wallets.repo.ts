@@ -73,6 +73,42 @@ export class OperatorWalletsRepository {
     return Number(rows[0]?.count ?? 0);
   }
 
+  /**
+   * All distinct ACTIVE (not-expired) registered wallet pubkeys. Used
+   * by the Phase 4 activity indexer to enumerate the set to scan each
+   * tick. Expired registrations silently drop out of the index set —
+   * an operator who let their attestation lapse has implicitly opted
+   * out of further activity harvesting.
+   */
+  async listAllDistinctWallets(): Promise<string[]> {
+    const { rows } = await this.pool.query<{ wallet_pubkey: string }>(
+      `SELECT DISTINCT wallet_pubkey
+         FROM operator_wallets
+        WHERE expires_at > NOW()
+        ORDER BY wallet_pubkey`,
+    );
+    return rows.map((r) => r.wallet_pubkey);
+  }
+
+  /**
+   * Existence check for the public `/v1/operator-wallets/:wallet/...`
+   * read endpoints. Returns true when the wallet is currently
+   * registered AND not expired. Used to gate the route against an
+   * existence oracle — the unregistered-wallet path now returns 404
+   * rather than an empty response.
+   */
+  async existsActive(wallet: string): Promise<boolean> {
+    const { rows } = await this.pool.query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM operator_wallets
+          WHERE wallet_pubkey = $1
+            AND expires_at > NOW()
+       ) AS exists`,
+      [wallet],
+    );
+    return rows[0]?.exists === true;
+  }
+
   /** One-click unlink. */
   async delete(vote: VotePubkey, wallet: string): Promise<boolean> {
     const { rowCount } = await this.pool.query(

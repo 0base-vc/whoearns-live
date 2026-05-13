@@ -8,7 +8,9 @@ import type {
   RpcClusterNode,
   RpcEpochInfo,
   RpcEpochSchedule,
+  RpcGetSignaturesOptions,
   RpcLeaderSchedule,
+  RpcSignatureInfo,
   RpcValidatorInfoAccount,
   RpcVoteAccounts,
 } from './types.js';
@@ -42,6 +44,9 @@ export const DEFAULT_METHOD_COSTS: Readonly<Record<string, number>> = Object.fre
   // entries, ~250B each, ~500KB response). Comparable to a
   // `getVoteAccounts` round-trip at our scale; same cost.
   getClusterNodes: 30,
+  // `getSignaturesForAddress` returns up to 1000 signatures (~120B
+  // each, ~120KB response). Cost similar to a getBlock — set at 30.
+  getSignaturesForAddress: 30,
   // `getProgramAccounts` on the Config program (~3k accounts,
   // ~500B each, ~3MB response) is heavier than the per-slot calls.
   // Providers commonly bill this higher depending on response size; we set it
@@ -538,6 +543,31 @@ export class SolanaRpcClient {
   async getVoteAccounts(commitment?: Commitment): Promise<RpcVoteAccounts> {
     const params = commitment !== undefined ? [{ commitment }] : undefined;
     return this.enqueue<RpcVoteAccounts>('getVoteAccounts', params);
+  }
+
+  /**
+   * Fetch signatures originated by `address` in newest-first order.
+   * Returns at most `limit` (default 1000, server cap). Pagination is
+   * via the `before` signature cursor — pass the oldest signature
+   * from the previous page to walk back further.
+   *
+   * Used by Phase 4 wallet-activity ingestion. The fee + landed-day
+   * for each signature is derived downstream via `getTransaction`
+   * (one round-trip per signature). For high-volume wallets the
+   * caller is expected to cap the per-tick batch size.
+   */
+  async getSignaturesForAddress(
+    address: string,
+    options: RpcGetSignaturesOptions = {},
+  ): Promise<RpcSignatureInfo[]> {
+    const params: [string, Record<string, unknown>?] = [address];
+    const opts: Record<string, unknown> = {};
+    if (options.limit !== undefined) opts['limit'] = Math.min(Math.max(options.limit, 1), 1000);
+    if (options.before !== undefined) opts['before'] = options.before;
+    if (options.until !== undefined) opts['until'] = options.until;
+    if (options.commitment !== undefined) opts['commitment'] = options.commitment;
+    if (Object.keys(opts).length > 0) params.push(opts);
+    return this.enqueue<RpcSignatureInfo[]>('getSignaturesForAddress', params);
   }
 
   /**

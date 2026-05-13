@@ -18,6 +18,7 @@ import { ProcessedBlocksRepository } from '../storage/repositories/processed-blo
 import { StatsRepository } from '../storage/repositories/stats.repo.js';
 import { ValidatorGithubRepository } from '../storage/repositories/validator-github.repo.js';
 import { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
+import { WalletActivityRepository } from '../storage/repositories/wallet-activity.repo.js';
 import { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
 
 export async function startApi(): Promise<void> {
@@ -46,6 +47,7 @@ export async function startApi(): Promise<void> {
     claims: claimsRepo,
     validatorGithub: new ValidatorGithubRepository(pool),
     operatorWallets: new OperatorWalletsRepository(pool),
+    walletActivity: new WalletActivityRepository(pool),
   };
 
   // The API process needs its own `ValidatorService` so the history

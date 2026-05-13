@@ -243,6 +243,34 @@ export interface RpcClusterNode {
 }
 
 /**
+ * One entry from `getSignaturesForAddress`. We only project the
+ * fields the wallet-activity ingester needs:
+ *   - `signature` is needed to enumerate
+ *   - `blockTime` is the canonical "when did this land" (epoch seconds)
+ *   - `err` lets us count failed-vs-successful txs separately if ever
+ *     needed; today we count both toward `tx_count`
+ */
+export interface RpcSignatureInfo {
+  signature: string;
+  slot: number;
+  /** Unix seconds when the block landed; null until finalised on some forks. */
+  blockTime: number | null;
+  err: unknown;
+}
+
+/** Options for `getSignaturesForAddress`. */
+export interface RpcGetSignaturesOptions {
+  /** Max 1000 per Solana RPC docs; we cap at the server side too. */
+  limit?: number;
+  /** Pagination cursor (older direction). */
+  before?: string;
+  /** Stop once this signature is reached. */
+  until?: string;
+  /** Commitment level — defaults to `finalized`. */
+  commitment?: 'confirmed' | 'finalized';
+}
+
+/**
  * On-chain validator-info record, published by validators via
  * `solana validator-info publish`. The Solana Config program stores
  * each record as an account with `type: 'validatorInfo'` when

@@ -222,7 +222,28 @@ Storage:
 
 ### Phase 4 — Wallet Activity (365-day grid)
 
-**Status: planned, not shipped.**
+**Status: partial release — tx-count indexing live; fee anchoring planned.**
+
+#### Live now
+
+- `wallet_daily_activity` table backed by a `getSignaturesForAddress`-
+  driven worker job (`wallet-activity-ingester`, default 6 h cadence).
+- `GET /v1/operator-wallets/:wallet/activity?days=365` returns daily
+  tx counts for the requested window. UTC-bucketed. Sparse — zero-
+  activity days are omitted, clients zero-fill at render time.
+- Operator wallets in the table feed directly from Phase 3
+  registrations.
+
+#### Planned next
+
+- **Fee anchoring**: `txFeesLamports` is reserved at zero today
+  because `getSignaturesForAddress` doesn't return fee data and
+  per-signature `getTransaction` would 10× the RPC cost. A
+  scheduled backfill batched against the priority-fee ingester's
+  existing block reads will populate fees without new round-trips.
+- **Activity score**: per-day intensity = `log10(daily_fees + 1)`
+  percentile within the operator-wallet cohort. The 365-day grid
+  draws this directly. Cannot ship without fee data.
 
 Daily intensity = `log10(daily_tx_fees_lamports + 1)` percentile
 within the cohort of claimed operator wallets. The fee anchor makes
