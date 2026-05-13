@@ -22,6 +22,7 @@ const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 const DEFAULT_MIN_WINDOW_SLOTS = 4;
 const LEADERBOARD_CACHE_TTL_MS = 10_000;
+const PREVIOUS_FINAL_EPOCH_RANK_LIMIT = 3;
 
 const WindowEnumSchema = z.enum(['live_trend', 'current_only', 'stable_trend', 'final_epoch']);
 
@@ -65,6 +66,12 @@ export interface LeaderboardRoutesDeps {
 }
 
 type SampleStatus = 'low' | 'medium' | 'normal';
+type PreviousFinalEpochRank = 1 | 2 | 3;
+
+interface PreviousFinalEpochBadge {
+  epoch: number;
+  rank: PreviousFinalEpochRank;
+}
 
 interface LeaderboardRow {
   rank: number;
@@ -103,6 +110,8 @@ interface LeaderboardRow {
   activatedStakeSol: string | null;
   incomePerStake: number | null;
   claimed: boolean;
+  previousFinalEpoch: number | null;
+  previousFinalEpochRank: PreviousFinalEpochRank | null;
 }
 
 interface LeaderboardResponse {
@@ -153,6 +162,7 @@ function toRow(
   rank: number,
   info: { name: string | null; iconUrl: string | null; website: string | null } | undefined,
   claimed: boolean,
+  previousFinalEpochBadge: PreviousFinalEpochBadge | undefined,
 ): LeaderboardRow {
   const total = stats.blockFeesTotalLamports + stats.blockTipsTotalLamports;
   const perSlot = stats.windowSlots > 0 ? total / BigInt(stats.windowSlots) : null;
@@ -198,7 +208,41 @@ function toRow(
     activatedStakeSol: stake === null ? null : lamportsToSol(stake),
     incomePerStake,
     claimed,
+    previousFinalEpoch: previousFinalEpochBadge?.epoch ?? null,
+    previousFinalEpochRank: previousFinalEpochBadge?.rank ?? null,
   };
+}
+
+function toPreviousFinalEpochRank(rank: number): PreviousFinalEpochRank | null {
+  return rank === 1 || rank === 2 || rank === 3 ? rank : null;
+}
+
+async function buildPreviousFinalEpochRankMap(
+  statsRepo: Pick<StatsRepository, 'findTopNByWindow'>,
+  epochsRepo: Pick<EpochsRepository, 'findLatestClosedEpochs'>,
+  optedOutVotes: Set<string>,
+  minWindowSlots: number,
+): Promise<Map<string, PreviousFinalEpochBadge>> {
+  const [latestFinalEpoch] = await epochsRepo.findLatestClosedEpochs(1);
+  if (latestFinalEpoch === undefined) return new Map();
+
+  const rows = await statsRepo.findTopNByWindow({
+    epochs: [{ epoch: latestFinalEpoch.epoch, isCurrent: false }],
+    limit: MAX_LIMIT,
+    sort: 'income_per_slot',
+    minWindowSlots,
+  });
+  const visibleRows =
+    optedOutVotes.size === 0 ? rows : rows.filter((row) => !optedOutVotes.has(row.votePubkey));
+  const topRows = visibleRows.slice(0, PREVIOUS_FINAL_EPOCH_RANK_LIMIT);
+
+  const out = new Map<string, PreviousFinalEpochBadge>();
+  topRows.forEach((row, index) => {
+    const rank = toPreviousFinalEpochRank(index + 1);
+    if (rank === null) return;
+    out.set(row.votePubkey, { epoch: latestFinalEpoch.epoch, rank });
+  });
+  return out;
 }
 
 function closedCountForWindow(window: LeaderboardWindow): number {
@@ -316,10 +360,11 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
       return body;
     }
 
+    const fetchLimit = Math.min(MAX_LIMIT, Math.max(query.limit, Math.ceil(query.limit * 1.5)));
     const [rows, optedOutVotes] = await Promise.all([
       statsRepo.findTopNByWindow({
         epochs: resolved.epochs,
-        limit: query.limit,
+        limit: fetchLimit,
         sort: query.sort,
         minWindowSlots: query.minWindowSlots,
       }),
@@ -327,25 +372,35 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
         ? Promise.resolve(new Set<string>())
         : profilesRepo.findOptedOutVotes(),
     ]);
-    const visibleRows =
-      optedOutVotes.size === 0 ? rows : rows.filter((r) => !optedOutVotes.has(r.votePubkey));
+    const visibleRows = (
+      optedOutVotes.size === 0 ? rows : rows.filter((r) => !optedOutVotes.has(r.votePubkey))
+    ).slice(0, query.limit);
 
-    let infoByIdentity = new Map<
-      IdentityPubkey,
-      { name: string | null; iconUrl: string | null; website: string | null }
-    >();
-    if (validatorsRepo !== undefined && visibleRows.length > 0) {
-      const identities = Array.from(new Set(visibleRows.map((r) => r.identityPubkey)));
-      infoByIdentity = await validatorsRepo.getInfosByIdentities(identities);
-    }
-
-    let claimedVotes = new Set<string>();
-    if (claimsRepo !== undefined && visibleRows.length > 0) {
-      claimedVotes = await claimsRepo.findClaimedVotes(visibleRows.map((r) => r.votePubkey));
-    }
+    const identities = Array.from(new Set(visibleRows.map((r) => r.identityPubkey)));
+    const votes = visibleRows.map((r) => r.votePubkey);
+    const [infoByIdentity, claimedVotes, previousFinalEpochRanks] = await Promise.all([
+      validatorsRepo !== undefined && identities.length > 0
+        ? validatorsRepo.getInfosByIdentities(identities)
+        : Promise.resolve(
+            new Map<
+              IdentityPubkey,
+              { name: string | null; iconUrl: string | null; website: string | null }
+            >(),
+          ),
+      claimsRepo !== undefined && votes.length > 0
+        ? claimsRepo.findClaimedVotes(votes)
+        : Promise.resolve(new Set<string>()),
+      buildPreviousFinalEpochRankMap(statsRepo, epochsRepo, optedOutVotes, query.minWindowSlots),
+    ]);
 
     const items = visibleRows.map((row, i) =>
-      toRow(row, i + 1, infoByIdentity.get(row.identityPubkey), claimedVotes.has(row.votePubkey)),
+      toRow(
+        row,
+        i + 1,
+        infoByIdentity.get(row.identityPubkey),
+        claimedVotes.has(row.votePubkey),
+        previousFinalEpochRanks.get(row.votePubkey),
+      ),
     );
 
     const finalEpoch = resolved.closed[0];

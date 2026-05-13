@@ -319,7 +319,7 @@ async function runPreviousEpochBackfill(args: {
       continue;
     }
     try {
-      await deps.feeService.backfillPreviousEpoch({
+      const result = await deps.feeService.backfillPreviousEpoch({
         epoch: prevEpoch,
         vote,
         identity,
@@ -328,6 +328,14 @@ async function runPreviousEpochBackfill(args: {
         leaderSchedule: prevSchedule,
         batchSize: deps.batchSize,
       });
+      if (result.errors > 0) {
+        failed += 1;
+        deps.logger.warn(
+          { vote, prevEpoch, errors: result.errors },
+          'fee-ingester: prev-epoch backfill had slot errors, will retry next tick',
+        );
+        continue;
+      }
       await deps.watchedDynamicRepo.markBackfilled(vote);
       filled += 1;
     } catch (err) {

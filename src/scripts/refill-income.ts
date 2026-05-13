@@ -3,28 +3,23 @@
  *
  * Supersedes `backfill-tips.ts`. Does more than the old script:
  *
- *   1. ZEROES per-block fee/tip columns (`fees_lamports`,
- *      `base_fees_lamports`, `priority_fees_lamports`, `tips_lamports`)
- *      on every produced block for the target (epoch, identity) pairs.
- *   2. RE-FETCHES each block with `transactionDetails: 'full'` and
+ *   1. RE-FETCHES each produced block with `transactionDetails: 'full'` and
  *      re-computes the four-way income decomposition (leader post-burn
- *      fees + gross base + gross priority + MEV tips).
- *   3. OVERWRITES the per-block row with the freshly computed values,
+ *      fees + leader net base share + priority fees + MEV tips).
+ *   2. OVERWRITES the per-block row with the freshly computed values,
  *      including tx counts, compute units, cost units, and ComputeBudget
  *      request aggregates.
- *   4. RESETS the per-epoch aggregate totals to 0 (via
- *      `StatsRepository.resetEpochTotals`) and re-applies per-block
- *      deltas via `addIncomeDelta` as the script walks the blocks —
- *      so `block_*_total_lamports` ends at exactly `sum(processed_blocks)`
- *      without double-count from any previous partial backfill.
- *   5. RECOMPUTES the five medians (fees, base, priority, tips, total)
+ *   3. REBUILDS the per-epoch aggregate totals from `processed_blocks`
+ *      after each identity finishes. A slot that fails to re-fetch keeps
+ *      its previous fact row, so partial refill failures cannot zero out
+ *      already-good aggregate income.
+ *   4. RECOMPUTES the five medians (fees, base, priority, tips, total)
  *      at end of each epoch.
  *
- * Why reset rather than diff: pre-migration-0010 rows have `base=0`
+ * Why rebuild rather than delta: pre-migration-0010 rows have `base=0`
  * and `priority=0` populated as the column default, not the real
- * gross amounts. Merging those 0s into the re-scan would be a mess;
- * it's simpler and faster to blow away the numeric columns and
- * recompute in one deterministic pass.
+ * amounts. Rebuilding aggregates from the fact table after repairs is
+ * deterministic and preserves rows whose RPC refetch failed this run.
  *
  * Idempotency: safe to re-run. Each invocation wipes and refills
  * scope. Re-running always converges to the same numbers (assuming
@@ -216,12 +211,6 @@ async function main(): Promise<number> {
         const slots = await processedBlocksRepo.findProducedSlotsForIdentity(epoch, identity);
         if (slots.length === 0) continue;
 
-        // STEP 1 of the reset: zero the per-epoch aggregate row. The
-        // re-scan below then builds the four totals back up via
-        // `addIncomeDelta`, so the end state = sum of freshly-
-        // computed per-block values. No double-count risk on re-runs.
-        await statsRepo.resetEpochTotals(epoch, identity);
-
         log.info(
           { epoch, identity, total: slots.length },
           'refill-income: re-scanning all produced blocks (reset+refill)',
@@ -302,25 +291,10 @@ async function main(): Promise<number> {
           ),
         );
 
-        // Re-apply the aggregate delta now that all blocks are
-        // rewritten. `resetEpochTotals` zeroed the four columns;
-        // this single call restores them to `sum(processed_blocks)`
-        // for THIS identity.
-        if (
-          identityLeader > 0n ||
-          identityBase > 0n ||
-          identityPriority > 0n ||
-          identityTips > 0n
-        ) {
-          await statsRepo.addIncomeDelta({
-            epoch,
-            identityPubkey: identity,
-            leaderFeeDeltaLamports: identityLeader,
-            baseFeeDeltaLamports: identityBase,
-            priorityFeeDeltaLamports: identityPriority,
-            tipDeltaLamports: identityTips,
-          });
-        }
+        // Rebuild from the complete fact table, not from just the
+        // successfully-refetched subset. If one slot fails above, its
+        // prior processed_blocks row remains and must stay counted.
+        await statsRepo.rebuildIncomeTotalsFromProcessedBlocks(epoch, [identity]);
 
         totalBlocksScanned += slots.length;
         totalBlocksUpdated += identityBlocks;

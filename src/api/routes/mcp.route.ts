@@ -182,7 +182,13 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
         const slotsElapsed =
           epoch === null || epoch.currentSlot === null
             ? null
-            : Math.max(0, epoch.currentSlot - epoch.firstSlot);
+            : Math.max(
+                0,
+                Math.min(
+                  epoch.slotCount,
+                  Math.min(epoch.currentSlot, epoch.lastSlot) - epoch.firstSlot + 1,
+                ),
+              );
         return {
           content: [
             {

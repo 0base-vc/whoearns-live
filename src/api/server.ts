@@ -284,7 +284,7 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     // read-only tools backed by the same repos the v1/* routes use
     // (no extra DB queries; the cost ceiling is whatever those repos
     // already charge). See `mcp.route.ts` for the tool catalog and
-    // the rationale on rate-limit exemption.
+    // public rate-limit posture.
     await scope.register(mcpRoutes, {
       config: deps.config,
       validatorsRepo: deps.repos.validators,

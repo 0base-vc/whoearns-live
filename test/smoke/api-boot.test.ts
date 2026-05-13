@@ -30,6 +30,7 @@ import {
   FakeValidatorService,
   FakeValidatorsRepo,
   FakeWatchedDynamicRepo,
+  makeEpochInfo,
 } from '../unit/api/_fakes.js';
 
 const silent = pino({ level: 'silent' });
@@ -346,6 +347,43 @@ describe('smoke: api server boots and routes 200/degraded', () => {
         'get_validator',
         'get_validator_leader_slots',
       ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns current epoch slotsElapsed with the same inclusive clamp as /v1/epoch/current', async () => {
+    const deps = makeDeps();
+    const epochs = deps.repos.epochs as unknown as FakeEpochsRepo;
+    epochs.rows.set(
+      500,
+      makeEpochInfo(500, 1_000, 1_099, {
+        isClosed: false,
+        currentSlot: 1_150,
+      }),
+    );
+    const app = await buildServer(deps);
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/mcp',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        payload: {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'get_current_epoch', arguments: {} },
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { result?: { content?: Array<{ text?: string }> } };
+      const payload = JSON.parse(body.result?.content?.[0]?.text ?? '{}') as {
+        slotsElapsed?: number;
+      };
+      expect(payload.slotsElapsed).toBe(100);
     } finally {
       await app.close();
     }

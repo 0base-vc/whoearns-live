@@ -191,6 +191,28 @@
     }
   }
 
+  function hasPreviousRank(item: LeaderboardItem): boolean {
+    return (
+      typeof item.previousFinalEpoch === 'number' &&
+      (item.previousFinalEpochRank === 1 ||
+        item.previousFinalEpochRank === 2 ||
+        item.previousFinalEpochRank === 3)
+    );
+  }
+
+  function previousRankText(item: LeaderboardItem): string {
+    return hasPreviousRank(item) ? `#${item.previousFinalEpochRank}` : '';
+  }
+
+  function previousRankLabel(item: LeaderboardItem): string {
+    if (!hasPreviousRank(item)) return '';
+    return `지난 에폭 랭커 · Epoch ${item.previousFinalEpoch} #${item.previousFinalEpochRank} by income / slot`;
+  }
+
+  function previousRankClass(item: LeaderboardItem): string {
+    return hasPreviousRank(item) ? `rank-${item.previousFinalEpochRank}` : '';
+  }
+
   function windowSummary(leaderboard: Leaderboard): string {
     const parts: string[] = [];
     if (leaderboard.currentEpoch !== null) parts.push(`current ${leaderboard.currentEpoch}`);
@@ -382,6 +404,15 @@
                       {#if item.claimed}
                         <VerifiedBadge />
                       {/if}
+                      {#if hasPreviousRank(item)}
+                        <span
+                          class={`previous-rank-badge ${previousRankClass(item)}`}
+                          aria-label={previousRankLabel(item)}
+                          title={previousRankLabel(item)}
+                        >
+                          {previousRankText(item)}
+                        </span>
+                      {/if}
                     </span>
                     <span
                       class="block truncate font-mono text-[10px] text-[color:var(--color-text-subtle)]"
@@ -395,6 +426,15 @@
                       <span class="truncate">{shortenPubkey(item.vote, 8, 6)}</span>
                       {#if item.claimed}
                         <VerifiedBadge />
+                      {/if}
+                      {#if hasPreviousRank(item)}
+                        <span
+                          class={`previous-rank-badge ${previousRankClass(item)}`}
+                          aria-label={previousRankLabel(item)}
+                          title={previousRankLabel(item)}
+                        >
+                          {previousRankText(item)}
+                        </span>
                       {/if}
                     </span>
                   {/if}
@@ -448,6 +488,15 @@
                     {#if item.claimed}
                       <VerifiedBadge />
                     {/if}
+                    {#if hasPreviousRank(item)}
+                      <span
+                        class={`previous-rank-badge ${previousRankClass(item)}`}
+                        aria-label={previousRankLabel(item)}
+                        title={previousRankLabel(item)}
+                      >
+                        {previousRankText(item)}
+                      </span>
+                    {/if}
                   </div>
                   <div class="truncate font-mono text-[10px] text-[color:var(--color-text-subtle)]">
                     {shortenPubkey(item.vote, 8, 6)}
@@ -460,6 +509,15 @@
                     <span class="truncate">{shortenPubkey(item.vote, 8, 6)}</span>
                     {#if item.claimed}
                       <VerifiedBadge />
+                    {/if}
+                    {#if hasPreviousRank(item)}
+                      <span
+                        class={`previous-rank-badge ${previousRankClass(item)}`}
+                        aria-label={previousRankLabel(item)}
+                        title={previousRankLabel(item)}
+                      >
+                        {previousRankText(item)}
+                      </span>
                     {/if}
                   </div>
                 {/if}
@@ -493,3 +551,49 @@
     {/if}
   {/if}
 </section>
+
+<style>
+  .previous-rank-badge {
+    display: inline-flex;
+    height: 1rem;
+    flex-shrink: 0;
+    align-items: center;
+    border-radius: 9999px;
+    border: 1px solid;
+    padding: 0 0.3rem;
+    font-size: 0.625rem;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0;
+  }
+
+  .previous-rank-badge.rank-1 {
+    border-color: color-mix(in oklab, #f59e0b 55%, transparent);
+    background: color-mix(in oklab, #f59e0b 20%, transparent);
+    color: #d97706;
+  }
+
+  .previous-rank-badge.rank-2 {
+    border-color: color-mix(in oklab, #94a3b8 58%, transparent);
+    background: color-mix(in oklab, #94a3b8 22%, transparent);
+    color: #64748b;
+  }
+
+  .previous-rank-badge.rank-3 {
+    border-color: color-mix(in oklab, #c2410c 50%, transparent);
+    background: color-mix(in oklab, #c2410c 18%, transparent);
+    color: #c2410c;
+  }
+
+  :global(.dark) .previous-rank-badge.rank-1 {
+    color: #fbbf24;
+  }
+
+  :global(.dark) .previous-rank-badge.rank-2 {
+    color: #cbd5e1;
+  }
+
+  :global(.dark) .previous-rank-badge.rank-3 {
+    color: #fb923c;
+  }
+</style>

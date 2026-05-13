@@ -241,6 +241,13 @@ export interface LeaderboardItem {
    * "verified" badge inline next to the moniker when true.
    */
   claimed: boolean;
+  /**
+   * Previous finalized epoch Top 3 badge. Null when the validator was
+   * not ranked #1-#3 by income per leader slot in the latest final
+   * epoch, or no closed epoch exists yet.
+   */
+  previousFinalEpoch?: number | null;
+  previousFinalEpochRank?: 1 | 2 | 3 | null;
 }
 
 export interface Leaderboard {

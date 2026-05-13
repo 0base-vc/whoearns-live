@@ -352,4 +352,52 @@ describe('fee-ingester.job', () => {
     await job.tick(new AbortController().signal);
     expect(deps.rpc.getLeaderSchedule).toHaveBeenCalledTimes(2);
   });
+
+  it('does not mark previous-epoch dynamic backfill complete when slot errors remain', async () => {
+    const deps = makeDeps({ currentSlot: 200 });
+    const epochsRepo = {
+      findByEpoch: vi.fn().mockResolvedValue({
+        epoch: 499,
+        firstSlot: 0,
+        lastSlot: 1_000,
+        slotCount: 1_001,
+        isClosed: true,
+        observedAt: new Date(),
+        closedAt: new Date(),
+        currentSlot: null,
+      }),
+    };
+    const watchedDynamicRepo = {
+      listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
+      markBackfilled: vi.fn().mockResolvedValue(undefined),
+    };
+    const backfillPreviousEpoch = vi.fn().mockResolvedValue({
+      slotsAssigned: 3,
+      slotsProduced: 2,
+      slotsSkipped: 0,
+      processed: 2,
+      skipped: 0,
+      errors: 1,
+    });
+    const feeService = {
+      ...deps.feeService,
+      backfillPreviousEpoch,
+    } as unknown as FeeService;
+    const job = createFeeIngesterJob({
+      ...deps,
+      feeService,
+      epochsRepo,
+      watchedDynamicRepo,
+      watchMode: 'explicit',
+      explicitVotes: [VOTE_A],
+      intervalMs: 30_000,
+      batchSize: 50,
+      logger: silent,
+    });
+
+    await job.tick(new AbortController().signal);
+
+    expect(backfillPreviousEpoch).toHaveBeenCalled();
+    expect(watchedDynamicRepo.markBackfilled).not.toHaveBeenCalled();
+  });
 });

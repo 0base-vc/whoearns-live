@@ -8,6 +8,7 @@ import leaderboardRoutes, {
 } from '../../../src/api/routes/leaderboard.route.js';
 import type { AggregatesRepository } from '../../../src/storage/repositories/aggregates.repo.js';
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
+import type { ProfilesRepository } from '../../../src/storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
 import {
   FakeAggregatesRepo,
@@ -197,6 +198,8 @@ describe('GET /v1/leaderboard', () => {
           windowSlots: number;
           incomeSolPerSlot: string | null;
           currentElapsedAssignedSlots: number;
+          previousFinalEpoch: number | null;
+          previousFinalEpochRank: number | null;
         }>;
       };
       expect(body.window).toBe('live_trend');
@@ -207,6 +210,41 @@ describe('GET /v1/leaderboard', () => {
       expect(body.items.map((row) => row.vote)).toEqual([VOTE_3, VOTE_1, VOTE_2]);
       expect(body.items.find((row) => row.vote === VOTE_1)?.windowSlots).toBe(14);
       expect(body.items.find((row) => row.vote === VOTE_1)?.currentElapsedAssignedSlots).toBe(4);
+      expect(
+        body.items.map((row) => ({
+          vote: row.vote,
+          previousFinalEpoch: row.previousFinalEpoch,
+          previousFinalEpochRank: row.previousFinalEpochRank,
+        })),
+      ).toEqual([
+        { vote: VOTE_3, previousFinalEpoch: 960, previousFinalEpochRank: 1 },
+        { vote: VOTE_1, previousFinalEpoch: 960, previousFinalEpochRank: 2 },
+        { vote: VOTE_2, previousFinalEpoch: 960, previousFinalEpochRank: 3 },
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('over-fetches before opt-out filtering so requested rows are not under-filled', async () => {
+    const { stats, epochs, deps } = buildDeps();
+    seedLiveWindow(stats, epochs);
+    deps.profilesRepo = {
+      findOptedOutVotes: async () => new Set([VOTE_3]),
+    } as Pick<ProfilesRepository, 'findOptedOutVotes'>;
+    const app = await makeApp(deps);
+    try {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/leaderboard?limit=2',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { count: number; items: Array<{ vote: string; rank: number }> };
+      expect(body.count).toBe(2);
+      expect(body.items).toEqual([
+        expect.objectContaining({ vote: VOTE_1, rank: 1 }),
+        expect.objectContaining({ vote: VOTE_2, rank: 2 }),
+      ]);
     } finally {
       await app.close();
     }

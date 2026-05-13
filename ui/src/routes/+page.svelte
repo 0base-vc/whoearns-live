@@ -112,7 +112,7 @@
       <ValidatorSearchCombobox
         id="home-validator-search"
         label="Validator name, vote pubkey, or identity pubkey"
-        placeholder="Search validator name, or paste vote / identity pubkey…"
+        placeholder="Search validator"
         bind:value={input}
         onSelect={(item) => {
           searchError = null;

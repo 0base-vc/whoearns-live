@@ -193,7 +193,10 @@ Windows:
 
 Rows include validator identity metadata, slot counts, block fee/tip totals,
 window income fields, `incomeSolPerSlot`, stake snapshot fields when
-available, `sampleStatus`, and a `claimed` boolean.
+available, `sampleStatus`, and a `claimed` boolean. Rows that ranked #1-#3 by
+`income_per_slot` in the latest finalized epoch also include
+`previousFinalEpoch` and `previousFinalEpochRank`; otherwise both fields are
+`null`.
 
 ## `GET /v1/validators/search`
 
