@@ -5,14 +5,18 @@ import { loadConfig } from '../core/config.js';
 import { createLogger } from '../core/logger.js';
 import { ShutdownManager } from '../core/shutdown.js';
 import { ClaimService } from '../services/claim.service.js';
+import { GithubGistVerificationService } from '../services/github-gist-verification.service.js';
+import { OperatorWalletVerificationService } from '../services/operator-wallet-verification.service.js';
 import { ValidatorService } from '../services/validator.service.js';
 import { closePool, createPool } from '../storage/db.js';
 import { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
 import { ClaimsRepository } from '../storage/repositories/claims.repo.js';
 import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
+import { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
 import { ProfilesRepository } from '../storage/repositories/profiles.repo.js';
 import { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
 import { StatsRepository } from '../storage/repositories/stats.repo.js';
+import { ValidatorGithubRepository } from '../storage/repositories/validator-github.repo.js';
 import { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
 
@@ -40,6 +44,8 @@ export async function startApi(): Promise<void> {
     watchedDynamic: new WatchedDynamicRepository(pool),
     profiles: profilesRepo,
     claims: claimsRepo,
+    validatorGithub: new ValidatorGithubRepository(pool),
+    operatorWallets: new OperatorWalletsRepository(pool),
   };
 
   // The API process needs its own `ValidatorService` so the history
@@ -76,7 +82,14 @@ export async function startApi(): Promise<void> {
     validatorService,
     logger,
   });
-  const services = { validator: validatorService, claim: claimService };
+  const githubGistService = new GithubGistVerificationService({ logger });
+  const operatorWalletService = new OperatorWalletVerificationService({ logger });
+  const services = {
+    validator: validatorService,
+    claim: claimService,
+    githubGist: githubGistService,
+    operatorWallet: operatorWalletService,
+  };
 
   const app = await buildServer({ config, logger, pool, repos, services });
   shutdown.register('http-server', async () => {

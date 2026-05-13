@@ -56,6 +56,43 @@ export interface ValidatorUpsertInput {
 }
 
 /**
+ * Phase 3 — GitHub identity linked to a claimed validator. The
+ * verification proof is a public Gist whose content is signed by the
+ * validator identity keypair (Keybase-style, no OAuth token retained).
+ */
+export interface ValidatorGithubLink {
+  votePubkey: VotePubkey;
+  githubUsername: string;
+  gistUrl: string;
+  gistId: string;
+  signedNonce: string;
+  verifiedAt: Date;
+  expiresAt: Date;
+}
+
+/**
+ * Phase 3 — Operator day-to-day wallet, separate from the validator
+ * identity. Identity is the consensus hot key and never registered
+ * for marketing surfaces; operator wallets are normal Solana keypairs
+ * the operator uses for DeFi/NFT/governance.
+ *
+ * Verification: identity key AND wallet key both sign a single
+ * canonical message containing BOTH pubkeys. The wallet also publishes
+ * an on-chain memo transaction so we know it's operationally alive
+ * at registration time (rules out dormant keys swapped in from a
+ * marketplace).
+ */
+export interface OperatorWallet {
+  votePubkey: VotePubkey;
+  walletPubkey: string;
+  label: string;
+  signedNonce: string;
+  anchorTxSignature: string;
+  registeredAt: Date;
+  expiresAt: Date;
+}
+
+/**
  * Subset of Validator fields carrying the on-chain moniker / branding.
  * Used as the input shape for `ValidatorsRepository.upsertInfo` so
  * callers can't accidentally overwrite identity/vote columns while

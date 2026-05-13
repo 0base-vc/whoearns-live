@@ -177,7 +177,36 @@ ship, the composite expands to the full four-signal formula:
 
 ### Phase 3 — Claim v2 (GitHub identity + operator wallet)
 
-**Status: planned, not shipped.**
+**Status: partial release — Gist + co-signed wallet verification live; UI surfacing planned.**
+
+#### Live now
+
+- `POST /v1/claim/github/verify` accepts a public Gist URL whose
+  body contains the canonical nonce + a base58 Ed25519 signature.
+  The Gist URL's username must match the requested
+  `githubUsername` (prevents publishing under someone else's
+  account). Verification is stateless on the WhoEarns side — no
+  OAuth token retained, GitHub never sees a callback.
+- `POST /v1/claim/wallet/verify` accepts co-signatures from BOTH
+  the validator identity key AND the operator wallet key over a
+  canonical nonce. An `anchorTxSignature` (Solana tx signature for
+  the operator-published memo) provides the "operationally alive"
+  defense-in-depth. 3 wallets per validator cap (DB trigger + route
+  count check).
+
+Storage:
+
+- `validator_github` (one row per claimed validator; replaces on
+  re-claim).
+- `operator_wallets` (≤3 per claimed validator; cascade-delete on
+  claim removal).
+
+#### Planned next
+
+- Profile surfacing on `/v1/validators/:idOrVote/badges` (GitHub
+  username + wallet count + freshness).
+- Reverse lookup endpoint for simd.watch governance ingest
+  (`GET /v1/operator-wallets/lookup?wallet=…`).
 
 - **GitHub identity** via Keybase-style Gist verification (no OAuth
   token retained). The Gist contains the validator-identity-signed

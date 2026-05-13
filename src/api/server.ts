@@ -11,7 +11,11 @@ import type pg from 'pg';
 import type { AppConfig } from '../core/config.js';
 import type { Logger } from '../core/logger.js';
 import type { ClaimService } from '../services/claim.service.js';
+import type { GithubGistVerificationService } from '../services/github-gist-verification.service.js';
+import type { OperatorWalletVerificationService } from '../services/operator-wallet-verification.service.js';
 import type { ValidatorService } from '../services/validator.service.js';
+import type { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
+import type { ValidatorGithubRepository } from '../storage/repositories/validator-github.repo.js';
 import type { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
@@ -72,6 +76,13 @@ export interface BuildServerDeps {
      * through `services.claim`.
      */
     claims: ClaimsRepository;
+    /**
+     * Phase 3 Claim v2 — GitHub Gist link + operator wallet
+     * registration. Optional so the API entrypoint can omit them
+     * when the gamification feature flag is off.
+     */
+    validatorGithub?: ValidatorGithubRepository;
+    operatorWallets?: OperatorWalletsRepository;
   };
   services: {
     validator: ValidatorService;
@@ -81,6 +92,9 @@ export interface BuildServerDeps {
      * orthogonal to the validator-tracking lifecycle.
      */
     claim: ClaimService;
+    /** Phase 3 Claim v2 helpers — see repos.{validatorGithub,operatorWallets}. */
+    githubGist?: GithubGistVerificationService;
+    operatorWallet?: OperatorWalletVerificationService;
   };
   /**
    * Override path to the SvelteKit build. When undefined we try a few
@@ -277,7 +291,25 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       claimsRepo: deps.repos.claims,
     });
     await scope.register(claimRoutes, {
+      config: deps.config,
       claimService: deps.services.claim,
+      // Phase 3 — Claim v2 deps are wired in when the gamification
+      // feature flag is on. The route returns 503 with code
+      // `feature_disabled` when these are absent, so the rest of
+      // the claim surface still works unconditionally.
+      ...(deps.repos.validatorGithub !== undefined
+        ? { validatorGithubRepo: deps.repos.validatorGithub }
+        : {}),
+      ...(deps.repos.operatorWallets !== undefined
+        ? { operatorWalletsRepo: deps.repos.operatorWallets }
+        : {}),
+      claimsRepo: deps.repos.claims,
+      ...(deps.services.githubGist !== undefined
+        ? { githubGistService: deps.services.githubGist }
+        : {}),
+      ...(deps.services.operatorWallet !== undefined
+        ? { operatorWalletService: deps.services.operatorWallet }
+        : {}),
     });
     // SEO + AI-discovery surfaces. Registered BEFORE `fastifyStatic`
     // (below, outside this register scope) so dynamic /sitemap.xml,

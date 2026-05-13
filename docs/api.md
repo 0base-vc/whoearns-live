@@ -594,6 +594,84 @@ Embedding example:
 </a>
 ```
 
+## Claim v2 endpoints (Phase 3)
+
+Two additional flows on top of `POST /v1/claim/verify`:
+
+### `POST /v1/claim/github/verify`
+
+Links a GitHub identity to a claimed validator via a Keybase-style
+public Gist. No OAuth token is retained.
+
+Request body:
+
+```json
+{
+  "votePubkey": "...",
+  "identityPubkey": "...",
+  "githubUsername": "alice",
+  "gistUrl": "https://gist.github.com/alice/<gistId>",
+  "timestampMs": 1715670000000
+}
+```
+
+The Gist body must contain (and only contain) the canonical nonce
+serialised by WhoEarns plus the operator's Ed25519 signature:
+
+```
+---
+{"domain":"...","expiresAtMs":...,"githubUsername":"alice","identityPubkey":"...","issuedAtMs":...,"votePubkey":"..."}
+---
+signature: <base58 Ed25519 sig>
+```
+
+Status codes: 200 on success, 403 for nonce/sig/policy failures, 502
+for upstream Gist fetch errors, 503 when the P3 feature deps are not
+wired in.
+
+### `POST /v1/claim/wallet/verify`
+
+Registers an operator-day-to-day wallet, co-signed by validator
+identity AND wallet keys, anchored by a Solana memo transaction.
+
+Request body:
+
+```json
+{
+  "votePubkey": "...",
+  "identityPubkey": "...",
+  "walletPubkey": "...",
+  "label": "cold",
+  "timestampMs": 1715670000000,
+  "identitySignatureB58": "...",
+  "walletSignatureB58": "...",
+  "anchorTxSignature": "..."
+}
+```
+
+- Cap of 3 wallets per validator (HTTP 409 `wallet_cap_reached`).
+- `label` is operator-chosen (≤32 chars).
+- `anchorTxSignature` is the Solana tx signature of the
+  operationally-alive memo transaction the wallet published.
+
+**Anchor tx semantics — Phase 3 scope.** The current release validates
+`anchorTxSignature` for base58 shape and exactly 64 decoded bytes (a
+real Solana tx signature). It does **not** yet fetch the transaction
+on-chain. Full on-chain verification — `getTransaction`, memo-program
+ID assertion, memo content equal to a hash of the canonical nonce, tx
+signer equal to `walletPubkey` — is a planned hardening pass (see
+`docs/roadmap.md`). Until that lands, the anchor functions as an
+operator-side commitment + crypto-shape filter rather than a proof
+of on-chain activity. Co-signed identity + wallet Ed25519 signatures
+remain the primary defense.
+
+**Replay defense.** Both endpoints store the canonical nonce under a
+UNIQUE index (migration 0025). Resubmission within the freshness
+window returns HTTP 403 `nonce_replay`. Future-dated `timestampMs` is
+rejected with `stale_timestamp` (the freshness window is asymmetric
+— 5 min past, 60 s future — so a captured request cannot extend its
+own usable lifetime).
+
 ## `POST /mcp`
 
 Streamable HTTP MCP endpoint for AI agents. The server exposes four read-only
