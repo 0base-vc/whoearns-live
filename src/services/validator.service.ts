@@ -1,6 +1,7 @@
 import type { SolanaRpcClient } from '../clients/solana-rpc.js';
 import type { Logger } from '../core/logger.js';
 import { normaliseHttpUrlOrNull } from '../core/url.js';
+import type { StatsRepository } from '../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import type { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
 import type { Epoch, IdentityPubkey, Validator, VotePubkey } from '../types/domain.js';
@@ -40,6 +41,13 @@ const ON_DEMAND_NEGATIVE_CACHE_MAX_ENTRIES = 10_000;
 export interface ValidatorServiceDeps {
   validatorsRepo: ValidatorsRepository;
   watchedDynamicRepo?: WatchedDynamicRepository;
+  /**
+   * Optional — when wired, every `refreshFromRpc` tick records the
+   * per-(epoch, vote) vote-credit totals derived from
+   * `getVoteAccounts.epochCredits`. Omitting the dep disables the
+   * indexer (useful in tests + on-demand-only call sites).
+   */
+  statsRepo?: Pick<StatsRepository, 'upsertVoteCreditsBatch'>;
   rpc: SolanaRpcClient;
   logger: Logger;
   /**
@@ -61,6 +69,7 @@ export interface ValidatorServiceDeps {
 export class ValidatorService {
   private readonly validatorsRepo: ValidatorsRepository;
   private readonly watchedDynamicRepo: WatchedDynamicRepository | undefined;
+  private readonly statsRepo: Pick<StatsRepository, 'upsertVoteCreditsBatch'> | undefined;
   private readonly rpc: SolanaRpcClient;
   private readonly logger: Logger;
   /** Full last-refresh snapshot for `all` / `top` mode resolution. */
@@ -75,6 +84,7 @@ export class ValidatorService {
   constructor(deps: ValidatorServiceDeps) {
     this.validatorsRepo = deps.validatorsRepo;
     this.watchedDynamicRepo = deps.watchedDynamicRepo;
+    this.statsRepo = deps.statsRepo;
     this.rpc = deps.rpc;
     this.logger = deps.logger;
     this.onDemandNegativeCacheMaxEntries =
@@ -159,6 +169,14 @@ export class ValidatorService {
         keybaseUsername: null,
         iconUrl: null,
         infoUpdatedAt: null,
+        // Client classification is owned by a separate refresh path
+        // (Phase 2 cluster-nodes ingester); refreshFromRpc never
+        // overwrites it, so the in-memory snapshot uses neutral
+        // defaults that the API layer treats as "unmeasured" until
+        // the dedicated ingester has run.
+        clientKind: 'unknown',
+        clientVersion: null,
+        clientUpdatedAt: null,
       });
       stakeByVote.set(vote, stake);
     }
@@ -166,6 +184,58 @@ export class ValidatorService {
     this.lastRefresh = out;
     this.lastStakeByVote = stakeByVote;
     this.logger.info({ epoch, validators: out.length }, 'validator.service: refreshed from RPC');
+
+    // Vote-credit indexing — best-effort, never fails the refresh.
+    // `epochCredits` returns up to the last 5 epochs as
+    // `[epoch, credits, prevCredits][]` entries; we pick the one
+    // matching the current `epoch` argument so a delinquent validator
+    // (whose latest entry is older) is simply skipped rather than
+    // mis-attributed to the current epoch.
+    //
+    // De-dup by votePubkey: if RPC briefly reports a vote in BOTH
+    // `accounts.current` and `accounts.delinquent` (transient race
+    // around delinquency transitions), the same vote_pubkey would
+    // hit `upsertVoteCreditsBatch` twice in one statement and trigger
+    // Postgres' `ON CONFLICT DO UPDATE command cannot affect row a
+    // second time` error, aborting the entire batch.
+    if (this.statsRepo !== undefined) {
+      try {
+        const bySource = new Map<
+          VotePubkey,
+          {
+            votePubkey: VotePubkey;
+            identityPubkey: IdentityPubkey;
+            voteCredits: bigint;
+            prevEpochVoteCredits: bigint;
+          }
+        >();
+        for (const row of [...accounts.current, ...accounts.delinquent]) {
+          const match = row.epochCredits.find(([e]) => e === epoch);
+          if (match === undefined) continue;
+          const [, credits, prevCredits] = match;
+          if (!Number.isFinite(credits) || !Number.isFinite(prevCredits)) continue;
+          bySource.set(row.votePubkey, {
+            votePubkey: row.votePubkey,
+            identityPubkey: row.nodePubkey,
+            voteCredits: BigInt(Math.max(0, Math.floor(credits))),
+            prevEpochVoteCredits: BigInt(Math.max(0, Math.floor(prevCredits))),
+          });
+        }
+        const entries = [...bySource.values()];
+        if (entries.length > 0) {
+          await this.statsRepo.upsertVoteCreditsBatch(epoch, entries);
+          this.logger.debug(
+            { epoch, indexed: entries.length },
+            'validator.service: vote credits indexed',
+          );
+        }
+      } catch (err) {
+        // Vote-credit indexing is decorative — failure must not break
+        // the validator refresh, which downstream jobs depend on.
+        this.logger.warn({ err, epoch }, 'validator.service: vote credits index failed');
+      }
+    }
+
     return out;
   }
 

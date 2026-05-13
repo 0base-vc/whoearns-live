@@ -22,6 +22,7 @@ import type { ValidatorsRepository } from '../storage/repositories/validators.re
 import type { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
 import { setErrorHandler } from './error-handler.js';
 import { registerRequestId } from './request-id.js';
+import badgeRoutes from './routes/badge.route.js';
 import claimRoutes from './routes/claim.route.js';
 import epochsRoutes from './routes/epochs.route.js';
 import healthRoutes from './routes/health.route.js';
@@ -173,7 +174,21 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     // /metrics is no longer on this listener — see the
     // dedicated-port block at the end of buildServer for the
     // separate Fastify instance bound to METRICS_PORT.
-    allowList: (req) => req.url === '/healthz',
+    //
+    // Image surfaces (`/og/...`, `/og-default.png`, `/badge/*.svg`) are
+    // exempt because they are deliberately CDN-fronted and embedded in
+    // third-party HTML — a single viral page loading hundreds of badges
+    // hits the origin as the CDN edge (one IP) and would otherwise
+    // exhaust the per-IP budget. The in-memory LRU + single-flight
+    // de-dup is the throttle for the render path; render cost ceilings
+    // are bounded by the closed-epoch-only data model.
+    allowList: (req) => {
+      if (req.url === '/healthz') return true;
+      if (req.url === '/og-default.png') return true;
+      if (req.url.startsWith('/og/')) return true;
+      if (req.url.startsWith('/badge/') && req.url.endsWith('.svg')) return true;
+      return false;
+    },
   });
 
   registerRequestId(app);
@@ -276,6 +291,16 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       validatorsRepo: deps.repos.validators,
     });
     await scope.register(ogRoutes, {
+      config: deps.config,
+      validatorsRepo: deps.repos.validators,
+      statsRepo: deps.repos.stats,
+    });
+    // SVG badge endpoint. Validators embed `<img
+    // src="/badge/<vote>.svg">` on their own websites / READMEs to
+    // surface live performance flair. Same data-freshness model as OG
+    // (latest closed-epoch only) so the CDN-cached badge can't lie
+    // mid-epoch.
+    await scope.register(badgeRoutes, {
       config: deps.config,
       validatorsRepo: deps.repos.validators,
       statsRepo: deps.repos.stats,

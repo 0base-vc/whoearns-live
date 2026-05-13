@@ -439,6 +439,50 @@ Body validation:
 | 400  | `validation_error` | `votes` missing, empty, oversize, or contains bad entries. |
 | 503  | `not_ready`        | No epoch row yet.                                          |
 
+## `GET /v1/validators/:idOrVote/tier`
+
+Returns the validator's **Node Tier** (Phase 1 release: 2-signal composite
+over the most recent 5 closed epochs). See [`scoring.md`](./scoring.md)
+for the full formula.
+
+Response shape:
+
+```json
+{
+  "vote": "VOTE_PUBKEY",
+  "identity": "IDENTITY_PUBKEY",
+  "window": {
+    "epochs": 5,
+    "slotsAssigned": 432,
+    "slotsSkipped": 3,
+    "voteCredits": "3400000",
+    "maxCredits": "3456000",
+    "voteCreditsUpdatedAt": "2026-05-12T08:00:00.000Z"
+  },
+  "tier": "forge | anvil | hearth | kindling | unrated",
+  "composite": 96,
+  "components": {
+    "tvcRatio": 0.985,
+    "wilsonSkipRate": 0.012
+  }
+}
+```
+
+`tier === "unrated"` when the validator has fewer than 10 leader slots
+across the window OR no credit-bearing rows in the window — the
+confidence floor prevents tiny-sample validators from being mis-
+classified as Forge. **`composite === null` when tier is `unrated`**
+so a UI cannot accidentally display a half-shown score.
+
+`window.voteCreditsUpdatedAt` is the OLDEST credit-row freshness in
+the window; `null` when no credit-bearing rows exist. Clients can
+detect stalled vote-credit ingestion by comparing this timestamp to
+the current epoch's expected start.
+
+The endpoint draws from `epoch_validator_stats` only — no live RPC.
+Response cache: `Cache-Control: public, max-age=300, s-maxage=3600`
+(closed-epoch data only changes at epoch boundaries, ~2 days).
+
 ## Claim/profile endpoints
 
 Validator operators can prove ownership by signing a short message with the
@@ -473,6 +517,39 @@ Mutation bodies include:
 The signed payload binds the purpose (`claim` or `profile`), timestamp, nonce,
 pubkeys, and profile fields, so a profile signature cannot be replayed as a
 different operation.
+
+## Image surfaces
+
+These are public, unauthenticated, cacheable image endpoints designed to
+be embedded by third parties (operator websites, GitHub READMEs, social
+share previews). All three share a "latest closed epoch only" data model
+— they never show running-epoch numbers, so a CDN-cached asset cannot be
+caught lying when the epoch closes mid-cache.
+
+| Method | Path               | Returns | Purpose                                                           |
+| ------ | ------------------ | ------- | ----------------------------------------------------------------- |
+| GET    | `/og/default.png`  | PNG     | Static brand OG card (also at `/og-default.png` for back-compat). |
+| GET    | `/og/:vote.png`    | PNG     | 1200×630 per-validator OG card (vote OR identity pubkey).         |
+| GET    | `/badge/:vote.svg` | SVG     | 440×76 embeddable performance badge for operator websites.        |
+
+The SVG badge ships `<title>` + `<desc>` accessibility metadata containing
+the validator name + closed-epoch summary so screen readers and search
+engines can announce content the satori-rendered vector paths otherwise
+hide. Cache: `public, max-age=3600, s-maxage=86400` (1 h browser, 1 day
+CDN).
+
+Embedding example:
+
+```html
+<a href="https://whoearns.live/income/VOTE">
+  <img
+    src="https://whoearns.live/badge/VOTE.svg"
+    alt="WhoEarns live performance for VOTE"
+    width="440"
+    height="76"
+  />
+</a>
+```
 
 ## `POST /mcp`
 

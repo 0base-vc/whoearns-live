@@ -135,6 +135,11 @@ export async function startWorker(): Promise<void> {
   const validatorService = new ValidatorService({
     validatorsRepo,
     watchedDynamicRepo,
+    // Wired in worker only — drives the per-(epoch, vote) vote-credits
+    // index on every `refreshFromRpc` tick. The API entrypoint
+    // intentionally skips this dep because its on-demand validator
+    // lookups go through a different code path and must not write.
+    statsRepo,
     rpc,
     logger,
   });

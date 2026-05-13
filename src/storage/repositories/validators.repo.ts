@@ -13,11 +13,15 @@ interface ValidatorRow {
   keybase_username: string | null;
   icon_url: string | null;
   info_updated_at: Date | null;
+  client_kind: string;
+  client_version: string | null;
+  client_updated_at: Date | null;
 }
 
 /** Column list shared by every SELECT so new info columns stay in sync. */
 const VALIDATOR_COLS = `vote_pubkey, identity_pubkey, first_seen_epoch, last_seen_epoch,
-  updated_at, name, details, website, keybase_username, icon_url, info_updated_at`;
+  updated_at, name, details, website, keybase_username, icon_url, info_updated_at,
+  COALESCE(client_kind, 'unknown') AS client_kind, client_version, client_updated_at`;
 
 function rowToValidator(row: ValidatorRow): Validator {
   return {
@@ -32,6 +36,9 @@ function rowToValidator(row: ValidatorRow): Validator {
     keybaseUsername: row.keybase_username,
     iconUrl: row.icon_url,
     infoUpdatedAt: row.info_updated_at,
+    clientKind: row.client_kind,
+    clientVersion: row.client_version,
+    clientUpdatedAt: row.client_updated_at,
   };
 }
 
@@ -53,7 +60,16 @@ export class ValidatorsRepository {
   async upsert(
     v: Omit<
       Validator,
-      'updatedAt' | 'name' | 'details' | 'website' | 'keybaseUsername' | 'iconUrl' | 'infoUpdatedAt'
+      | 'updatedAt'
+      | 'name'
+      | 'details'
+      | 'website'
+      | 'keybaseUsername'
+      | 'iconUrl'
+      | 'infoUpdatedAt'
+      | 'clientKind'
+      | 'clientVersion'
+      | 'clientUpdatedAt'
     >,
   ): Promise<void> {
     await this.pool.query(

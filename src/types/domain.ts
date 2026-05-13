@@ -28,6 +28,17 @@ export interface Validator {
   keybaseUsername: string | null;
   iconUrl: string | null;
   infoUpdatedAt: Date | null;
+  /**
+   * Validator client implementation (Phase 2). Sourced from gossip
+   * `version` parsing in `getClusterNodes` and classified via
+   * `services/client-kind.ts`. Defaults to `'unknown'` until the
+   * cluster-nodes ingester has seen this identity. Stored as a
+   * string (not the `ClientKind` enum directly) so the DB can carry
+   * forward unrecognised future clients without a schema change.
+   */
+  clientKind: string;
+  clientVersion: string | null;
+  clientUpdatedAt: Date | null;
 }
 
 /**
@@ -123,6 +134,24 @@ export interface EpochValidatorStats {
    * out rows where it's null.
    */
   activatedStakeLamports: bigint | null;
+  /**
+   * Cumulative vote credits earned this epoch, sourced from
+   * `getVoteAccounts.epochCredits`. Once SIMD-0033 (Timely Vote
+   * Credits) is in effect, this is implicitly latency-weighted —
+   * a high `voteCredits / max_possible` ratio means votes landed
+   * within the 1-2 slot bonus window. Feeds the Effective Latency
+   * percentile and the Node Tier composite. Defaults to 0 for rows
+   * written before the vote-credits indexer started populating it.
+   */
+  voteCredits: bigint;
+  /**
+   * Snapshot of `voteCredits` from the most recent close — retained
+   * so the running-epoch delta can be reconstructed even if Solana
+   * resets the cumulative counter (it shouldn't, but `epochCredits`
+   * semantics carry a "previous epoch" entry that we record here).
+   */
+  prevEpochVoteCredits: bigint;
+  voteCreditsUpdatedAt: Date | null;
   slotsUpdatedAt: Date | null;
   slotWindowLastSlot: Slot | null;
   slotWindowUpdatedAt: Date | null;

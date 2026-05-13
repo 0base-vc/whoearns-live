@@ -22,11 +22,17 @@ import {
   serializeValidator,
   serializeValidatorPlaceholder,
 } from '../serializers/validator-response.js';
+import {
+  computeTier,
+  tierInputFromHistory,
+  WINDOW_CLOSED_EPOCHS,
+  WINDOW_FETCH_ROWS,
+} from '../../services/node-tier.js';
 
 export interface ValidatorsRoutesDeps {
   statsRepo: Pick<
     StatsRepository,
-    'findByVoteEpoch' | 'findManyByVotesCurrentEpoch' | 'findManyByVotesEpoch'
+    'findByVoteEpoch' | 'findManyByVotesCurrentEpoch' | 'findManyByVotesEpoch' | 'findHistoryByVote'
   >;
   validatorsRepo: Pick<
     ValidatorsRepository,
@@ -276,6 +282,116 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       });
     },
   );
+
+  /**
+   * GET /v1/validators/:idOrVote/tier
+   *
+   * Returns the validator's Node Tier (forge / anvil / hearth /
+   * kindling / unrated) derived from the most recent 5 CLOSED
+   * epochs — the running epoch is skipped because its slot/credit
+   * counters grow during the response cache window and would make
+   * a tier ride the running-epoch values.
+   *
+   * Two-signal P1 composite: 0.6 × TVC ratio + 0.4 × (1 − Wilson
+   * lower bound on skip rate). Full four-signal composite (with vote-
+   * latency p99 + congestion CU) is documented in `docs/scoring.md`
+   * and shipping in a later phase once the underlying signals are
+   * indexed.
+   *
+   * Confidence floor: returns `tier: "unrated"` when the validator
+   * has < 10 leader slots in the window, irrespective of the
+   * computed composite.
+   */
+  app.get('/v1/validators/:idOrVote/tier', async (request, reply): Promise<NodeTierResponse> => {
+    const params = unwrap(VoteOrIdentityParamSchema.safeParse(request.params), 'path parameters');
+    const validator = await findValidatorByVoteOrIdentity(validatorsRepo, params.idOrVote);
+    if (validator === null) {
+      throw new NotFoundError('validator', params.idOrVote);
+    }
+    // Identify closed rows explicitly rather than assuming `history[0]`
+    // is the running epoch. A validator outside the current leader
+    // schedule may have its newest history row pointing at a CLOSED
+    // epoch, in which case the previous "skip row 0" rule silently
+    // discarded a legitimate closed-epoch row from the window.
+    const [history, currentEpoch] = await Promise.all([
+      statsRepo.findHistoryByVote(validator.votePubkey, WINDOW_FETCH_ROWS),
+      epochsRepo.findCurrent(),
+    ]);
+    const closedRows =
+      currentEpoch !== null
+        ? history.filter((r) => r.epoch < currentEpoch.epoch).slice(0, WINDOW_CLOSED_EPOCHS)
+        : history.slice(0, WINDOW_CLOSED_EPOCHS);
+    const input = tierInputFromHistory(validator.votePubkey, closedRows);
+    const result = computeTier(input);
+    // Surface the staleness of the oldest credit timestamp so a UI
+    // can grey out the tier when ingestion has stalled. `null` when
+    // the window has no credit-bearing rows.
+    const voteCreditsUpdatedAt = closedRows
+      .map((r) => r.voteCreditsUpdatedAt)
+      .filter((d): d is Date => d !== null)
+      .reduce<Date | null>((oldest, cur) => (oldest === null || cur < oldest ? cur : oldest), null);
+
+    void reply.header(
+      'cache-control',
+      `public, max-age=${TIER_CACHE_MAX_AGE_SEC}, s-maxage=${TIER_CACHE_S_MAXAGE_SEC}`,
+    );
+    return {
+      vote: validator.votePubkey,
+      identity: validator.identityPubkey,
+      window: {
+        epochs: closedRows.length,
+        slotsAssigned: input.slotsAssigned,
+        slotsSkipped: input.slotsSkipped,
+        voteCredits: input.voteCredits.toString(),
+        maxCredits: input.maxCredits.toString(),
+        voteCreditsUpdatedAt: voteCreditsUpdatedAt?.toISOString() ?? null,
+      },
+      tier: result.tier,
+      composite: result.composite,
+      components: {
+        tvcRatio: result.components.tvcRatio,
+        wilsonSkipRate: result.components.wilsonSkipRate,
+      },
+    };
+  });
 };
+
+// 5-minute browser cache, 1-hour CDN cache. Closed-epoch data updates
+// only on epoch boundaries (~2 days), so even the 1 h CDN cache is
+// conservative. Sized to absorb a viral share without N×validator
+// DB hits per visitor.
+const TIER_CACHE_MAX_AGE_SEC = 300;
+const TIER_CACHE_S_MAXAGE_SEC = 3600;
+
+interface NodeTierResponse {
+  vote: string;
+  identity: string;
+  window: {
+    epochs: number;
+    slotsAssigned: number;
+    slotsSkipped: number;
+    voteCredits: string;
+    maxCredits: string;
+    /**
+     * ISO-8601 timestamp of the OLDEST credit-row update in the
+     * window. `null` when no credit-bearing rows are present (e.g.
+     * the vote-credit indexer hasn't run yet for any closed epoch).
+     * Lets UI detect ingestion staleness without polling a separate
+     * health surface.
+     */
+    voteCreditsUpdatedAt: string | null;
+  };
+  tier: 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
+  /**
+   * 0-100 composite. **`null` when `tier === 'unrated'`** so a UI
+   * cannot accidentally display "composite: 87" alongside an
+   * unrated classification.
+   */
+  composite: number | null;
+  components: {
+    tvcRatio: number;
+    wilsonSkipRate: number;
+  };
+}
 
 export default validatorsRoutes;

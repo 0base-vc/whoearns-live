@@ -1,13 +1,14 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { Resvg } from '@resvg/resvg-js';
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import satori from 'satori';
 import type { AppConfig } from '../../core/config.js';
+import { NotFoundError, ValidationError } from '../../core/errors.js';
 import type { IdentityPubkey, VotePubkey } from '../../types/domain.js';
 import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
+import { imageRenderTotal } from '../metrics.js';
+import { _resetFontCacheForTesting, loadInterFontOnce } from '../satori-font.js';
+import { BRAND_TOKENS, createImageLruCache, shortenPubkey } from '../satori-render.js';
 
 export interface OgRoutesDeps {
   config: AppConfig;
@@ -21,108 +22,7 @@ const OG_HEIGHT = 630;
 // LRU cache. Key = vote pubkey (or '__default__' for og-default).
 // Each entry ~50KB; 500 entries ≈ 25MB ceiling. Plenty of headroom
 // inside the 3Gi pod limit.
-const LRU_MAX = 500;
-const LRU_TTL_MS = 60 * 60 * 1000; // 1 hour
-
-interface CacheEntry {
-  buf: Buffer;
-  ts: number;
-}
-const cache = new Map<string, CacheEntry>();
-
-function cacheGet(key: string): Buffer | null {
-  const hit = cache.get(key);
-  if (!hit) return null;
-  if (Date.now() - hit.ts > LRU_TTL_MS) {
-    cache.delete(key);
-    return null;
-  }
-  // LRU re-insertion: delete + set bumps the entry to the most-recent
-  // position in Map's insertion-order iteration, which we use as our
-  // eviction order in `cacheSet`.
-  cache.delete(key);
-  cache.set(key, hit);
-  return hit.buf;
-}
-
-function cacheSet(key: string, buf: Buffer): void {
-  if (cache.size >= LRU_MAX) {
-    // Evict oldest insertion; Map iterates in insertion order so the
-    // first key from `keys()` is the LRU.
-    const oldest = cache.keys().next().value;
-    if (oldest !== undefined) cache.delete(oldest);
-  }
-  cache.set(key, { buf, ts: Date.now() });
-}
-
-/**
- * Resolve the bundled Inter font file. We use `inter-latin-700-normal.woff`
- * because it's a Latin-only subset (~30KB) — Cyrillic / extended Latin
- * subsets each ship as separate files. Validator names rarely use non-
- * Latin characters; the few exceptions (CJK monikers) will fall back to
- * pubkey-only rendering, which is acceptable.
- */
-function resolveFontPath(): string | null {
-  const thisDir = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    // dev: src/api/routes/og.route.ts → repo root → node_modules
-    resolve(
-      thisDir,
-      '..',
-      '..',
-      '..',
-      'node_modules',
-      '@fontsource',
-      'inter',
-      'files',
-      'inter-latin-700-normal.woff',
-    ),
-    // compiled: dist/api/routes/og.route.js → repo root → node_modules
-    resolve(
-      thisDir,
-      '..',
-      '..',
-      '..',
-      'node_modules',
-      '@fontsource',
-      'inter',
-      'files',
-      'inter-latin-700-normal.woff',
-    ),
-    // Docker: CWD = /app, node_modules at /app/node_modules
-    resolve(
-      process.cwd(),
-      'node_modules',
-      '@fontsource',
-      'inter',
-      'files',
-      'inter-latin-700-normal.woff',
-    ),
-  ];
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
-  return null;
-}
-
-let cachedFontBuffer: ArrayBuffer | null = null;
-function loadFontOnce(): ArrayBuffer | null {
-  if (cachedFontBuffer !== null) return cachedFontBuffer;
-  const path = resolveFontPath();
-  if (path === null) return null;
-  const data = readFileSync(path);
-  // Convert Buffer → ArrayBuffer (satori expects ArrayBuffer or Buffer;
-  // explicit ArrayBuffer is the safest cross-version choice).
-  const arr = new ArrayBuffer(data.byteLength);
-  new Uint8Array(arr).set(data);
-  cachedFontBuffer = arr;
-  return arr;
-}
-
-function shortenPubkey(pubkey: string, head = 6, tail = 4): string {
-  if (pubkey.length <= head + tail + 1) return pubkey;
-  return `${pubkey.slice(0, head)}…${pubkey.slice(-tail)}`;
-}
+const cache = createImageLruCache<Buffer>(500, 60 * 60 * 1000);
 
 /**
  * Build the satori "JSX-as-object" tree for one OG image. Two slots:
@@ -143,12 +43,8 @@ interface OgContent {
   badge?: string;
 }
 
-// Brand violet matches the UI's `--color-brand-500` token. Keep this in
-// sync with `ui/src/app.css` if the brand colour ever changes.
-const COLOR_BRAND = '#7C3AED';
-const COLOR_BG_DARK = '#1A1033';
-const COLOR_TEXT_PRIMARY = '#FFFFFF';
-const COLOR_TEXT_MUTED = '#C4B5FD';
+const { brand: COLOR_BRAND, bgDark: COLOR_BG_DARK } = BRAND_TOKENS;
+const { textPrimary: COLOR_TEXT_PRIMARY, textMuted: COLOR_TEXT_MUTED } = BRAND_TOKENS;
 
 function buildTree(content: OgContent): unknown {
   const children = [
@@ -347,26 +243,53 @@ function describeValidatorForOg(args: {
  * brand can re-skin by changing constants in this file rather than
  * regenerating 2000 PNGs.
  */
+// Single-flight: collapse concurrent cache-miss renders for the same
+// key to one satori+resvg pipeline call.
+const inFlight = new Map<string, Promise<Buffer | null>>();
+
 const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
   app: FastifyInstance,
   opts: OgRoutesDeps,
 ) => {
   const renderOrFail = async (key: string, content: OgContent): Promise<Buffer | null> => {
-    const cached = cacheGet(key);
-    if (cached !== null) return cached;
-    const font = loadFontOnce();
-    if (font === null) {
-      app.log.warn('og: Inter font not found in node_modules; OG images disabled');
-      return null;
+    const cached = cache.get(key);
+    if (cached !== null) {
+      imageRenderTotal.inc({ surface: 'og', outcome: 'cache_hit' });
+      return cached;
     }
+    const pending = inFlight.get(key);
+    if (pending !== undefined) return pending;
+    const promise = (async (): Promise<Buffer | null> => {
+      const font = loadInterFontOnce();
+      if (font === null) {
+        app.log.warn('og: Inter font not found in node_modules; OG images disabled');
+        imageRenderTotal.inc({ surface: 'og', outcome: 'font_missing' });
+        return null;
+      }
+      try {
+        const buf = await renderPng(content, font);
+        cache.set(key, buf);
+        imageRenderTotal.inc({ surface: 'og', outcome: 'rendered' });
+        return buf;
+      } catch (err) {
+        app.log.error({ err, key }, 'og: render failed');
+        imageRenderTotal.inc({ surface: 'og', outcome: 'render_error' });
+        return null;
+      }
+    })();
+    inFlight.set(key, promise);
     try {
-      const buf = await renderPng(content, font);
-      cacheSet(key, buf);
-      return buf;
-    } catch (err) {
-      app.log.error({ err, key }, 'og: render failed');
-      return null;
+      return await promise;
+    } finally {
+      inFlight.delete(key);
     }
+  };
+
+  const sendPng = (reply: FastifyReply, buf: Buffer): FastifyReply => {
+    return reply
+      .type('image/png')
+      .header('cache-control', 'public, max-age=3600, s-maxage=86400')
+      .send(buf);
   };
 
   // Default OG image — the static one referenced by the layout's
@@ -374,6 +297,13 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
   // `/og-default.png` (root path, dash) and we want the directory
   // form `/og/default.png` for consistency with per-validator paths.
   const handleDefault = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (request.method === 'HEAD') {
+      return reply
+        .code(200)
+        .type('image/png')
+        .header('cache-control', 'public, max-age=3600, s-maxage=86400')
+        .send('');
+    }
     const buf = await renderOrFail('__default__', {
       wordmark: opts.config.SITE_NAME,
       title: opts.config.SITE_NAME,
@@ -388,10 +318,7 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
         },
       });
     }
-    return reply
-      .type('image/png')
-      .header('cache-control', 'public, max-age=3600, s-maxage=86400')
-      .send(buf);
+    return sendPng(reply, buf);
   };
 
   app.get('/og/default.png', handleDefault);
@@ -403,9 +330,12 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
     // wildcard matcher includes the extension.
     const param = rawParam.endsWith('.png') ? rawParam.slice(0, -4) : rawParam;
     if (param.length === 0) {
-      return reply.code(400).send({
-        error: { code: 'validation_error', message: 'vote required', requestId: request.id },
-      });
+      throw new ValidationError('vote required');
+    }
+    // Pubkey shape guard — same as the badge route. Rejects path-
+    // traversal probes early without touching the DB.
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(param)) {
+      throw new ValidationError('invalid pubkey format');
     }
 
     // Try vote first, then identity — same dual-lookup as the income page.
@@ -414,23 +344,16 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
       validator = await opts.validatorsRepo.findByIdentity(param as IdentityPubkey);
     }
     if (validator === null) {
-      return reply.code(404).send({
-        error: {
-          code: 'not_found',
-          message: `validator not found: ${param}`,
-          requestId: request.id,
-        },
-      });
+      throw new NotFoundError('validator', param);
     }
 
-    // Pick the most recent row that actually has data — skip the
-    // running epoch (its numbers grow during the cache lifetime, so
-    // a cached image taken mid-epoch would lie). We approximate
-    // "running epoch" as "newest row" and prefer the one immediately
-    // before it; if there's only one row, use it as-is. The image is
-    // best-effort decoration so even an off-by-one epoch is fine.
+    // Closed-epoch-only rule: use the SECOND-newest history row to
+    // skip the running epoch. If only one row exists, fall through
+    // to a name-only card rather than capture a snapshot that will
+    // change during the 1 h cache window (would lie for up to 25 h
+    // with the 1-day CDN cache).
     const history = await opts.statsRepo.findHistoryByVote(validator.votePubkey, 5);
-    const latestRow = history.length > 1 ? history[1] : history[0];
+    const latestRow = history.length > 1 ? history[1] : null;
 
     let totalIncomeSol: string | null = null;
     if (latestRow) {
@@ -454,6 +377,14 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
       skipRate,
     });
 
+    if (request.method === 'HEAD') {
+      return reply
+        .code(200)
+        .type('image/png')
+        .header('cache-control', 'public, max-age=3600, s-maxage=86400')
+        .send('');
+    }
+
     const buf = await renderOrFail(validator.votePubkey, content);
     if (buf === null) {
       return reply.code(503).send({
@@ -464,10 +395,7 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
         },
       });
     }
-    return reply
-      .type('image/png')
-      .header('cache-control', 'public, max-age=3600, s-maxage=86400')
-      .send(buf);
+    return sendPng(reply, buf);
   });
 };
 
@@ -476,5 +404,5 @@ export default ogRoutes;
 /** Test-only hook to clear the LRU between test cases. */
 export function _resetOgCacheForTesting(): void {
   cache.clear();
-  cachedFontBuffer = null;
+  _resetFontCacheForTesting();
 }

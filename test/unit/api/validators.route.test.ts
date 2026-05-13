@@ -623,3 +623,69 @@ describe('POST /v1/validators/current-epoch/batch', () => {
     await ctx.app.close();
   });
 });
+
+describe('GET /v1/validators/:idOrVote/tier', () => {
+  let ctx: Ctx;
+  beforeEach(async () => {
+    ctx = await makeCtx();
+  });
+
+  it('returns unrated when the validator has no history', async () => {
+    await seedValidator(ctx, VOTE_1, IDENTITY_1);
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      tier: string;
+      window: { epochs: number };
+    };
+    expect(body.tier).toBe('unrated');
+    expect(body.window.epochs).toBe(0);
+  });
+
+  it('classifies a strong validator with enough closed-epoch history', async () => {
+    await seedValidator(ctx, VOTE_1, IDENTITY_1, 505);
+    // Seed 6 epochs. The tier endpoint resolves the running epoch
+    // from `epochsRepo.findCurrent()` and excludes any row whose
+    // `epoch >= current.epoch`. The test FakeEpochsRepo defaults to
+    // a current epoch of 500, so all 6 rows are treated as closed
+    // and the window picks the 5 oldest.
+    for (let e = 500; e <= 505; e++) {
+      ctx.stats.rows.set(
+        `${e}:${VOTE_1}`,
+        makeStats(e, VOTE_1, IDENTITY_1, {
+          slotsAssigned: 100,
+          slotsProduced: 100,
+          slotsSkipped: 0,
+          voteCredits: 800n, // 100 slots × 8 = max
+          voteCreditsUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
+        }),
+      );
+    }
+    // Bump the current epoch above the seeded window so all 6
+    // seeded rows count as CLOSED, and the route picks 5 for the
+    // window.
+    await ctx.epochs.upsert({
+      epoch: 600,
+      firstSlot: 0,
+      lastSlot: 100,
+      slotCount: 100,
+      isClosed: false,
+    });
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      tier: string;
+      composite: number;
+      window: { epochs: number; slotsAssigned: number };
+    };
+    expect(body.tier).toBe('forge');
+    expect(body.window.epochs).toBe(5);
+    expect(body.window.slotsAssigned).toBe(500);
+    expect(body.composite).toBeGreaterThanOrEqual(95);
+  });
+
+  it('returns 404 for unknown validators', async () => {
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_2}/tier` });
+    expect(res.statusCode).toBe(404);
+  });
+});

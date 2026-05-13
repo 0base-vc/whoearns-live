@@ -128,6 +128,21 @@ export const httpRequestDurationSeconds = new Histogram({
 });
 
 /**
+ * `image_render_total` — outcome of satori-rendered image requests
+ * (OG and badge). Separates cache hits from misses (operational
+ * signal — render CPU is the dominant cost in this code path) and
+ * splits the miss path into rendered / font-missing / render-error
+ * so a satori upgrade regression is distinguishable from an env
+ * misconfiguration. Cardinality: 2 surfaces × 4 outcomes = 8 series.
+ */
+export const imageRenderTotal = new Counter({
+  name: 'image_render_total',
+  help: 'Outcome of satori-rendered image requests (OG + badge).',
+  labelNames: ['surface', 'outcome'] as const,
+  registers: [registry],
+});
+
+/**
  * Map a Fastify request to a low-cardinality "route" label. Falls
  * back to the raw URL pathname when no route matched (404 / SPA
  * fallback) — these get bucketed under `__notfound__` to keep the

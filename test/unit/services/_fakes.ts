@@ -41,7 +41,16 @@ export class FakeValidatorsRepo {
   async upsert(
     v: Omit<
       Validator,
-      'updatedAt' | 'name' | 'details' | 'website' | 'keybaseUsername' | 'iconUrl' | 'infoUpdatedAt'
+      | 'updatedAt'
+      | 'name'
+      | 'details'
+      | 'website'
+      | 'keybaseUsername'
+      | 'iconUrl'
+      | 'infoUpdatedAt'
+      | 'clientKind'
+      | 'clientVersion'
+      | 'clientUpdatedAt'
     >,
   ): Promise<void> {
     const existing = this.rows.get(v.votePubkey);
@@ -62,6 +71,9 @@ export class FakeValidatorsRepo {
       keybaseUsername: existing?.keybaseUsername ?? null,
       iconUrl: existing?.iconUrl ?? null,
       infoUpdatedAt: existing?.infoUpdatedAt ?? null,
+      clientKind: existing?.clientKind ?? 'unknown',
+      clientVersion: existing?.clientVersion ?? null,
+      clientUpdatedAt: existing?.clientUpdatedAt ?? null,
     });
   }
 
@@ -369,6 +381,9 @@ export class FakeStatsRepo {
       medianTipLamports: prev?.medianTipLamports ?? null,
       medianTotalLamports: prev?.medianTotalLamports ?? null,
       activatedStakeLamports: nextStake,
+      voteCredits: prev?.voteCredits ?? 0n,
+      prevEpochVoteCredits: prev?.prevEpochVoteCredits ?? 0n,
+      voteCreditsUpdatedAt: prev?.voteCreditsUpdatedAt ?? null,
       slotsUpdatedAt: new Date(),
       slotWindowLastSlot: args.slotWindowLastSlot ?? prev?.slotWindowLastSlot ?? null,
       slotWindowUpdatedAt:
@@ -427,6 +442,9 @@ export class FakeStatsRepo {
         medianTipLamports: null,
         medianTotalLamports: null,
         activatedStakeLamports: row.activatedStakeLamports ?? null,
+        voteCredits: 0n,
+        prevEpochVoteCredits: 0n,
+        voteCreditsUpdatedAt: null,
         slotsUpdatedAt: new Date(),
         slotWindowLastSlot: row.slotWindowLastSlot ?? null,
         slotWindowUpdatedAt: row.slotWindowLastSlot === undefined ? null : new Date(),
@@ -1403,6 +1421,9 @@ export function makeStats(
     medianTipLamports: null,
     medianTotalLamports: null,
     activatedStakeLamports: null,
+    voteCredits: 0n,
+    prevEpochVoteCredits: 0n,
+    voteCreditsUpdatedAt: null,
     slotsUpdatedAt: null,
     slotWindowLastSlot: null,
     slotWindowUpdatedAt: null,

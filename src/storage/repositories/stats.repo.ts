@@ -31,6 +31,10 @@ interface StatsRow {
   median_tip_lamports: string | null;
   median_total_lamports: string | null;
   activated_stake_lamports: string | null;
+  /** Cumulative vote credits this epoch. NOT NULL DEFAULT 0 since 0021. */
+  vote_credits: string;
+  prev_epoch_vote_credits: string;
+  vote_credits_updated_at: Date | null;
   slots_updated_at: Date | null;
   slot_window_last_slot: string | null;
   slot_window_updated_at: Date | null;
@@ -78,6 +82,9 @@ function rowToStats(row: StatsRow): EpochValidatorStats {
       row.median_total_lamports === null ? null : toLamports(row.median_total_lamports),
     activatedStakeLamports:
       row.activated_stake_lamports === null ? null : toLamports(row.activated_stake_lamports),
+    voteCredits: toLamports(row.vote_credits ?? '0'),
+    prevEpochVoteCredits: toLamports(row.prev_epoch_vote_credits ?? '0'),
+    voteCreditsUpdatedAt: row.vote_credits_updated_at,
     slotsUpdatedAt: row.slots_updated_at,
     slotWindowLastSlot:
       row.slot_window_last_slot === null ? null : Number(row.slot_window_last_slot),
@@ -179,6 +186,9 @@ const STATS_COLS = `epoch, vote_pubkey, identity_pubkey,
   COALESCE(block_tips_total_lamports, 0) AS block_tips_total_lamports,
   median_tip_lamports, median_total_lamports,
   activated_stake_lamports,
+  COALESCE(vote_credits, 0) AS vote_credits,
+  COALESCE(prev_epoch_vote_credits, 0) AS prev_epoch_vote_credits,
+  vote_credits_updated_at,
   slots_updated_at, slot_window_last_slot, slot_window_updated_at,
   fees_updated_at, median_fee_updated_at,
   median_base_fee_updated_at, median_priority_fee_updated_at,
@@ -519,6 +529,56 @@ export class StatsRepository {
         args.tipDeltaLamports.toString(),
       ],
     );
+  }
+
+  /**
+   * Batch-write vote credits + previous-epoch credits into the
+   * `(epoch, vote)` rows. Source is `getVoteAccounts.epochCredits`
+   * which returns up to 5 epochs of cumulative credits per validator.
+   *
+   * Uses `INSERT … ON CONFLICT` so a vote without a slot row yet
+   * (validator has stake but no leader slots in the epoch) still
+   * gets credits recorded — the rest of the columns stay at their
+   * NOT NULL DEFAULT 0 / NULL values until the slot or fee ingesters
+   * fill them. `last_seen_epoch` on the parent validator row is
+   * touched separately by `validatorsRepo.upsert`.
+   *
+   * Single-statement batch via `unnest()` so a 2000-validator batch
+   * is one round-trip.
+   */
+  async upsertVoteCreditsBatch(
+    epoch: Epoch,
+    entries: ReadonlyArray<{
+      votePubkey: VotePubkey;
+      identityPubkey: IdentityPubkey;
+      voteCredits: bigint;
+      prevEpochVoteCredits: bigint;
+    }>,
+  ): Promise<number> {
+    if (entries.length === 0) return 0;
+    const votes = entries.map((e) => e.votePubkey);
+    const identities = entries.map((e) => e.identityPubkey);
+    const credits = entries.map((e) => e.voteCredits.toString());
+    const prevCredits = entries.map((e) => e.prevEpochVoteCredits.toString());
+
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO epoch_validator_stats
+         (epoch, vote_pubkey, identity_pubkey,
+          slots_assigned, slots_produced, slots_skipped,
+          vote_credits, prev_epoch_vote_credits, vote_credits_updated_at)
+       SELECT $1::bigint,
+              v.vote_pubkey, v.identity_pubkey,
+              0, 0, 0,
+              v.vote_credits::numeric, v.prev_epoch_vote_credits::numeric, NOW()
+         FROM UNNEST($2::text[], $3::text[], $4::text[], $5::text[])
+              AS v(vote_pubkey, identity_pubkey, vote_credits, prev_epoch_vote_credits)
+       ON CONFLICT (epoch, vote_pubkey) DO UPDATE
+            SET vote_credits = EXCLUDED.vote_credits,
+                prev_epoch_vote_credits = EXCLUDED.prev_epoch_vote_credits,
+                vote_credits_updated_at = NOW()`,
+      [epoch, votes, identities, credits, prevCredits],
+    );
+    return rowCount ?? 0;
   }
 
   /**

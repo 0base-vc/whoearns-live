@@ -325,6 +325,38 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /v1/validators/{idOrVote}/tier:
+    get:
+      summary: Node Tier (Phase 1 — 2-signal composite)
+      description: |
+        Returns the validator's Node Tier (Forge / Anvil / Hearth /
+        Kindling / Unrated) derived from the most recent 5 closed
+        epochs. See `docs/scoring.md` for the public formula.
+
+        `composite` is `null` when `tier === "unrated"` — no
+        half-shown scores. `voteCreditsUpdatedAt` surfaces the oldest
+        credit-row freshness in the window so clients can detect
+        ingestion staleness.
+      parameters:
+        - $ref: '#/components/parameters/IdOrVotePath'
+      responses:
+        '200':
+          description: Node Tier and component breakdown.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeTier'
+        '400':
+          description: Invalid pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Validator not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /v1/validators/current-epoch/batch:
     post:
       summary: Bulk lookup for the current epoch
@@ -439,6 +471,98 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /og/default.png:
+    get:
+      summary: Default OG (Open Graph) card
+      description: |
+        Brand-only fallback rendered when no validator context exists.
+        Returns a 1200×630 PNG cached for 1 hour client-side / 1 day
+        on the CDN. Also reachable at `/og-default.png` for back-compat.
+      responses:
+        '200':
+          description: PNG image.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        '503':
+          description: Renderer unavailable (font assets missing).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /og/{vote}.png:
+    get:
+      summary: Per-validator OG image
+      description: |
+        1200×630 PNG with the validator's latest **closed** epoch
+        income + skip rate. Cache-Control: `public, max-age=3600,
+        s-maxage=86400`. The `:vote` path parameter accepts vote OR
+        identity pubkeys (same dual lookup as the income page).
+        Surfaces only closed-epoch numbers so a CDN-cached image
+        never lies mid-epoch.
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
+      responses:
+        '200':
+          description: PNG image.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        '400':
+          description: Invalid vote pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Validator not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Renderer unavailable (font assets missing).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /badge/{vote}.svg:
+    get:
+      summary: Embeddable SVG performance badge
+      description: |
+        Compact 440×76 vector badge with the validator's latest closed
+        epoch summary (name, income, skip rate, epoch number). Designed
+        for embedding on operator websites + GitHub READMEs:
+
+            <img src="https://whoearns.live/badge/VOTE.svg"
+                 alt="WhoEarns badge for VOTE"
+                 width="440" height="76" />
+
+        Ships `<title>` + `<desc>` accessibility metadata since satori
+        rasterises text glyphs to vector paths. Same closed-epoch-only
+        data model as `/og/{vote}.png`.
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
+      responses:
+        '200':
+          description: SVG image.
+          content:
+            image/svg+xml:
+              schema: { type: string, format: binary }
+        '400':
+          description: Invalid vote pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Validator not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Renderer unavailable (font assets missing).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /mcp:
     get:
       summary: MCP streaming verb disabled
@@ -480,6 +604,48 @@ components:
         pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
 
   schemas:
+    NodeTier:
+      type: object
+      required: [vote, identity, window, tier, composite, components]
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+        window:
+          type: object
+          required:
+            [epochs, slotsAssigned, slotsSkipped, voteCredits, maxCredits, voteCreditsUpdatedAt]
+          properties:
+            epochs: { type: integer, minimum: 0 }
+            slotsAssigned: { type: integer, minimum: 0 }
+            slotsSkipped: { type: integer, minimum: 0 }
+            voteCredits:
+              { type: string, description: 'NUMERIC(30,0) decimal string. Treat as bigint.' }
+            maxCredits:
+              {
+                type: string,
+                description: 'Per-validator ceiling = slotsAssigned × 8 (SIMD-0033 max credit per timely vote). May saturate the ratio at 1.0.',
+              }
+            voteCreditsUpdatedAt:
+              type: string
+              format: date-time
+              nullable: true
+              description: 'Oldest credit-row update timestamp in the window; null when no credit-bearing rows present.'
+        tier:
+          type: string
+          enum: [forge, anvil, hearth, kindling, unrated]
+        composite:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+          description: 'null when tier === "unrated" — no half-shown scores.'
+        components:
+          type: object
+          required: [tvcRatio, wilsonSkipRate]
+          properties:
+            tvcRatio: { type: number, minimum: 0, maximum: 1 }
+            wilsonSkipRate: { type: number, minimum: 0, maximum: 1 }
+
     Error:
       type: object
       required: [error]

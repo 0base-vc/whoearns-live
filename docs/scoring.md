@@ -1,0 +1,250 @@
+# Scoring
+
+This document is the public specification for every score, tier, and
+badge WhoEarns surfaces on a validator profile. It exists because _a
+score whose formula is hidden cannot be trusted as a delegation signal_
+— anyone who delegates stake based on a ranking should be able to
+verify the math.
+
+The implementation lives in this repository under the MIT license. If
+the docs here disagree with the code, **the code is the source of
+truth and the docs need a PR**.
+
+> **Status snapshot.** WhoEarns currently ships block-fee/tip income
+> totals, skip rate, on-chain median fee benchmarks, the `performance`
+> sort, OG image cards, the public `/badge/:vote.svg` SVG badge, and
+> the **two-signal Node Tier** at `/v1/validators/:idOrVote/tier`
+> (Phase 1 partial release — TVC ratio + Wilson skip lower-bound;
+> the remaining two signals are planned). Phase 2+ formulas are
+> roadmap, not running scoring axes — don't cite them until the
+> matching phase ships.
+
+## Design principles
+
+1. **Outcome over claim.** Every signal that can be derived from
+   on-chain or network-observable data is preferred over operator
+   self-declaration. Self-declaration channels are restricted to facts
+   the chain cannot reveal (GitHub identity, day-to-day wallet) and
+   are always cryptographically anchored.
+2. **Behavior reveals hardware.** We do not ask operators what their
+   hardware is. Vote-latency tail, congestion-conditioned CU/slot,
+   skip rate with a confidence floor, and timely vote credits jointly
+   make low-quality hardware impossible to disguise as high-quality
+   over a multi-epoch window.
+3. **No single global leaderboard.** Total earnings are stake-weighted
+   by definition — a single global ranking would mean the largest
+   operators win every time and small-validator engagement dies.
+   Bracketed and categorised rankings (small-validator, client-specific,
+   regional, commission-stability) sit alongside the stake-neutral
+   `performance` ranking.
+4. **Commission cuts are not a competition.** WhoEarns does not feature
+   "lowest commission" as a top-line ranking. Commission _stability_
+   (low variance over a long window) is a legitimate signal; cutting
+   commission to win a race directly damages the operator economics
+   the protocol relies on.
+5. **Per-component breakdown is mandatory.** Any composite score is
+   rendered next to its sub-scores. A score of 84 must always show what
+   it is composed of, so a reviewer can spot when one component is
+   carrying the rest.
+6. **Latest closed epoch only on cached artifacts.** OG images and SVG
+   badges show closed-epoch numbers, never running-epoch numbers, so
+   a CDN-cached asset can't be caught lying when the epoch closes
+   mid-cache.
+
+## Implemented (live today)
+
+### Performance (the `performance` leaderboard sort)
+
+```
+performance = (block_fees_total + block_tips_total) / slots_assigned
+```
+
+Stake-neutral by construction: numerator and denominator both scale
+linearly with stake, so two equally-skilled validators at different
+sizes rank identically. Commission-neutral because block fees and tips
+go directly to the operator identity, not through validator commission.
+
+### Skip rate
+
+```
+skip_rate = slots_skipped / slots_assigned
+```
+
+Reported as-is on the profile. Used as an input to the future Node
+Tier composite (Phase 1) with a Wilson 95% lower-bound to prevent
+small-sample "perfect skip rate" inflation.
+
+### Median fee / tip / total
+
+Per-validator medians across blocks within an epoch. Used to compare a
+validator's per-block packing skill against the cluster's
+top-N-by-stake sample. Currently surfaced on validator detail pages
+and through `/v1/validators/:id/current-epoch`.
+
+## Planned (not yet shipping)
+
+> _The formulas below describe future scoring. Do not cite them in
+> delegation decisions until the matching phase ships. Each subsection
+> is gated by an explicit phase status._
+
+### Phase 1 — Effective Latency + Node Tier
+
+**Status: partial release — 2 of 4 signals live.**
+
+#### What's actually computed today (live now)
+
+`GET /v1/validators/:idOrVote/tier` ships a **two-signal composite**
+over the most recent 5 closed epochs:
+
+```
+composite = 0.60 × tvcRatio + 0.40 × (1 − wilsonSkipRate)
+tier      = forge  if composite ≥ 95
+            anvil  if composite ≥ 80
+            hearth if composite ≥ 40
+            kindling otherwise
+unrated   = slotsAssigned < 10 OR maxCredits < 1 OR all rows unmeasured
+```
+
+Where:
+
+- `tvcRatio` = `voteCredits / (slotsAssigned × 8)`, clamped to [0, 1].
+  Rows with `voteCreditsUpdatedAt = NULL` (vote-credit indexer hasn't
+  written this row yet) contribute slots **only** to the reliability
+  signal — neither voteCredits nor maxCredits — so ingestion lag
+  cannot inflate the apparent ratio.
+- `wilsonSkipRate` = 95% Wilson lower bound of `slotsSkipped /
+slotsAssigned`. z = 1.959963984540054 (qnorm(0.975)). A tiny
+  sample with 0 skips does NOT register as 100% reliable — it
+  registers as the bound permits, then the leader-slot floor of 10
+  forces an `unrated` tier when the sample is too small to classify.
+- `composite` is `null` when `tier === 'unrated'` (no half-shown
+  scores).
+
+The window response also surfaces `voteCreditsUpdatedAt` (oldest
+credit timestamp in the window) so clients can tell when ingestion
+has stalled.
+
+#### Planned to add next (NOT live yet)
+
+Once vote-tx parsing and congestion-conditioned CU/slot indexing
+ship, the composite expands to the full four-signal formula:
+
+- **Effective Latency percentile.** `median(landed_slot − voted_slot)`
+  per validator per epoch, then ranked as a percentile against the
+  eligible cohort. This is the outcome DoubleZero is engineered to
+  improve and is deliberately provider-agnostic — a non-DZ validator
+  with great peering scores as well as a DZ member.
+- **Node Tier (final four-signal formula)** — replaces the live
+  two-signal composite once the missing signals land:
+  - 40% Timely-Vote-Credits ratio
+  - 25% Vote-latency p99
+  - 20% CU per leader slot conditioned on congestion
+  - 15% Wilson-lower-bound skip rate
+    10-epoch recency-weighted window (the live release uses a flat 5-
+    closed-epoch window — extending to recency-weighted 10 ships with
+    the new signals so all four are exercised on the same axis).
+
+### Phase 2 — Tenure, Client, Categories
+
+**Status: planned, not shipped.**
+
+- **Tenure.** Derived from `validators.first_seen_epoch`. Surfaced as
+  "Active since epoch N" and used for community-facing badges like
+  "Cycle 1 OG".
+- **Client identification.** Pulled from `getClusterNodes.version`
+  and (for Jito-Solana) the on-chain `TipDistributionAccount` PDA.
+  Surfaced as a `Firedancer Pioneer` / `Jito-MEV active` etc. badge.
+- **Category leaderboards.** Small-validator (<100k SOL stake),
+  newcomer (<30 epochs active), client-specific, regional. Each
+  category gets its own KOM-style leaderboard so the gamification
+  rewards being best-in-bracket, not best-globally.
+
+### Phase 3 — Claim v2 (GitHub identity + operator wallet)
+
+**Status: planned, not shipped.**
+
+- **GitHub identity** via Keybase-style Gist verification (no OAuth
+  token retained). The Gist contains the validator-identity-signed
+  registration nonce. Cross-platform: enables governance integration
+  in Phase 6 + 7.
+- **Operator wallet registration** via co-signed off-chain message
+  (identity key signs, wallet key signs) plus an on-chain memo
+  anchoring the registration nonce, proving the wallet is operationally
+  alive at registration time. Capped at 3 wallets per validator,
+  re-attested quarterly, one-click unlink.
+- Squads multisig support: threshold-of-members signatures plus
+  on-chain member-set read.
+
+### Phase 4 — Wallet Activity (365-day grid)
+
+**Status: planned, not shipped.**
+
+Daily intensity = `log10(daily_tx_fees_lamports + 1)` percentile
+within the cohort of claimed operator wallets. The fee anchor makes
+gaming the score cost SOL — count alone could be inflated with
+1-lamport spam tx. Displayed as a GitHub-style 53×7 grid; the share
+asset is a 1200×630 PNG.
+
+### Phase 5 — Pending SIMD widget + AI curation
+
+**Status: planned, not shipped.**
+
+For each active SIMD proposal:
+
+- A Claude Sonnet–generated 50-word _neutral_ summary plus 3-5
+  discussion questions tailored to validator operators (cost, risk,
+  asymmetric impact).
+- All prompts live in `prompts/` and all AI outputs land as PRs
+  reviewed by a human before deploy.
+- Operator answers are formatted as markdown by the WhoEarns UI and
+  posted by the operator personally on simd.watch (GitHub
+  Discussions–backed via Giscus). WhoEarns never proxies the post.
+
+### Phase 6 + 7 — Governance + Operator Activity Index
+
+**Status: planned, not shipped.**
+
+GitHub Discussions API ingest reads simd.watch's discussion repo and
+attributes comments + reactions to claimed validators by GitHub
+username. Composite score:
+
+```
+OperatorActivityIndex =
+    0.50 × WalletActivity_90d
+    0.50 × GovernanceParticipation_180d
+        ├─ 0.40 × on-chain SIMD vote rate (vote-by-stake)
+        ├─ 0.35 × GitHub Discussions comment count on SIMD threads
+        ├─ 0.15 × peer-validator reactions received
+        └─ 0.10 × Realms major-DAO votes (optional)
+```
+
+Always rendered with per-component breakdown. Never used as a single
+global leaderboard.
+
+## Anti-patterns we deliberately do not ship
+
+- **Hollow XP / points** with no real redemption. We don't mint badges
+  for the sake of badges; every badge maps to a verifiable on-chain or
+  network-observable fact.
+- **Follower counts that affect ranking.** DeBank-style follower
+  graphs get Sybil-farmed in 48 hours. Followers can be displayed but
+  never weighted.
+- **Hardware specs as a tier criterion.** Self-declared specs are
+  unverifiable. The Node Tier composite measures behavior — if the
+  hardware is good, the behavior will demonstrate it; if it isn't,
+  no amount of marketing can hide it.
+- **"Lowest commission" leaderboard.** Encourages bottom-of-stack
+  pricing that centralises to the deepest-pocketed operators.
+- **Geographic-diversity penalty on a latency-centric L1.** Solana
+  rewards co-located low-latency operation. We use **Effective Latency**
+  (an outcome measurement) rather than a geographic-spread penalty —
+  but never publish a hard "closer-is-better" ranking that would
+  encourage Frankfurt-piling. Regional leaderboards keep being best
+  in-region a separate, valid flex.
+
+## See also
+
+- [`docs/architecture.md`](./architecture.md) — runtime topology, jobs.
+- [`docs/api.md`](./api.md) — HTTP API reference.
+- [`docs/roadmap.md`](./roadmap.md) — phased rollout, motivation per
+  phase, security review notes.
