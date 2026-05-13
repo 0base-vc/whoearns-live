@@ -160,6 +160,49 @@ function seedLiveWindow(stats: FakeStatsRepo, epochs: FakeEpochsRepo): void {
   );
 }
 
+function seedCompleteDecade(stats: FakeStatsRepo, epochs: FakeEpochsRepo): void {
+  const updatedAt = new Date('2026-04-28T00:00:00.000Z');
+  for (let epoch = 950; epoch <= 959; epoch += 1) {
+    epochs.rows.set(
+      epoch,
+      makeEpochInfo(epoch, epoch * 1_000, epoch * 1_000 + 999, {
+        isClosed: true,
+        closedAt: new Date('2026-04-20T00:00:00.000Z'),
+      }),
+    );
+    stats.rows.set(
+      `${epoch}:${VOTE_1}`,
+      makeStats(epoch, VOTE_1, IDENTITY_1, {
+        slotsAssigned: 10,
+        slotsProduced: 10,
+        blockFeesTotalLamports: 20_000_000_000n,
+        slotsUpdatedAt: updatedAt,
+        feesUpdatedAt: updatedAt,
+      }),
+    );
+    stats.rows.set(
+      `${epoch}:${VOTE_2}`,
+      makeStats(epoch, VOTE_2, IDENTITY_2, {
+        slotsAssigned: 10,
+        slotsProduced: 10,
+        blockFeesTotalLamports: 10_000_000_000n,
+        slotsUpdatedAt: updatedAt,
+        feesUpdatedAt: updatedAt,
+      }),
+    );
+    stats.rows.set(
+      `${epoch}:${VOTE_3}`,
+      makeStats(epoch, VOTE_3, IDENTITY_3, {
+        slotsAssigned: 10,
+        slotsProduced: 10,
+        blockFeesTotalLamports: 30_000_000_000n,
+        slotsUpdatedAt: updatedAt,
+        feesUpdatedAt: updatedAt,
+      }),
+    );
+  }
+}
+
 describe('GET /v1/leaderboard', () => {
   it('returns an empty live window when no epochs have data', async () => {
     const { deps } = buildDeps();
@@ -198,8 +241,6 @@ describe('GET /v1/leaderboard', () => {
           windowSlots: number;
           incomeSolPerSlot: string | null;
           currentElapsedAssignedSlots: number;
-          previousFinalEpoch: number | null;
-          previousFinalEpochRank: number | null;
         }>;
       };
       expect(body.window).toBe('live_trend');
@@ -210,16 +251,73 @@ describe('GET /v1/leaderboard', () => {
       expect(body.items.map((row) => row.vote)).toEqual([VOTE_3, VOTE_1, VOTE_2]);
       expect(body.items.find((row) => row.vote === VOTE_1)?.windowSlots).toBe(14);
       expect(body.items.find((row) => row.vote === VOTE_1)?.currentElapsedAssignedSlots).toBe(4);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('supports decade_epoch and badges validators with complete 10-epoch data', async () => {
+    const { stats, epochs, deps } = buildDeps();
+    seedLiveWindow(stats, epochs);
+    seedCompleteDecade(stats, epochs);
+    const app = await makeApp(deps);
+    try {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/leaderboard?window=decade_epoch',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as {
+        epoch: number;
+        window: string;
+        isFinal: boolean;
+        currentEpoch: number | null;
+        closedEpochsIncluded: number[];
+        items: Array<{
+          vote: string;
+          closedEpochsIncluded: number;
+          decadeEpochStart: number | null;
+          decadeEpochEnd: number | null;
+          decadeRank: number | null;
+        }>;
+      };
+      expect(body).toMatchObject({
+        epoch: 959,
+        window: 'decade_epoch',
+        isFinal: true,
+        currentEpoch: null,
+      });
+      expect(body.closedEpochsIncluded).toEqual([959, 958, 957, 956, 955, 954, 953, 952, 951, 950]);
       expect(
         body.items.map((row) => ({
           vote: row.vote,
-          previousFinalEpoch: row.previousFinalEpoch,
-          previousFinalEpochRank: row.previousFinalEpochRank,
+          closedEpochsIncluded: row.closedEpochsIncluded,
+          decadeEpochStart: row.decadeEpochStart,
+          decadeEpochEnd: row.decadeEpochEnd,
+          decadeRank: row.decadeRank,
         })),
       ).toEqual([
-        { vote: VOTE_3, previousFinalEpoch: 960, previousFinalEpochRank: 1 },
-        { vote: VOTE_1, previousFinalEpoch: 960, previousFinalEpochRank: 2 },
-        { vote: VOTE_2, previousFinalEpoch: 960, previousFinalEpochRank: 3 },
+        {
+          vote: VOTE_3,
+          closedEpochsIncluded: 10,
+          decadeEpochStart: 950,
+          decadeEpochEnd: 959,
+          decadeRank: 1,
+        },
+        {
+          vote: VOTE_1,
+          closedEpochsIncluded: 10,
+          decadeEpochStart: 950,
+          decadeEpochEnd: 959,
+          decadeRank: 2,
+        },
+        {
+          vote: VOTE_2,
+          closedEpochsIncluded: 10,
+          decadeEpochStart: 950,
+          decadeEpochEnd: 959,
+          decadeRank: 3,
+        },
       ]);
     } finally {
       await app.close();

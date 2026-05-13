@@ -683,4 +683,37 @@ describe('StatsRepository', () => {
     expect(rows[0]?.windowSlots).toBe(4);
     expect(rows[0]?.blockFeesTotalLamports).toBe(0n);
   });
+
+  it('findTopNByWindow: filters incomplete closed-epoch windows before limiting', async () => {
+    for (let epoch = 950; epoch <= 959; epoch += 1) {
+      await seedIncomeRow({
+        epoch,
+        vote: 'CompleteVote',
+        identity: 'CompleteId',
+        slotsAssigned: 10,
+        fees: 10_000n,
+      });
+    }
+    for (let epoch = 955; epoch <= 959; epoch += 1) {
+      await seedIncomeRow({
+        epoch,
+        vote: 'IncompleteVote',
+        identity: 'IncompleteId',
+        slotsAssigned: 10,
+        fees: 1_000_000n,
+      });
+    }
+
+    const rows = await repo.findTopNByWindow({
+      epochs: Array.from({ length: 10 }, (_, i) => ({ epoch: 959 - i, isCurrent: false })),
+      limit: 1,
+      sort: 'income_per_slot',
+      minWindowSlots: 1,
+      requiredClosedEpochs: 10,
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.votePubkey).toBe('CompleteVote');
+    expect(rows[0]?.closedEpochsIncluded).toBe(10);
+  });
 });

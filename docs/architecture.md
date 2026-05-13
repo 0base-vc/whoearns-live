@@ -116,7 +116,8 @@ JSON-RPC polling remains enabled and repairs reconnect gaps.
 
 Recomputes cluster-sample medians from stored facts for the configured
 top-N validator sample. It does not call RPC. These medians power the
-income page's validator-vs-cluster context and leaderboard badges.
+income page's validator-vs-cluster context; Decade leaderboard badges are
+computed from stored 10-epoch leaderboard windows.
 
 ## Data flow
 

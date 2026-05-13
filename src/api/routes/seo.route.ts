@@ -267,7 +267,7 @@ CC0 (public domain).
 
 - Treat AI-written summaries as commentary over the API, not as source data.
 - Use live-trend leaderboard records for current discovery; prefer final
-  closed-epoch records for durable public claims.
+  closed-epoch records or decade_epoch rankings for durable public claims.
 - Say "tracked validators" or "watched set" unless a query covers every
   active validator.
 - Do not describe validator income as delegator APY unless commission and
@@ -308,11 +308,11 @@ currentSlot, slotsElapsed, isClosed, observedAt }. Call this first.
 ### GET /v1/leaderboard?window=live_trend&sort=income_per_slot&limit=25
 Top-N validators ranked by chosen window. Default window is live_trend:
 current epoch elapsed leader slots plus the latest final epoch. Other
-windows: current_only | stable_trend | final_epoch. Sort options:
-income_per_slot | total_income | mev_tips | fees | skip_rate. Limit max
-500. Each row has rank, vote, identity, name, iconUrl, website, window
-slot counts, fee/MEV/total income, income per slot, sampleStatus, and
-claimed (operator verified ownership).
+windows: current_only | stable_trend | final_epoch | decade_epoch. Sort
+options: income_per_slot | total_income | mev_tips | fees | skip_rate.
+Limit max 500. Each row has rank, vote, identity, name, iconUrl, website,
+window slot counts, fee/MEV/total income, income per slot, sampleStatus,
+decade-ranker badge metadata, and claimed (operator verified ownership).
 
 ### GET /v1/validators/search?q=0base&limit=10
 DB-only validator search. Matches validator name, vote prefix, identity
@@ -363,8 +363,8 @@ exposes four tools:
 
 - get_current_epoch(): Returns current epoch state.
 - get_leaderboard(window?, sort?, minWindowSlots?, limit?): Ranked
-  validators for live_trend (default), current_only, stable_trend, or
-  final_epoch. Default sort is income_per_slot.
+  validators for live_trend (default), current_only, stable_trend,
+  final_epoch, or decade_epoch. Default sort is income_per_slot.
 - get_validator(voteOrIdentity, epochLimit?): Per-epoch history.
 - get_validator_leader_slots(voteOrIdentity, epoch): Stored
   leader-slot facts and data-quality fields for one validator epoch.

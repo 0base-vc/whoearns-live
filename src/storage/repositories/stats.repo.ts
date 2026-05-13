@@ -222,7 +222,12 @@ export type LeaderboardSort =
   | 'skip_rate'
   | 'median_fee';
 
-export type LeaderboardWindow = 'live_trend' | 'current_only' | 'stable_trend' | 'final_epoch';
+export type LeaderboardWindow =
+  | 'live_trend'
+  | 'current_only'
+  | 'stable_trend'
+  | 'final_epoch'
+  | 'decade_epoch';
 
 export type LeaderboardWindowSort =
   | 'income_per_slot'
@@ -1019,11 +1024,13 @@ export class StatsRepository {
     limit: number;
     sort?: LeaderboardWindowSort;
     minWindowSlots?: number;
+    requiredClosedEpochs?: number;
   }): Promise<WindowedLeaderboardStats[]> {
     if (args.epochs.length === 0) return [];
 
     const safeLimit = Math.max(1, Math.min(args.limit, 500));
     const minWindowSlots = Math.max(1, args.minWindowSlots ?? 4);
+    const requiredClosedEpochs = Math.max(0, args.requiredClosedEpochs ?? 0);
     const sort = args.sort ?? 'income_per_slot';
     const order = ((): string => {
       switch (sort) {
@@ -1052,8 +1059,9 @@ export class StatsRepository {
       params.push(epoch.epoch, epoch.isCurrent, epoch.isCurrent ? 2 : 1);
     }
     const minParam = params.length + 1;
-    const limitParam = params.length + 2;
-    params.push(minWindowSlots, safeLimit);
+    const requiredClosedParam = params.length + 2;
+    const limitParam = params.length + 3;
+    params.push(minWindowSlots, requiredClosedEpochs, safeLimit);
 
     const { rows } = await this.pool.query<WindowedLeaderboardStatsRow>(
       `WITH included(epoch, is_current, priority) AS (
@@ -1116,6 +1124,7 @@ export class StatsRepository {
              )
            )
          GROUP BY evs.vote_pubkey
+        HAVING COUNT(*) FILTER (WHERE included.is_current IS FALSE) >= $${requiredClosedParam}
        )
        SELECT
          vote_pubkey,

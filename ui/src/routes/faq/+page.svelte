@@ -66,6 +66,12 @@
       a_ko: 'Income / slot = (블록 수수료 + 온체인 Jito tips) / 선택한 window의 리더 슬롯 수입니다. 기본 live-trend에서는 진행 중 에폭은 현재까지 지난 할당 슬롯을, 종료 에폭은 전체 할당 슬롯을 씁니다. 스테이크 중립적(100k-SOL validator와 10M-SOL validator를 직접 비교 가능)이고 commission 중립적입니다.',
     },
     {
+      q_en: 'What is the Decade leaderboard?',
+      q_ko: 'Decade 리더보드는 무엇인가요?',
+      a_en: 'The Decade leaderboard ranks the latest complete 10-epoch block by income / leader slot. A validator must have income rows in all 10 epochs to qualify. This makes the badge harder to game than a one-epoch spike, reduces noise from tiny samples, and gives delegators a more durable operator-quality signal.',
+      a_ko: 'Decade 리더보드는 가장 최근 완성된 10개 에폭 구간을 income / leader slot 기준으로 랭킹합니다. 해당 validator는 10개 에폭 모두에 income row가 있어야 참여할 수 있습니다. 한 에폭짜리 스파이크보다 조작이 어렵고, 작은 샘플 노이즈를 줄이며, delegator에게 더 지속적인 운영 품질 신호를 줍니다.',
+    },
+    {
       q_en: 'Can I search by validator name?',
       q_ko: 'validator 이름으로 검색할 수 있나요?',
       a_en: 'Yes. The homepage and Compare page both let you type part of a validator name, or paste a vote / identity pubkey directly. The search endpoint is DB-only, so it reads known validator metadata without triggering Solana RPC. If you type a name, select a result before submitting so the URL uses the canonical vote pubkey.',

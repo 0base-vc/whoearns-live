@@ -181,7 +181,12 @@ export interface ClaimChallenge {
  * in sync. Consumers should treat an unknown string as a client/server
  * version mismatch (fall back to `income_per_slot`).
  */
-export type LeaderboardWindow = 'live_trend' | 'current_only' | 'stable_trend' | 'final_epoch';
+export type LeaderboardWindow =
+  | 'live_trend'
+  | 'current_only'
+  | 'stable_trend'
+  | 'final_epoch'
+  | 'decade_epoch';
 
 export type LeaderboardSort =
   | 'income_per_slot'
@@ -242,12 +247,13 @@ export interface LeaderboardItem {
    */
   claimed: boolean;
   /**
-   * Previous finalized epoch Top 3 badge. Null when the validator was
-   * not ranked #1-#3 by income per leader slot in the latest final
-   * epoch, or no closed epoch exists yet.
+   * Latest complete 10-epoch Top 3 badge. Null when the validator was
+   * not ranked #1-#3 by income per leader slot across the complete
+   * decade window, or when it lacks all 10 epoch rows.
    */
-  previousFinalEpoch?: number | null;
-  previousFinalEpochRank?: 1 | 2 | 3 | null;
+  decadeEpochStart?: number | null;
+  decadeEpochEnd?: number | null;
+  decadeRank?: 1 | 2 | 3 | null;
 }
 
 export interface Leaderboard {

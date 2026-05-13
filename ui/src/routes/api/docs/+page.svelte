@@ -39,9 +39,9 @@
     {
       method: 'GET',
       path: '/v1/leaderboard',
-      summary: 'Top-N validators by live or final window',
+      summary: 'Top-N validators by live, final, or Decade window',
       description:
-        'Ranked list for a selected window. Default `window=live_trend&sort=income_per_slot`, combining current elapsed leader slots with the latest final epoch. Other windows: `current_only`, `stable_trend`, and `final_epoch`.',
+        'Ranked list for a selected window. Default `window=live_trend&sort=income_per_slot`, combining current elapsed leader slots with the latest final epoch. Other windows: `current_only`, `stable_trend`, `final_epoch`, and `decade_epoch`.',
       params: [
         {
           name: 'limit',
@@ -56,7 +56,8 @@
         {
           name: 'window',
           type: 'enum',
-          description: '`live_trend` | `current_only` | `stable_trend` | `final_epoch`.',
+          description:
+            '`live_trend` | `current_only` | `stable_trend` | `final_epoch` | `decade_epoch`.',
         },
         {
           name: 'minWindowSlots',

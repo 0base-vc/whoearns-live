@@ -32,6 +32,7 @@ import {
 import { PubkeySchema } from '../schemas/pubkey.js';
 
 const MCP_LEADERBOARD_CACHE_TTL_MS = 10_000;
+const MCP_DECADE_EPOCH_COUNT = 10;
 
 export interface McpRoutesDeps {
   config: AppConfig;
@@ -39,7 +40,10 @@ export interface McpRoutesDeps {
     ValidatorsRepository,
     'findByVote' | 'findByIdentity' | 'getInfosByIdentities'
   >;
-  epochsRepo: Pick<EpochsRepository, 'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs'>;
+  epochsRepo: Pick<
+    EpochsRepository,
+    'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs' | 'findLatestCompleteClosedEpochBlock'
+  >;
   statsRepo: Pick<StatsRepository, 'findHistoryByVote' | 'findTopNByWindow' | 'findByVoteEpoch'>;
   processedBlocksRepo: Pick<ProcessedBlocksRepository, 'getValidatorEpochSlotStats'>;
   aggregatesRepo: Pick<AggregatesRepository, 'findByEpochTopN'>;
@@ -221,7 +225,7 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
         title: 'Get top Solana validators',
         description:
           'Returns top-N validators for a selected leaderboard window. Default window=live_trend and sort=income_per_slot, combining the running epoch with the latest closed epoch. ' +
-          'window=current_only shows only elapsed running-epoch leader slots; stable_trend adds two closed epochs; final_epoch ranks the latest closed epoch. ' +
+          'window=current_only shows only elapsed running-epoch leader slots; stable_trend adds two closed epochs; final_epoch ranks the latest closed epoch; decade_epoch ranks the latest complete 10-epoch block and requires all 10 epoch rows. ' +
           'sort=income_per_slot is stake-neutral. sort=total_income biases toward big-stake validators. sort=mev_tips and sort=fees rank by component income. sort=skip_rate ranks by reliability (lower is better). ' +
           SHARED_TOOL_PROVENANCE_NOTE,
         inputSchema: {
@@ -230,7 +234,7 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
             .optional()
             .describe('Ranking metric. Default: income_per_slot.'),
           window: z
-            .enum(['live_trend', 'current_only', 'stable_trend', 'final_epoch'])
+            .enum(['live_trend', 'current_only', 'stable_trend', 'final_epoch', 'decade_epoch'])
             .optional()
             .describe('Leaderboard sample window. Default: live_trend.'),
           minWindowSlots: z
@@ -436,6 +440,17 @@ interface LeaderboardPayloadRow {
   activatedStakeLamports: string | null;
   incomePerStake: number | null;
   claimed: boolean;
+  decadeEpochStart: number | null;
+  decadeEpochEnd: number | null;
+  decadeRank: DecadeRank | null;
+}
+
+type DecadeRank = 1 | 2 | 3;
+
+interface DecadeBadge {
+  epochStart: number;
+  epochEnd: number;
+  rank: DecadeRank;
 }
 
 function mcpClosedCountForWindow(window: LeaderboardWindow): number {
@@ -445,10 +460,57 @@ function mcpClosedCountForWindow(window: LeaderboardWindow): number {
     case 'live_trend':
     case 'final_epoch':
       return 1;
+    case 'decade_epoch':
     case 'current_only':
     default:
       return 0;
   }
+}
+
+async function mcpResolveLatestCompleteDecade(opts: McpRoutesDeps): Promise<EpochInfo[]> {
+  return opts.epochsRepo.findLatestCompleteClosedEpochBlock(MCP_DECADE_EPOCH_COUNT);
+}
+
+function toMcpDecadeRank(rank: number): DecadeRank | null {
+  return rank === 1 || rank === 2 || rank === 3 ? rank : null;
+}
+
+function mcpBuildDecadeRankMapFromRows(
+  rows: WindowedLeaderboardStats[],
+  closed: EpochInfo[],
+): Map<string, DecadeBadge> {
+  if (closed.length !== MCP_DECADE_EPOCH_COUNT) return new Map();
+  const epochEnd = closed[0]!.epoch;
+  const epochStart = closed[closed.length - 1]!.epoch;
+  const out = new Map<string, DecadeBadge>();
+  rows
+    .filter((row) => row.closedEpochsIncluded === MCP_DECADE_EPOCH_COUNT)
+    .slice(0, 3)
+    .forEach((row, index) => {
+      const rank = toMcpDecadeRank(index + 1);
+      if (rank === null) return;
+      out.set(row.votePubkey, { epochStart, epochEnd, rank });
+    });
+  return out;
+}
+
+async function mcpFetchDecadeRankMap(
+  opts: McpRoutesDeps,
+  optedOut: Set<string>,
+  minWindowSlots: number,
+): Promise<Map<string, DecadeBadge>> {
+  const closed = await mcpResolveLatestCompleteDecade(opts);
+  if (closed.length !== MCP_DECADE_EPOCH_COUNT) return new Map();
+  const rows = await opts.statsRepo.findTopNByWindow({
+    epochs: closed.map((row) => ({ epoch: row.epoch, isCurrent: false })),
+    limit: 500,
+    sort: 'income_per_slot',
+    minWindowSlots,
+    requiredClosedEpochs: MCP_DECADE_EPOCH_COUNT,
+  });
+  const visibleRows =
+    optedOut.size === 0 ? rows : rows.filter((row) => !optedOut.has(row.votePubkey));
+  return mcpBuildDecadeRankMapFromRows(visibleRows, closed);
 }
 
 async function buildLeaderboardPayload(
@@ -476,11 +538,20 @@ async function buildLeaderboardPayload(
   const closedCount = mcpClosedCountForWindow(window);
   const [current, closed] = await Promise.all([
     opts.epochsRepo.findCurrent(),
-    closedCount > 0 ? opts.epochsRepo.findLatestClosedEpochs(closedCount) : Promise.resolve([]),
+    window === 'decade_epoch'
+      ? mcpResolveLatestCompleteDecade(opts)
+      : closedCount > 0
+        ? opts.epochsRepo.findLatestClosedEpochs(closedCount)
+        : Promise.resolve([]),
   ]);
 
   const epochs: LeaderboardWindowEpoch[] = [];
-  if (window !== 'final_epoch' && current !== null && !current.isClosed) {
+  if (
+    window !== 'final_epoch' &&
+    window !== 'decade_epoch' &&
+    current !== null &&
+    !current.isClosed
+  ) {
     epochs.push({ epoch: current.epoch, isCurrent: true });
   }
   for (const row of closed) epochs.push({ epoch: row.epoch, isCurrent: false });
@@ -508,9 +579,10 @@ async function buildLeaderboardPayload(
     // a row is nonexistent in practice.
     opts.statsRepo.findTopNByWindow({
       epochs,
-      limit: Math.min(200, Math.ceil(limit * 1.5)),
+      limit: window === 'decade_epoch' ? 500 : Math.min(200, Math.ceil(limit * 1.5)),
       sort,
       minWindowSlots,
+      requiredClosedEpochs: window === 'decade_epoch' ? MCP_DECADE_EPOCH_COUNT : 0,
     }),
     opts.profilesRepo.findOptedOutVotes(),
     // Cluster medians are an epoch aggregate, so expose them only when
@@ -522,6 +594,11 @@ async function buildLeaderboardPayload(
 
   const filtered = statsRows.filter((r) => !optedOut.has(r.votePubkey));
   const trimmed = filtered.slice(0, limit);
+
+  const decadeRanks =
+    window === 'decade_epoch' && sort === 'income_per_slot'
+      ? mcpBuildDecadeRankMapFromRows(filtered, closed)
+      : await mcpFetchDecadeRankMap(opts, optedOut, minWindowSlots);
 
   const identities = trimmed.map((r) => r.identityPubkey);
   const votes = trimmed.map((r) => r.votePubkey);
@@ -536,12 +613,19 @@ async function buildLeaderboardPayload(
       i + 1,
       infoMap.get(row.identityPubkey),
       claimedSet.has(row.votePubkey),
+      decadeRanks.get(row.votePubkey),
     ),
   );
 
   return {
-    epoch: window === 'final_epoch' ? (finalEpoch?.epoch ?? null) : (current?.epoch ?? null),
-    epochClosedAt: window === 'final_epoch' ? (finalEpoch?.closedAt?.toISOString() ?? null) : null,
+    epoch:
+      window === 'final_epoch' || window === 'decade_epoch'
+        ? (finalEpoch?.epoch ?? null)
+        : (current?.epoch ?? null),
+    epochClosedAt:
+      window === 'final_epoch' || window === 'decade_epoch'
+        ? (finalEpoch?.closedAt?.toISOString() ?? null)
+        : null,
     window,
     sort,
     currentEpoch: current !== null && !current.isClosed ? current.epoch : null,
@@ -557,6 +641,7 @@ function serializeLeaderboardRow(
   rank: number,
   info: { name: string | null } | undefined,
   claimed: boolean,
+  decadeBadge: DecadeBadge | undefined,
 ): LeaderboardPayloadRow {
   const blockFees = stats.blockFeesTotalLamports;
   const blockTips = stats.blockTipsTotalLamports;
@@ -586,6 +671,9 @@ function serializeLeaderboardRow(
     activatedStakeLamports: stake === null ? null : stake.toString(),
     incomePerStake,
     claimed,
+    decadeEpochStart: decadeBadge?.epochStart ?? null,
+    decadeEpochEnd: decadeBadge?.epochEnd ?? null,
+    decadeRank: decadeBadge?.rank ?? null,
   };
 }
 

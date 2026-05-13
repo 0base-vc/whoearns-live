@@ -22,9 +22,16 @@ const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 const DEFAULT_MIN_WINDOW_SLOTS = 4;
 const LEADERBOARD_CACHE_TTL_MS = 10_000;
-const PREVIOUS_FINAL_EPOCH_RANK_LIMIT = 3;
+const DECADE_EPOCH_COUNT = 10;
+const DECADE_RANK_LIMIT = 3;
 
-const WindowEnumSchema = z.enum(['live_trend', 'current_only', 'stable_trend', 'final_epoch']);
+const WindowEnumSchema = z.enum([
+  'live_trend',
+  'current_only',
+  'stable_trend',
+  'final_epoch',
+  'decade_epoch',
+]);
 
 const SortEnumSchema = z.preprocess(
   (value) => {
@@ -58,7 +65,10 @@ const LeaderboardQuerySchema = z
 
 export interface LeaderboardRoutesDeps {
   statsRepo: Pick<StatsRepository, 'findTopNByWindow'>;
-  epochsRepo: Pick<EpochsRepository, 'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs'>;
+  epochsRepo: Pick<
+    EpochsRepository,
+    'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs' | 'findLatestCompleteClosedEpochBlock'
+  >;
   aggregatesRepo: Pick<AggregatesRepository, 'findByEpochTopN'>;
   validatorsRepo?: Pick<ValidatorsRepository, 'getInfosByIdentities'>;
   profilesRepo?: Pick<ProfilesRepository, 'findOptedOutVotes'>;
@@ -66,11 +76,12 @@ export interface LeaderboardRoutesDeps {
 }
 
 type SampleStatus = 'low' | 'medium' | 'normal';
-type PreviousFinalEpochRank = 1 | 2 | 3;
+type DecadeRank = 1 | 2 | 3;
 
-interface PreviousFinalEpochBadge {
-  epoch: number;
-  rank: PreviousFinalEpochRank;
+interface DecadeBadge {
+  epochStart: number;
+  epochEnd: number;
+  rank: DecadeRank;
 }
 
 interface LeaderboardRow {
@@ -110,8 +121,9 @@ interface LeaderboardRow {
   activatedStakeSol: string | null;
   incomePerStake: number | null;
   claimed: boolean;
-  previousFinalEpoch: number | null;
-  previousFinalEpochRank: PreviousFinalEpochRank | null;
+  decadeEpochStart: number | null;
+  decadeEpochEnd: number | null;
+  decadeRank: DecadeRank | null;
 }
 
 interface LeaderboardResponse {
@@ -162,7 +174,7 @@ function toRow(
   rank: number,
   info: { name: string | null; iconUrl: string | null; website: string | null } | undefined,
   claimed: boolean,
-  previousFinalEpochBadge: PreviousFinalEpochBadge | undefined,
+  decadeBadge: DecadeBadge | undefined,
 ): LeaderboardRow {
   const total = stats.blockFeesTotalLamports + stats.blockTipsTotalLamports;
   const perSlot = stats.windowSlots > 0 ? total / BigInt(stats.windowSlots) : null;
@@ -208,41 +220,60 @@ function toRow(
     activatedStakeSol: stake === null ? null : lamportsToSol(stake),
     incomePerStake,
     claimed,
-    previousFinalEpoch: previousFinalEpochBadge?.epoch ?? null,
-    previousFinalEpochRank: previousFinalEpochBadge?.rank ?? null,
+    decadeEpochStart: decadeBadge?.epochStart ?? null,
+    decadeEpochEnd: decadeBadge?.epochEnd ?? null,
+    decadeRank: decadeBadge?.rank ?? null,
   };
 }
 
-function toPreviousFinalEpochRank(rank: number): PreviousFinalEpochRank | null {
+function toDecadeRank(rank: number): DecadeRank | null {
   return rank === 1 || rank === 2 || rank === 3 ? rank : null;
 }
 
-async function buildPreviousFinalEpochRankMap(
+async function resolveLatestCompleteDecade(
+  epochsRepo: Pick<EpochsRepository, 'findLatestCompleteClosedEpochBlock'>,
+): Promise<EpochInfo[]> {
+  return epochsRepo.findLatestCompleteClosedEpochBlock(DECADE_EPOCH_COUNT);
+}
+
+function buildDecadeRankMapFromRows(
+  rows: WindowedLeaderboardStats[],
+  closed: EpochInfo[],
+): Map<string, DecadeBadge> {
+  if (closed.length !== DECADE_EPOCH_COUNT) return new Map();
+  const epochEnd = closed[0]!.epoch;
+  const epochStart = closed[closed.length - 1]!.epoch;
+  const out = new Map<string, DecadeBadge>();
+  rows
+    .filter((row) => row.closedEpochsIncluded === DECADE_EPOCH_COUNT)
+    .slice(0, DECADE_RANK_LIMIT)
+    .forEach((row, index) => {
+      const rank = toDecadeRank(index + 1);
+      if (rank === null) return;
+      out.set(row.votePubkey, { epochStart, epochEnd, rank });
+    });
+  return out;
+}
+
+async function buildDecadeRankMap(
   statsRepo: Pick<StatsRepository, 'findTopNByWindow'>,
-  epochsRepo: Pick<EpochsRepository, 'findLatestClosedEpochs'>,
+  epochsRepo: Pick<EpochsRepository, 'findLatestCompleteClosedEpochBlock'>,
   optedOutVotes: Set<string>,
   minWindowSlots: number,
-): Promise<Map<string, PreviousFinalEpochBadge>> {
-  const [latestFinalEpoch] = await epochsRepo.findLatestClosedEpochs(1);
-  if (latestFinalEpoch === undefined) return new Map();
+): Promise<Map<string, DecadeBadge>> {
+  const closed = await resolveLatestCompleteDecade(epochsRepo);
+  if (closed.length !== DECADE_EPOCH_COUNT) return new Map();
 
   const rows = await statsRepo.findTopNByWindow({
-    epochs: [{ epoch: latestFinalEpoch.epoch, isCurrent: false }],
+    epochs: closed.map((row) => ({ epoch: row.epoch, isCurrent: false })),
     limit: MAX_LIMIT,
     sort: 'income_per_slot',
     minWindowSlots,
+    requiredClosedEpochs: DECADE_EPOCH_COUNT,
   });
   const visibleRows =
     optedOutVotes.size === 0 ? rows : rows.filter((row) => !optedOutVotes.has(row.votePubkey));
-  const topRows = visibleRows.slice(0, PREVIOUS_FINAL_EPOCH_RANK_LIMIT);
-
-  const out = new Map<string, PreviousFinalEpochBadge>();
-  topRows.forEach((row, index) => {
-    const rank = toPreviousFinalEpochRank(index + 1);
-    if (rank === null) return;
-    out.set(row.votePubkey, { epoch: latestFinalEpoch.epoch, rank });
-  });
-  return out;
+  return buildDecadeRankMapFromRows(visibleRows, closed);
 }
 
 function closedCountForWindow(window: LeaderboardWindow): number {
@@ -252,6 +283,7 @@ function closedCountForWindow(window: LeaderboardWindow): number {
     case 'live_trend':
     case 'final_epoch':
       return 1;
+    case 'decade_epoch':
     case 'current_only':
     default:
       return 0;
@@ -261,7 +293,10 @@ function closedCountForWindow(window: LeaderboardWindow): number {
 async function resolveWindowEpochs(
   window: LeaderboardWindow,
   epochOverride: number | undefined,
-  epochsRepo: Pick<EpochsRepository, 'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs'>,
+  epochsRepo: Pick<
+    EpochsRepository,
+    'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs' | 'findLatestCompleteClosedEpochBlock'
+  >,
 ): Promise<{
   epochs: LeaderboardWindowEpoch[];
   current: EpochInfo | null;
@@ -293,6 +328,16 @@ async function resolveWindowEpochs(
       current: null,
       closed: [epoch],
       epochClosedAt: epoch.closedAt?.toISOString() ?? null,
+    };
+  }
+
+  if (window === 'decade_epoch') {
+    const closed = await resolveLatestCompleteDecade(epochsRepo);
+    return {
+      epochs: closed.map((row) => ({ epoch: row.epoch, isCurrent: false })),
+      current: null,
+      closed,
+      epochClosedAt: closed[0]?.closedAt?.toISOString() ?? null,
     };
   }
 
@@ -343,7 +388,7 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
         epochClosedAt: null,
         window: query.window,
         sort: query.sort,
-        isFinal: query.window === 'final_epoch',
+        isFinal: query.window === 'final_epoch' || query.window === 'decade_epoch',
         currentEpoch: null,
         closedEpochsIncluded: [],
         asOfSlot: null,
@@ -360,25 +405,33 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
       return body;
     }
 
-    const fetchLimit = Math.min(MAX_LIMIT, Math.max(query.limit, Math.ceil(query.limit * 1.5)));
+    const fetchLimit =
+      query.window === 'decade_epoch'
+        ? MAX_LIMIT
+        : Math.min(MAX_LIMIT, Math.max(query.limit, Math.ceil(query.limit * 1.5)));
     const [rows, optedOutVotes] = await Promise.all([
       statsRepo.findTopNByWindow({
         epochs: resolved.epochs,
         limit: fetchLimit,
         sort: query.sort,
         minWindowSlots: query.minWindowSlots,
+        requiredClosedEpochs: query.window === 'decade_epoch' ? DECADE_EPOCH_COUNT : 0,
       }),
       profilesRepo === undefined
         ? Promise.resolve(new Set<string>())
         : profilesRepo.findOptedOutVotes(),
     ]);
-    const visibleRows = (
-      optedOutVotes.size === 0 ? rows : rows.filter((r) => !optedOutVotes.has(r.votePubkey))
-    ).slice(0, query.limit);
+    const filteredRows =
+      optedOutVotes.size === 0 ? rows : rows.filter((r) => !optedOutVotes.has(r.votePubkey));
+    const visibleRows = filteredRows.slice(0, query.limit);
 
     const identities = Array.from(new Set(visibleRows.map((r) => r.identityPubkey)));
     const votes = visibleRows.map((r) => r.votePubkey);
-    const [infoByIdentity, claimedVotes, previousFinalEpochRanks] = await Promise.all([
+    const decadeRanksPromise =
+      query.window === 'decade_epoch' && query.sort === 'income_per_slot'
+        ? Promise.resolve(buildDecadeRankMapFromRows(filteredRows, resolved.closed))
+        : buildDecadeRankMap(statsRepo, epochsRepo, optedOutVotes, query.minWindowSlots);
+    const [infoByIdentity, claimedVotes, decadeRanks] = await Promise.all([
       validatorsRepo !== undefined && identities.length > 0
         ? validatorsRepo.getInfosByIdentities(identities)
         : Promise.resolve(
@@ -390,7 +443,7 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
       claimsRepo !== undefined && votes.length > 0
         ? claimsRepo.findClaimedVotes(votes)
         : Promise.resolve(new Set<string>()),
-      buildPreviousFinalEpochRankMap(statsRepo, epochsRepo, optedOutVotes, query.minWindowSlots),
+      decadeRanksPromise,
     ]);
 
     const items = visibleRows.map((row, i) =>
@@ -399,7 +452,7 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
         i + 1,
         infoByIdentity.get(row.identityPubkey),
         claimedVotes.has(row.votePubkey),
-        previousFinalEpochRanks.get(row.votePubkey),
+        decadeRanks.get(row.votePubkey),
       ),
     );
 
@@ -433,11 +486,17 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
       }, null) ?? null;
 
     const body: LeaderboardResponse = {
-      epoch: query.window === 'final_epoch' ? (finalEpoch?.epoch ?? 0) : (currentEpoch?.epoch ?? 0),
-      epochClosedAt: query.window === 'final_epoch' ? resolved.epochClosedAt : null,
+      epoch:
+        query.window === 'final_epoch' || query.window === 'decade_epoch'
+          ? (finalEpoch?.epoch ?? 0)
+          : (currentEpoch?.epoch ?? 0),
+      epochClosedAt:
+        query.window === 'final_epoch' || query.window === 'decade_epoch'
+          ? resolved.epochClosedAt
+          : null,
       window: query.window,
       sort: query.sort,
-      isFinal: query.window === 'final_epoch',
+      isFinal: query.window === 'final_epoch' || query.window === 'decade_epoch',
       currentEpoch: currentEpoch?.epoch ?? null,
       closedEpochsIncluded: resolved.closed.map((row) => row.epoch),
       asOfSlot: currentEpoch?.currentSlot ?? null,

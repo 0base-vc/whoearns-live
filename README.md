@@ -77,6 +77,8 @@ flowchart TD
   failed-tx rate, tip-bearing blocks, max priority fee, max Jito tip, and
   fetch-error visibility without scanning every Solana slot.
 - Current-epoch lower bounds that update as new leader blocks are ingested.
+- Leaderboard windows for live trend, current epoch, stable trend, latest
+  final epoch, and the latest complete 10-epoch Decade ranking.
 - Explicit watch list (recommended) or `*` to track all active validators.
 - Crash-safe ingestion: per-slot `processed_blocks` facts make every job
   idempotent, and aggregate totals can be rebuilt from facts.
@@ -208,18 +210,18 @@ All endpoints return `application/json`. See [`docs/api.md`](./docs/api.md)
 for the full reference and [`docs/openapi.yaml`](./docs/openapi.yaml) for
 the OpenAPI 3.1 spec.
 
-| Method | Path                                 | Description                                            |
-| ------ | ------------------------------------ | ------------------------------------------------------ |
-| GET    | `/healthz`                           | Liveness plus DB / RPC / epoch freshness.              |
-| GET    | `/v1/epoch/current`                  | Current epoch boundary and elapsed-slot count.         |
-| GET    | `/v1/leaderboard`                    | Live-trend validator ranking by windowed income.       |
-| GET    | `/v1/validators/search`              | DB-only validator name / pubkey search.                |
-| GET    | `/v1/validators/:vote/current-epoch` | Full current-epoch stats for one validator.            |
-| GET    | `/v1/validators/:vote/history`       | Per-epoch history for one validator.                   |
-| POST   | `/v1/validators/current-epoch/batch` | Same as above for up to 200 validators in one request. |
-| GET    | `/v1/validators/:vote/epochs/:epoch` | Historical per-epoch stats for one validator.          |
-| GET    | `/v1/claim/:vote/status`             | Public claim/profile state for a validator.            |
-| POST   | `/mcp`                               | Streamable HTTP MCP server for AI agents.              |
+| Method | Path                                 | Description                                                 |
+| ------ | ------------------------------------ | ----------------------------------------------------------- |
+| GET    | `/healthz`                           | Liveness plus DB / RPC / epoch freshness.                   |
+| GET    | `/v1/epoch/current`                  | Current epoch boundary and elapsed-slot count.              |
+| GET    | `/v1/leaderboard`                    | Live-trend and Decade validator ranking by windowed income. |
+| GET    | `/v1/validators/search`              | DB-only validator name / pubkey search.                     |
+| GET    | `/v1/validators/:vote/current-epoch` | Full current-epoch stats for one validator.                 |
+| GET    | `/v1/validators/:vote/history`       | Per-epoch history for one validator.                        |
+| POST   | `/v1/validators/current-epoch/batch` | Same as above for up to 200 validators in one request.      |
+| GET    | `/v1/validators/:vote/epochs/:epoch` | Historical per-epoch stats for one validator.               |
+| GET    | `/v1/claim/:vote/status`             | Public claim/profile state for a validator.                 |
+| POST   | `/mcp`                               | Streamable HTTP MCP server for AI agents.                   |
 
 Validator response shape:
 
@@ -275,7 +277,7 @@ scraping the UI or parsing OpenAPI:
 | Tool                         | Description                                                                                 |
 | ---------------------------- | ------------------------------------------------------------------------------------------- |
 | `get_current_epoch`          | Returns the running epoch number, slot range, and elapsed slots.                            |
-| `get_leaderboard`            | Top-N validators for live-trend, current, stable, or final windows.                         |
+| `get_leaderboard`            | Top-N validators for live-trend, current, stable, final, or Decade windows.                 |
 | `get_validator`              | Per-epoch history for one validator (vote OR identity pubkey).                              |
 | `get_validator_leader_slots` | Stored leader-slot facts for one validator epoch, including CU efficiency; no live RPC hit. |
 

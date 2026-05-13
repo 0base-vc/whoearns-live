@@ -293,6 +293,30 @@ export class FakeEpochsRepo {
       .slice(0, Math.min(limit, 10));
   }
 
+  async findLatestCompleteClosedEpochBlock(blockSize: number): Promise<EpochInfo[]> {
+    if (!Number.isInteger(blockSize) || blockSize <= 0) return [];
+    const safe = Math.max(1, Math.min(blockSize, 100));
+    const closed = [...this.rows.values()].filter((row) => row.isClosed);
+    const latestClosed = closed.reduce<number | null>(
+      (best, row) => (best === null || row.epoch > best ? row.epoch : best),
+      null,
+    );
+    if (latestClosed === null) return [];
+
+    let epochEnd = Math.floor((latestClosed + 1) / safe) * safe - 1;
+    while (epochEnd >= safe - 1) {
+      const rows: EpochInfo[] = [];
+      for (let epoch = epochEnd; epoch > epochEnd - safe; epoch -= 1) {
+        const row = this.rows.get(epoch);
+        if (row === undefined || !row.isClosed) break;
+        rows.push(row);
+      }
+      if (rows.length === safe) return rows;
+      epochEnd -= safe;
+    }
+    return [];
+  }
+
   async markClosed(epoch: Epoch, closedAt: Date): Promise<void> {
     const row = this.rows.get(epoch);
     if (row) {
@@ -724,9 +748,11 @@ export class FakeStatsRepo {
     limit: number;
     sort?: LeaderboardWindowSort;
     minWindowSlots?: number;
+    requiredClosedEpochs?: number;
   }): Promise<WindowedLeaderboardStats[]> {
     const safeLimit = Math.max(1, Math.min(args.limit, 500));
     const minWindowSlots = Math.max(1, args.minWindowSlots ?? 4);
+    const requiredClosedEpochs = Math.max(0, args.requiredClosedEpochs ?? 0);
     const epochs = new Map(args.epochs.map((e) => [e.epoch, e.isCurrent]));
     const byVote = new Map<VotePubkey, WindowedLeaderboardStats>();
 
@@ -785,7 +811,9 @@ export class FakeStatsRepo {
       byVote.set(row.votePubkey, next);
     }
 
-    const rows = [...byVote.values()].filter((r) => r.windowSlots >= minWindowSlots);
+    const rows = [...byVote.values()].filter(
+      (r) => r.windowSlots >= minWindowSlots && r.closedEpochsIncluded >= requiredClosedEpochs,
+    );
     const total = (r: WindowedLeaderboardStats) =>
       r.blockFeesTotalLamports + r.blockTipsTotalLamports;
     switch (args.sort ?? 'income_per_slot') {

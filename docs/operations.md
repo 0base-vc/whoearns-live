@@ -136,7 +136,7 @@ SQL migrations live in `src/storage/migrations/` and are applied by
   consumes the HTTP API.
 - **AI-agent surfaces.** `/llms.txt`, `/llms-full.txt`, OpenAPI, and MCP are
   public read surfaces. Treat them like docs: keep claims tied to closed
-  epochs, tracked-sample boundaries, and reproducible API fields.
+  epochs, Decade/window sample boundaries, and reproducible API fields.
 - **Health.** `/healthz` is appropriate for both liveness and
   readiness.
 

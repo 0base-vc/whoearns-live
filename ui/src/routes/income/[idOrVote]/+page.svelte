@@ -8,14 +8,9 @@
     - Lifetime total income was the PRIMARY reason users open this
       page but was cramped into a side-dl. Promoted to the hero
       number (text-4xl / text-5xl, accent).
-    - Running-epoch card had 8 equal-weight KPI tiles competing for
-      attention. Collapsed to a single "Total so far" hero figure +
-      "slots produced / assigned" + a "Breakdown" disclosure that
-      reveals the base / priority / live MEV tips split for power
-      users who want it.
-    - Epoch progress used to be a standalone flex column with its
-      own label. Inlined as a thin sliver under the "Running epoch"
-      header with a `~Xh left` caption — context, not content.
+    - Running-epoch data now appears directly in the Epoch income
+      table as the first row with a compact Live badge. The previous
+      expandable running card was harder to scan than the table.
     - "MEV tips" + "MEV (Jito)" were two near-duplicate columns in
       the history table. Uses on-chain gross Jito tips as the primary
       MEV value; Kobe payout is retained only as a backend reference.
@@ -29,17 +24,10 @@
       UI despite living on the API response. Now shown as a 48px
       rounded tile in the hero, with a styled text-initial fallback
       for validators whose operators haven't published a logo.
-    - Status legend was ABOVE the table, separating the content
-      from the vocabulary that explains it. Moved BELOW the table/
-      cards so readers see the data first, then the legend as a
-      footnote (an accessibility trade-off — the SR `<caption>` still
-      covers vocabulary-before-data for that path).
-    - Freshness indicator was the 8th KPI tile in the running-epoch
-      grid, invisible at a glance. Promoted to a pulsing dot +
-      "updated 23s ago" next to the running-epoch title.
+    - Status legend was removed from the epoch table. Closed epochs do
+      not need a repeated "Final" label; only the live row is marked.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
   import type { PageData } from './$types';
   import type { ValidatorEpochRecord } from '$lib/types';
   import {
@@ -47,7 +35,6 @@
     formatSkipRate,
     formatSol,
     formatSolFixed,
-    formatTimestamp,
     shortenPubkey,
   } from '$lib/format';
 
@@ -67,13 +54,6 @@
   // rationale behind the specific counts.
   const HISTORY_PER_EPOCH_DECIMALS = 3;
 
-  // Solana's target slot time is ~400ms; leader-schedule calculations
-  // in the indexer already use this constant. Used here ONLY for the
-  // "~Xh left in this epoch" readout — a visualisation aid, not an
-  // accurate countdown. Real slot time drifts 5-10% with network load;
-  // we round aggressively (hours/mins, no seconds) so the noise isn't
-  // visible to the user.
-  const APPROX_SLOT_MS = 400;
   const LAST_MONTH_EPOCHS = 16;
 
   function safeHttpUrl(raw: string | null | undefined): string | null {
@@ -86,34 +66,9 @@
     }
   }
 
-  /**
-   * `relativeNow` drives `formatTimestamp()` and the "updated Xs ago"
-   * ticker so relative timestamps advance without a page reload.
-   * Incremented on a timer in `onMount`. The actual DATA doesn't
-   * refetch — only the relative-time rendering. Cheapest possible
-   * "live-feel" UX: no extra HTTP calls, no server load, just makes
-   * the existing stale-indicator readable.
-   *
-   * Backend data freshness is a separate axis, driven by the polling
-   * fee-ingester (30s) and the gRPC live-path (sub-second when
-   * enabled). A user who wants truly fresh numbers still needs F5,
-   * but at least the timestamp won't deceive them.
-   */
-  let relativeNow = $state(new Date());
-  onMount(() => {
-    // 10-second tick is the sweet spot: fine enough that "13s" → "23s"
-    // visibly updates while a user is looking, coarse enough that the
-    // browser doesn't spin a setInterval at 1Hz for no reason.
-    const id = setInterval(() => {
-      relativeNow = new Date();
-    }, 10_000);
-    return () => clearInterval(id);
-  });
-
   let { data }: { data: PageData } = $props();
 
   const history = $derived(data.history);
-  const currentEpoch = $derived(data.currentEpoch);
 
   /**
    * True when the user hit an unknown pubkey and the indexer just
@@ -126,13 +81,6 @@
   const trackingMessage = $derived<string | null>(history.trackingMessage ?? null);
   const safeWebsiteUrl = $derived(safeHttpUrl(history.website));
   const safeIconUrl = $derived(safeHttpUrl(history.iconUrl));
-
-  const currentRow = $derived<ValidatorEpochRecord | undefined>(
-    currentEpoch === null ? undefined : history.items.find((r) => r.epoch === currentEpoch.epoch),
-  );
-  const historyWithoutCurrent = $derived<ValidatorEpochRecord[]>(
-    currentRow === undefined ? history.items : history.items.filter((r) => r !== currentRow),
-  );
 
   const lastMonthRows = $derived<ValidatorEpochRecord[]>(history.items.slice(0, LAST_MONTH_EPOCHS));
   const lastMonthFeesSol = $derived<number>(
@@ -171,60 +119,6 @@
    *     for it yet. Rare but possible during backfill windows.
    */
   const hasAnyHistory = $derived<boolean>(history.items.length > 0);
-
-  /**
-   * True when we have a current-epoch KPI row to show. Distinct from
-   * `currentEpoch !== null` because the cluster might know the
-   * current epoch while our indexer hasn't produced a row for this
-   * validator yet (freshly tracked, or the validator isn't a leader
-   * this epoch).
-   */
-  const hasRunningKpis = $derived<boolean>(currentRow !== undefined);
-
-  const epochProgressPct = $derived<number | null>(
-    currentEpoch === null || currentEpoch.slotsElapsed === null || currentEpoch.slotCount === 0
-      ? null
-      : (currentEpoch.slotsElapsed / currentEpoch.slotCount) * 100,
-  );
-
-  /**
-   * Rough "time left in this epoch" in minutes. Uses the ~400ms/slot
-   * nominal rate; network load can make this off by 5-10%, so we
-   * render in coarse units (hours/mins) rather than seconds to keep
-   * the imprecision invisible.
-   *
-   * Returns null if any input is missing (null slotsElapsed, zero
-   * slotCount). The UI shows "—" in that case.
-   */
-  const minutesLeftInEpoch = $derived.by<number | null>(() => {
-    if (currentEpoch === null) return null;
-    if (currentEpoch.slotsElapsed === null) return null;
-    const slotsRemaining = Math.max(0, currentEpoch.slotCount - currentEpoch.slotsElapsed);
-    return Math.round((slotsRemaining * APPROX_SLOT_MS) / 60_000);
-  });
-
-  const epochTimeLeftLabel = $derived.by<string | null>(() => {
-    const m = minutesLeftInEpoch;
-    if (m === null) return null;
-    if (m <= 0) return 'closing';
-    if (m < 60) return `~${m}m left`;
-    const hours = Math.round(m / 60);
-    return `~${hours}h left`;
-  });
-
-  /**
-   * Epoch label shown in the hero and running-epoch cards. Guards
-   * against transient API states where the backend might hand back a
-   * zero or negative epoch during a cold-start window (freshly-created
-   * embedded Postgres, migration in progress, epoch-watcher hasn't
-   * ticked yet). Displaying "-1" or "0" is confusing — em-dash signals
-   * "not known yet" consistently with the other fallbacks.
-   */
-  const currentEpochLabel = $derived<string>(
-    currentEpoch === null || !Number.isInteger(currentEpoch.epoch) || currentEpoch.epoch <= 0
-      ? '—'
-      : String(currentEpoch.epoch),
-  );
 
   const shortVote = $derived(shortenPubkey(history.vote, 6, 6));
   // Prefer moniker in the <title> tag — makes browser tabs, OS
@@ -322,30 +216,6 @@
   let iconLoadFailed = $state(false);
 
   /**
-   * Total income for the running epoch "so far" — the one big number
-   * that replaces the 3-tile base/priority/MEV split at the top of
-   * the running-epoch card. Returns null when any of the three
-   * components is null (we don't want to advertise a partial sum
-   * that might mislead — a null in one stream is a null in the
-   * total, same semantic as the history table's Total column).
-   */
-  const runningTotalSol = $derived.by<number | null>(() => {
-    if (currentRow === undefined) return null;
-    if (
-      currentRow.blockBaseFeesTotalSol === null ||
-      currentRow.blockPriorityFeesTotalSol === null ||
-      currentRow.blockTipsTotalSol === null
-    ) {
-      return null;
-    }
-    return (
-      Number(currentRow.blockBaseFeesTotalSol) +
-      Number(currentRow.blockPriorityFeesTotalSol) +
-      Number(currentRow.blockTipsTotalSol)
-    );
-  });
-
-  /**
    * Primary MEV display is our on-chain gross Jito tips, derived from
    * every produced block. Kobe's post-TipRouter payout remains available
    * on the API as a reference, but it is not the page's income source.
@@ -358,6 +228,10 @@
       return { display: row.blockTipsTotalSol, isApproximate: false };
     }
     return { display: null, isApproximate: false };
+  }
+
+  function isLiveRow(row: ValidatorEpochRecord): boolean {
+    return row.isCurrentEpoch && !row.isFinal;
   }
 </script>
 
@@ -646,223 +520,7 @@
   </section>
 {/if}
 
-<!-- ─────────── 2. Running-epoch card ─────────── -->
-<!--
-  Skipped entirely during the initial tracking window — there's
-  nothing useful to show (all tiles would render "—" and the user
-  already has the tracking banner above). Re-enabled automatically
-  once `currentRow` materialises.
--->
-{#if currentEpoch && hasRunningKpis}
-  <Card tone="accent" class="mt-6">
-    <!--
-      Header row: epoch label + status + freshness on the left; the
-      "Total so far" hero figure on the right. Stacks vertically on
-      mobile (`< sm`) so the two blocks never overlap on narrow
-      viewports — the right column's right-align would otherwise crash
-      into the left column's progress-bar caption at ~400px widths.
-    -->
-    <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-x-6">
-      <div class="min-w-0 flex-1">
-        <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <p
-            class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-subtle)]"
-          >
-            Running epoch
-          </p>
-          <p class="flex items-baseline gap-2 text-2xl font-semibold">
-            <span class="font-mono">{currentEpochLabel}</span>
-            {#if currentRow}
-              <span
-                class="rounded-full border border-[color:var(--color-border-default)] px-2 py-0.5 text-xs font-medium text-[color:var(--color-text-muted)]"
-              >
-                {currentRow.isFinal ? 'Final' : 'Running'}
-              </span>
-            {/if}
-          </p>
-          <!--
-            Freshness indicator — single source of live-feel. Pulsing
-            dot anchors attention; the ticker copy actually earns its
-            value here vs. buried as the 8th KPI tile. `motion-reduce`
-            collapses animation for users who've asked for it.
-          -->
-          {#if currentRow}
-            <span
-              class="flex items-center gap-1.5 text-xs text-[color:var(--color-text-muted)]"
-              aria-label={`Last updated ${formatTimestamp(currentRow.lastUpdatedAt, relativeNow)}`}
-            >
-              <span
-                aria-hidden="true"
-                class="inline-block h-1.5 w-1.5 rounded-full bg-[color:var(--color-brand-500)] motion-safe:animate-pulse"
-              ></span>
-              <span class="font-mono tabular-nums">
-                updated {formatTimestamp(currentRow.lastUpdatedAt, relativeNow)}
-              </span>
-            </span>
-          {/if}
-        </div>
-
-        <!--
-          Progress bar — inlined thin sliver, context not content.
-          Drops below the title on wrap; otherwise shares the row
-          with the total-income hero. `~Xh left` replaces the
-          previous bare percentage because "50% done" on a 432,000-
-          slot epoch means wildly different things time-wise
-          depending on when you land.
-        -->
-        {#if epochProgressPct !== null}
-          <div class="mt-2.5 max-w-md">
-            <div class="flex items-baseline justify-between gap-2 text-[11px]">
-              <span
-                class="font-mono tabular-nums text-[color:var(--color-text-muted)]"
-                title={currentEpoch.slotsElapsed !== null
-                  ? `${currentEpoch.slotsElapsed.toLocaleString()} / ${currentEpoch.slotCount.toLocaleString()} slots`
-                  : undefined}
-                >{epochProgressPct.toFixed(1)}%{epochTimeLeftLabel
-                  ? ` · ${epochTimeLeftLabel}`
-                  : ''}</span
-              >
-            </div>
-            <div
-              class="mt-1 h-1 overflow-hidden rounded-full bg-[color:var(--color-surface-muted)]"
-              role="progressbar"
-              aria-valuenow={epochProgressPct}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-label={`Epoch ${currentEpoch.epoch} is ${epochProgressPct.toFixed(1)}% complete`}
-            >
-              <div
-                class="h-full bg-[color:var(--color-brand-500)] transition-[width]"
-                style:width={`${epochProgressPct.toFixed(2)}%`}
-              ></div>
-            </div>
-          </div>
-        {/if}
-      </div>
-
-      <!--
-        The running-epoch hero number: "Total so far". One figure,
-        prominent, accent-coloured. Replaces the 3-tile base/
-        priority/MEV split at the top; the split is available
-        one click away in the disclosure below.
-
-        Null state ("—") when any of the three streams is null —
-        consistent with the history table's Total column and avoids
-        misleading partial sums during the first few blocks of a
-        new epoch.
-      -->
-      <div class="text-left sm:text-right">
-        <p
-          class="inline-flex items-center text-xs font-semibold uppercase tracking-wider text-[color:var(--color-text-subtle)]"
-        >
-          Total so far
-          <Tooltip
-            label="About running-epoch total"
-            align="right"
-            content="Block fees + Jito tips earned since the running epoch started. Will keep growing as the validator produces more blocks until the epoch closes."
-          />
-        </p>
-        {#if runningTotalSol !== null}
-          <p
-            class="mt-1 text-3xl font-semibold tracking-tight text-[color:var(--color-brand-500)] sm:text-4xl"
-          >
-            ◎{formatSol(String(runningTotalSol))}
-          </p>
-        {:else}
-          <p class="mt-1 text-3xl text-[color:var(--color-text-subtle)] sm:text-4xl">—</p>
-        {/if}
-        {#if currentRow}
-          <p class="mt-0.5 text-xs text-[color:var(--color-text-muted)]">
-            {formatNumberOrDash(currentRow.slotsProduced)} / {formatNumberOrDash(
-              currentRow.slotsAssigned,
-            )} slots · {formatSkipRate(currentRow.slotsSkipped, currentRow.slotsAssigned)} skipped
-          </p>
-        {/if}
-      </div>
-    </div>
-
-    <!--
-      Breakdown disclosure. `<details>` is HTML-native, keyboard/SR
-      accessible for free, and gets remembered per-session via the
-      `name` attribute so repeat visitors don't have to re-click.
-      Initial closed state keeps the page calm; power users
-      expand and the split is right there.
-    -->
-    {#if currentRow}
-      <details
-        class="mt-4 group border-t border-[color:var(--color-border-default)] pt-3"
-        name="running-breakdown"
-      >
-        <summary
-          class="cursor-pointer list-none select-none text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)] hover:text-[color:var(--color-text-default)]"
-        >
-          <span class="inline-block transition-transform group-open:rotate-90" aria-hidden="true"
-            >▸</span
-          >
-          Breakdown
-        </summary>
-        <dl class="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-3">
-          <div>
-            <dt
-              class="inline-flex items-center text-xs uppercase tracking-wide text-[color:var(--color-text-muted)]"
-            >
-              Base fees
-              <Tooltip
-                label="About base fees"
-                content="The fixed 5,000-lamport-per-signature fee every Solana transaction pays. Always paid regardless of network load."
-              />
-            </dt>
-            <dd class="mt-0.5 font-mono text-sm tabular-nums">
-              {#if currentRow.blockBaseFeesTotalSol !== null}
-                ◎{formatSol(currentRow.blockBaseFeesTotalSol)}
-              {:else}
-                <span class="text-[color:var(--color-text-subtle)]">—</span>
-              {/if}
-            </dd>
-          </div>
-          <div>
-            <dt
-              class="inline-flex items-center text-xs uppercase tracking-wide text-[color:var(--color-text-muted)]"
-            >
-              Priority fees
-              <Tooltip
-                label="About priority fees"
-                content="Optional extra users pay to outbid others for inclusion in busy blocks. Since SIMD-96, 100% of priority fees go to the leader (zero burn)."
-              />
-            </dt>
-            <dd class="mt-0.5 font-mono text-sm tabular-nums">
-              {#if currentRow.blockPriorityFeesTotalSol !== null}
-                ◎{formatSol(currentRow.blockPriorityFeesTotalSol)}
-              {:else}
-                <span class="text-[color:var(--color-text-subtle)]">—</span>
-              {/if}
-            </dd>
-          </div>
-          <div>
-            <dt
-              class="inline-flex items-center text-xs uppercase tracking-wide text-[color:var(--color-text-muted)]"
-            >
-              MEV tips (gross)
-              <Tooltip
-                label="About MEV tips"
-                content="Jito tips traders deposit on-chain to land bundles in this validator's blocks. 'Gross' because Jito's TipRouter takes a 3% fee before the final payout."
-              />
-            </dt>
-            <dd class="mt-0.5 font-mono text-sm tabular-nums">
-              {#if currentRow.blockTipsTotalSol !== null}
-                ◎{formatSol(currentRow.blockTipsTotalSol)}
-              {:else}
-                <span class="text-[color:var(--color-text-subtle)]">—</span>
-              {/if}
-            </dd>
-          </div>
-        </dl>
-      </details>
-    {/if}
-  </Card>
-{/if}
-
-<!-- ─────────── 3. Income trend chart ─────────── -->
+<!-- ─────────── 2. Income trend chart ─────────── -->
 <!--
   Hidden during the initial tracking window: an empty chart card is a
   "nothing here" signal that stacks redundantly with the tracking
@@ -874,13 +532,13 @@
   </div>
 {/if}
 
-<!-- ─────────── 4. Epoch income history ─────────── -->
+<!-- ─────────── 3. Epoch income ─────────── -->
 <section aria-labelledby="history-title" class="mt-10">
   <div class="mb-4">
-    <h2 id="history-title" class="text-lg font-semibold">Epoch income history</h2>
+    <h2 id="history-title" class="text-lg font-semibold">Epoch income</h2>
   </div>
 
-  {#if historyWithoutCurrent.length === 0 && !currentRow}
+  {#if !hasAnyHistory}
     <Card>
       <p class="text-sm text-[color:var(--color-text-muted)]">
         {#if isTracking}
@@ -902,12 +560,12 @@
         the 6-column-clip problem the old `overflow-x-auto` table
         had on 375px phones.
 
-      Both views read from the same `historyWithoutCurrent` array —
+      Both views read from the same `history.items` array —
       single source of truth, no drift between responsive modes.
     -->
     <!-- Mobile: stacked cards -->
     <ul class="space-y-3 md:hidden">
-      {#each historyWithoutCurrent as row (row.epoch)}
+      {#each history.items as row (row.epoch)}
         {@const mev = unifiedMevFor(row)}
         {@const total =
           row.blockBaseFeesTotalSol !== null &&
@@ -922,9 +580,13 @@
             <div class="flex items-baseline justify-between gap-3">
               <div class="flex items-baseline gap-3">
                 <span class="font-mono text-lg font-semibold">Epoch {row.epoch}</span>
-                <span class="text-xs font-medium text-[color:var(--color-text-muted)]">
-                  {row.isFinal ? 'Final' : 'Running'}
-                </span>
+                {#if isLiveRow(row)}
+                  <span
+                    class="rounded-full border border-[color:var(--color-brand-500)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-brand-500)]"
+                  >
+                    Live
+                  </span>
+                {/if}
               </div>
               <div class="text-right">
                 <p class="text-[10px] uppercase tracking-wide text-[color:var(--color-text-muted)]">
@@ -1025,14 +687,12 @@
     <div
       class="hidden md:block overflow-x-auto rounded-xl border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)]"
     >
-      <table
-        class="min-w-full divide-y divide-[color:var(--color-border-default)] text-sm"
-        aria-describedby="status-legend"
-      >
+      <table class="min-w-full divide-y divide-[color:var(--color-border-default)] text-sm">
         <caption class="sr-only">
-          Epoch income history for validator {history.vote}, newest epoch first. Income is
-          decomposed into three revenue streams: gross base fees, gross priority fees, and Jito MEV
-          tips. The MEV column shows on-chain Jito tips derived from produced blocks.
+          Epoch income for validator {history.vote}, newest epoch first. The live running epoch
+          appears first when available. Income is decomposed into three revenue streams: base fees,
+          priority fees, and Jito MEV tips. The MEV column shows on-chain Jito tips derived from
+          produced blocks.
         </caption>
         <thead
           class="bg-[color:var(--color-surface-muted)] text-xs uppercase tracking-wide text-[color:var(--color-text-muted)]"
@@ -1100,16 +760,26 @@
                 />
               </span>
             </th>
-            <th scope="col" class="px-4 py-3 text-center">Status</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-[color:var(--color-border-default)]">
-          {#each historyWithoutCurrent as row (row.epoch)}
+          {#each history.items as row (row.epoch)}
             {@const mev = unifiedMevFor(row)}
             <tr
               class="bg-[color:var(--color-surface)] transition-colors hover:bg-[color:var(--color-surface-muted)]"
             >
-              <th scope="row" class="px-4 py-3 text-left font-mono font-medium">{row.epoch}</th>
+              <th scope="row" class="px-4 py-3 text-left font-mono font-medium">
+                <span class="inline-flex items-center gap-2">
+                  {row.epoch}
+                  {#if isLiveRow(row)}
+                    <span
+                      class="rounded-full border border-[color:var(--color-brand-500)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-brand-500)]"
+                    >
+                      Live
+                    </span>
+                  {/if}
+                </span>
+              </th>
               <td class="px-4 py-3 text-right tabular-nums">
                 {formatNumberOrDash(row.slotsProduced)} / {formatNumberOrDash(row.slotsAssigned)}
               </td>
@@ -1154,11 +824,6 @@
                 {:else}
                   <span class="text-[color:var(--color-text-subtle)]" aria-label="no data">—</span>
                 {/if}
-              </td>
-              <td class="px-4 py-3 text-center">
-                <span class="text-xs font-medium text-[color:var(--color-text-muted)]">
-                  {row.isFinal ? 'Final' : 'Running'}
-                </span>
               </td>
             </tr>
           {/each}

@@ -56,10 +56,12 @@
 
   const PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
   const LAST_MONTH_EPOCHS = 16;
+  const DECADE_EPOCH_COUNT = 10;
   const WINDOW_OPTIONS: Array<{ key: LeaderboardWindow; label: string }> = [
     { key: 'live_trend', label: 'Live trend' },
     { key: 'current_only', label: 'Current only' },
     { key: 'stable_trend', label: 'Stable trend' },
+    { key: 'decade_epoch', label: 'Decade' },
     { key: 'final_epoch', label: 'Final epoch' },
   ];
 
@@ -67,11 +69,35 @@
     return `${vote}:${epoch}`;
   }
 
-  function rowsNeededForLeaderSlotStats(history: ValidatorHistory | null): ValidatorEpochRecord[] {
+  function latestCompleteDecadeRange(): { start: number; end: number } | null {
+    const current = data.currentEpoch;
+    if (current === null) return null;
+    const latestClosed = current.isClosed ? current.epoch : current.epoch - 1;
+    if (latestClosed < DECADE_EPOCH_COUNT - 1) return null;
+    const end = Math.floor((latestClosed + 1) / DECADE_EPOCH_COUNT) * DECADE_EPOCH_COUNT - 1;
+    if (end < DECADE_EPOCH_COUNT - 1) return null;
+    return { start: end - DECADE_EPOCH_COUNT + 1, end };
+  }
+
+  function pickedRows(history: ValidatorHistory | null): ValidatorEpochRecord[] {
     if (history === null) return [];
     const current = history.items.find((r) => r.isCurrentEpoch);
-    const closed = history.items.filter((r) => r.isFinal).slice(0, 2);
-    return [...(current ? [current] : []), ...closed];
+    const closed = history.items.filter((r) => r.isFinal);
+    if (windowMode === 'current_only') return current ? [current] : [];
+    if (windowMode === 'stable_trend')
+      return [...(current ? [current] : []), ...closed.slice(0, 2)];
+    if (windowMode === 'decade_epoch') {
+      const range = latestCompleteDecadeRange();
+      if (range === null) return [];
+      const rows = closed.filter((row) => row.epoch >= range.start && row.epoch <= range.end);
+      return rows.length === DECADE_EPOCH_COUNT ? rows : [];
+    }
+    if (windowMode === 'final_epoch') return closed.slice(0, 1);
+    return [...(current ? [current] : []), ...closed.slice(0, 1)];
+  }
+
+  function rowsNeededForLeaderSlotStats(history: ValidatorHistory | null): ValidatorEpochRecord[] {
+    return pickedRows(history);
   }
 
   $effect(() => {
@@ -236,17 +262,6 @@
     if (value === null || value === undefined) return null;
     const n = Number(value);
     return Number.isFinite(n) ? n : null;
-  }
-
-  function pickedRows(history: ValidatorHistory | null): ValidatorEpochRecord[] {
-    if (history === null) return [];
-    const current = history.items.find((r) => r.isCurrentEpoch);
-    const closed = history.items.filter((r) => r.isFinal);
-    if (windowMode === 'current_only') return current ? [current] : [];
-    if (windowMode === 'stable_trend')
-      return [...(current ? [current] : []), ...closed.slice(0, 2)];
-    if (windowMode === 'final_epoch') return closed.slice(0, 1);
-    return [...(current ? [current] : []), ...closed.slice(0, 1)];
   }
 
   function rowWindowSlots(row: ValidatorEpochRecord): number {

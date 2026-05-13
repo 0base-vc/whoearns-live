@@ -16,8 +16,10 @@ info:
     Repository migration note: `docs/migrations/v0.3-api.md`.
 
     **v0.4 leaderboard/search update.** `/v1/leaderboard` now defaults to
-    `window=live_trend&sort=income_per_slot`; validator name search is exposed
-    at `/v1/validators/search`. Repository migration note:
+    `window=live_trend&sort=income_per_slot` and also supports
+    `window=decade_epoch` for the latest complete 10-epoch ranking block.
+    Validator name search is exposed at `/v1/validators/search`.
+    Repository migration note:
     `docs/migrations/v0.4-api.md`.
 
 servers:
@@ -242,6 +244,8 @@ paths:
             final epochs.
           - `final_epoch`: latest final epoch only, or `?epoch=N` when an
             explicit closed epoch is requested.
+          - `decade_epoch`: latest complete 10-epoch block. Validators must
+            have rows in all 10 epochs to rank.
 
         **Sort modes:**
           - `income_per_slot` (DEFAULT): `(block_fees + block_tips) / windowSlots`,
@@ -254,8 +258,8 @@ paths:
         Rows below `minWindowSlots` are filtered. Returned rows also include a
         `sampleStatus` hint (`low`, `medium`, `normal`) for clients that want
         to label small denominators. Validators that ranked #1-#3 by
-        `income_per_slot` in the latest finalized epoch include
-        `previousFinalEpoch` and `previousFinalEpochRank` badge metadata.
+        `income_per_slot` in the latest complete 10-epoch block include
+        `decadeEpochStart`, `decadeEpochEnd`, and `decadeRank` badge metadata.
         Compatibility: bare `?epoch=N` is treated as
         `window=final_epoch&epoch=N`; legacy sort aliases `performance` and
         `income_per_stake` map to `income_per_slot`, and `median_fee` maps to
@@ -1017,11 +1021,12 @@ components:
 
     LeaderboardWindow:
       type: string
-      enum: [live_trend, current_only, stable_trend, final_epoch]
+      enum: [live_trend, current_only, stable_trend, final_epoch, decade_epoch]
       default: live_trend
       description: |
         Sample window for `/v1/leaderboard`. `live_trend` is current epoch
-        elapsed leader slots plus the latest final epoch.
+        elapsed leader slots plus the latest final epoch. `decade_epoch` is
+        the latest complete 10-epoch block.
 
     LeaderboardSort:
       type: string
@@ -1070,8 +1075,9 @@ components:
         - activatedStakeSol
         - incomePerStake
         - claimed
-        - previousFinalEpoch
-        - previousFinalEpochRank
+        - decadeEpochStart
+        - decadeEpochEnd
+        - decadeRank
       properties:
         rank: { type: integer, minimum: 1 }
         vote: { type: string }
@@ -1144,16 +1150,20 @@ components:
             epoch. Multiply by 100 for percentage; null when stake
             data is unavailable.
         claimed: { type: boolean }
-        previousFinalEpoch:
+        decadeEpochStart:
           type: [integer, 'null']
           minimum: 0
-          description: Latest finalized epoch used for the previous-epoch Top 3 badge.
-        previousFinalEpochRank:
+          description: First epoch in the latest complete 10-epoch ranking block.
+        decadeEpochEnd:
+          type: [integer, 'null']
+          minimum: 0
+          description: Last epoch in the latest complete 10-epoch ranking block.
+        decadeRank:
           type: [integer, 'null']
           enum: [1, 2, 3, null]
           description: |
-            Rank by income per leader slot in the latest finalized epoch.
-            Null when the validator was not in the visible Top 3.
+            Rank by income per leader slot in the latest complete 10-epoch block.
+            Null when the validator was not in the eligible visible Top 3.
 
     Leaderboard:
       type: object

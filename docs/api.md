@@ -168,8 +168,8 @@ far with the latest final epoch.
 
 Query params:
 
-- `window` — `live_trend` (default), `current_only`, `stable_trend`, or
-  `final_epoch`.
+- `window` — `live_trend` (default), `current_only`, `stable_trend`,
+  `final_epoch`, or `decade_epoch`.
 - `epoch` — optional closed epoch number. Only valid with `window=final_epoch`.
 - `limit` — 1-500, default 100.
 - `sort` — `income_per_slot` (default), `total_income`, `mev_tips`, `fees`,
@@ -190,13 +190,21 @@ Windows:
 - `stable_trend` — current epoch elapsed leader slots + two latest final
   epochs.
 - `final_epoch` — latest final epoch only, or `?epoch=N` when requested.
+- `decade_epoch` — latest complete 10-epoch block. Validators must have
+  rows in all 10 epochs to rank.
+
+Example:
+
+```bash
+curl "https://whoearns.live/v1/leaderboard?window=decade_epoch&sort=income_per_slot&limit=25"
+```
 
 Rows include validator identity metadata, slot counts, block fee/tip totals,
 window income fields, `incomeSolPerSlot`, stake snapshot fields when
 available, `sampleStatus`, and a `claimed` boolean. Rows that ranked #1-#3 by
-`income_per_slot` in the latest finalized epoch also include
-`previousFinalEpoch` and `previousFinalEpochRank`; otherwise both fields are
-`null`.
+`income_per_slot` in the latest complete 10-epoch block also include
+`decadeEpochStart`, `decadeEpochEnd`, and `decadeRank`; otherwise those fields
+are `null`.
 
 ## `GET /v1/validators/search`
 
@@ -468,7 +476,10 @@ different operation.
 
 Streamable HTTP MCP endpoint for AI agents. The server exposes four read-only
 tools: `get_current_epoch`, `get_leaderboard`, `get_validator`, and
-`get_validator_leader_slots`. MCP calls use the same public per-IP rate limit.
+`get_validator_leader_slots`. `get_leaderboard` supports the same window
+model as `/v1/leaderboard`, including `decade_epoch`, and includes
+`decadeEpochStart`, `decadeEpochEnd`, and `decadeRank` on rows when relevant.
+MCP calls use the same public per-IP rate limit.
 The public stateless transport accepts POST only; GET/DELETE return 405 to
 avoid unauthenticated long-lived stream connections.
 as `/v1/*`; tool schemas also cap response sizes.

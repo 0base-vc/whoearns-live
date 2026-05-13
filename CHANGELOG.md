@@ -8,7 +8,9 @@ and this project follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Live Trend 2.0 leaderboard windows: `live_trend` (default),
-  `current_only`, `stable_trend`, and `final_epoch`.
+  `current_only`, `stable_trend`, `final_epoch`, and `decade_epoch`.
+- Decade ranker badges for the Top 3 validators by income per leader slot
+  across the latest complete 10-epoch block.
 - DB-only validator search via `GET /v1/validators/search` for name,
   vote pubkey prefix, identity pubkey prefix, and keybase username lookups.
 - AI-assisted positioning across public docs, SEO metadata, OpenAPI,

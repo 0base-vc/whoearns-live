@@ -46,6 +46,16 @@
       ko: '각 에폭이 시작되기 전에 Solana는 리더 슬롯을 결정적으로 validator들에게 할당합니다 — 활성 스테이크에 비례해서요 (스테이크 많을수록 슬롯도 많아짐). 이 스케줄이 "블록 N을 누가 만들기로 되어 있었는가"의 기준입니다.',
     },
     {
+      term: 'Leaderboard window',
+      en: 'The sample period used for a ranking. WhoEarns supports live_trend (running epoch plus latest final epoch), current_only, stable_trend, final_epoch, and decade_epoch. The same income / slot formula is applied inside each window.',
+      ko: '랭킹에 사용하는 샘플 구간입니다. WhoEarns는 live_trend(진행 중 에폭 + 최신 종료 에폭), current_only, stable_trend, final_epoch, decade_epoch를 지원합니다. 각 window 안에서 같은 income / slot 공식이 적용됩니다.',
+    },
+    {
+      term: 'Decade ranking',
+      en: 'A leaderboard mode that uses the latest complete 10-epoch block. Validators need rows in all 10 epochs to qualify, and the Top 3 by income per leader slot receive gold, silver, and bronze badges.',
+      ko: '가장 최근 완성된 10개 에폭 구간을 사용하는 리더보드 모드입니다. Validator는 10개 에폭 모두에 row가 있어야 참여할 수 있고, leader slot당 수입 Top 3에게 금/은/동 뱃지가 표시됩니다.',
+    },
+    {
       term: 'Skip rate',
       en: "The percentage of leader slots a validator failed to produce. 0% is perfect; consistently above ~5% usually means an unhealthy node or a misconfigured one. Skip rate is one of the cleanest signals of operator quality because it's stake-neutral.",
       ko: 'validator가 자신에게 할당된 리더 슬롯에서 블록을 만들지 못한 비율입니다. 0%가 완벽한 값이고, 지속적으로 ~5% 이상이면 노드가 불안정하거나 잘못 설정된 경우가 많습니다. Skip rate는 스테이크와 무관해서 운영 품질을 보는 가장 깨끗한 지표 중 하나입니다.',

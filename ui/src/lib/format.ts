@@ -42,11 +42,11 @@ export function formatSolFixed(sol: string | null, decimals: number): string {
   return n.toFixed(decimals);
 }
 
-/** Skip-rate percentage with 2 decimal places, or "—" when we can't compute it. */
+/** Skip-rate percentage plus skipped-slot count, or "—" when we can't compute it. */
 export function formatSkipRate(skipped: number | null, assigned: number | null): string {
   if (skipped === null || assigned === null || assigned === 0) return '—';
   const pct = (skipped / assigned) * 100;
-  return `${pct.toFixed(2)}% (${skipped}/${assigned})`;
+  return `${pct.toFixed(2)}% (${skipped.toLocaleString()})`;
 }
 
 export function formatNumberOrDash(n: number | null): string {
