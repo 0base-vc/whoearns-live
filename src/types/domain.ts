@@ -93,6 +93,29 @@ export interface OperatorWallet {
 }
 
 /**
+ * Phase 5 — one tracked SIMD (Solana Improvement Document) with
+ * optional AI curation (summary + discussion questions). Pre-review
+ * rows are NOT exposed via the public API; only the row's
+ * `simd_number`, `title`, `status`, `source_url`, and review state
+ * are routinely surfaced. AI fields ship after a human reviewer
+ * signs off.
+ */
+export interface SimdProposal {
+  simdNumber: number;
+  title: string;
+  status: string;
+  sourceUrl: string;
+  bodySha256: string | null;
+  aiSummary: string | null;
+  aiQuestions: string[] | null;
+  aiGeneratedAt: Date | null;
+  reviewedAt: Date | null;
+  reviewedBy: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
  * Phase 4 — daily on-chain activity row for a registered operator
  * wallet. Used to render the 365-day GitHub-style activity heatmap on
  * the validator profile. Per-day aggregates only — individual tx

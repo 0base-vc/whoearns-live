@@ -16,6 +16,7 @@ import type { OperatorWalletVerificationService } from '../services/operator-wal
 import type { ValidatorService } from '../services/validator.service.js';
 import type { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
 import type { ValidatorGithubRepository } from '../storage/repositories/validator-github.repo.js';
+import type { SimdProposalsRepository } from '../storage/repositories/simd-proposals.repo.js';
 import type { WalletActivityRepository } from '../storage/repositories/wallet-activity.repo.js';
 import type { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../storage/repositories/claims.repo.js';
@@ -30,6 +31,7 @@ import { registerRequestId } from './request-id.js';
 import badgeRoutes from './routes/badge.route.js';
 import claimRoutes from './routes/claim.route.js';
 import operatorWalletsRoutes from './routes/operator-wallets.route.js';
+import simdProposalsRoutes from './routes/simd-proposals.route.js';
 import epochsRoutes from './routes/epochs.route.js';
 import healthRoutes from './routes/health.route.js';
 import leaderboardRoutes from './routes/leaderboard.route.js';
@@ -87,6 +89,8 @@ export interface BuildServerDeps {
     operatorWallets?: OperatorWalletsRepository;
     /** Phase 4 — wallet daily activity (read surface). */
     walletActivity?: WalletActivityRepository;
+    /** Phase 5 — SIMD proposals + AI curation. */
+    simdProposals?: SimdProposalsRepository;
   };
   services: {
     validator: ValidatorService;
@@ -322,6 +326,13 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       await scope.register(operatorWalletsRoutes, {
         walletActivityRepo: deps.repos.walletActivity,
         operatorWalletsRepo: deps.repos.operatorWallets,
+      });
+    }
+    // Phase 5 — Pending SIMD widget read endpoint. Conditional like
+    // operator-wallets above; the curation pipeline is worker-owned.
+    if (deps.repos.simdProposals !== undefined) {
+      await scope.register(simdProposalsRoutes, {
+        repo: deps.repos.simdProposals,
       });
     }
     // SEO + AI-discovery surfaces. Registered BEFORE `fastifyStatic`

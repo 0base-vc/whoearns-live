@@ -206,6 +206,13 @@ export const ConfigSchema = z.object({
   // ~4x vs hourly. Operators expecting near-real-time can lower
   // this; the indexer is idempotent so partial runs are safe.
   WALLET_ACTIVITY_INTERVAL_MS: PositiveInt.default(6 * 60 * 60 * 1000),
+  // Phase 5 — Anthropic Claude API key for SIMD curation. When
+  // unset, the SIMD curation pipeline is disabled (the route still
+  // serves already-curated rows, but new SIMDs stay pre-review
+  // until an operator manually populates them).
+  ANTHROPIC_API_KEY: z.string().optional(),
+  ANTHROPIC_MODEL: z.string().default('claude-sonnet-4-6'),
+  SIMD_CURATION_INTERVAL_MS: PositiveInt.default(12 * 60 * 60 * 1000),
 
   SLOT_FINALITY_BUFFER: NonNegativeInt.default(32),
 

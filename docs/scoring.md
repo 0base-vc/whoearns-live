@@ -253,7 +253,33 @@ asset is a 1200×630 PNG.
 
 ### Phase 5 — Pending SIMD widget + AI curation
 
-**Status: planned, not shipped.**
+**Status: partial release — AI curation pipeline + read endpoint live; GitHub-sync job + writeable admin review planned.**
+
+#### Live now
+
+- `simd_proposals` table mirrors the GitHub SIMD list (one row per
+  SIMD number, with `body_sha256` for change detection).
+- `AnthropicClient` thin wrapper around the Messages API
+  (`claude-sonnet-4-6` default, 30 s timeout, no SDK lock-in).
+- `SimdCurationService` parses model output (`SUMMARY:` +
+  `QUESTIONS:` with 3-5 `Q: ` lines) and writes to the DB.
+  Unparseable output is logged + skipped (never persisted).
+- `prompts/simd-curation.md` ships the load-bearing system prompt
+  as committed source — auditors can read what framing the model
+  was given before trusting the output.
+- `GET /v1/simd-proposals?limit=N` returns reviewed-only rows for
+  the Pending SIMD widget.
+
+#### Planned next
+
+- GitHub mirror job — pull the SIMD list from
+  `solana-foundation/solana-improvement-documents` periodically
+  and feed rows into the curation pipeline.
+- Admin review endpoint — let a 1XP reviewer mark `reviewed_at`
+  on individual curations after spot-checking.
+- Markdown-export + simd.watch deep-link on the operator-facing
+  widget so claimed validators can post discussion comments
+  directly to GitHub Discussions.
 
 For each active SIMD proposal:
 
