@@ -273,34 +273,57 @@ export class ValidatorsRepository {
     if (trimmed.length < 2) return [];
 
     const lowered = trimmed.toLowerCase();
-    const like = `%${lowered.replace(/[%_\\]/g, '\\$&')}%`;
-    const prefix = `${lowered.replace(/[%_\\]/g, '\\$&')}%`;
+    const escaped = lowered.replace(/[%_\\]/g, '\\$&');
+    const like = `%${escaped}%`;
+    const prefix = `${escaped}%`;
     const optedOut = Array.from(optedOutVotes);
-    const { rows } = await this.pool.query<ValidatorRow>(
-      `SELECT v.vote_pubkey, v.identity_pubkey, v.first_seen_epoch, v.last_seen_epoch,
-              v.updated_at, v.name, v.details, v.website, v.keybase_username, v.icon_url,
-              v.info_updated_at,
-              CASE
-                WHEN lower(v.vote_pubkey) LIKE $3 ESCAPE '\\' THEN 0
-                WHEN lower(v.identity_pubkey) LIKE $3 ESCAPE '\\' THEN 1
-                WHEN lower(v.name) LIKE $2 ESCAPE '\\' THEN 2
-                WHEN lower(v.keybase_username) LIKE $2 ESCAPE '\\' THEN 3
-                ELSE 4
-              END AS rank_key
-         FROM validators v
-         LEFT JOIN validator_profiles vp ON v.vote_pubkey = vp.vote_pubkey
-        WHERE (
-              lower(v.vote_pubkey) LIKE $3 ESCAPE '\\'
-           OR lower(v.identity_pubkey) LIKE $3 ESCAPE '\\'
-           OR lower(v.name) LIKE $2 ESCAPE '\\'
-           OR lower(v.keybase_username) LIKE $2 ESCAPE '\\'
-        )
-          AND vp.opted_out IS NOT TRUE
-          AND NOT (v.vote_pubkey = ANY($4::text[]))
-        ORDER BY rank_key ASC, v.last_seen_epoch DESC, v.name ASC NULLS LAST, v.vote_pubkey ASC
-        LIMIT $1`,
-      [safeLimit, like, prefix, optedOut],
+
+    const runSearch = async (
+      matchMode: 'prefix' | 'substring',
+      rowLimit: number,
+      excludeVotes: VotePubkey[],
+    ): Promise<ValidatorRow[]> => {
+      const namePattern = matchMode === 'prefix' ? prefix : like;
+      const { rows } = await this.pool.query<ValidatorRow>(
+        `SELECT v.vote_pubkey, v.identity_pubkey, v.first_seen_epoch, v.last_seen_epoch,
+                v.updated_at, v.name, v.details, v.website, v.keybase_username, v.icon_url,
+                v.info_updated_at,
+                CASE
+                  WHEN lower(v.vote_pubkey) LIKE $3 ESCAPE '\\' THEN 0
+                  WHEN lower(v.identity_pubkey) LIKE $3 ESCAPE '\\' THEN 1
+                  WHEN lower(v.name) LIKE $2 ESCAPE '\\' THEN 2
+                  WHEN lower(v.keybase_username) LIKE $2 ESCAPE '\\' THEN 3
+                  ELSE 4
+                END AS rank_key
+           FROM validators v
+           LEFT JOIN validator_profiles vp ON v.vote_pubkey = vp.vote_pubkey
+          WHERE (
+                lower(v.vote_pubkey) LIKE $3 ESCAPE '\\'
+             OR lower(v.identity_pubkey) LIKE $3 ESCAPE '\\'
+             OR lower(v.name) LIKE $2 ESCAPE '\\'
+             OR lower(v.keybase_username) LIKE $2 ESCAPE '\\'
+          )
+            AND vp.opted_out IS NOT TRUE
+            AND NOT (v.vote_pubkey = ANY($4::text[]))
+            AND NOT (v.vote_pubkey = ANY($5::text[]))
+          ORDER BY rank_key ASC, v.last_seen_epoch DESC, v.name ASC NULLS LAST, v.vote_pubkey ASC
+          LIMIT $1`,
+        [rowLimit, namePattern, prefix, optedOut, excludeVotes],
+      );
+      return rows;
+    };
+
+    // Prefix queries hit the text_pattern_ops indexes for name, keybase,
+    // vote, and identity. If a user typed a middle substring, keep the UX
+    // useful with a bounded fallback scan over the small validator table.
+    const prefixRows = await runSearch('prefix', safeLimit, []);
+    if (prefixRows.length >= safeLimit) return prefixRows.map(rowToValidator);
+
+    const substringRows = await runSearch(
+      'substring',
+      safeLimit - prefixRows.length,
+      prefixRows.map((row) => row.vote_pubkey as VotePubkey),
     );
-    return rows.map(rowToValidator);
+    return [...prefixRows, ...substringRows].map(rowToValidator);
   }
 }

@@ -233,6 +233,10 @@
   function isLiveRow(row: ValidatorEpochRecord): boolean {
     return row.isCurrentEpoch && !row.isFinal;
   }
+
+  function displayedSlotDenominator(row: ValidatorEpochRecord): number | null {
+    return isLiveRow(row) ? (row.slotsElapsedAssigned ?? row.slotsAssigned) : row.slotsAssigned;
+  }
 </script>
 
 <svelte:head>
@@ -575,6 +579,7 @@
               Number(row.blockPriorityFeesTotalSol) +
               Number(row.blockTipsTotalSol)
             : null}
+        {@const slotDenominator = displayedSlotDenominator(row)}
         <li>
           <Card>
             <div class="flex items-baseline justify-between gap-3">
@@ -614,7 +619,7 @@
                   />
                 </dt>
                 <dd class="font-mono tabular-nums">
-                  {formatNumberOrDash(row.slotsProduced)} / {formatNumberOrDash(row.slotsAssigned)}
+                  {formatNumberOrDash(row.slotsProduced)} / {formatNumberOrDash(slotDenominator)}
                 </dd>
               </div>
               <div>
@@ -626,7 +631,7 @@
                   />
                 </dt>
                 <dd class="font-mono tabular-nums">
-                  {formatSkipRate(row.slotsSkipped, row.slotsAssigned)}
+                  {formatSkipRate(row.slotsSkipped, slotDenominator)}
                 </dd>
               </div>
               <div>
@@ -765,6 +770,7 @@
         <tbody class="divide-y divide-[color:var(--color-border-default)]">
           {#each history.items as row (row.epoch)}
             {@const mev = unifiedMevFor(row)}
+            {@const slotDenominator = displayedSlotDenominator(row)}
             <tr
               class="bg-[color:var(--color-surface)] transition-colors hover:bg-[color:var(--color-surface-muted)]"
             >
@@ -781,10 +787,10 @@
                 </span>
               </th>
               <td class="px-4 py-3 text-right tabular-nums">
-                {formatNumberOrDash(row.slotsProduced)} / {formatNumberOrDash(row.slotsAssigned)}
+                {formatNumberOrDash(row.slotsProduced)} / {formatNumberOrDash(slotDenominator)}
               </td>
               <td class="px-4 py-3 text-right tabular-nums">
-                {formatSkipRate(row.slotsSkipped, row.slotsAssigned)}
+                {formatSkipRate(row.slotsSkipped, slotDenominator)}
               </td>
               <td class="px-4 py-3 text-right tabular-nums">
                 {#if row.blockBaseFeesTotalSol !== null}

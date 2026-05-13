@@ -26,6 +26,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
   `?epoch=N` remain accepted for compatibility.
 - MCP `get_leaderboard` now follows the same window model as the public
   leaderboard instead of advertising latest-closed-epoch-only semantics.
+- MCP `get_current_epoch.slotsElapsed` now counts the observed current slot
+  and clamps to `slotCount`, matching the public epoch API semantics.
 - Renamed the public Helm chart path, chart name, Docker Compose project,
   local image name, and logger service name to `whoearns-live`.
 - Cleaned up public docs: moved the v0.3 API migration note under

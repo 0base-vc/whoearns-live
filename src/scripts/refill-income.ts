@@ -33,7 +33,9 @@
  *
  * For targeted repairs, use an explicit comma-separated list:
  *   BACKFILL_EPOCH_LIST=959,958,957,956 pnpm backfill:income
- * This bypasses the recent-epoch window and only scans those epochs.
+ * This bypasses the recent-epoch window and only scans those epochs,
+ * unless `INCLUDE_RUNNING=1` is also set, in which case the running
+ * epoch is prepended.
  *
  * Set `BACKFILL_CONCURRENCY=1..8` to tune refill-local parallelism.
  * This is separate from `SOLANA_RPC_CONCURRENCY`; use both when a
@@ -80,7 +82,9 @@ import { ProcessedBlocksRepository } from '../storage/repositories/processed-blo
 import { StatsRepository } from '../storage/repositories/stats.repo.js';
 import { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
-import type { Epoch } from '../types/domain.js';
+import type { Epoch, ProcessedBlock } from '../types/domain.js';
+
+const DB_REWRITE_BATCH_SIZE = 200;
 
 async function main(): Promise<number> {
   const cfg = loadConfig();
@@ -154,8 +158,20 @@ async function main(): Promise<number> {
     const includeRunning = process.env['INCLUDE_RUNNING'] === '1';
     const targetEpochs: Epoch[] = [];
 
+    const pushUniqueTargetEpoch = (epoch: Epoch): void => {
+      if (!targetEpochs.includes(epoch)) targetEpochs.push(epoch);
+    };
+    const maybePrependRunningEpoch = async (): Promise<void> => {
+      if (!includeRunning) return;
+      const current = await epochsRepo.findCurrent();
+      if (current !== null && !current.isClosed && current.epoch > latestClosed.epoch) {
+        pushUniqueTargetEpoch(current.epoch);
+      }
+    };
+
     if (explicitEpochs !== null) {
-      targetEpochs.push(...explicitEpochs);
+      await maybePrependRunningEpoch();
+      for (const epoch of explicitEpochs) pushUniqueTargetEpoch(epoch);
     } else {
       // Optionally include the running epoch at the head of the list.
       // Use case: a live-ingestion bug corrupted per-block rows for the
@@ -164,17 +180,12 @@ async function main(): Promise<number> {
       // epoch to close. Scan order matters here — do running epoch
       // FIRST so the user sees correct running-epoch numbers as soon as
       // the script gets to its end; historical epochs get fixed after.
-      if (includeRunning) {
-        const current = await epochsRepo.findCurrent();
-        if (current !== null && !current.isClosed && current.epoch > latestClosed.epoch) {
-          targetEpochs.push(current.epoch);
-        }
-      }
+      await maybePrependRunningEpoch();
 
       for (let i = 0; i < epochsToBackfill; i++) {
         const e = latestClosed.epoch - i;
         if (e < 0) break;
-        targetEpochs.push(e);
+        pushUniqueTargetEpoch(e);
       }
     }
     log.info({ targetEpochs, includeRunning }, 'refill-income: epoch plan');
@@ -220,7 +231,7 @@ async function main(): Promise<number> {
         let identityPriority = 0n;
         let identityTips = 0n;
         let identityLeader = 0n;
-        let identityBlocks = 0;
+        const repairedBlocks: ProcessedBlock[] = [];
 
         await Promise.all(
           slots.map((slot) =>
@@ -246,7 +257,7 @@ async function main(): Promise<number> {
                 // their 0s untouched (not in `slots` since we filter
                 // to `block_status = 'produced'`).
                 const processedAt = new Date();
-                const ok = await processedBlocksRepo.replaceProducedBlockFacts({
+                repairedBlocks.push({
                   epoch,
                   slot,
                   leaderIdentity: identity,
@@ -274,13 +285,10 @@ async function main(): Promise<number> {
                   factsCapturedAt: processedAt,
                   processedAt,
                 });
-                if (ok) {
-                  identityLeader += leaderFees;
-                  identityBase += leaderBase;
-                  identityPriority += income.priorityFees;
-                  identityTips += income.mevTips;
-                  identityBlocks += 1;
-                }
+                identityLeader += leaderFees;
+                identityBase += leaderBase;
+                identityPriority += income.priorityFees;
+                identityTips += income.mevTips;
               } catch (err) {
                 log.warn(
                   { err, epoch, identity, slot },
@@ -290,6 +298,11 @@ async function main(): Promise<number> {
             }),
           ),
         );
+
+        let identityBlocks = 0;
+        for (const chunk of chunkArray(repairedBlocks, DB_REWRITE_BATCH_SIZE)) {
+          identityBlocks += await processedBlocksRepo.replaceProducedBlockFactsBatch(chunk);
+        }
 
         // Rebuild from the complete fact table, not from just the
         // successfully-refetched subset. If one slot fails above, its
@@ -397,6 +410,14 @@ function parseEpochList(raw: string | undefined): Epoch[] | null {
   }
 
   return epochs;
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
 }
 
 main()

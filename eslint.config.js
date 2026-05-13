@@ -10,6 +10,7 @@ export default [
       'dist/**',
       'coverage/**',
       'node_modules/**',
+      '.claude/**',
       '**/*.d.ts',
       // SvelteKit UI has its own toolchain under ui/; don't lint it with
       // the backend's ESLint config.

@@ -12,6 +12,7 @@ const CREATE_SCHEMA_MIGRATIONS_SQL = `
     applied_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )
 `;
+const NO_TRANSACTION_DIRECTIVE = '-- migrate: no-transaction';
 
 /**
  * Locate all `*.sql` files in the migrations directory.
@@ -30,12 +31,20 @@ async function fetchApplied(pool: pg.Pool): Promise<Set<string>> {
   return new Set(rows.map((r) => r.name));
 }
 
+function splitSqlStatements(sql: string): string[] {
+  return sql
+    .split(';')
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
+}
+
 /**
  * Apply every `*.sql` file in the migrations directory exactly once.
  *
- * Each migration is wrapped in a transaction. If the SQL already contains
- * BEGIN/COMMIT these will be honoured by Postgres, but we do not recommend
- * it — the runner's transaction is sufficient.
+ * Migrations are wrapped in a transaction unless the file contains
+ * `-- migrate: no-transaction`. That escape hatch is required for
+ * `CREATE INDEX CONCURRENTLY`, which Postgres rejects inside an explicit
+ * transaction. Non-transactional migrations must be idempotent.
  *
  * Safe to invoke concurrently across processes: the INSERT into
  * `schema_migrations` acts as the de-dup lock. If two processes race, the
@@ -56,6 +65,18 @@ export async function runMigrations(pool: pg.Pool, logger?: Logger): Promise<voi
     const sqlPath = path.join(MIGRATIONS_DIR, file);
     const sql = await readFile(sqlPath, 'utf8');
 
+    const noTransaction = sql.includes(NO_TRANSACTION_DIRECTIVE);
+    if (noTransaction) {
+      for (const statement of splitSqlStatements(sql)) {
+        await pool.query(statement);
+      }
+      await pool.query('INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING', [
+        file,
+      ]);
+      logger?.info({ migration: file, transactional: false }, 'applied migration');
+      continue;
+    }
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -65,7 +86,7 @@ export async function runMigrations(pool: pg.Pool, logger?: Logger): Promise<voi
         [file],
       );
       await client.query('COMMIT');
-      logger?.info({ migration: file }, 'applied migration');
+      logger?.info({ migration: file, transactional: true }, 'applied migration');
     } catch (err) {
       await client.query('ROLLBACK').catch(() => undefined);
       throw err;

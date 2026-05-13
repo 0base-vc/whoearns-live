@@ -213,8 +213,10 @@ Solana RPC and opted-out validators are excluded.
 
 Query params:
 
-- `q` — required, 2-96 chars. Matches validator `name`, vote pubkey prefix,
-  identity pubkey prefix, and keybase username.
+- `q` — required, 2-96 chars. Matches vote pubkey prefix, identity pubkey
+  prefix, validator name, and keybase username. Prefix matches are ranked
+  first; if they under-fill `limit`, a bounded name/keybase substring fallback
+  fills the remaining rows.
 - `limit` — clamped to 1-25, default 10.
 
 Response:

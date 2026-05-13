@@ -98,6 +98,7 @@ export interface RpcBlockReward {
 export interface RpcCompiledInstruction {
   programIdIndex: number;
   accounts?: number[];
+  /** Base58-encoded compiled instruction data; runtime schema validates this. */
   data: string;
 }
 

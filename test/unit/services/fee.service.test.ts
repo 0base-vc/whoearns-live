@@ -225,6 +225,10 @@ describe('decomposeBlockIncome — type tolerance across RPC shapes', () => {
             },
             {
               programIdIndex: 2,
+              data: bs58.encode(Uint8Array.from([2, 0x90, 0xd0, 0x03, 0x00])),
+            },
+            {
+              programIdIndex: 2,
               data: bs58.encode(Uint8Array.from([3, 0x88, 0x13, 0, 0, 0, 0, 0, 0])),
             },
           ],
@@ -270,10 +274,10 @@ describe('decomposeBlockIncome — type tolerance across RPC shapes', () => {
       maxPriorityFeeLamports: 15_000n,
       computeUnitsConsumed: 130_000n,
       costUnits: 132_000n,
-      computeBudgetRequestedUnits: 200_000n,
+      computeBudgetRequestedUnits: 250_000n,
       computeBudgetLimitTxCount: 1,
       computeBudgetPriceTxCount: 1,
-      maxComputeUnitLimit: 200_000n,
+      maxComputeUnitLimit: 250_000n,
       maxComputeUnitPriceMicroLamports: 5_000n,
     });
   });

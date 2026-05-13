@@ -187,7 +187,7 @@ const STATS_COLS = `epoch, vote_pubkey, identity_pubkey,
 const PEER_BENCHMARK_MIN_VALIDATORS = 3;
 
 /**
- * Supported ordering modes for `findTopNByEpoch`.
+ * Supported ordering modes for the deprecated `findTopNByEpoch` helper.
  *
  * - `performance` (default, recommended for UI): `(block_fees + tips)
  *   / slots_assigned` DESC. "Income per leader opportunity" — the
@@ -214,6 +214,8 @@ const PEER_BENCHMARK_MIN_VALIDATORS = 3;
  * Extension point: keep adding enum cases rather than passing raw SQL
  * from the API layer. The switch below is the only place SQL is
  * synthesised; the route hands a typed enum through.
+ *
+ * @deprecated Production leaderboard callers should use `findTopNByWindow`.
  */
 export type LeaderboardSort =
   | 'performance'
@@ -942,6 +944,10 @@ export class StatsRepository {
    * Rows are filtered to those with `fees_updated_at IS NOT NULL` so
    * leaderboards never contain placeholder rows (a validator we know
    * the vote for but haven't ingested fees for yet).
+   *
+   * @deprecated Kept for compatibility with older tests/scripts. Production
+   * leaderboard routes use `findTopNByWindow` so current, stable, final, and
+   * decade windows share one denominator model.
    */
   async findTopNByEpoch(
     epoch: Epoch,
@@ -1025,6 +1031,7 @@ export class StatsRepository {
     sort?: LeaderboardWindowSort;
     minWindowSlots?: number;
     requiredClosedEpochs?: number;
+    excludedVotes?: string[];
   }): Promise<WindowedLeaderboardStats[]> {
     if (args.epochs.length === 0) return [];
 
@@ -1060,8 +1067,9 @@ export class StatsRepository {
     }
     const minParam = params.length + 1;
     const requiredClosedParam = params.length + 2;
-    const limitParam = params.length + 3;
-    params.push(minWindowSlots, requiredClosedEpochs, safeLimit);
+    const excludedVotesParam = params.length + 3;
+    const limitParam = params.length + 4;
+    params.push(minWindowSlots, requiredClosedEpochs, args.excludedVotes ?? [], safeLimit);
 
     const { rows } = await this.pool.query<WindowedLeaderboardStatsRow>(
       `WITH included(epoch, is_current, priority) AS (
@@ -1109,9 +1117,10 @@ export class StatsRepository {
           (ARRAY_AGG(evs.activated_stake_lamports ORDER BY included.priority DESC, evs.epoch DESC)
              FILTER (WHERE evs.activated_stake_lamports IS NOT NULL))[1]
              AS activated_stake_lamports
-          FROM included
-          JOIN epoch_validator_stats evs ON evs.epoch = included.epoch
+         FROM included
+         JOIN epoch_validator_stats evs ON evs.epoch = included.epoch
          WHERE evs.slots_updated_at IS NOT NULL
+           AND NOT (evs.vote_pubkey = ANY($${excludedVotesParam}::text[]))
            AND (
              evs.fees_updated_at IS NOT NULL
              OR evs.tips_updated_at IS NOT NULL

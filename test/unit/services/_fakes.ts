@@ -749,16 +749,19 @@ export class FakeStatsRepo {
     sort?: LeaderboardWindowSort;
     minWindowSlots?: number;
     requiredClosedEpochs?: number;
+    excludedVotes?: string[];
   }): Promise<WindowedLeaderboardStats[]> {
     const safeLimit = Math.max(1, Math.min(args.limit, 500));
     const minWindowSlots = Math.max(1, args.minWindowSlots ?? 4);
     const requiredClosedEpochs = Math.max(0, args.requiredClosedEpochs ?? 0);
+    const excludedVotes = new Set(args.excludedVotes ?? []);
     const epochs = new Map(args.epochs.map((e) => [e.epoch, e.isCurrent]));
     const byVote = new Map<VotePubkey, WindowedLeaderboardStats>();
 
     for (const row of this.rows.values()) {
       const isCurrent = epochs.get(row.epoch);
       if (isCurrent === undefined) continue;
+      if (excludedVotes.has(row.votePubkey)) continue;
       if (row.slotsUpdatedAt === null) continue;
       const denominator = isCurrent ? row.slotsElapsedAssigned : row.slotsAssigned;
       const currentIncome = isCurrent
@@ -816,22 +819,31 @@ export class FakeStatsRepo {
     );
     const total = (r: WindowedLeaderboardStats) =>
       r.blockFeesTotalLamports + r.blockTipsTotalLamports;
+    const compareBigIntDesc = (a: bigint, b: bigint): number => (a === b ? 0 : a > b ? -1 : 1);
+    const compareRatioDesc = (aNum: bigint, aDen: number, bNum: bigint, bDen: number): number => {
+      if (aDen <= 0 && bDen <= 0) return 0;
+      if (aDen <= 0) return 1;
+      if (bDen <= 0) return -1;
+      const left = aNum * BigInt(bDen);
+      const right = bNum * BigInt(aDen);
+      return compareBigIntDesc(left, right);
+    };
     switch (args.sort ?? 'income_per_slot') {
       case 'total_income':
-        rows.sort((a, b) => Number(total(b) - total(a)));
+        rows.sort((a, b) => compareBigIntDesc(total(a), total(b)));
         break;
       case 'mev_tips':
-        rows.sort((a, b) => Number(b.blockTipsTotalLamports - a.blockTipsTotalLamports));
+        rows.sort((a, b) => compareBigIntDesc(a.blockTipsTotalLamports, b.blockTipsTotalLamports));
         break;
       case 'fees':
-        rows.sort((a, b) => Number(b.blockFeesTotalLamports - a.blockFeesTotalLamports));
+        rows.sort((a, b) => compareBigIntDesc(a.blockFeesTotalLamports, b.blockFeesTotalLamports));
         break;
       case 'skip_rate':
         rows.sort((a, b) => a.slotsSkipped / a.windowSlots - b.slotsSkipped / b.windowSlots);
         break;
       case 'income_per_slot':
       default:
-        rows.sort((a, b) => Number(total(b)) / b.windowSlots - Number(total(a)) / a.windowSlots);
+        rows.sort((a, b) => compareRatioDesc(total(a), a.windowSlots, total(b), b.windowSlots));
         break;
     }
     return rows.slice(0, safeLimit);

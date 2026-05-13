@@ -214,6 +214,63 @@ describe('ProcessedBlocksRepository', () => {
     });
   });
 
+  it('replaceProducedBlockFactsBatch: rewrites multiple produced rows in one statement', async () => {
+    await repo.insertBatch([
+      mkBlock(100, { leaderIdentity: 'A', feesLamports: 1n }),
+      mkBlock(101, { leaderIdentity: 'A', feesLamports: 2n }),
+      mkBlock(102, { leaderIdentity: 'A', blockStatus: 'skipped', feesLamports: 0n }),
+    ]);
+
+    const replacedAt = new Date('2026-05-12T00:00:00Z');
+    const count = await repo.replaceProducedBlockFactsBatch([
+      mkBlock(100, {
+        leaderIdentity: 'A',
+        feesLamports: 100n,
+        baseFeesLamports: 40n,
+        priorityFeesLamports: 60n,
+        tipsLamports: 7n,
+        computeUnitsConsumed: 123_000n,
+        factsCapturedAt: replacedAt,
+        processedAt: replacedAt,
+      }),
+      mkBlock(101, {
+        leaderIdentity: 'A',
+        feesLamports: 200n,
+        baseFeesLamports: 90n,
+        priorityFeesLamports: 110n,
+        tipsLamports: 17n,
+        computeUnitsConsumed: 223_000n,
+        factsCapturedAt: replacedAt,
+        processedAt: replacedAt,
+      }),
+      mkBlock(102, {
+        leaderIdentity: 'A',
+        blockStatus: 'skipped',
+        feesLamports: 300n,
+        factsCapturedAt: replacedAt,
+        processedAt: replacedAt,
+      }),
+    ]);
+
+    expect(count).toBe(2);
+    await expect(repo.findBySlot(100)).resolves.toMatchObject({
+      feesLamports: 100n,
+      priorityFeesLamports: 60n,
+      tipsLamports: 7n,
+      computeUnitsConsumed: 123_000n,
+    });
+    await expect(repo.findBySlot(101)).resolves.toMatchObject({
+      feesLamports: 200n,
+      priorityFeesLamports: 110n,
+      tipsLamports: 17n,
+      computeUnitsConsumed: 223_000n,
+    });
+    await expect(repo.findBySlot(102)).resolves.toMatchObject({
+      blockStatus: 'skipped',
+      feesLamports: 0n,
+    });
+  });
+
   it('getValidatorEpochSlotStats: aggregates block facts and unresolved fetch errors', async () => {
     await repo.insertBatch([
       mkBlock(100, {

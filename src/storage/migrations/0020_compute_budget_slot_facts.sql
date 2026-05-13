@@ -4,6 +4,9 @@
 -- ComputeBudget request aggregates. These are derived from the same
 -- getBlock(transactionDetails='full') payload already fetched by the
 -- income ingester, so normal-path RPC usage does not increase.
+--
+-- These NOT NULL DEFAULT column adds are metadata-only on Postgres 11+
+-- because every default is a constant.
 
 ALTER TABLE processed_blocks
   ADD COLUMN IF NOT EXISTS cost_units                              NUMERIC(30, 0) NOT NULL DEFAULT 0,

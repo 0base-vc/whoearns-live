@@ -146,6 +146,10 @@ function readU64Le(bytes: Uint8Array, offset: number): bigint | null {
 function extractComputeBudgetRequestFacts(tx: RpcFullTransactionEntry): ComputeBudgetRequestFacts {
   const staticKeys = tx.transaction.message.accountKeys;
   const instructions = tx.transaction.message.instructions ?? [];
+  // Solana runtime applies the last ComputeBudget limit / price instruction
+  // in transaction order. Keep that rule explicit here: each matching
+  // instruction overwrites the accumulator, then block-level aggregation
+  // records the final requested values for this tx.
   let requestedUnits: bigint | null = null;
   let unitPriceMicroLamports: bigint | null = null;
 

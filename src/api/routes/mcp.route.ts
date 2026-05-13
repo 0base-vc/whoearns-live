@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppConfig } from '../../core/config.js';
+import { TtlCache } from '../../core/ttl-cache.js';
 import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
@@ -32,6 +33,7 @@ import {
 import { PubkeySchema } from '../schemas/pubkey.js';
 
 const MCP_LEADERBOARD_CACHE_TTL_MS = 10_000;
+const MCP_LEADERBOARD_CACHE_MAX_ENTRIES = 128;
 const MCP_DECADE_EPOCH_COUNT = 10;
 
 export interface McpRoutesDeps {
@@ -52,7 +54,7 @@ export interface McpRoutesDeps {
 }
 
 type LeaderboardPayload = Awaited<ReturnType<typeof buildLeaderboardPayload>>;
-type LeaderboardPayloadCache = Map<string, { expiresAt: number; payload: LeaderboardPayload }>;
+type LeaderboardPayloadCache = TtlCache<string, Promise<LeaderboardPayload>>;
 
 /**
  * Streamable-HTTP MCP server in-process at `/mcp`. Exposes four
@@ -94,7 +96,9 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
   app: FastifyInstance,
   opts: McpRoutesDeps,
 ) => {
-  const leaderboardPayloadCache: LeaderboardPayloadCache = new Map();
+  const leaderboardPayloadCache: LeaderboardPayloadCache = new TtlCache(
+    MCP_LEADERBOARD_CACHE_MAX_ENTRIES,
+  );
 
   async function getCachedLeaderboardPayload(
     window: LeaderboardWindow,
@@ -105,13 +109,15 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
     const key = `${window}:${sort}:${limit}:${minWindowSlots}`;
     const now = Date.now();
     const cached = leaderboardPayloadCache.get(key);
-    if (cached !== undefined && cached.expiresAt > now) return cached.payload;
-    const payload = await buildLeaderboardPayload(opts, window, sort, limit, minWindowSlots);
-    leaderboardPayloadCache.set(key, {
-      expiresAt: now + MCP_LEADERBOARD_CACHE_TTL_MS,
-      payload,
-    });
-    return payload;
+    if (cached !== undefined) return cached;
+    const payload = buildLeaderboardPayload(opts, window, sort, limit, minWindowSlots);
+    leaderboardPayloadCache.set(key, payload, MCP_LEADERBOARD_CACHE_TTL_MS, now);
+    try {
+      return await payload;
+    } catch (err) {
+      leaderboardPayloadCache.delete(key);
+      throw err;
+    }
   }
 
   /**
@@ -507,10 +513,9 @@ async function mcpFetchDecadeRankMap(
     sort: 'income_per_slot',
     minWindowSlots,
     requiredClosedEpochs: MCP_DECADE_EPOCH_COUNT,
+    excludedVotes: Array.from(optedOut),
   });
-  const visibleRows =
-    optedOut.size === 0 ? rows : rows.filter((row) => !optedOut.has(row.votePubkey));
-  return mcpBuildDecadeRankMapFromRows(visibleRows, closed);
+  return mcpBuildDecadeRankMapFromRows(rows, closed);
 }
 
 async function buildLeaderboardPayload(
@@ -571,19 +576,7 @@ async function buildLeaderboardPayload(
   }
 
   const finalEpoch = closed[0];
-  const [statsRows, optedOut, aggregate] = await Promise.all([
-    // We over-fetch by 50% then trim to `limit` after opt-out
-    // filtering — keeps the result honest even if a couple of the
-    // top validators have opted out. Cap at 200 to bound the
-    // round-trip; the inevitable corner case of >200 opt-outs in
-    // a row is nonexistent in practice.
-    opts.statsRepo.findTopNByWindow({
-      epochs,
-      limit: window === 'decade_epoch' ? 500 : Math.min(200, Math.ceil(limit * 1.5)),
-      sort,
-      minWindowSlots,
-      requiredClosedEpochs: window === 'decade_epoch' ? MCP_DECADE_EPOCH_COUNT : 0,
-    }),
+  const [optedOut, aggregate] = await Promise.all([
     opts.profilesRepo.findOptedOutVotes(),
     // Cluster medians are an epoch aggregate, so expose them only when
     // the selected MCP window is the same final-epoch shape as /v1.
@@ -592,12 +585,21 @@ async function buildLeaderboardPayload(
       : Promise.resolve(null),
   ]);
 
-  const filtered = statsRows.filter((r) => !optedOut.has(r.votePubkey));
-  const trimmed = filtered.slice(0, limit);
+  const statsRows = await opts.statsRepo.findTopNByWindow({
+    epochs,
+    limit,
+    sort,
+    minWindowSlots,
+    requiredClosedEpochs:
+      window === 'decade_epoch' ? MCP_DECADE_EPOCH_COUNT : mcpClosedCountForWindow(window),
+    excludedVotes: Array.from(optedOut),
+  });
+
+  const trimmed = statsRows.slice(0, limit);
 
   const decadeRanks =
     window === 'decade_epoch' && sort === 'income_per_slot'
-      ? mcpBuildDecadeRankMapFromRows(filtered, closed)
+      ? mcpBuildDecadeRankMapFromRows(statsRows, closed)
       : await mcpFetchDecadeRankMap(opts, optedOut, minWindowSlots);
 
   const identities = trimmed.map((r) => r.identityPubkey);
@@ -726,6 +728,7 @@ async function buildValidatorPayload(
       claimed: boolean;
       profile: {
         twitterHandle: string | null;
+        narrativeOverride: string | null;
       } | null;
       items: ValidatorHistoryItem[];
     }
@@ -758,6 +761,7 @@ async function buildValidatorPayload(
         ? null
         : {
             twitterHandle: profile.twitterHandle,
+            narrativeOverride: profile.narrativeOverride,
           },
     items: history.map(serializeHistoryItem),
   };

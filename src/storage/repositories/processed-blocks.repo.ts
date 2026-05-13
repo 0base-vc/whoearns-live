@@ -621,6 +621,121 @@ export class ProcessedBlocksRepository {
   }
 
   /**
+   * Batch variant of `replaceProducedBlockFacts` for refill jobs. Keeps the
+   * same "update existing produced rows only" contract while avoiding one DB
+   * round-trip per slot.
+   */
+  async replaceProducedBlockFactsBatch(blocks: ProcessedBlock[]): Promise<number> {
+    if (blocks.length === 0) return 0;
+    const params: unknown[] = [];
+    const values: string[] = [];
+    for (let i = 0; i < blocks.length; i += 1) {
+      const block = blocks[i]!;
+      const base = i * 25;
+      values.push(`(
+        $${base + 1}::bigint,
+        $${base + 2}::bigint,
+        $${base + 3}::text,
+        $${base + 4}::numeric,
+        $${base + 5}::numeric,
+        $${base + 6}::numeric,
+        $${base + 7}::numeric,
+        $${base + 8}::timestamptz,
+        $${base + 9}::int,
+        $${base + 10}::int,
+        $${base + 11}::int,
+        $${base + 12}::int,
+        $${base + 13}::int,
+        $${base + 14}::int,
+        $${base + 15}::numeric,
+        $${base + 16}::numeric,
+        $${base + 17}::numeric,
+        $${base + 18}::numeric,
+        $${base + 19}::numeric,
+        $${base + 20}::int,
+        $${base + 21}::int,
+        $${base + 22}::numeric,
+        $${base + 23}::numeric,
+        $${base + 24}::timestamptz,
+        $${base + 25}::timestamptz
+      )`);
+      params.push(
+        block.epoch,
+        block.slot,
+        block.leaderIdentity,
+        block.feesLamports.toString(),
+        block.baseFeesLamports.toString(),
+        block.priorityFeesLamports.toString(),
+        block.tipsLamports.toString(),
+        block.blockTime,
+        block.txCount,
+        block.successfulTxCount,
+        block.failedTxCount,
+        block.unknownMetaTxCount,
+        block.signatureCount,
+        block.tipTxCount,
+        block.maxTipLamports.toString(),
+        block.maxPriorityFeeLamports.toString(),
+        block.computeUnitsConsumed.toString(),
+        block.costUnits.toString(),
+        block.computeBudgetRequestedUnits.toString(),
+        block.computeBudgetLimitTxCount,
+        block.computeBudgetPriceTxCount,
+        block.maxComputeUnitLimit.toString(),
+        block.maxComputeUnitPriceMicroLamports.toString(),
+        block.factsCapturedAt,
+        block.processedAt,
+      );
+    }
+
+    const { rowCount } = await this.pool.query(
+      `WITH incoming (
+         epoch, slot, leader_identity, fees_lamports, base_fees_lamports,
+         priority_fees_lamports, tips_lamports, block_time, tx_count,
+         successful_tx_count, failed_tx_count, unknown_meta_tx_count,
+         signature_count, tip_tx_count, max_tip_lamports,
+         max_priority_fee_lamports, compute_units_consumed, cost_units,
+         compute_budget_requested_units, compute_budget_limit_tx_count,
+         compute_budget_price_tx_count, max_compute_unit_limit,
+         max_compute_unit_price_micro_lamports, facts_captured_at, processed_at
+       ) AS (
+         VALUES ${values.join(', ')}
+       )
+       UPDATE processed_blocks pb
+          SET leader_identity = incoming.leader_identity,
+              fees_lamports = incoming.fees_lamports,
+              base_fees_lamports = incoming.base_fees_lamports,
+              priority_fees_lamports = incoming.priority_fees_lamports,
+              tips_lamports = incoming.tips_lamports,
+              block_time = incoming.block_time,
+              tx_count = incoming.tx_count,
+              successful_tx_count = incoming.successful_tx_count,
+              failed_tx_count = incoming.failed_tx_count,
+              unknown_meta_tx_count = incoming.unknown_meta_tx_count,
+              signature_count = incoming.signature_count,
+              tip_tx_count = incoming.tip_tx_count,
+              max_tip_lamports = incoming.max_tip_lamports,
+              max_priority_fee_lamports = incoming.max_priority_fee_lamports,
+              compute_units_consumed = incoming.compute_units_consumed,
+              cost_units = incoming.cost_units,
+              compute_budget_requested_units = incoming.compute_budget_requested_units,
+              compute_budget_limit_tx_count = incoming.compute_budget_limit_tx_count,
+              compute_budget_price_tx_count = incoming.compute_budget_price_tx_count,
+              max_compute_unit_limit = incoming.max_compute_unit_limit,
+              max_compute_unit_price_micro_lamports =
+                incoming.max_compute_unit_price_micro_lamports,
+              facts_captured_at = incoming.facts_captured_at,
+              processed_at = incoming.processed_at
+         FROM incoming
+        WHERE pb.epoch = incoming.epoch
+          AND pb.slot = incoming.slot
+          AND pb.block_status = 'produced'`,
+      params,
+    );
+    return rowCount ?? 0;
+  }
+
+  /**
    * Convenience: fetch a single block by slot. Not part of the required
    * API but useful in tests; kept internal to the repository.
    */

@@ -67,7 +67,9 @@ paths:
       description: |
         DB-only search over validator `name`, `vote_pubkey`, `identity_pubkey`,
         and `keybase_username`. This endpoint never calls Solana RPC and
-        excludes opted-out validators.
+        excludes opted-out validators. Prefix matches are ranked first; if
+        they under-fill the requested limit, a bounded name/keybase substring
+        fallback fills the remaining rows.
       parameters:
         - name: q
           in: query
@@ -76,7 +78,7 @@ paths:
             type: string
             minLength: 2
             maxLength: 96
-          description: Name substring, keybase username, vote prefix, or identity prefix.
+          description: Validator name, keybase username, vote prefix, or identity prefix.
         - name: limit
           in: query
           required: false

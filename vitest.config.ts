@@ -5,7 +5,7 @@ export default defineConfig({
     globals: false,
     environment: 'node',
     include: ['test/**/*.test.ts'],
-    exclude: ['node_modules', 'dist', 'coverage'],
+    exclude: ['node_modules', 'dist', 'coverage', '.claude'],
     testTimeout: 30_000,
     hookTimeout: 60_000,
     pool: 'threads',

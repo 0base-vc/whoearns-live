@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { AppError, NotFoundError, ValidationError } from '../../core/errors.js';
 import { lamportsToSol, lamportsToString } from '../../core/lamports.js';
+import { TtlCache } from '../../core/ttl-cache.js';
 import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
@@ -22,6 +23,7 @@ const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 const DEFAULT_MIN_WINDOW_SLOTS = 4;
 const LEADERBOARD_CACHE_TTL_MS = 10_000;
+const LEADERBOARD_CACHE_MAX_ENTRIES = 256;
 const DECADE_EPOCH_COUNT = 10;
 const DECADE_RANK_LIMIT = 3;
 
@@ -270,10 +272,9 @@ async function buildDecadeRankMap(
     sort: 'income_per_slot',
     minWindowSlots,
     requiredClosedEpochs: DECADE_EPOCH_COUNT,
+    excludedVotes: Array.from(optedOutVotes),
   });
-  const visibleRows =
-    optedOutVotes.size === 0 ? rows : rows.filter((row) => !optedOutVotes.has(row.votePubkey));
-  return buildDecadeRankMapFromRows(visibleRows, closed);
+  return buildDecadeRankMapFromRows(rows, closed);
 }
 
 function closedCountForWindow(window: LeaderboardWindow): number {
@@ -288,6 +289,10 @@ function closedCountForWindow(window: LeaderboardWindow): number {
     default:
       return 0;
   }
+}
+
+function requiredClosedEpochsForWindow(window: LeaderboardWindow): number {
+  return window === 'decade_epoch' ? DECADE_EPOCH_COUNT : closedCountForWindow(window);
 }
 
 async function resolveWindowEpochs(
@@ -312,7 +317,7 @@ async function resolveWindowEpochs(
     );
   }
 
-  if (window === 'final_epoch' && epochOverride !== undefined) {
+  if (epochOverride !== undefined) {
     const epoch = await epochsRepo.findByEpoch(epochOverride);
     if (epoch === null) throw new NotFoundError('epoch', String(epochOverride));
     if (!epoch.isClosed) {
@@ -368,16 +373,16 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
   opts: LeaderboardRoutesDeps,
 ) => {
   const { statsRepo, epochsRepo, aggregatesRepo, validatorsRepo, profilesRepo, claimsRepo } = opts;
-  const responseCache = new Map<string, { expiresAt: number; body: LeaderboardResponse }>();
+  const responseCache = new TtlCache<string, LeaderboardResponse>(LEADERBOARD_CACHE_MAX_ENTRIES);
 
   app.get('/v1/leaderboard', async (request, reply): Promise<LeaderboardResponse> => {
     const query = unwrap(LeaderboardQuerySchema.safeParse(request.query), 'query parameter');
     const cacheKey = JSON.stringify(query);
     const now = Date.now();
-    const cached = responseCache.get(cacheKey);
-    if (cached !== undefined && cached.expiresAt > now) {
+    const cached = responseCache.get(cacheKey, now);
+    if (cached !== undefined) {
       setClientReadCache(reply);
-      return cached.body;
+      return cached;
     }
 
     const resolved = await resolveWindowEpochs(query.window, query.epoch, epochsRepo);
@@ -400,36 +405,29 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
         items: [],
         cluster: null,
       };
-      responseCache.set(cacheKey, { expiresAt: now + LEADERBOARD_CACHE_TTL_MS, body });
+      responseCache.set(cacheKey, body, LEADERBOARD_CACHE_TTL_MS, now);
       setClientReadCache(reply);
       return body;
     }
 
-    const fetchLimit =
-      query.window === 'decade_epoch'
-        ? MAX_LIMIT
-        : Math.min(MAX_LIMIT, Math.max(query.limit, Math.ceil(query.limit * 1.5)));
-    const [rows, optedOutVotes] = await Promise.all([
-      statsRepo.findTopNByWindow({
-        epochs: resolved.epochs,
-        limit: fetchLimit,
-        sort: query.sort,
-        minWindowSlots: query.minWindowSlots,
-        requiredClosedEpochs: query.window === 'decade_epoch' ? DECADE_EPOCH_COUNT : 0,
-      }),
-      profilesRepo === undefined
-        ? Promise.resolve(new Set<string>())
-        : profilesRepo.findOptedOutVotes(),
-    ]);
-    const filteredRows =
-      optedOutVotes.size === 0 ? rows : rows.filter((r) => !optedOutVotes.has(r.votePubkey));
-    const visibleRows = filteredRows.slice(0, query.limit);
+    const requiredClosedEpochs = requiredClosedEpochsForWindow(query.window);
+    const optedOutVotes =
+      profilesRepo === undefined ? new Set<string>() : await profilesRepo.findOptedOutVotes();
+    const rows = await statsRepo.findTopNByWindow({
+      epochs: resolved.epochs,
+      limit: query.limit,
+      sort: query.sort,
+      minWindowSlots: query.minWindowSlots,
+      requiredClosedEpochs,
+      excludedVotes: Array.from(optedOutVotes),
+    });
+    const visibleRows = rows.slice(0, query.limit);
 
     const identities = Array.from(new Set(visibleRows.map((r) => r.identityPubkey)));
     const votes = visibleRows.map((r) => r.votePubkey);
     const decadeRanksPromise =
       query.window === 'decade_epoch' && query.sort === 'income_per_slot'
-        ? Promise.resolve(buildDecadeRankMapFromRows(filteredRows, resolved.closed))
+        ? Promise.resolve(buildDecadeRankMapFromRows(rows, resolved.closed))
         : buildDecadeRankMap(statsRepo, epochsRepo, optedOutVotes, query.minWindowSlots);
     const [infoByIdentity, claimedVotes, decadeRanks] = await Promise.all([
       validatorsRepo !== undefined && identities.length > 0
@@ -479,11 +477,10 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
 
     const currentEpoch =
       resolved.current !== null && !resolved.current.isClosed ? resolved.current : null;
-    const safeUpperSlot =
-      items.reduce<number | null>((max, row) => {
-        if (row.slotWindowLastSlot === null) return max;
-        return max === null || row.slotWindowLastSlot > max ? row.slotWindowLastSlot : max;
-      }, null) ?? null;
+    const safeUpperSlot = items.reduce<number | null>((max, row) => {
+      if (row.slotWindowLastSlot === null) return max;
+      return max === null || row.slotWindowLastSlot > max ? row.slotWindowLastSlot : max;
+    }, null);
 
     const body: LeaderboardResponse = {
       epoch:
@@ -508,7 +505,7 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
       items,
       cluster,
     };
-    responseCache.set(cacheKey, { expiresAt: now + LEADERBOARD_CACHE_TTL_MS, body });
+    responseCache.set(cacheKey, body, LEADERBOARD_CACHE_TTL_MS, now);
     setClientReadCache(reply);
     return body;
   });
