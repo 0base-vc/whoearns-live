@@ -28,6 +28,8 @@ import {
   WINDOW_CLOSED_EPOCHS,
   WINDOW_FETCH_ROWS,
 } from '../../services/node-tier.js';
+import { narrowToDocumentedKind } from '../../services/client-kind.js';
+import { summariseTenure } from '../../services/tenure.js';
 
 export interface ValidatorsRoutesDeps {
   statsRepo: Pick<
@@ -354,7 +356,115 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       },
     };
   });
+
+  /**
+   * GET /v1/validators/:idOrVote/badges
+   *
+   * Composite profile-level badges. Combines:
+   *   - Tenure (first_seen_epoch → landmark)
+   *   - Client kind + version (from getClusterNodes ingestion)
+   *   - Node Tier (same computation as /tier — included here so UI
+   *     can render the full badge row in a single round-trip)
+   *
+   * Cached briefly so a hot profile page doesn't N+1 the DB on every
+   * visitor — but not so long that a fresh claim / client upgrade
+   * stalls invisibly.
+   */
+  app.get('/v1/validators/:idOrVote/badges', async (request, reply): Promise<BadgesResponse> => {
+    const params = unwrap(VoteOrIdentityParamSchema.safeParse(request.params), 'path parameters');
+    const validator = await findValidatorByVoteOrIdentity(validatorsRepo, params.idOrVote);
+    if (validator === null) {
+      throw new NotFoundError('validator', params.idOrVote);
+    }
+
+    const [history, currentEpoch] = await Promise.all([
+      statsRepo.findHistoryByVote(validator.votePubkey, WINDOW_FETCH_ROWS),
+      epochsRepo.findCurrent(),
+    ]);
+    const closedRows =
+      currentEpoch !== null
+        ? history.filter((r) => r.epoch < currentEpoch.epoch).slice(0, WINDOW_CLOSED_EPOCHS)
+        : history.slice(0, WINDOW_CLOSED_EPOCHS);
+    const tierInput = tierInputFromHistory(validator.votePubkey, closedRows);
+    const tierResult = computeTier(tierInput);
+
+    const tenure = summariseTenure(
+      validator.firstSeenEpoch,
+      currentEpoch !== null ? currentEpoch.epoch : validator.lastSeenEpoch,
+    );
+
+    // Re-narrow the stored client kind to the documented enum at the
+    // public boundary. The DB column is intentionally wide so a
+    // future-extended classifier writes without a migration, but the
+    // OpenAPI contract is the closed enum — any other value would
+    // break strictly-typed SDK consumers.
+    const clientKind = narrowToDocumentedKind(validator.clientKind);
+
+    // HEAD short-circuit: after the existence check the route is
+    // semantically valid, so return headers without paying the
+    // serialisation cost a HEAD response will throw away.
+    if (request.method === 'HEAD') {
+      return reply
+        .code(200)
+        .header(
+          'cache-control',
+          `public, max-age=${BADGES_CACHE_MAX_AGE_SEC}, s-maxage=${BADGES_CACHE_S_MAXAGE_SEC}`,
+        )
+        .send('') as unknown as BadgesResponse;
+    }
+
+    void reply.header(
+      'cache-control',
+      `public, max-age=${BADGES_CACHE_MAX_AGE_SEC}, s-maxage=${BADGES_CACHE_S_MAXAGE_SEC}`,
+    );
+    return {
+      vote: validator.votePubkey,
+      identity: validator.identityPubkey,
+      tenure: {
+        firstSeenEpoch: tenure.firstSeenEpoch,
+        activeEpochs: tenure.activeEpochs,
+        landmark: tenure.landmark,
+        badge: tenure.badge,
+      },
+      client: {
+        kind: clientKind,
+        version: validator.clientVersion,
+        updatedAt: validator.clientUpdatedAt?.toISOString() ?? null,
+      },
+      tier: {
+        tier: tierResult.tier,
+        composite: tierResult.composite,
+        windowEpochs: closedRows.length,
+      },
+    };
+  });
 };
+
+const BADGES_CACHE_MAX_AGE_SEC = 300;
+const BADGES_CACHE_S_MAXAGE_SEC = 1800;
+
+interface BadgesResponse {
+  vote: string;
+  identity: string;
+  tenure: {
+    firstSeenEpoch: number;
+    activeEpochs: number;
+    landmark: string;
+    badge: string;
+  };
+  client: {
+    /** Classifier output: agave / jito_solana / firedancer / frankendancer / paladin / sig / unknown. */
+    kind: string;
+    /** Raw gossip-advertised version string, or null when never observed. */
+    version: string | null;
+    updatedAt: string | null;
+  };
+  tier: {
+    tier: 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
+    composite: number | null;
+    windowEpochs: number;
+  };
+}
 
 // 5-minute browser cache, 1-hour CDN cache. Closed-epoch data updates
 // only on epoch boundaries (~2 days), so even the 1 h CDN cache is

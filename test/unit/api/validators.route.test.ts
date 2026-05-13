@@ -689,3 +689,55 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+describe('GET /v1/validators/:idOrVote/badges', () => {
+  let ctx: Ctx;
+  beforeEach(async () => {
+    ctx = await makeCtx();
+  });
+
+  it('returns tenure + client + tier for a tracked validator', async () => {
+    // first_seen_epoch = 100 → predates CYCLE_1_OG (150) → "Cycle 1 OG".
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 100,
+      lastSeenEpoch: 500,
+    });
+    await ctx.epochs.upsert({
+      epoch: 1000,
+      firstSlot: 0,
+      lastSlot: 100,
+      slotCount: 100,
+      isClosed: false,
+    });
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/badges`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      tenure: { firstSeenEpoch: number; landmark: string; badge: string; activeEpochs: number };
+      client: { kind: string; version: string | null };
+      tier: { tier: string; composite: number | null };
+    };
+    expect(body.tenure.firstSeenEpoch).toBe(100);
+    expect(body.tenure.landmark).toBe('CYCLE_1_OG');
+    expect(body.tenure.badge).toBe('Cycle 1 OG');
+    expect(body.tenure.activeEpochs).toBe(900);
+    // Validator was never seen by the cluster-nodes ingester in this test.
+    expect(body.client.kind).toBe('unknown');
+    expect(body.client.version).toBeNull();
+    // No history rows seeded → unrated tier.
+    expect(body.tier.tier).toBe('unrated');
+    expect(body.tier.composite).toBeNull();
+  });
+
+  it('returns 404 for unknown validators', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_2}/badges`,
+    });
+    expect(res.statusCode).toBe(404);
+  });
+});

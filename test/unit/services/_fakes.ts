@@ -30,6 +30,7 @@ import type {
   ProcessedBlock,
   Slot,
   Validator,
+  ValidatorUpsertInput,
   ValidatorEpochSlotStats,
   VotePubkey,
 } from '../../../src/types/domain.js';
@@ -38,21 +39,7 @@ import type {
 export class FakeValidatorsRepo {
   readonly rows = new Map<VotePubkey, Validator>();
 
-  async upsert(
-    v: Omit<
-      Validator,
-      | 'updatedAt'
-      | 'name'
-      | 'details'
-      | 'website'
-      | 'keybaseUsername'
-      | 'iconUrl'
-      | 'infoUpdatedAt'
-      | 'clientKind'
-      | 'clientVersion'
-      | 'clientUpdatedAt'
-    >,
-  ): Promise<void> {
+  async upsert(v: ValidatorUpsertInput): Promise<void> {
     const existing = this.rows.get(v.votePubkey);
     const firstSeen = existing ? existing.firstSeenEpoch : v.firstSeenEpoch;
     const lastSeen = existing ? Math.max(existing.lastSeenEpoch, v.lastSeenEpoch) : v.lastSeenEpoch;

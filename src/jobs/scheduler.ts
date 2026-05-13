@@ -49,6 +49,12 @@ export class Scheduler {
     this.jobs.push(job);
   }
 
+  /** Number of registered jobs; consumers (e.g. startup logs) should
+   * use this rather than hand-maintained literals. */
+  get size(): number {
+    return this.jobs.length;
+  }
+
   start(): void {
     if (this.started) return;
     this.started = true;

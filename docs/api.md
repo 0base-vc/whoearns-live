@@ -483,6 +483,49 @@ The endpoint draws from `epoch_validator_stats` only — no live RPC.
 Response cache: `Cache-Control: public, max-age=300, s-maxage=3600`
 (closed-epoch data only changes at epoch boundaries, ~2 days).
 
+## `GET /v1/validators/:idOrVote/badges`
+
+Returns composite profile-level badges (Phase 2):
+
+```json
+{
+  "vote": "VOTE_PUBKEY",
+  "identity": "IDENTITY_PUBKEY",
+  "tenure": {
+    "firstSeenEpoch": 100,
+    "activeEpochs": 900,
+    "landmark": "CYCLE_1_OG",
+    "badge": "Cycle 1 OG"
+  },
+  "client": {
+    "kind": "firedancer",
+    "version": "0.405.20218",
+    "updatedAt": "2026-05-13T08:00:00.000Z"
+  },
+  "tier": {
+    "tier": "forge",
+    "composite": 96,
+    "windowEpochs": 5
+  }
+}
+```
+
+- `tenure.landmark` is one of `MAINNET_BETA_LAUNCH`, `CYCLE_1_OG`,
+  `CROSS_CHAIN_ERA`, `DEFI_2`, `PRE_FTX`, `JITO_V2`,
+  `FIREDANCER_LAUNCH`, `recent_operator`. The oldest landmark the
+  validator predates wins (no double-counting).
+- `client.kind` enum: `agave`, `jito_solana`, `firedancer`,
+  `frankendancer`, `paladin`, `sig`, `unknown`. Sourced from
+  `getClusterNodes.version`; `unknown` is the neutral default before
+  the cluster-nodes ingester has run.
+- `tier` mirrors `GET /v1/validators/:idOrVote/tier`. Bundled here so
+  a profile page renders the full badge row in one round-trip.
+
+Cache: `public, max-age=300, s-maxage=1800` (5 min browser / 30 min
+CDN). All three sub-objects update on independent cadences:
+`tenure.activeEpochs` ticks each epoch (~2 days), `client.kind` ticks
+on operator upgrade cycles, `tier` ticks on epoch close.
+
 ## Claim/profile endpoints
 
 Validator operators can prove ownership by signing a short message with the

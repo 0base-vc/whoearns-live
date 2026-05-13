@@ -1,0 +1,57 @@
+import { describe, expect, it } from 'vitest';
+import { summariseTenure, TENURE_LANDMARKS } from '../../../src/services/tenure.js';
+
+describe('summariseTenure', () => {
+  it('assigns Genesis Operator badge for first_seen === 0', () => {
+    const t = summariseTenure(0, 1000);
+    expect(t.landmark).toBe('MAINNET_BETA_LAUNCH');
+    expect(t.badge).toBe('Genesis Operator');
+    expect(t.activeEpochs).toBe(1000);
+  });
+
+  it('assigns Cycle 1 OG for first_seen below the cutoff', () => {
+    const t = summariseTenure(50, 1000);
+    expect(t.landmark).toBe('CYCLE_1_OG');
+    expect(t.badge).toBe('Cycle 1 OG');
+    expect(t.activeEpochs).toBe(950);
+  });
+
+  it('assigns the OLDEST landmark the validator predates (no double-counting)', () => {
+    // A validator with first_seen = 100 predates BOTH MAINNET_BETA_LAUNCH (0)
+    // AND CYCLE_1_OG (150). They should receive the latter (the most-recent
+    // landmark they still predate) — not the earliest one they predate.
+    const t = summariseTenure(100, 1000);
+    expect(t.landmark).toBe('CYCLE_1_OG');
+  });
+
+  it('classifies a recent-era operator into the RECENT landmark', () => {
+    // FIREDANCER_LAUNCH (850) < first_seen <= RECENT (950) → RECENT.
+    const t = summariseTenure(TENURE_LANDMARKS.FIREDANCER_LAUNCH + 100, 1000);
+    expect(t.landmark).toBe('RECENT');
+    expect(t.badge).toBe('Recent-Era Operator');
+  });
+
+  it('classifies a brand-new operator past the last landmark', () => {
+    const t = summariseTenure(TENURE_LANDMARKS.RECENT + 200, 1300);
+    expect(t.landmark).toBe('recent_operator');
+    expect(t.badge).toBe('New Operator');
+  });
+
+  it('returns 0 active epochs for a future first_seen (defensive)', () => {
+    const t = summariseTenure(1500, 1000);
+    expect(t.activeEpochs).toBe(0);
+  });
+
+  it('coerces NaN inputs to safe zeros without throwing', () => {
+    const t = summariseTenure(Number.NaN, 1000);
+    expect(t.firstSeenEpoch).toBe(0);
+    expect(t.landmark).toBe('MAINNET_BETA_LAUNCH');
+    expect(Number.isFinite(t.activeEpochs)).toBe(true);
+  });
+
+  it('coerces negative inputs to safe zeros', () => {
+    const t = summariseTenure(-1, 1000);
+    expect(t.firstSeenEpoch).toBe(0);
+    expect(t.landmark).toBe('MAINNET_BETA_LAUNCH');
+  });
+});

@@ -42,6 +42,20 @@ export interface Validator {
 }
 
 /**
+ * Input shape for `ValidatorsRepository.upsert`. Explicit
+ * positive-list rather than `Omit<Validator, …>` because the omit
+ * chain grew to 10 fields and silently allows extras — every new
+ * column on `validators` requires two omit edits (real repo + fake)
+ * that are easy to miss.
+ */
+export interface ValidatorUpsertInput {
+  votePubkey: VotePubkey;
+  identityPubkey: IdentityPubkey;
+  firstSeenEpoch: Epoch;
+  lastSeenEpoch: Epoch;
+}
+
+/**
  * Subset of Validator fields carrying the on-chain moniker / branding.
  * Used as the input shape for `ValidatorsRepository.upsertInfo` so
  * callers can't accidentally overwrite identity/vote columns while

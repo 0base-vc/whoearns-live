@@ -57,11 +57,27 @@ export interface TenureSummary {
  * Compute tenure summary from the validator's first-seen epoch and
  * the current epoch.
  *
- * Returns conservative classifications — `firstSeenEpoch > current`
- * (impossible but defensive) returns 0 active epochs.
+ * Defensive against impossible / corrupt inputs:
+ *   - non-finite or negative inputs are coerced to 0 before the
+ *     landmark cascade. A `NaN` first-seen epoch (e.g. from BIGINT
+ *     precision loss in `Number(row.first_seen_epoch)`) would
+ *     otherwise propagate through the cascade as never-matching and
+ *     emit `activeEpochs: NaN`, which serialises to `null` in JSON
+ *     and violates the OpenAPI `integer, minimum: 0` contract.
+ *
+ * **Landmark maintenance.** Today the highest landmark is
+ * `RECENT: 950`. As mainnet epoch advances past `RECENT + ~200`,
+ * the "Recent Operator" bucket will widen indefinitely — add a new
+ * landmark for the most recent meaningful network event and bump
+ * `RECENT` accordingly. Keep the chain short; bloat dilutes the
+ * signal.
  */
 export function summariseTenure(firstSeenEpoch: number, currentEpoch: number): TenureSummary {
-  const activeEpochs = Math.max(0, currentEpoch - firstSeenEpoch);
+  const safeFirst =
+    Number.isFinite(firstSeenEpoch) && firstSeenEpoch >= 0 ? Math.floor(firstSeenEpoch) : 0;
+  const safeCurrent =
+    Number.isFinite(currentEpoch) && currentEpoch >= 0 ? Math.floor(currentEpoch) : safeFirst;
+  const activeEpochs = Math.max(0, safeCurrent - safeFirst);
 
   let landmark: TenureSummary['landmark'] = 'recent_operator';
   let badge = 'New Operator';
@@ -69,31 +85,34 @@ export function summariseTenure(firstSeenEpoch: number, currentEpoch: number): T
   // Walk landmarks in descending order — assign the OLDEST landmark
   // the validator predates. (e.g. first_seen = 100 → predates
   // Cycle_1_OG (150) → CYCLE_1_OG badge, not MAINNET_BETA_LAUNCH.)
-  if (firstSeenEpoch <= TENURE_LANDMARKS.MAINNET_BETA_LAUNCH) {
+  if (safeFirst <= TENURE_LANDMARKS.MAINNET_BETA_LAUNCH) {
     landmark = 'MAINNET_BETA_LAUNCH';
     badge = 'Genesis Operator';
-  } else if (firstSeenEpoch <= TENURE_LANDMARKS.CYCLE_1_OG) {
+  } else if (safeFirst <= TENURE_LANDMARKS.CYCLE_1_OG) {
     landmark = 'CYCLE_1_OG';
     badge = 'Cycle 1 OG';
-  } else if (firstSeenEpoch <= TENURE_LANDMARKS.CROSS_CHAIN_ERA) {
+  } else if (safeFirst <= TENURE_LANDMARKS.CROSS_CHAIN_ERA) {
     landmark = 'CROSS_CHAIN_ERA';
     badge = 'Cross-Chain Era Veteran';
-  } else if (firstSeenEpoch <= TENURE_LANDMARKS.DEFI_2) {
+  } else if (safeFirst <= TENURE_LANDMARKS.DEFI_2) {
     landmark = 'DEFI_2';
     badge = 'DeFi Summer Veteran';
-  } else if (firstSeenEpoch <= TENURE_LANDMARKS.PRE_FTX) {
+  } else if (safeFirst <= TENURE_LANDMARKS.PRE_FTX) {
     landmark = 'PRE_FTX';
     badge = 'Pre-FTX Veteran';
-  } else if (firstSeenEpoch <= TENURE_LANDMARKS.JITO_V2) {
+  } else if (safeFirst <= TENURE_LANDMARKS.JITO_V2) {
     landmark = 'JITO_V2';
     badge = 'Jito-Era Operator';
-  } else if (firstSeenEpoch <= TENURE_LANDMARKS.FIREDANCER_LAUNCH) {
+  } else if (safeFirst <= TENURE_LANDMARKS.FIREDANCER_LAUNCH) {
     landmark = 'FIREDANCER_LAUNCH';
     badge = 'Firedancer-Era Operator';
+  } else if (safeFirst <= TENURE_LANDMARKS.RECENT) {
+    landmark = 'RECENT';
+    badge = 'Recent-Era Operator';
   } else {
     landmark = 'recent_operator';
-    badge = 'Recent Operator';
+    badge = 'New Operator';
   }
 
-  return { firstSeenEpoch, activeEpochs, landmark, badge };
+  return { firstSeenEpoch: safeFirst, activeEpochs, landmark, badge };
 }

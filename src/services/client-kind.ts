@@ -25,6 +25,28 @@ export type ClientKind =
   | 'sig' // Syndica's Sig client
   | 'unknown';
 
+const DOCUMENTED_CLIENT_KINDS: ReadonlySet<ClientKind> = new Set([
+  'agave',
+  'jito_solana',
+  'firedancer',
+  'frankendancer',
+  'paladin',
+  'sig',
+  'unknown',
+]);
+
+/**
+ * Validator.clientKind is stored as a wide `string` so the DB can
+ * carry forward future kinds without a schema change. The API
+ * boundary, however, advertises a closed enum in OpenAPI — return
+ * `'unknown'` for any value that isn't in the documented set so a
+ * future-extended classifier (or an out-of-band DB write) can't
+ * leak unrecognised kinds to public consumers.
+ */
+export function narrowToDocumentedKind(value: string): ClientKind {
+  return DOCUMENTED_CLIENT_KINDS.has(value as ClientKind) ? (value as ClientKind) : 'unknown';
+}
+
 const JITO_RE = /-jito/i;
 const FIREDANCER_RE = /^0\./; // 0.x.y semver — Firedancer / Frankendancer
 const FRANKENDANCER_RE = /(frkd|frankendancer)/i;

@@ -5,6 +5,7 @@ import { type TokenBucket } from './token-bucket.js';
 import type {
   RpcBlock,
   RpcBlockProductionValue,
+  RpcClusterNode,
   RpcEpochInfo,
   RpcEpochSchedule,
   RpcLeaderSchedule,
@@ -20,6 +21,10 @@ const UPSTREAM_NAME = 'solana-rpc';
  * payloads can cost more. Providers vary; override via the `methodCosts`
  * constructor option when switching providers.
  */
+/** Hard caps on `getClusterNodes` response shape — see method docstring. */
+const GET_CLUSTER_NODES_MAX_ENTRIES = 8000;
+const GET_CLUSTER_NODES_MAX_VERSION_LEN = 64;
+
 export const DEFAULT_METHOD_COST = 30;
 export const DEFAULT_METHOD_COSTS: Readonly<Record<string, number>> = Object.freeze({
   getSlot: 30,
@@ -33,6 +38,10 @@ export const DEFAULT_METHOD_COSTS: Readonly<Record<string, number>> = Object.fre
   // need full tx payloads.
   getBlock: 30,
   getVoteAccounts: 30,
+  // `getClusterNodes` returns the full gossip member list (~2000
+  // entries, ~250B each, ~500KB response). Comparable to a
+  // `getVoteAccounts` round-trip at our scale; same cost.
+  getClusterNodes: 30,
   // `getProgramAccounts` on the Config program (~3k accounts,
   // ~500B each, ~3MB response) is heavier than the per-slot calls.
   // Providers commonly bill this higher depending on response size; we set it
@@ -529,6 +538,54 @@ export class SolanaRpcClient {
   async getVoteAccounts(commitment?: Commitment): Promise<RpcVoteAccounts> {
     const params = commitment !== undefined ? [{ commitment }] : undefined;
     return this.enqueue<RpcVoteAccounts>('getVoteAccounts', params);
+  }
+
+  /**
+   * Fetch gossip ContactInfo for every node currently in the cluster.
+   * Used by Phase 2 client-kind indexing to map identity pubkeys to
+   * their advertised version string.
+   *
+   * The full response includes `gossip`, `tpu`, `rpc`, `featureSet`,
+   * and `shredVersion` per node; we project to the minimal
+   * `{pubkey, version}` shape via the response type so downstream
+   * code can't accidentally depend on fields we haven't audited for
+   * stability.
+   */
+  async getClusterNodes(): Promise<RpcClusterNode[]> {
+    const raw = await this.enqueue<Array<RpcClusterNode & Record<string, unknown>>>(
+      'getClusterNodes',
+      undefined,
+    );
+    // Upstream sanity caps. Solana mainnet has ~2000 gossip-active
+    // nodes; 8000 is a comfortable upper bound that catches a
+    // malformed / hostile RPC response (e.g. millions of synthetic
+    // entries) before it OOMs the worker. Per-version-string length
+    // is capped at the DB column width (VARCHAR(64)) — anything
+    // longer is almost certainly garbage and would fail the UPDATE
+    // at write time, which is too late.
+    if (!Array.isArray(raw)) {
+      throw new UpstreamError(UPSTREAM_NAME, 'getClusterNodes: expected array');
+    }
+    if (raw.length > GET_CLUSTER_NODES_MAX_ENTRIES) {
+      throw new UpstreamError(
+        UPSTREAM_NAME,
+        `getClusterNodes: ${raw.length} entries exceeds ${GET_CLUSTER_NODES_MAX_ENTRIES} cap`,
+      );
+    }
+    return raw.map((n) => {
+      const rawVersion = typeof n.version === 'string' ? n.version : null;
+      const trimmed = rawVersion === null ? null : rawVersion.trim();
+      const normalised =
+        trimmed === null ||
+        trimmed.length === 0 ||
+        trimmed.length > GET_CLUSTER_NODES_MAX_VERSION_LEN
+          ? null
+          : trimmed;
+      return {
+        pubkey: typeof n.pubkey === 'string' ? n.pubkey : '',
+        version: normalised,
+      };
+    });
   }
 
   /**

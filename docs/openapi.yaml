@@ -357,6 +357,33 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /v1/validators/{idOrVote}/badges:
+    get:
+      summary: Composite profile badges (Phase 2)
+      description: |
+        Returns tenure landmark, client kind/version, and Node Tier
+        for one validator. Designed for a single-round-trip profile
+        page render.
+      parameters:
+        - $ref: '#/components/parameters/IdOrVotePath'
+      responses:
+        '200':
+          description: Tenure + client + tier badges.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Badges'
+        '400':
+          description: Invalid pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Validator not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /v1/validators/current-epoch/batch:
     post:
       summary: Bulk lookup for the current epoch
@@ -604,6 +631,59 @@ components:
         pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
 
   schemas:
+    Badges:
+      type: object
+      required: [vote, identity, tenure, client, tier]
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+        tenure:
+          type: object
+          required: [firstSeenEpoch, activeEpochs, landmark, badge]
+          properties:
+            firstSeenEpoch: { type: integer, minimum: 0 }
+            activeEpochs: { type: integer, minimum: 0 }
+            landmark:
+              type: string
+              enum:
+                - MAINNET_BETA_LAUNCH
+                - CYCLE_1_OG
+                - CROSS_CHAIN_ERA
+                - DEFI_2
+                - PRE_FTX
+                - JITO_V2
+                - FIREDANCER_LAUNCH
+                - RECENT
+                - recent_operator
+            badge: { type: string }
+        client:
+          type: object
+          required: [kind, version, updatedAt]
+          properties:
+            kind:
+              type: string
+              enum: [agave, jito_solana, firedancer, frankendancer, paladin, sig, unknown]
+            version:
+              type: string
+              nullable: true
+            updatedAt:
+              type: string
+              format: date-time
+              nullable: true
+        tier:
+          type: object
+          required: [tier, composite, windowEpochs]
+          properties:
+            tier:
+              type: string
+              enum: [forge, anvil, hearth, kindling, unrated]
+            composite:
+              type: integer
+              nullable: true
+              minimum: 0
+              maximum: 100
+            windowEpochs: { type: integer, minimum: 0 }
+
     NodeTier:
       type: object
       required: [vote, identity, window, tier, composite, components]

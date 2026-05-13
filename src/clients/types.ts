@@ -225,6 +225,24 @@ export interface RpcVoteAccounts {
 }
 
 /**
+ * Subset of the `getClusterNodes` response we actually need for
+ * client identification. Solana's RPC also returns `gossip`, `tpu`,
+ * `rpc`, `featureSet`, and `shredVersion`; we ignore those here to
+ * minimise the surface that downstream code can accidentally depend
+ * on.
+ */
+export interface RpcClusterNode {
+  /** Identity (node) pubkey. */
+  pubkey: string;
+  /**
+   * Gossip-advertised version string. Null when the node is too old
+   * to publish a version (almost never in production, but legal per
+   * spec). Trim before classifying.
+   */
+  version: string | null;
+}
+
+/**
  * On-chain validator-info record, published by validators via
  * `solana validator-info publish`. The Solana Config program stores
  * each record as an account with `type: 'validatorInfo'` when

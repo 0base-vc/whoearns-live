@@ -12,12 +12,13 @@ truth and the docs need a PR**.
 
 > **Status snapshot.** WhoEarns currently ships block-fee/tip income
 > totals, skip rate, on-chain median fee benchmarks, the `performance`
-> sort, OG image cards, the public `/badge/:vote.svg` SVG badge, and
-> the **two-signal Node Tier** at `/v1/validators/:idOrVote/tier`
-> (Phase 1 partial release — TVC ratio + Wilson skip lower-bound;
-> the remaining two signals are planned). Phase 2+ formulas are
-> roadmap, not running scoring axes — don't cite them until the
-> matching phase ships.
+> sort, OG image cards, the public `/badge/:vote.svg` SVG badge, the
+> **two-signal Node Tier** at `/v1/validators/:idOrVote/tier`
+> (Phase 1 partial — TVC ratio + Wilson skip lower-bound; the
+> remaining two signals are planned), and the **tenure + client
+> badges** at `/v1/validators/:idOrVote/badges` (Phase 2 partial —
+> category leaderboards still planned). Phase 3+ formulas are
+> roadmap — don't cite them until the matching phase ships.
 
 ## Design principles
 
@@ -146,18 +147,33 @@ ship, the composite expands to the full four-signal formula:
 
 ### Phase 2 — Tenure, Client, Categories
 
-**Status: planned, not shipped.**
+**Status: partial release — tenure + client badges live; category leaderboards planned.**
 
-- **Tenure.** Derived from `validators.first_seen_epoch`. Surfaced as
-  "Active since epoch N" and used for community-facing badges like
-  "Cycle 1 OG".
+#### Live now
+
+- **Tenure.** Derived from `validators.first_seen_epoch`. Returned by
+  `GET /v1/validators/:idOrVote/badges` with one of 8 landmark
+  classifications (Genesis Operator → Recent Operator). The oldest
+  landmark the validator predates wins (no double-counting).
 - **Client identification.** Pulled from `getClusterNodes.version`
-  and (for Jito-Solana) the on-chain `TipDistributionAccount` PDA.
-  Surfaced as a `Firedancer Pioneer` / `Jito-MEV active` etc. badge.
+  by the `cluster-nodes-ingester` worker job. Classified via
+  `services/client-kind.ts` into agave / jito_solana / firedancer /
+  frankendancer / paladin / sig / unknown. Surfaced on
+  `/badges` and persisted on `validators.client_kind` for future
+  category leaderboards.
+
+#### Planned next
+
 - **Category leaderboards.** Small-validator (<100k SOL stake),
   newcomer (<30 epochs active), client-specific, regional. Each
   category gets its own KOM-style leaderboard so the gamification
-  rewards being best-in-bracket, not best-globally.
+  rewards being best-in-bracket, not best-globally. The
+  `client_kind` index and `first_seen_epoch` column already exist;
+  the leaderboard route extension is the remaining work.
+- **Behavioural Jito-Solana cross-check.** The on-chain
+  `TipDistributionAccount` PDA is the high-confidence signal for Jito
+  participation. Gossip version says "0.18.22-jito" but the PDA says
+  the truth; the next iteration cross-references both.
 
 ### Phase 3 — Claim v2 (GitHub identity + operator wallet)
 

@@ -22,6 +22,7 @@ import { createAggregatesComputerJob } from '../jobs/aggregates-computer.job.js'
 import { createEpochWatcherJob } from '../jobs/epoch-watcher.job.js';
 import { createFeeIngesterJob } from '../jobs/fee-ingester.job.js';
 import { createIncomeReconcilerJob } from '../jobs/income-reconciler.job.js';
+import { createClusterNodesIngesterJob } from '../jobs/cluster-nodes-ingester.job.js';
 import { createValidatorInfoRefreshJob } from '../jobs/validator-info-refresh.job.js';
 import { createSlotIngesterJob } from '../jobs/slot-ingester.job.js';
 import { withRpcFallback } from '../jobs/rpc-fallback.js';
@@ -260,12 +261,21 @@ export async function startWorker(): Promise<void> {
     }),
   );
 
+  scheduler.register(
+    createClusterNodesIngesterJob({
+      rpc,
+      validatorsRepo,
+      intervalMs: config.CLUSTER_NODES_INTERVAL_MS,
+      logger,
+    }),
+  );
+
   shutdown.register('scheduler', async () => {
     await scheduler.stop();
   });
 
   scheduler.start();
-  logger.info({ jobs: 6 }, 'worker:scheduler-started');
+  logger.info({ jobs: scheduler.size }, 'worker:scheduler-started');
 
   // Optional Yellowstone gRPC block subscriber. Runs alongside the
   // polling-path fee-ingester rather than replacing it — gRPC handles

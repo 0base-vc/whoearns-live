@@ -1,5 +1,11 @@
 import type pg from 'pg';
-import type { IdentityPubkey, Validator, ValidatorInfo, VotePubkey } from '../../types/domain.js';
+import type {
+  IdentityPubkey,
+  Validator,
+  ValidatorInfo,
+  ValidatorUpsertInput,
+  VotePubkey,
+} from '../../types/domain.js';
 
 interface ValidatorRow {
   vote_pubkey: string;
@@ -57,21 +63,7 @@ export class ValidatorsRepository {
    * validator upsert (every vote-accounts refresh) from stomping on
    * moniker data that may have just been written by the info job.
    */
-  async upsert(
-    v: Omit<
-      Validator,
-      | 'updatedAt'
-      | 'name'
-      | 'details'
-      | 'website'
-      | 'keybaseUsername'
-      | 'iconUrl'
-      | 'infoUpdatedAt'
-      | 'clientKind'
-      | 'clientVersion'
-      | 'clientUpdatedAt'
-    >,
-  ): Promise<void> {
+  async upsert(v: ValidatorUpsertInput): Promise<void> {
     await this.pool.query(
       `INSERT INTO validators (vote_pubkey, identity_pubkey, first_seen_epoch, last_seen_epoch, updated_at)
        VALUES ($1, $2, $3, $4, NOW())
@@ -123,6 +115,51 @@ export class ValidatorsRepository {
       updated += rowCount ?? 0;
     }
     return { updated };
+  }
+
+  /**
+   * Batch-write client classification + version + freshness for many
+   * identities in one statement. UNNEST-driven so a 2000-validator
+   * refresh is one round-trip.
+   *
+   * Identity is the natural key (a validator may rotate vote
+   * accounts, but identity is stable). Rows whose identity_pubkey
+   * isn't in the `validators` table are silently skipped — the
+   * cluster-nodes refresh runs alongside the vote-accounts refresh,
+   * but if a node is in gossip without a corresponding vote account,
+   * it's not a validator we care about for the badge surface.
+   *
+   * Returns the number of rows whose client_kind OR client_version
+   * actually changed — useful for logging "N classifications drifted
+   * this tick" without spamming on the steady-state.
+   */
+  async upsertClientBatch(
+    entries: ReadonlyArray<{
+      identityPubkey: IdentityPubkey;
+      clientKind: string;
+      clientVersion: string | null;
+    }>,
+  ): Promise<{ updated: number }> {
+    if (entries.length === 0) return { updated: 0 };
+    const identities = entries.map((e) => e.identityPubkey);
+    const kinds = entries.map((e) => e.clientKind);
+    const versions = entries.map((e) => e.clientVersion);
+
+    const { rowCount } = await this.pool.query(
+      `UPDATE validators v
+          SET client_kind       = src.client_kind,
+              client_version    = src.client_version,
+              client_updated_at = NOW()
+         FROM UNNEST($1::text[], $2::text[], $3::text[])
+              AS src(identity_pubkey, client_kind, client_version)
+        WHERE v.identity_pubkey = src.identity_pubkey
+          AND (
+            v.client_kind     IS DISTINCT FROM src.client_kind OR
+            v.client_version  IS DISTINCT FROM src.client_version
+          )`,
+      [identities, kinds, versions],
+    );
+    return { updated: rowCount ?? 0 };
   }
 
   async findByVote(vote: VotePubkey): Promise<Validator | null> {

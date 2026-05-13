@@ -196,6 +196,11 @@ export const ConfigSchema = z.object({
   // = 16 calls/day, and validators rarely rename faster than that.
   // `watchMode=all` deployments see a proportionally larger burst.
   VALIDATOR_INFO_INTERVAL_MS: PositiveInt.default(6 * 60 * 60 * 1000),
+  // Periodic gossip ContactInfo refresh — drives Phase 2 client-kind
+  // and client-version indexing on the full cluster (~2000 entries).
+  // 30 minutes balances "fresh enough for Firedancer-Pioneer badges
+  // around a release" against ~500 KB of payload per tick.
+  CLUSTER_NODES_INTERVAL_MS: PositiveInt.default(30 * 60 * 1000),
 
   SLOT_FINALITY_BUFFER: NonNegativeInt.default(32),
 
