@@ -302,7 +302,51 @@ For each active SIMD proposal:
 
 ### Phase 6 + 7 — Governance + Operator Activity Index
 
-**Status: planned, not shipped.**
+**Status: scoring math + endpoint live; GitHub Discussions ingest job not yet wired.**
+
+#### Live now
+
+- `simd_discussion_comments` mirror table (one row per
+  Giscus-backed comment on a SIMD discussion, keyed by
+  `(discussion_number, comment_id)`).
+- `SimdDiscussionsRepository` — `upsertBatch` for ingest,
+  `statsByUsername` for read.
+- `services/operator-activity-index.ts` — pure-function composite:
+  - `computeGovernance(commentCount, reactionsReceived, activeWindowCount)`
+    saturating sigmoid; active-window comments weight 1.5× of
+    stale-window. Returns 0-100 governance subscore.
+  - `computeOperatorActivityIndex` blends governance + wallet
+    halves 50/50. Returns `composite: null` when both halves have
+    no signal (truly unmeasured), or composites whichever half has
+    signal otherwise.
+- `GET /v1/validators/:idOrVote/operator-activity-index` endpoint —
+  resolves linked GitHub username via `validator_github`, aggregates
+  discussion stats, sums wallet-activity active days from all
+  registered operator wallets, returns the composite + breakdown.
+
+#### NOT yet live
+
+- **GitHub Discussions ingest job** — the table can be written
+  via the repo, but no worker tick calls
+  `octokit.discussions.listComments()` to feed it. Until that
+  ships the table stays empty and every validator scores 0 on
+  governance.
+- **`active_window` classifier** — the column exists; what
+  determines a "live" discussion (open vote window, recent
+  upstream activity) needs definition + cross-reference with
+  `simd_proposals.status`.
+- **On-chain SIMD vote-by-stake ingestion** — the documented
+  40% governance weight for on-chain votes. The remaining 50%
+  weight is reserved.
+- **Realms major-DAO votes** — documented 10% governance weight.
+- **Helm + env wiring for `GITHUB_PAT`** — the ingest job will
+  need GitHub API auth (5000-req/hour PAT vs ~60 unauthenticated).
+  Not in chart yet.
+
+The composite formula in `services/operator-activity-index.ts`
+documents both the LIVE subset and the documented final shape. As
+the missing components land, the file's `livePortion` constant
+shifts and the existing tests catch any regression.
 
 GitHub Discussions API ingest reads simd.watch's discussion repo and
 attributes comments + reactions to claimed validators by GitHub

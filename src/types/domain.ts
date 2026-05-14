@@ -93,6 +93,22 @@ export interface OperatorWallet {
 }
 
 /**
+ * Phase 6 — one ingested GitHub Discussions comment on a SIMD
+ * thread (Giscus backend on simd.watch). Used by the governance
+ * score to attribute discussion participation back to claimed
+ * validators via the `validator_github.github_username` mapping.
+ */
+export interface SimdDiscussionComment {
+  discussionNumber: number;
+  commentId: string;
+  githubUsername: string;
+  reactionsCount: number;
+  activeWindow: boolean;
+  createdAt: Date;
+  ingestedAt: Date;
+}
+
+/**
  * Phase 5 — one tracked SIMD (Solana Improvement Document) with
  * optional AI curation (summary + discussion questions). Pre-review
  * rows are NOT exposed via the public API; only the row's

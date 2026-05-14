@@ -16,6 +16,7 @@ import type { OperatorWalletVerificationService } from '../services/operator-wal
 import type { ValidatorService } from '../services/validator.service.js';
 import type { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
 import type { ValidatorGithubRepository } from '../storage/repositories/validator-github.repo.js';
+import type { SimdDiscussionsRepository } from '../storage/repositories/simd-discussions.repo.js';
 import type { SimdProposalsRepository } from '../storage/repositories/simd-proposals.repo.js';
 import type { WalletActivityRepository } from '../storage/repositories/wallet-activity.repo.js';
 import type { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
@@ -30,6 +31,7 @@ import { setErrorHandler } from './error-handler.js';
 import { registerRequestId } from './request-id.js';
 import badgeRoutes from './routes/badge.route.js';
 import claimRoutes from './routes/claim.route.js';
+import oaiRoutes from './routes/operator-activity-index.route.js';
 import operatorWalletsRoutes from './routes/operator-wallets.route.js';
 import simdProposalsRoutes from './routes/simd-proposals.route.js';
 import epochsRoutes from './routes/epochs.route.js';
@@ -91,6 +93,8 @@ export interface BuildServerDeps {
     walletActivity?: WalletActivityRepository;
     /** Phase 5 — SIMD proposals + AI curation. */
     simdProposals?: SimdProposalsRepository;
+    /** Phase 6 — GitHub Discussions comments mirror. */
+    simdDiscussions?: SimdDiscussionsRepository;
   };
   services: {
     validator: ValidatorService;
@@ -333,6 +337,25 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     if (deps.repos.simdProposals !== undefined) {
       await scope.register(simdProposalsRoutes, {
         repo: deps.repos.simdProposals,
+      });
+    }
+    // Phase 6 — Operator Activity Index. Requires the validator
+    // repo (always present), plus the github-link, operator-wallet,
+    // wallet-activity, and simd-discussions repos (all P3+P4+P6
+    // optional). When any required dep is missing the route is
+    // not registered at all.
+    if (
+      deps.repos.validatorGithub !== undefined &&
+      deps.repos.operatorWallets !== undefined &&
+      deps.repos.walletActivity !== undefined &&
+      deps.repos.simdDiscussions !== undefined
+    ) {
+      await scope.register(oaiRoutes, {
+        validatorsRepo: deps.repos.validators,
+        validatorGithubRepo: deps.repos.validatorGithub,
+        operatorWalletsRepo: deps.repos.operatorWallets,
+        walletActivityRepo: deps.repos.walletActivity,
+        simdDiscussionsRepo: deps.repos.simdDiscussions,
       });
     }
     // SEO + AI-discovery surfaces. Registered BEFORE `fastifyStatic`
