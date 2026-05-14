@@ -130,6 +130,19 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
         throw new NotFoundError('validator claim', params.data.idOrVote);
       }
 
+      // Identity-drift gate — the claim binds a vote pubkey to the
+      // identity pubkey that proved ownership. If the operator has
+      // since rotated their on-chain identity (or the claim row is
+      // stale), `validators.identityPubkey` no longer matches the
+      // claimed identity, and the OAI would be serving scoring signal
+      // against an identity that no longer controls the validator.
+      // Treat it exactly like the not-claimed case — same `NotFoundError`
+      // shape — so unknown / unclaimed / opted-out / identity-drift all
+      // collapse to one 404 and don't leak which gate fired.
+      if (validator.identityPubkey !== claim.identityPubkey) {
+        throw new NotFoundError('validator claim', params.data.idOrVote);
+      }
+
       // Opt-out gate — mirrors validators-history / leaderboard
       // suppression so a validator can self-remove from scoring
       // surfaces with one switch.

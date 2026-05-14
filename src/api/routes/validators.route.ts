@@ -9,6 +9,7 @@ import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import type {
   EpochInfo,
+  EpochValidatorStats,
   Validator,
   ValidatorCurrentEpochResponse,
   VotePubkey,
@@ -30,6 +31,7 @@ import {
   WINDOW_CLOSED_EPOCHS,
   WINDOW_FETCH_ROWS,
 } from '../../services/node-tier.js';
+import type { TierInput, TierResult } from '../../services/node-tier.js';
 import { narrowToDocumentedKind } from '../../services/client-kind.js';
 import { summariseTenure } from '../../services/tenure.js';
 
@@ -99,6 +101,47 @@ async function findValidatorByVoteOrIdentity(
   const byVote = await validatorsRepo.findByVote(idOrVote);
   if (byVote !== null) return byVote;
   return validatorsRepo.findByIdentity(idOrVote);
+}
+
+/**
+ * Shape returned by `resolveTierForValidator` — the computed tier plus
+ * the closed-epoch rows it was derived from, so a caller can also
+ * surface the window size / oldest-credit freshness without re-reading.
+ */
+interface ResolvedTier {
+  result: TierResult;
+  input: TierInput;
+  closedRows: EpochValidatorStats[];
+}
+
+/**
+ * Fetch the validator's recent history, window it to the most recent
+ * CLOSED epochs, and compute the Node Tier. Shared by `/tier` and
+ * `/badges` so the window logic + composite live in exactly one place
+ * — a future fifth tier signal only needs touching here.
+ *
+ * Closed rows are identified explicitly (`epoch < currentEpoch.epoch`)
+ * rather than assuming `history[0]` is the running epoch: a validator
+ * outside the current leader schedule may have its newest history row
+ * pointing at a CLOSED epoch, which the old "skip row 0" rule silently
+ * discarded from the window.
+ */
+async function resolveTierForValidator(
+  statsRepo: Pick<StatsRepository, 'findHistoryByVote'>,
+  epochsRepo: Pick<EpochsRepository, 'findCurrent'>,
+  votePubkey: VotePubkey,
+): Promise<ResolvedTier> {
+  const [history, currentEpoch] = await Promise.all([
+    statsRepo.findHistoryByVote(votePubkey, WINDOW_FETCH_ROWS),
+    epochsRepo.findCurrent(),
+  ]);
+  const closedRows =
+    currentEpoch !== null
+      ? history.filter((r) => r.epoch < currentEpoch.epoch).slice(0, WINDOW_CLOSED_EPOCHS)
+      : history.slice(0, WINDOW_CLOSED_EPOCHS);
+  const input = tierInputFromHistory(votePubkey, closedRows);
+  const result = computeTier(input);
+  return { result, input, closedRows };
 }
 
 const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
@@ -318,21 +361,14 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
         void reply.code(200).header('cache-control', cacheControl('SCORING')).send('');
         return;
       }
-      // Identify closed rows explicitly rather than assuming `history[0]`
-      // is the running epoch. A validator outside the current leader
-      // schedule may have its newest history row pointing at a CLOSED
-      // epoch, in which case the previous "skip row 0" rule silently
-      // discarded a legitimate closed-epoch row from the window.
-      const [history, currentEpoch] = await Promise.all([
-        statsRepo.findHistoryByVote(validator.votePubkey, WINDOW_FETCH_ROWS),
-        epochsRepo.findCurrent(),
-      ]);
-      const closedRows =
-        currentEpoch !== null
-          ? history.filter((r) => r.epoch < currentEpoch.epoch).slice(0, WINDOW_CLOSED_EPOCHS)
-          : history.slice(0, WINDOW_CLOSED_EPOCHS);
-      const input = tierInputFromHistory(validator.votePubkey, closedRows);
-      const result = computeTier(input);
+      // History fetch + closed-epoch windowing + composite — shared
+      // with /badges via `resolveTierForValidator` so the window logic
+      // can no longer drift between the two routes.
+      const { result, input, closedRows } = await resolveTierForValidator(
+        statsRepo,
+        epochsRepo,
+        validator.votePubkey,
+      );
       // Surface the staleness of the oldest credit timestamp so a UI
       // can grey out the tier when ingestion has stalled. `null` when
       // the window has no credit-bearing rows.
@@ -400,16 +436,13 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
         throw new NotFoundError('validator', params.idOrVote);
       }
 
-      const [history, currentEpoch] = await Promise.all([
-        statsRepo.findHistoryByVote(validator.votePubkey, WINDOW_FETCH_ROWS),
+      // /badges also needs the current epoch for the tenure summary,
+      // so fetch it alongside the shared tier resolution. The tier's
+      // own closed-epoch windowing lives in `resolveTierForValidator`.
+      const [{ result: tierResult, closedRows }, currentEpoch] = await Promise.all([
+        resolveTierForValidator(statsRepo, epochsRepo, validator.votePubkey),
         epochsRepo.findCurrent(),
       ]);
-      const closedRows =
-        currentEpoch !== null
-          ? history.filter((r) => r.epoch < currentEpoch.epoch).slice(0, WINDOW_CLOSED_EPOCHS)
-          : history.slice(0, WINDOW_CLOSED_EPOCHS);
-      const tierInput = tierInputFromHistory(validator.votePubkey, closedRows);
-      const tierResult = computeTier(tierInput);
 
       const tenure = summariseTenure(
         validator.firstSeenEpoch,

@@ -1010,6 +1010,24 @@ view stays well under it.
 Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
 `SCORING` tier).
 
+## UI integration map
+
+Where each gamification endpoint (Phase 1-6) is intended to render in
+a future WhoEarns UI. This is a planning aid — the endpoints are live
+and usable today regardless of UI status; the surfaces below are not
+all built yet.
+
+| Endpoint                                           | Intended UI surface                                        |
+| -------------------------------------------------- | ---------------------------------------------------------- |
+| `/v1/validators/:idOrVote/tier`                    | Profile header — Node Tier badge + composite breakdown     |
+| `/v1/validators/:idOrVote/badges`                  | Profile header — tenure + client + tier badge row          |
+| `/v1/validators/:idOrVote/operator-activity-index` | Profile scoring panel — OAI composite + sub-component bars |
+| `/v1/claim/:vote/status`                           | Operator dashboard — claim-progress / re-attest reminders  |
+| `/v1/claim/:vote/audit`                            | Operator dashboard — claim-change forensic timeline        |
+| `/v1/operator-wallets/:wallet`                     | Profile wallet panel — wallet registration metadata header |
+| `/v1/operator-wallets/:wallet/activity`            | Profile wallet panel — 365-day activity heatmap grid       |
+| `/v1/simd-proposals`                               | Governance widget / leaderboard sidebar — pending SIMDs    |
+
 ## `POST /mcp`
 
 Streamable HTTP MCP endpoint for AI agents. The server exposes six read-only

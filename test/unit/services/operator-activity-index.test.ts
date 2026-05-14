@@ -77,6 +77,19 @@ describe('computeOperatorActivityIndex', () => {
     expect(r.governance.score).toBeGreaterThan(0);
   });
 
+  it('treats lingering reactions (zero comments) as governance signal', () => {
+    // A validator whose comments were deleted but whose peer reactions
+    // linger still has governance signal — `hasGovernanceSignal` must
+    // check `reactionsReceived` too, not `commentCount` alone, or the
+    // composite would wrongly null out.
+    const r = computeOperatorActivityIndex({
+      governance: { commentCount: 0, reactionsReceived: 8, activeWindowCount: 0 },
+      wallet: { activeDaysLast90: 0 },
+    });
+    expect(r.composite).not.toBeNull();
+    expect(r.governance.score).toBeGreaterThan(0);
+  });
+
   it('caps wallet score at 100 even with many active days', () => {
     const r = computeOperatorActivityIndex({
       governance: { commentCount: 0, reactionsReceived: 0, activeWindowCount: 0 },

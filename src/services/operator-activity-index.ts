@@ -64,6 +64,11 @@ const GOVERNANCE_COMMENT_HALF_POINT = 10;
 const GOVERNANCE_REACTIONS_HALF_POINT = 25;
 
 export function computeGovernance(input: OaiGovernanceInputs): GovernanceResult {
+  // `OaiGovernanceInputs` carries documented optional placeholders for
+  // the PLANNED on-chain `simdVoteRate` + `realmsVotes` sub-weights;
+  // this function deliberately ignores them until those ingests ship.
+  // The single-object param means wiring them in later is non-breaking.
+  //
   // Active-window comments are worth 1.5× of stale-window comments —
   // engagement on a live SIMD signals more current involvement than
   // re-litigating settled proposals.
@@ -96,7 +101,12 @@ export function computeOperatorActivityIndex(input: OaiInputs): OaiResult {
   const walletScore = Math.round(
     100 * saturate(input.wallet.activeDaysLast90, WALLET_ACTIVE_DAYS_HALF_POINT),
   );
-  const hasGovernanceSignal = input.governance.commentCount > 0;
+  // "Has governance signal" mirrors the score computation, which folds
+  // in BOTH comment count and reactions — a validator whose comments
+  // were deleted but whose peer reactions linger still has signal, so
+  // checking `commentCount` alone would wrongly null its composite.
+  const hasGovernanceSignal =
+    input.governance.commentCount > 0 || input.governance.reactionsReceived > 0;
   const hasWalletSignal = input.wallet.activeDaysLast90 > 0;
   if (!hasGovernanceSignal && !hasWalletSignal) {
     return { composite: null, governance, walletScore };

@@ -126,7 +126,7 @@ and through `/v1/validators/:id/current-epoch`.
 
 ### Phase 1 — Effective Latency + Node Tier
 
-**Status: partial release — 2 of 4 signals live.**
+**Status:** partial — 2 of 4 tier signals live (TVC ratio + Wilson skip); vote-latency p99 + congestion CU not yet indexed.
 
 #### What's actually computed today (live now)
 
@@ -190,7 +190,7 @@ ship, the composite expands to the full four-signal formula:
 
 ### Phase 2 — Tenure, Client, Categories
 
-**Status: partial release — tenure + client badges live; category leaderboards planned.**
+**Status:** partial — tenure + client badges live; category leaderboards planned.
 
 #### Live now
 
@@ -220,7 +220,7 @@ ship, the composite expands to the full four-signal formula:
 
 ### Phase 3 — Claim v2 (GitHub identity + operator wallet)
 
-**Status: partial release — Gist + co-signed wallet verification live; UI surfacing planned.**
+**Status:** partial — Gist + co-signed wallet verification live; profile surfacing + reverse lookup + Squads support planned.
 
 #### Live now
 
@@ -255,7 +255,7 @@ Storage:
 
 ### Phase 4 — Wallet Activity (365-day grid)
 
-**Status: partial release — tx-count indexing live; fee anchoring planned.**
+**Status:** partial — tx-count indexing + read endpoint live; fee anchoring + activity score planned.
 
 #### Live now
 
@@ -290,7 +290,7 @@ Storage:
 
 ### Phase 5 — Pending SIMD widget + AI curation
 
-**Status: scaffolding shipped; pipeline not yet active.**
+**Status:** partial — curation service + read endpoint are callable, but the GitHub mirror job + curation scheduler + admin review endpoint are unshipped, so the pipeline has no automatic data flow yet.
 
 #### Shipped (callable code, no automatic data flow yet)
 
@@ -344,7 +344,7 @@ the post.
 
 ### Phase 6 + 7 — Governance + Operator Activity Index
 
-**Status: scoring math + endpoint live; GitHub Discussions ingest job not yet wired.**
+**Status:** partial — OAI scoring math + endpoint + mirror table/repo live; GitHub Discussions ingest job, `active_window` classifier, on-chain SIMD votes, and Realms votes not yet wired.
 
 #### Documented final shape
 

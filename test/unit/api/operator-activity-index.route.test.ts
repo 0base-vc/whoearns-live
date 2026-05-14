@@ -6,14 +6,14 @@ import oaiRoutes, {
   type OaiRoutesDeps,
 } from '../../../src/api/routes/operator-activity-index.route.js';
 import type { Validator, ValidatorClaim, ValidatorGithubLink } from '../../../src/types/domain.js';
-import { IDENTITY_1, makeTestApp, VOTE_1 } from './_fakes.js';
+import { IDENTITY_1, IDENTITY_2, makeTestApp, VOTE_1 } from './_fakes.js';
 
 const silent = pino({ level: 'silent' });
 
-function makeValidator(): Validator {
+function makeValidator(identityPubkey: string = IDENTITY_1): Validator {
   return {
     votePubkey: VOTE_1,
-    identityPubkey: IDENTITY_1,
+    identityPubkey,
     firstSeenEpoch: 500,
     lastSeenEpoch: 500,
     updatedAt: new Date(),
@@ -50,8 +50,14 @@ function buildDeps(overrides: {
   governanceIngestActive?: boolean;
   githubLink?: ValidatorGithubLink | null;
   statsRow?: { commentCount: number; reactionsReceived: number; activeWindowCount: number };
+  /**
+   * When set, the `validators` row carries this identity pubkey while
+   * the claim still binds `IDENTITY_1` — simulates an on-chain
+   * identity rotation that left the claim stale (identity-drift gate).
+   */
+  validatorIdentityPubkey?: string;
 }): OaiRoutesDeps {
-  const validator = makeValidator();
+  const validator = makeValidator(overrides.validatorIdentityPubkey ?? IDENTITY_1);
   const claim: ValidatorClaim = {
     votePubkey: VOTE_1,
     identityPubkey: IDENTITY_1,
@@ -146,6 +152,23 @@ describe('GET /v1/validators/:idOrVote/operator-activity-index', () => {
     // is the governance-only blend, not null.
     expect(body.composite).not.toBeNull();
     expect(body.ingestStatus.governanceIngestActive).toBe(true);
+    await app.close();
+  });
+
+  it('404s when the on-chain identity has drifted from the claimed identity', async () => {
+    // The operator rotated their on-chain identity after claiming (or
+    // the claim row is stale): `validators.identityPubkey` no longer
+    // matches the identity that proved ownership. The OAI must not
+    // serve scoring signal against an identity that no longer controls
+    // the validator — and the drift case collapses into the same 404
+    // as unknown / unclaimed / opted-out so the gate that fired stays
+    // unobservable.
+    const app = await makeApp(buildDeps({ validatorIdentityPubkey: IDENTITY_2 }));
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/operator-activity-index`,
+    });
+    expect(res.statusCode).toBe(404);
     await app.close();
   });
 
