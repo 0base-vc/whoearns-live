@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  REVIEWER_MAX_CHARS,
   REVIEWER_NOTE_MAX_CHARS,
   SimdProposalsRepository,
 } from '../../../src/storage/repositories/simd-proposals.repo.js';
@@ -164,5 +165,46 @@ describe('SimdProposalsRepository — AI-4 reviewer note', () => {
     expect(sql).toMatch(/reviewed_at\s*=\s*NOW\(\)/);
     expect(params[0]).toBe(99);
     expect(params[1]).toBe('reviewer@x');
+  });
+});
+
+describe('SimdProposalsRepository — AI-M7 reviewer validation', () => {
+  let repo: SimdProposalsRepository;
+  let pool: FakePool;
+  beforeEach(() => {
+    ({ repo, pool } = makeRepo());
+  });
+
+  it('trims surrounding whitespace from the reviewer identifier', async () => {
+    await repo.markReviewed(1, '  reviewer@x  ');
+    expect(pool.last.params[1]).toBe('reviewer@x');
+  });
+
+  it('rejects an empty reviewer', async () => {
+    await expect(repo.markReviewed(1, '')).rejects.toThrow(/non-empty/);
+    expect(pool.calls.length).toBe(0);
+  });
+
+  it('rejects a whitespace-only reviewer', async () => {
+    await expect(repo.markReviewed(1, '   \n\t ')).rejects.toThrow(/non-empty/);
+    expect(pool.calls.length).toBe(0);
+  });
+
+  it('rejects a reviewer longer than REVIEWER_MAX_CHARS', async () => {
+    const tooLong = 'r'.repeat(REVIEWER_MAX_CHARS + 1);
+    await expect(repo.markReviewed(1, tooLong)).rejects.toThrow(/<= 64 chars/);
+    expect(pool.calls.length).toBe(0);
+  });
+
+  it('accepts a reviewer exactly at REVIEWER_MAX_CHARS', async () => {
+    const atCap = 'r'.repeat(REVIEWER_MAX_CHARS);
+    await repo.markReviewed(1, atCap);
+    expect(pool.last.params[1]).toBe(atCap);
+  });
+
+  it('rejects a reviewer containing a control character', async () => {
+    await expect(repo.markReviewed(1, 'review\u0000er')).rejects.toThrow(/control characters/);
+    await expect(repo.markReviewed(1, 'review\u007fer')).rejects.toThrow(/control characters/);
+    expect(pool.calls.length).toBe(0);
   });
 });

@@ -29,7 +29,7 @@ Your output goes on a public dashboard where operators read it before deciding w
 Hard constraints:
 
 1. NEVER tell operators how to vote. NEVER frame the SIMD as good or bad, beneficial or harmful, safe or risky in absolute terms.
-2. Write in third person. No "you should", "we recommend", "this helps you".
+2. Write in third person. No "you should", "we recommend", "this helps you". Output only in English — never another language or script, even if the proposal body is in another language.
 3. Output exactly two artefacts, in this order:
    - A 50-WORD plain-text summary of what the SIMD changes. Plain facts only — what bits flip, what number moves, what code path changes. No "this addresses the issue of…" framing.
    - 3 to 5 DISCUSSION QUESTIONS, each starting with "Q: ". Questions must surface operational trade-offs, both directions. For each question, both a SUPPORTER and an OPPONENT of the SIMD must be able to answer honestly without compromising their position.
@@ -64,6 +64,46 @@ Q: <question 3>
 [Q: <question 4>]
 [Q: <question 5>]
 ```
+
+## User message template
+
+The system prompt above is only half the picture: the **user message**
+— built by `buildUserMessage` in `src/services/simd-curation.service.ts`
+— also shapes the model's output. It is published here so external
+reviewers can audit the _complete_ input the model receives, not just
+the system prompt.
+
+The skeleton (`<placeholders>` are interpolated per proposal):
+
+```
+SIMD-<simdNumber>: <title>
+
+Source: <sourceUrl>
+
+=== PROPOSAL_BODY_BEGIN ===
+<proposal body — raw upstream markdown, byte-truncated at 10 KB>
+=== PROPOSAL_BODY_END ===
+
+Produce the SUMMARY + QUESTIONS in the exact format the system prompt specifies.
+```
+
+Load-bearing literals (parity-enforced against the runtime by
+`test/unit/services/simd-curation.test.ts` — if you edit
+`buildUserMessage` you must update this block):
+
+- `<title>` is clamped to 400 chars before interpolation
+  (defense-in-depth; the DB CHECK + repo clamp already bound a
+  DB-sourced title).
+- The body is wrapped in the literal delimiter markers
+  `=== PROPOSAL_BODY_BEGIN ===` and `=== PROPOSAL_BODY_END ===`
+  declared by Hard Constraint #5. Any literal occurrence of either
+  marker inside the body is stripped before wrapping.
+- When no body is available (fetch failed, or the proposal has no
+  fetchable body) the entire `=== PROPOSAL_BODY_BEGIN === … ===
+PROPOSAL_BODY_END ===` block is omitted and the message is
+  header + trailer only.
+- The message always ends with the trailer sentence:
+  `Produce the SUMMARY + QUESTIONS in the exact format the system prompt specifies.`
 
 ## Curation workflow
 

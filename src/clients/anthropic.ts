@@ -57,6 +57,55 @@ const DEFAULT_TEMPERATURE = 0.2;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const ANTHROPIC_API_VERSION = '2023-06-01';
 
+/**
+ * HTTP statuses we retry exactly once: `429` (rate-limited) plus
+ * `503`/`529` (Anthropic's "overloaded" responses). One rate-limit
+ * hiccup shouldn't lose a whole curation batch; capping at a single
+ * retry keeps the error semantics simple — a second failure is a
+ * plain throw, same as a non-retryable status.
+ */
+const RETRYABLE_STATUSES = new Set([429, 503, 529]);
+
+/**
+ * Ceiling on how long we honour a `retry-after` before a retry. The
+ * curation worker tick runs on its own schedule, so sleeping minutes
+ * inside a single call is worse than failing fast and picking the
+ * row up next tick.
+ */
+const MAX_RETRY_AFTER_MS = 10_000;
+
+/**
+ * Fallback sleep when a retryable response carries no usable
+ * `retry-after` header.
+ */
+const DEFAULT_RETRY_SLEEP_MS = 1_000;
+
+/**
+ * Best-effort parser for the `retry-after` header. Servers send it as
+ * either delta-seconds (`"5"`) or an HTTP-date; returns milliseconds
+ * or `undefined` when it can't be made sense of.
+ */
+function parseRetryAfterMs(header: string | null): number | undefined {
+  if (header === null) return undefined;
+  const trimmed = header.trim();
+  if (trimmed === '') return undefined;
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+    return undefined;
+  }
+  const epochMs = Date.parse(trimmed);
+  if (!Number.isNaN(epochMs)) {
+    const diff = epochMs - Date.now();
+    return diff > 0 ? diff : 0;
+  }
+  return undefined;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 interface AnthropicRawTextBlock {
   type: 'text';
   text: string;
@@ -93,33 +142,52 @@ export class AnthropicClient {
       ...(req.system !== undefined ? { system: req.system } : {}),
       messages: req.messages,
     };
-    const response = await this.fetcher(this.endpointUrl, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': this.apiKey,
-        'anthropic-version': ANTHROPIC_API_VERSION,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.timeoutMs),
-    });
-    if (!response.ok) {
-      const detail = await response.text().catch(() => '');
-      throw new Error(`anthropic: HTTP ${response.status} ${detail.slice(0, 200)}`);
+    const payload = JSON.stringify(body);
+
+    // Attempt 0 is the initial request; attempt 1 is the single retry
+    // we allow on a retryable status (429 / 503 / 529). Anything past
+    // that throws — keeping the error path identical to a hard 4xx.
+    for (let attempt = 0; ; attempt += 1) {
+      const response = await this.fetcher(this.endpointUrl, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': ANTHROPIC_API_VERSION,
+        },
+        body: payload,
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+
+      if (!response.ok) {
+        if (RETRYABLE_STATUSES.has(response.status) && attempt === 0) {
+          const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
+          const sleepMs = Math.min(retryAfterMs ?? DEFAULT_RETRY_SLEEP_MS, MAX_RETRY_AFTER_MS);
+          this.logger.warn(
+            { status: response.status, retryAfterMs, sleepMs },
+            'anthropic: retryable status — sleeping then retrying once',
+          );
+          await sleep(sleepMs);
+          continue;
+        }
+        const detail = await response.text().catch(() => '');
+        throw new Error(`anthropic: HTTP ${response.status} ${detail.slice(0, 200)}`);
+      }
+
+      const json = (await response.json()) as AnthropicRawResponse;
+      if (json.error !== undefined) {
+        throw new Error(`anthropic: ${json.error.type}: ${json.error.message}`);
+      }
+      const text = (json.content ?? [])
+        .filter((b): b is AnthropicRawTextBlock => b.type === 'text')
+        .map((b) => b.text)
+        .join('');
+      return {
+        text,
+        stopReason: json.stop_reason ?? null,
+        inputTokens: json.usage?.input_tokens ?? 0,
+        outputTokens: json.usage?.output_tokens ?? 0,
+      };
     }
-    const json = (await response.json()) as AnthropicRawResponse;
-    if (json.error !== undefined) {
-      throw new Error(`anthropic: ${json.error.type}: ${json.error.message}`);
-    }
-    const text = (json.content ?? [])
-      .filter((b): b is AnthropicRawTextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('');
-    return {
-      text,
-      stopReason: json.stop_reason ?? null,
-      inputTokens: json.usage?.input_tokens ?? 0,
-      outputTokens: json.usage?.output_tokens ?? 0,
-    };
   }
 }

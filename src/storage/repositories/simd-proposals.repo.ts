@@ -79,6 +79,44 @@ export const REVIEWER_NOTE_MAX_CHARS = 280;
  */
 export const SIMD_TITLE_MAX_CHARS = 400;
 
+/**
+ * Reviewer-identifier length cap (AI-M7). `markReviewed` accepts a
+ * free-form `reviewer` string today — there is no admin route yet to
+ * impose a structured `prefix:value` scheme, so the only contract is
+ * "a sane bounded identifier": non-empty, no control chars, trimmed,
+ * and short enough that it can't itself become an injection / bloat
+ * surface in `reviewed_by`. 64 chars comfortably fits an email, a
+ * GitHub handle, or a `team:name` style id.
+ */
+export const REVIEWER_MAX_CHARS = 64;
+
+/**
+ * Validate + normalise a `reviewer` identifier for `markReviewed`
+ * (AI-M7). Trims surrounding whitespace, then rejects:
+ *   - empty / whitespace-only input (no anonymous reviews);
+ *   - anything longer than `REVIEWER_MAX_CHARS`;
+ *   - C0/C1 control characters (U+0000-U+001F, U+007F-U+009F)
+ *     — invisible payload smuggling into the audit column.
+ * Throws a clear `Error` on invalid input; returns the trimmed value
+ * otherwise.
+ */
+function normaliseReviewer(reviewer: string): string {
+  const trimmed = reviewer.trim();
+  if (trimmed === '') {
+    throw new Error('markReviewed: reviewer must be a non-empty identifier');
+  }
+  if (trimmed.length > REVIEWER_MAX_CHARS) {
+    throw new Error(
+      `markReviewed: reviewer must be <= ${REVIEWER_MAX_CHARS} chars (got ${trimmed.length})`,
+    );
+  }
+  // eslint-disable-next-line no-control-regex -- intentional C0/C1 rejection
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(trimmed)) {
+    throw new Error('markReviewed: reviewer must not contain control characters');
+  }
+  return trimmed;
+}
+
 export interface SimdProposalUpsert {
   simdNumber: number;
   title: string;
@@ -162,8 +200,15 @@ export class SimdProposalsRepository {
    * trip the constraint. Passing `undefined` leaves any prior note
    * untouched is NOT the behaviour — a fresh review writes a fresh
    * note, so `undefined` clears it (review state is per-approval).
+   *
+   * `reviewer` is validated via `normaliseReviewer` (AI-M7): it must
+   * be a non-empty, control-char-free identifier of at most
+   * `REVIEWER_MAX_CHARS` chars. Invalid input throws before the
+   * write — `reviewed_by` is an audit column and must not absorb
+   * empty / oversized / payload-bearing strings.
    */
   async markReviewed(simdNumber: number, reviewer: string, note?: string): Promise<void> {
+    const safeReviewer = normaliseReviewer(reviewer);
     const trimmed = note?.trim();
     const safeNote =
       trimmed === undefined || trimmed === '' ? null : trimmed.slice(0, REVIEWER_NOTE_MAX_CHARS);
@@ -174,7 +219,7 @@ export class SimdProposalsRepository {
               reviewer_note = $3,
               updated_at    = NOW()
         WHERE simd_number = $1`,
-      [simdNumber, reviewer, safeNote],
+      [simdNumber, safeReviewer, safeNote],
     );
   }
 

@@ -8,9 +8,12 @@ import {
   BODY_DELIM_BEGIN,
   BODY_DELIM_END,
   BODY_INJECT_MAX_BYTES,
+  defaultBodyFetcher,
+  githubBlobToRawUrl,
   parseCurationOutput,
   SIMD_CURATION_SYSTEM_PROMPT,
   SimdCurationService,
+  USER_MESSAGE_TITLE_MAX_CHARS,
 } from '../../../src/services/simd-curation.service.js';
 import type { SimdProposalsRepository } from '../../../src/storage/repositories/simd-proposals.repo.js';
 import type { SimdProposal } from '../../../src/types/domain.js';
@@ -100,6 +103,72 @@ describe('parseCurationOutput', () => {
     const partisan = `SUMMARY:\nfoo\n\nQUESTIONS:\nQ: This must pass — what risks?\nQ: b\nQ: c`;
     expect(parseCurationOutput(partisan)).toBeNull();
   });
+
+  // --- AI-M3: partisan-blocklist evasions ---
+
+  it('rejects "merits adoption" (joiner-tolerant verb→target)', () => {
+    const bad = `SUMMARY:\nThe proposal merits adoption by the network.\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c`;
+    expect(parseCurationOutput(bad)).toBeNull();
+  });
+
+  it('rejects "recommended to approve" (short joiner between verb and target)', () => {
+    const bad = `SUMMARY:\nReviewers recommended to approve this change.\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c`;
+    expect(parseCurationOutput(bad)).toBeNull();
+  });
+
+  it('rejects value verbs — "improves" / "benefits" / "harms"', () => {
+    for (const verb of ['improves', 'benefits', 'harms']) {
+      const bad = `SUMMARY:\nThis change ${verb} the validator set.\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c`;
+      expect(parseCurationOutput(bad), verb).toBeNull();
+    }
+  });
+
+  it('rejects partisan phrasing in a question via the loosened joiner regex', () => {
+    const bad = `SUMMARY:\nfoo\n\nQUESTIONS:\nQ: Should reviewers recommend approving the proposal?\nQ: b\nQ: c`;
+    expect(parseCurationOutput(bad)).toBeNull();
+  });
+
+  it('rejects a non-English (non-Latin) summary that bypasses the English regex set', () => {
+    // A wholly Cyrillic summary — partisan or not, the English-only
+    // blocklist can't see it, so the Latin-share backstop rejects it.
+    const nonLatin = `SUMMARY:\nЭто предложение следует одобрить всем операторам сети немедленно.\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c`;
+    expect(parseCurationOutput(nonLatin)).toBeNull();
+  });
+
+  it('still accepts an English summary with an occasional accented character', () => {
+    const ok = `SUMMARY:\nThe SIMD changes the fee schedule; co-author Renée Müller notes the bit flip.\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c`;
+    expect(parseCurationOutput(ok)).not.toBeNull();
+  });
+
+  // --- AI-M4: broadened FORBIDDEN_CHARS ---
+
+  it('rejects a backtick in the summary', () => {
+    const bad =
+      'SUMMARY:\nThe SIMD edits `config.toml` on every node.\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c';
+    expect(parseCurationOutput(bad)).toBeNull();
+  });
+
+  it('rejects a javascript: URI scheme', () => {
+    const bad = `SUMMARY:\nSee javascript:alert(1) for details.\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c`;
+    expect(parseCurationOutput(bad)).toBeNull();
+  });
+
+  it('rejects a data: URI scheme', () => {
+    // No angle brackets here — isolates the `data:` rejection from the
+    // pre-existing `[<>{}]` rule.
+    const bad = `SUMMARY:\nReference data:text/plain;base64,QQ for the spec.\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c`;
+    expect(parseCurationOutput(bad)).toBeNull();
+  });
+
+  it('rejects a markdown-link pattern "](" in any question', () => {
+    const bad = `SUMMARY:\nfoo\n\nQUESTIONS:\nQ: What about [the docs](http://evil.test)?\nQ: b\nQ: c`;
+    expect(parseCurationOutput(bad)).toBeNull();
+  });
+
+  it('rejects a control character in the summary', () => {
+    const bad = `SUMMARY:\nThe SIMD bumps the limit.\u0007\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c`;
+    expect(parseCurationOutput(bad)).toBeNull();
+  });
 });
 
 describe('SIMD_CURATION_SYSTEM_PROMPT', () => {
@@ -139,6 +208,62 @@ describe('SIMD_CURATION_SYSTEM_PROMPT', () => {
     // final newline (it lives just before the closing ```). Match
     // by trimming the trailing newline from the source only.
     expect(match![1]).toBe(SIMD_CURATION_SYSTEM_PROMPT.replace(/\n$/, ''));
+  });
+
+  it('publishes the user-message template load-bearing literals (AI-M1)', async () => {
+    // The parity contract historically covered only the system
+    // prompt. The user message — built by `buildUserMessage` — also
+    // shapes model output and is invisible to external reviewers
+    // unless it's published. Rather than a brittle byte-equality on
+    // a templated string, assert the *invariant* literals of a
+    // real `buildUserMessage` render all appear in the published md.
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const repoRoot = path.resolve(here, '..', '..', '..');
+    const md = await readFile(path.join(repoRoot, 'prompts', 'simd-curation.md'), 'utf8');
+
+    // Render a real body-included user message with a fixed input.
+    const svc = new SimdCurationService({
+      anthropic: {
+        async messages() {
+          return { text: '', stopReason: 'end_turn', inputTokens: 0, outputTokens: 0 };
+        },
+      },
+      repo: {
+        async listNeedingCuration() {
+          return [];
+        },
+        async setAiCuration() {},
+      },
+      logger: silent,
+      async bodyFetcher() {
+        return '## Body\n\nReal proposal markdown.';
+      },
+    });
+    const rendered = await svc.buildUserMessage({
+      simdNumber: 1234,
+      title: 'Fixed Title',
+      sourceUrl: 'https://example.test/1234.md',
+    });
+    const trailer =
+      'Produce the SUMMARY + QUESTIONS in the exact format the system prompt specifies.';
+
+    // Sanity: the render itself contains the invariants we publish.
+    expect(rendered).toContain(BODY_DELIM_BEGIN);
+    expect(rendered).toContain(BODY_DELIM_END);
+    expect(rendered).toContain(trailer);
+
+    // The md must document a `## User message template` block...
+    expect(md, 'prompts/simd-curation.md is missing the user-message template section').toMatch(
+      /## User message template/,
+    );
+    // ...and that block must carry the load-bearing literals so an
+    // external reviewer sees the same invariants the model receives.
+    expect(md).toContain(BODY_DELIM_BEGIN);
+    expect(md).toContain(BODY_DELIM_END);
+    expect(md).toContain(trailer);
+    // The skeleton must show the interpolation placeholders.
+    expect(md).toMatch(/SIMD-<simdNumber>: <title>/);
+    expect(md).toMatch(/Source: <sourceUrl>/);
   });
 });
 
@@ -287,6 +412,135 @@ describe('SimdCurationService body injection (B4.b)', () => {
     });
     expect(msg).not.toContain(BODY_DELIM_BEGIN);
     expect(msg).toContain('Source: https://example.test/0099.md');
+  });
+
+  it('clamps an over-length title before interpolation (AI-M2)', async () => {
+    // A title reaching `buildUserMessage` from a non-DB path is not
+    // bounded by migration 0032's CHECK / the repo clamp — the
+    // defense-in-depth clamp at the interpolation site catches it.
+    const svc = new SimdCurationService({
+      anthropic: {
+        async messages() {
+          return { text: '', stopReason: 'end_turn', inputTokens: 0, outputTokens: 0 };
+        },
+      },
+      repo: {
+        async listNeedingCuration() {
+          return [];
+        },
+        async setAiCuration() {},
+      },
+      logger: silent,
+    });
+    const hugeTitle = 'T'.repeat(USER_MESSAGE_TITLE_MAX_CHARS * 3);
+    const msg = await svc.buildUserMessage({
+      simdNumber: 99,
+      title: hugeTitle,
+      sourceUrl: 'https://example.test/0099.md',
+    });
+    // The interpolated title segment is the header's first line after
+    // the `SIMD-99: ` prefix, up to the first newline.
+    const headerLine = msg.split('\n')[0] ?? '';
+    const interpolatedTitle = headerLine.replace(/^SIMD-99: /, '');
+    expect(interpolatedTitle.length).toBe(USER_MESSAGE_TITLE_MAX_CHARS);
+    expect(msg).not.toContain(hugeTitle);
+  });
+});
+
+describe('githubBlobToRawUrl + defaultBodyFetcher (AI-M-bodyfetch)', () => {
+  it('transforms a GitHub blob URL into its raw.githubusercontent.com form', () => {
+    expect(
+      githubBlobToRawUrl(
+        'https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0099-test.md',
+      ),
+    ).toBe(
+      'https://raw.githubusercontent.com/solana-foundation/solana-improvement-documents/main/proposals/0099-test.md',
+    );
+  });
+
+  it('returns null for a non-GitHub or non-blob URL', () => {
+    expect(githubBlobToRawUrl('https://example.test/0099.md')).toBeNull();
+    expect(githubBlobToRawUrl('https://github.com/owner/repo/tree/main/dir')).toBeNull();
+    expect(githubBlobToRawUrl('not a url')).toBeNull();
+  });
+
+  it('fetches the raw body for a GitHub blob URL', async () => {
+    const fakeFetch = (async () =>
+      new Response('## Proposal\n\nBody text.', { status: 200 })) as unknown as typeof fetch;
+    const body = await defaultBodyFetcher(
+      'https://github.com/o/r/blob/main/proposals/0001-x.md',
+      fakeFetch,
+    );
+    expect(body).toBe('## Proposal\n\nBody text.');
+  });
+
+  it('returns null (URL-only fallback) when the fetch errors', async () => {
+    const fakeFetch = (async () => {
+      throw new Error('ECONNRESET');
+    }) as unknown as typeof fetch;
+    const body = await defaultBodyFetcher(
+      'https://github.com/o/r/blob/main/proposals/0001-x.md',
+      fakeFetch,
+    );
+    expect(body).toBeNull();
+  });
+
+  it('returns null on a non-2xx response', async () => {
+    const fakeFetch = (async () =>
+      new Response('not found', { status: 404 })) as unknown as typeof fetch;
+    const body = await defaultBodyFetcher(
+      'https://github.com/o/r/blob/main/proposals/0001-x.md',
+      fakeFetch,
+    );
+    expect(body).toBeNull();
+  });
+
+  it('returns null when the response exceeds the read cap', async () => {
+    // content-length over 1 MB → rejected before reading the body.
+    const fakeFetch = (async () =>
+      new Response('x', {
+        status: 200,
+        headers: { 'content-length': String(2 * 1024 * 1024) },
+      })) as unknown as typeof fetch;
+    const body = await defaultBodyFetcher(
+      'https://github.com/o/r/blob/main/proposals/0001-x.md',
+      fakeFetch,
+    );
+    expect(body).toBeNull();
+  });
+
+  it('is the default fetcher — service is body-grounded with no injected dep', async () => {
+    // No `bodyFetcher` dep + a GitHub-shaped sourceUrl ⇒ the default
+    // fetcher runs. We patch the global fetch so the default has
+    // something deterministic to read.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('## Default-path body', { status: 200 })) as unknown as typeof fetch;
+    try {
+      const svc = new SimdCurationService({
+        anthropic: {
+          async messages() {
+            return { text: '', stopReason: 'end_turn', inputTokens: 0, outputTokens: 0 };
+          },
+        },
+        repo: {
+          async listNeedingCuration() {
+            return [];
+          },
+          async setAiCuration() {},
+        },
+        logger: silent,
+      });
+      const msg = await svc.buildUserMessage({
+        simdNumber: 1,
+        title: 'T',
+        sourceUrl: 'https://github.com/o/r/blob/main/proposals/0001-x.md',
+      });
+      expect(msg).toContain(BODY_DELIM_BEGIN);
+      expect(msg).toContain('## Default-path body');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });
 
