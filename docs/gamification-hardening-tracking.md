@@ -40,10 +40,11 @@ were not duplicated here to avoid drift between two sources of truth.
    rate limiting, RPC budget vs ANTHROPIC quota interactions.
 
 A cross-cutting integration pass on top of those seven produced the
-six BLOCKER-class findings below (B1-B6). B1-B6 and all 22 per-report
-HIGH items are now closed (see the HIGH scorecard); the MED (~52) and
-LOW (~42) backlogs remain. The Blockers section below is kept as the
-historical record of the B1-B6 framing — where a B-item's original
+six BLOCKER-class findings below (B1-B6). B1-B6, all 22 per-report
+HIGH items, and all ~52 MED items are now closed (see the HIGH
+scorecard + the MED section); only the ~42 LOW polish items remain.
+The Blockers section below is kept as the historical record of the
+B1-B6 framing — where a B-item's original
 scope note turned out to be wrong (e.g. B3's claim about llms.txt),
 it is corrected inline.
 
@@ -202,11 +203,13 @@ cited per domain so the full text stays recoverable).
 the MED/LOW sweep had NOT closed — the four REST items, the four
 TypeScript-architecture items, and the two cross-cutting OAI-semantics
 items. Those were then closed by a dedicated three-agent fix pass
-(commits `3f13b18` TS, `4cf711b` REST, `8357bef` Cross-cutting).
-**All 22 per-report HIGH items are now closed.** The MED (~52) and LOW
-(~42) backlogs remain. The earlier "SEC-1 / REST-1..5 / SOL-3 / TS-1 /
-SEC-2" labels were invented during the reconstruction and do not
-correspond to real findings — they are replaced wholesale below.
+(commits `3f13b18` TS, `4cf711b` REST, `8357bef` Cross-cutting), and
+the full ~52-item MED backlog was then closed by a seven-agent
+domain-by-domain pass. **All 22 HIGH and all ~52 MED items are now
+closed; only the ~42 LOW polish items remain.** The earlier
+"SEC-1 / REST-1..5 / SOL-3 / TS-1 / SEC-2" labels were invented during
+the reconstruction and do not correspond to real findings — they are
+replaced wholesale below.
 
 ## HIGH-severity items (itemised, per expert report)
 
@@ -270,7 +273,7 @@ said 21 — it under-counted TypeScript by one).
 - [x] **REST-H4**: inline `reply.code().send({error})` payloads omit
       the `details` field the central `error-handler.ts` supports.
       → `4cf711b`: added an exported `sendError(reply, {code,
-  statusCode, message, requestId, details?})` helper routing
+statusCode, message, requestId, details?})` helper routing
       through the same `makePayload` the central handler uses;
       converted 19 inline sites across claim / claim-v2 / badge / og.
       (`operator-activity-index.route.ts` had none — it throws
@@ -346,174 +349,168 @@ said 21 — it under-counted TypeScript by one).
 - REST domain (`4cf711b`) — REST-H2, REST-H3, REST-H4, REST-H5.
 - Cross-cutting domain (`8357bef`) — CROSS-H1, CROSS-H3.
 
-Remaining open work is the **MED backlog** (~52 items, below) and the
-LOW backlog (~42). No HIGH items remain.
+No HIGH items remain. The **MED backlog (~52 items, below) is also now
+fully closed** by a seven-agent fix pass. Only the **LOW backlog
+(~42)** is open.
 
 ## MED items (itemised, per expert report)
 
-Per-report MED tally ≈ 52. Status: a handful were incidentally closed
-by the three hardening commits; **most are open.**
+Per-report MED tally ≈ 52. **All closed** by a seven-agent
+domain-by-domain fix pass (one agent per domain group, run
+sequentially, each verified + committed independently). The detailed
+per-item rationale lives in the seven commit messages; this section
+is the index. Two items are deferred-by-design (`[!]`) — the reviews
+themselves flagged them as future-major-version API breaks.
 
-### Security MED _(agent a43d08ff)_ — all OPEN
+### Security MED _(agent a43d08ff)_ — ALL CLOSED
 
-- [ ] **SEC-M1**: Ed25519 verify-envelope inconsistency — `claim.service.ts`
-      uses `buildOffchainMessage`, the two P3 services verify raw JSON
-      bytes; no `purpose` domain-separation field on the P3 nonces.
-- [ ] **SEC-M2**: race-to-link Gist replay → self-DoS (attacker scrapes
-      a public Gist proof and submits first; operator gets `nonce_replay`
-      on their own claim). Fix: server-issued challenge or hash-commit.
-- [ ] **SEC-M3**: no length bound on `simd_proposals.title` flowing into
-      the Anthropic prompt. _B4 bounded the **body** at 10 KB; the
-      **title** is still unbounded_ — add `CHECK (LENGTH(title) <= 400)` + ingester truncation.
-- [ ] **SEC-M4**: identity-key compromise has no audit trail / no
-      notification path — re-claim / re-link / wallet-register are
-      silent and immediate. Fix: immutable `validator_claim_events` log + a public `GET /v1/claim/:vote/audit`.
-- [ ] **SEC-M5**: `simd_discussions.reactions_count` sums **all** GitHub
-      reactions, but the OAI docstring promises "peer-validator
-      reactions" — gameable with reaction bots. Fix: store a separate
-      `peer_reactions_count` JOINed against `validator_github` before
-      the ingester ships.
+- [x] **SEC-M1**: Ed25519 verify-envelope inconsistency — both P3
+      services now verify through the same `buildOffchainMessage`
+      envelope `claim.service.ts` uses; a `purpose` domain-separation
+      tag is baked into the canonical nonce. → `a81547b`
+- [x] **SEC-M2**: race-to-link Gist replay self-DoS — a nonce-replay
+      that resolves to the same `(vote, githubUsername)` linkage now
+      returns 200 idempotent instead of 403. → `a81547b`
+- [x] **SEC-M3**: `simd_proposals.title` unbounded into the prompt —
+      migration `0032` adds `CHECK (LENGTH(title) <= 400)` + a clamp
+      in `upsertSource`. → `a81547b`
+- [x] **SEC-M4**: identity-key compromise had no audit trail —
+      migration `0034` adds an append-only `validator_claim_events`
+      log, a repo, write-path instrumentation, and a public
+      `GET /v1/claim/:vote/audit` (forensic `submitted_ip` not
+      exposed). → `fea7637`
+- [x] **SEC-M5**: `reactions_count` summed all reactions — migration
+      `0033` renames it `total_reactions_count` + adds
+      `peer_reactions_count` (the peer-validator subset the score
+      consumes; 0 until the unshipped ingester populates it). → `a81547b`
 
-### Database MED _(agent af24bcf5)_ — all OPEN
+### Database MED _(agent af24bcf5)_ — ALL CLOSED → `b9c0fd2`
 
-- [ ] **DB-M1**: `signed_nonce` UNIQUE is one-way — same-vote re-claim
-      with a fresh nonce passes; migration-0025 commentary is
-      misleading. (Comment fix.)
-- [ ] **DB-M2**: `upsertClientBatch` silently no-ops for unknown
-      identity; `rowCount` returned is "changed" not "attempted" —
-      masks gossip/validators divergence.
-- [ ] **DB-M3**: `IS DISTINCT FROM` NULL guard on `client_kind` — a
-      NULL `clientKind` would violate the NOT NULL column; add
-      `COALESCE(..., 'unknown')`.
-- [ ] **DB-M4**: `simd_proposals.ai_questions` CHECK enforces length
-      only, not JSON validity — corrupt JSON stores and silently reads
-      back as `null`. Fix: switch column to `JSONB`.
-- [ ] **DB-M5**: `wallet_daily_activity` has no FK to `operator_wallets`
-      — one-click unlink orphans history; GDPR purge must know both
-      tables. (Document, or add admin script.)
-- [ ] **DB-M6**: OAI route runs 6 **sequential** queries against a
-      pool of 10 — a cache-miss burst can saturate. Fix: `Promise.all`
-      the independent reads; consider pool size 20. _(Also flagged by
-      REST + Ops — see REST-M / OPS-M.)_
-- [ ] **DB-M7**: UNNEST batch upserts silently truncate on
-      mismatched-length input arrays — add an `array_length` assertion
-      (4 repos).
+- [x] **DB-M1**: corrected the misleading one-way `signed_nonce`
+      UNIQUE commentary in migration `0025` (comment-only).
+- [x] **DB-M2**: `upsertClientBatch` returns `{ updated, attempted }`;
+      caller logs the skipped delta at debug.
+- [x] **DB-M3**: `COALESCE(src.client_kind, 'unknown')` guards the
+      NOT NULL column.
+- [x] **DB-M4**: migration `0031` converts `simd_proposals.ai_questions`
+      TEXT → JSONB (+ `jsonb_typeof = 'array'` CHECK); repo drops the
+      app-side `JSON.parse`.
+- [x] **DB-M5**: the deliberate `wallet_daily_activity` → `operator_wallets`
+      FK gap + two-table GDPR-purge requirement documented in the `0026`
+      migration comment.
+- [x] **DB-M6**: the OAI route's 6 sequential reads are now two
+      `Promise.all` waves; `POSTGRES_POOL_SIZE` default 10 → 20.
+- [x] **DB-M7**: fail-fast array-length guards on all four UNNEST
+      batch upserts.
 
-### REST MED _(agent a711d2da)_ — all OPEN unless noted
+### Solana MED _(agent a84928cc)_ — ALL CLOSED → `b9c0fd2`
 
-- [~] **REST-M-cache**: cache-control values drifted across routes
-  with no rationale. _Substantially addressed_ by the MED/LOW
-  sweep's `src/api/cache-control.ts` tiers; the expert's specific
-  asks (OAI `s-maxage` 1800→3600, `stale-while-revalidate` on
-  simd-proposals) were NOT applied.
-- [ ] **REST-M1**: `robots.txt` allow-list stale (see REST-H3).
-- [ ] **REST-M2**: Gist/wallet failure responses set `code` = `message`
-      = the machine reason string (`{code:"fetch_failed",
-message:"fetch_failed"}`) — needs a `humanMessageFor...` lookup.
-- [ ] **REST-M3**: `/v1/simd-proposals` + `/v1/operator-wallets/:wallet/activity` + `/v1/validators/:idOrVote/tier` lack HEAD short-circuits — HEAD
-      pays the full DB cost.
-- [ ] **REST-M4**: OAI runs 5-7 queries inside the 60/min/IP budget —
-      add a tighter per-route cap (e.g. 30/min).
-- [ ] **REST-M5**: `/v1/simd-proposals` returns `{proposals:[]}` while
-      every other list uses `{items:[]}` / `{results:[]}` — three names
-      for "list response."
-- [ ] **REST-M6**: no `GET /v1/operator-wallets/:wallet` parent
-      resource — the `/activity` sub-path implies a missing parent.
-- [ ] **REST-M7**: `/v1/claim/*` (6 routes) argues for `/v1/claims`
-      (plural collection) in a future major version.
-- [ ] **REST-M8**: tier/badges/OAI should consolidate under one
-      `/v1/validators/:id/scoring` to avoid 3× duplicate lookups (major
-      version; note in roadmap).
-- [ ] **REST-M9**: conditional-route-registration → SPA-shell-200 risk
-      if the `/v1/` guard in `setNotFoundHandler` is ever relaxed; add
-      a positive 404-JSON assertion test.
-- [ ] **REST-M10**: tier/badges/OAI not exposed via MCP — add
-      `get_validator_tier` / `get_validator_badges` MCP tools.
+- [x] **SOL-M1**: `getSignaturesForAddress` now pages backwards with a
+      `before` cursor, stopping at a per-wallet `ingestion_cursors`
+      checkpoint / the 365-day cutoff / a 10× hard ceiling. The
+      checkpoint repo was instantiated-and-discarded — now wired in.
+- [x] **SOL-M2**: `client-kind.ts` regex broadened for real `sig`
+      variants; fixtures added.
+- [x] **SOL-M3**: tenure landmark epochs recalibrated (off by 50-100).
 
-### Solana MED _(agent a84928cc)_ — all OPEN
+### REST MED _(agent a711d2da)_
 
-- [ ] **SOL-M1**: `getSignaturesForAddress` is a single 1000-cap call
-      with no `before` cursor — high-volume operator wallets are
-      under-counted permanently (no per-wallet checkpoint exists).
-- [ ] **SOL-M2**: `client-kind.ts` regex misses some real `sig`
-      variants (`solana-sig-validator/...`, space-separated); add
-      fixtures for `0.405.x-jito-frkd`.
-- [ ] **SOL-M3**: several tenure landmark epochs in `tenure.ts` are
-      off by 50-100 (e.g. `FIREDANCER_LAUNCH: 850` — Frankendancer-on-
-      mainnet was ~712; `RECENT: 950` — May 2026 is ~epoch 1015).
+- [x] **REST-M-cache** / **CROSS-M3**: `/tier` + `/badges` migrated
+      onto `cacheControl('SCORING')` (they had contradictory hand-rolled
+      `s-maxage`); `stale-while-revalidate` added to simd-proposals. → `21382ce`
+- [x] **REST-M1**: `robots.txt` allow-list — already closed as
+      REST-H3. → `4cf711b`
+- [x] **REST-M2**: `humanMessageFor*` lookups — Gist/wallet failures
+      now send human prose as `message`, machine id as `code`. → `21382ce`
+- [x] **REST-M3**: HEAD short-circuits added to simd-proposals,
+      operator-wallets/activity, validators/tier. → `21382ce`
+- [x] **REST-M4**: OAI route gets a per-route 30/min rate-limit cap. → `21382ce`
+- [x] **REST-M5**: `/v1/simd-proposals` response `{proposals}` →
+      `{items}` + `count`, matching every other list endpoint. → `21382ce`
+- [x] **REST-M6**: added the missing parent resource
+      `GET /v1/operator-wallets/:wallet` (+ a `findActiveByWallet` repo
+      method, gated identically to `/activity`). → `21382ce`
+- [!] **REST-M7**: `/v1/claim/*` → `/v1/claims` plural collection —
+  **deferred by design**: an API-breaking change the review itself
+  scoped to a future major version.
+- [!] **REST-M8**: consolidate tier/badges/OAI under
+  `/v1/validators/:id/scoring` — **deferred by design**: same, a
+  future-major-version change.
+- [x] **REST-M9** / **CROSS-M5**: added a positive regression test —
+      an unknown `/v1/...` path returns a JSON 404 envelope, not the
+      SPA shell. → `21382ce`
+- [x] **REST-M10**: `get_validator_tier` + `get_validator_badges` MCP
+      tools added. → `21382ce`
 
-### TypeScript MED _(agent a1801710)_ — all OPEN
+### TypeScript MED _(agent a1801710)_ — ALL CLOSED → `de5cf27`
 
-- [ ] **TS-M1**: `domain.ts` is a 624-line god-module; split into
-      `domain/{validators,claim,simd,wallet,epoch}.ts`. _(Option B's
-      TS-2 grew this file further — the real finding wants it split.)_
-- [ ] **TS-M2**: `BuildServerDeps` is 11+ repos with 4 conditional
-      register branches — introduce a `RouteRegistry` array.
-- [ ] **TS-M3**: `Pick<>` deps on the OAI route protect nothing (the
-      test fakes cast `as unknown as`); pick one consistent stance.
-- [ ] **TS-M4**: `aiSummary as string` post-`.filter` cast in
-      `simd-proposals.route.ts` — use a type-predicate filter instead.
-- [ ] **TS-M5**: `upsertClientBatch` arg shape inlined twice — add a
-      named `ValidatorClientUpsertInput` type.
-- [ ] **TS-M6**: inconsistent throw-vs-`reply.send` across new routes;
-      Postgres SQLSTATE branching in the route layer (`claim.route.ts`)
-      — push the catch-and-reclassify into the repo.
-- [ ] **TS-M7**: zero per-route tests for the four P3-P6 route plugins
-      (also Cross-cutting CROSS-M-tests).
+- [x] **TS-M1**: `domain.ts` split into `src/types/domain/{validators,
+    claim,simd,wallet,epoch,oai}.ts` + an `index.ts` barrel; `domain.ts`
+      is now a one-line re-export so all 50 importers are unchanged.
+- [x] **TS-M2**: assessed — the "4 conditional register branches" were
+      already removed by TS-H1; the remaining flat register block has no
+      shared deps shape to factor out, so a `RouteRegistry` would be pure
+      churn. Closed as assessed, not changed.
+- [x] **TS-M3**: assessed — the OAI route's `Pick<>` deps are the
+      dominant codebase convention (13 other route files) and are now
+      exercised by a real route test; kept as-is.
+- [x] **TS-M4**: `simd-proposals.route.ts` uses a type-predicate filter
+      — the `as string` casts are gone.
+- [x] **TS-M5**: named `ValidatorClientUpsertInput` type, used in both
+      the repo signature and the ingester's Map.
+- [x] **TS-M6**: SQLSTATE branching pushed out of `claim-v2.route.ts`
+      into the repos, which now return typed discriminated results; the
+      SEC-M2 idempotent-replay path is preserved.
+- [x] **TS-M7** / **CROSS-M-tests**: per-route tests added for claim,
+      claim-v2, operator-wallets, simd-proposals (operator-activity-index
+      already had one).
 
-### AI MED _(agent a35c6f12)_ — all OPEN
+### AI MED _(agent a35c6f12)_ — ALL CLOSED → `afc538e`
 
-- [ ] **AI-M-bodyfetch**: no default `bodyFetcher` is wired — B4.b
-      built the path but curation still runs URL-only until a fetcher
-      is injected.
-- [ ] **AI-M1**: parity anchor doesn't include the user-message
-      template (only the system prompt is mirrored).
-- [ ] **AI-M2**: `proposal.title` not length-capped before
-      interpolation (overlaps SEC-M3).
-- [ ] **AI-M3**: partisan blocklist misses evasions (`merits adoption`,
-      `recommended to approve`, non-English summaries).
-- [ ] **AI-M4**: `FORBIDDEN_CHARS` misses `` ` ``, `javascript:`,
-      markdown-link injection, `data:` URIs, control chars.
-- [ ] **AI-M5**: no regression test pinning model behaviour (gated on
-      `ANTHROPIC_API_KEY`).
-- [ ] **AI-M6**: `AnthropicClient` ignores `429` / `retry-after` —
-      one rate-limit hiccup loses the whole batch.
-- [ ] **AI-M7**: `reviewer` identity is a free-form string with no
-      validation (depends on the not-yet-built admin route).
+- [x] **AI-M-bodyfetch**: a `defaultBodyFetcher` (blob→raw URL, timed,
+      size-capped) is now the constructor default — curation is
+      body-grounded out of the box.
+- [x] **AI-M1**: the user-message template is documented in
+      `prompts/simd-curation.md` and parity-asserted.
+- [x] **AI-M2**: a defense-in-depth title clamp at the interpolation
+      site (on top of SEC-M3's DB-layer cap).
+- [x] **AI-M3**: partisan blocklist loosened for joiner-evasions +
+      value verbs; "Output only in English" prompt line + a
+      predominantly-Latin parser backstop.
+- [x] **AI-M4**: `FORBIDDEN_CHARS` broadened (backtick, `javascript:`/
+      `data:`, markdown-link `](`, control chars — keeping Tab/LF/CR).
+- [x] **AI-M5**: a key-gated `test/integration` model-behaviour
+      regression test.
+- [x] **AI-M6**: `AnthropicClient` retries once on 429/503/529,
+      honouring `retry-after` capped at 10 s.
+- [x] **AI-M7**: `markReviewed` validates the `reviewer` identifier
+      (non-empty, ≤ 64 chars, no control chars, trimmed).
 
-### Ops MED _(agent a68a4fbd)_ — all OPEN
+### Ops MED _(agent a68a4fbd)_ — ALL CLOSED → `2157047`
 
-- [ ] **OPS-M1**: `.env.example` + `docker-compose.yml` miss
-      `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `SIMD_CURATION_INTERVAL_MS`.
-- [ ] **OPS-M2**: wallet-activity ingester fires its first tick AT BOOT
-      — RPC burst while `/healthz` is still `degraded`. Stagger it.
-- [ ] **OPS-M3**: cluster-nodes ingester first tick races the
-      validator-info backfill — cold-start RPC burst, 429 on public RPC.
-- [ ] **OPS-M4**: no job-level Prometheus metrics — add
-      `jobs_executed_total{job,outcome}` + `jobs_tick_duration_seconds{job}`.
-      The "indexer silently failing every tick" scenario has no signal.
-- [ ] **OPS-M5**: wallet-activity tick logs INFO even on a no-op.
-- [ ] **OPS-M6**: `docs/operations.md` + `architecture.md` untouched by
-      the entire branch — no runbook for the new jobs/env, no
-      FK-dependent-restore caveat.
+- [x] **OPS-M1**: `.env.example` + docker-compose gain the Phase-5
+      Anthropic vars (with the documented Compose-empty-var caveat).
+- [x] **OPS-M2** / **OPS-M3**: `Job.initialDelayMs` + staggered
+      first-tick offsets in `worker.ts` spread the cold-start RPC burst.
+- [x] **OPS-M4**: `jobsExecutedTotal{job,outcome}` +
+      `jobsTickDurationSeconds{job}` on the shared registry, observed
+      from `Scheduler.runLoop`.
+- [x] **OPS-M5**: wallet-activity tick logs `debug` on a no-op, `info`
+      only when there was work.
+- [x] **OPS-M6**: `operations.md` + `architecture.md` updated for the
+      Phase 2-6 jobs/env + the full-DB-restore caveat.
 
-### Cross-cutting MED _(agent a4264d40)_ — all OPEN
+### Cross-cutting MED _(agent a4264d40)_ — ALL CLOSED → `21382ce`
 
-- [ ] **CROSS-M1**: `/v1/claim/:vote/status` doesn't surface GitHub-link
-      or wallet state — a UI needs 3 extra un-batched fetches.
-- [ ] **CROSS-M2**: phase-numbering drift — `scoring.md` numbers 0-7,
-      `roadmap.md` numbers 1-5, `architecture.md` doesn't mention phases.
-- [ ] **CROSS-M3**: cache TTL drift between `/tier` (`s-maxage=3600`)
-      and `/badges` (`s-maxage=1800`) — same tier, contradictory CDN
-      windows. _(The cache-control module exists now but `/tier` +
-      `/badges` were not migrated onto it — see REST-M-cache.)_
-- [ ] **CROSS-M4**: v1 vs v2 claim endpoints use two replay mechanisms,
-      two timestamp units (`timestampSec` vs `timestampMs`), two
-      freshness windows — at minimum document it.
-- [ ] **CROSS-M5**: conditional route registration → SPA-200 (dup of
-      REST-M9).
-- [ ] **CROSS-M-tests**: zero route-level tests for any P3-P6 endpoint
-      (dup of TS-M7).
+- [x] **CROSS-M1**: `/v1/claim/:vote/status` now folds in `githubLink` + `wallets` summary (one fetch, not four).
+- [x] **CROSS-M2**: a scoring-phase ↔ roadmap-stage crosswalk table
+      added to `docs/scoring.md`.
+- [x] **CROSS-M3**: see REST-M-cache.
+- [x] **CROSS-M4**: the v1-vs-v2 claim signing asymmetry (timestamp
+      units, freshness windows, replay mechanisms) documented in
+      `docs/api.md`.
+- [x] **CROSS-M5**: see REST-M9.
+- [x] **CROSS-M-tests**: see TS-M7.
 
 ## LOW items
 
@@ -527,39 +524,48 @@ places; `hasGovernanceSignal` only checks `commentCount`. Not
 individually tracked — recover from the per-expert agent transcripts if
 a dedicated LOW pass is scheduled.
 
-## What the three hardening commits actually did to MED/LOW
+## How the early "MED/LOW sweep" relates to the itemised list
 
-The "MED/LOW sweep" commit was scoped against the **pre-reconciliation
-cluster approximation**, not this itemised list. Mapping it honestly
-onto the real findings:
+The original `docs+fix(hardening): MED/LOW sweep` commit predates the
+transcript reconciliation — it was scoped against the **cluster
+approximation**, not the itemised list above. It still did real work
+that the later seven-agent pass then built on or finished:
 
-- **Helm README** — real, valuable, not a numbered review finding
-  (the Ops report wanted `operations.md` updated, OPS-M6 — still open).
-- **cache-control module** — addresses the _substance_ of REST-M-cache
-  - CROSS-M3, but `/tier` + `/badges` were never migrated onto it and
-    the specific TTL asks weren't applied; REST-M-cache / CROSS-M3 stay
-    partially open.
-- **docstring drift** — `scoring.md` + `api.md` fixes are real and
-  overlap CROSS-H2 (closed) + CROSS-M2 (phase numbering — still open).
-- **import order** — touched 3 files; not a numbered finding.
-- **cache-control test** — real; TS-M7 / CROSS-M-tests (route tests)
-  still open.
-- **OpenAPI examples** — correctly resolved-by-decision.
+- **Helm README** — valuable, not itself a numbered finding (the Ops
+  report's runbook ask was OPS-M6, closed by the Ops agent).
+- **cache-control module** — `src/api/cache-control.ts` was created
+  here; the Cross/REST agent later migrated `/tier` + `/badges` onto
+  it (REST-M-cache / CROSS-M3) and added the missing TTL tweaks.
+- **docstring drift** — `scoring.md` + `api.md` fixes here overlapped
+  CROSS-H2; CROSS-M2 (phase-numbering crosswalk) was finished by the
+  Cross agent.
+- **cache-control test** — the route-test gap (TS-M7 / CROSS-M-tests)
+  was finished by the TS agent.
+- **import order**, **OpenAPI examples** — one-offs, no itemised
+  finding.
 
-Net: the sweep did real work but it did **not** close the itemised
-MED backlog. Treat the MED list above as the source of truth.
+Net: the sweep was a partial down-payment; the itemised MED list above
+is the authoritative record and is now fully closed.
 
 ---
 
 ## Closure record
 
-| Commit                                                               | Genuinely closed                                                                                                                    | Notes                                                                                                                                  |
-| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `fix(hardening): adversarial-review Option A — B1-B6`                | B1 (SOL-H1/H2), B2 (Wilson), B3 (REST-H1 + CROSS-H2 openapi half), B4.a-c (AI-H1/H2/H4 + AI-H3 path), B5 (OPS-H1/H2), B6 (DB-H1/H2) | 11 HIGH. The bundled tracker's "REST-1..5 / SOL-3 / TS-1 / SEC-1" labels were reconstruction artefacts.                                |
-| `fix(hardening): Option B — B4.d/AI-3, AI-4, OPS-2, TS-2`            | B4.d/AI-3 (body-drift re-curation), AI-4 (reviewer note)                                                                            | OPS-2 (ServiceMonitor) + TS-2 (type promotion) were **self-directed**, not review findings — harmless but not in the 22 HIGH / 52 MED. |
-| `docs+fix(hardening): MED/LOW sweep`                                 | CROSS-H2 (api.md half), substance of REST-M-cache/CROSS-M3                                                                          | Scoped against the cluster approximation, not this itemised list — see "What the three commits actually did" above.                    |
-| `docs(hardening): correct tracker from recovered transcript reports` | (no code) — replaced the reconstructed HIGH section with the itemised list recovered from the 8 transcript reports                  | This document. Surfaced the 10 genuinely-open HIGH items the reconstruction had hidden.                                                |
-| `fix(hardening): close 4 TypeScript-architecture HIGH items`         | TS-H1, TS-H2, TS-H3, TS-H4                                                                                                          | Dedicated fix pass — TS agent `a667329478b61de94`. 529 unit+smoke tests pass.                                                          |
-| `fix(hardening): close 4 REST/HTTP HIGH items`                       | REST-H2, REST-H3, REST-H4, REST-H5                                                                                                  | Dedicated fix pass — REST agent `ad7427fec7cacdb90`. 529 unit+smoke tests pass.                                                        |
-| `fix(hardening): close 2 cross-cutting OAI-semantics HIGH items`     | CROSS-H1, CROSS-H3                                                                                                                  | Dedicated fix pass — Cross-cutting agent `a80125a6b9980b84d`. 532 unit+smoke tests pass.                                               |
-| _pending_                                                            | The MED backlog (~52 items, itemised above) + the LOW backlog (~42)                                                                 | All 22 HIGH items are now closed. SEC-2 from the old tracker was not a finding and is dropped.                                         |
+| Commit                                                                                       | Genuinely closed                                                                                                                    | Notes                                                                                                                                                      |
+| -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fix(hardening): adversarial-review Option A — B1-B6`                                        | B1 (SOL-H1/H2), B2 (Wilson), B3 (REST-H1 + CROSS-H2 openapi half), B4.a-c (AI-H1/H2/H4 + AI-H3 path), B5 (OPS-H1/H2), B6 (DB-H1/H2) | 11 HIGH. The bundled tracker's "REST-1..5 / SOL-3 / TS-1 / SEC-1" labels were reconstruction artefacts.                                                    |
+| `fix(hardening): Option B — B4.d/AI-3, AI-4, OPS-2, TS-2`                                    | B4.d/AI-3 (body-drift re-curation), AI-4 (reviewer note)                                                                            | OPS-2 (ServiceMonitor) + TS-2 (type promotion) were **self-directed**, not review findings — harmless but not in the 22 HIGH / 52 MED.                     |
+| `docs+fix(hardening): MED/LOW sweep`                                                         | CROSS-H2 (api.md half), substance of REST-M-cache/CROSS-M3                                                                          | Scoped against the cluster approximation, not this itemised list — see "What the three commits actually did" above.                                        |
+| `docs(hardening): correct tracker from recovered transcript reports`                         | (no code) — replaced the reconstructed HIGH section with the itemised list recovered from the 8 transcript reports                  | This document. Surfaced the 10 genuinely-open HIGH items the reconstruction had hidden.                                                                    |
+| `fix(hardening): close 4 TypeScript-architecture HIGH items`                                 | TS-H1, TS-H2, TS-H3, TS-H4                                                                                                          | Dedicated fix pass — TS agent `a667329478b61de94`. 529 unit+smoke tests pass.                                                                              |
+| `fix(hardening): close 4 REST/HTTP HIGH items`                                               | REST-H2, REST-H3, REST-H4, REST-H5                                                                                                  | Dedicated fix pass — REST agent `ad7427fec7cacdb90`. 529 unit+smoke tests pass.                                                                            |
+| `fix(hardening): close 2 cross-cutting OAI-semantics HIGH items`                             | CROSS-H1, CROSS-H3                                                                                                                  | Dedicated fix pass — Cross-cutting agent `a80125a6b9980b84d`. 532 unit+smoke tests pass.                                                                   |
+| `docs(hardening): mark all 22 HIGH items closed` + `… correct two residual false statements` | (no code) — tracker HIGH section flipped to closed; residual false B3 claim struck through                                          | Documentation accuracy.                                                                                                                                    |
+| `fix(hardening): close 10 Solana + Database MED items`                                       | SOL-M1/M2/M3, DB-M1..M7                                                                                                             | MED sweep — data-layer agent `a9fd04a04f695752c`. Migration 0031. 540 tests.                                                                               |
+| `fix(hardening): close 4 Security MED items (SEC-M1/M2/M3/M5)`                               | SEC-M1, SEC-M2, SEC-M3, SEC-M5                                                                                                      | MED sweep — security agent `a88a79a1cd89be9b3`. Migrations 0032, 0033. 540 tests.                                                                          |
+| `fix(hardening): close SEC-M4 — immutable claim audit log`                                   | SEC-M4                                                                                                                              | MED sweep — audit-log agent `a69767b81515ad5e9`. Migration 0034. 551 tests.                                                                                |
+| `fix(hardening): close 8 AI-pipeline MED items`                                              | AI-M-bodyfetch, AI-M1..M7                                                                                                           | MED sweep — AI agent `ae8a19f1896fb9b77`. 583 tests (3 key-gated skips).                                                                                   |
+| `fix(hardening): close 6 Ops/SRE MED items (OPS-M1..M6)`                                     | OPS-M1..M6                                                                                                                          | MED sweep — ops agent `aa3c6b0f390b12bc9`. 586 tests.                                                                                                      |
+| `fix(hardening): close 7 TypeScript-architecture MED items`                                  | TS-M1..M7                                                                                                                           | MED sweep — TS agent `a2443e5e0aa036412`. domain.ts split into a barrel. 622 tests.                                                                        |
+| `fix(hardening): close REST + cross-cutting MED items`                                       | REST-M1..M6/M9/M10 + M-cache, CROSS-M1..M5/M-tests                                                                                  | MED sweep — REST/Cross agent `a144e6162302ba07b`. 633 tests. REST-M7/M8 deferred-by-design.                                                                |
+| _pending_                                                                                    | The LOW backlog (~42 itemised polish items)                                                                                         | All 22 HIGH + ~52 MED items closed. REST-M7/M8 deferred by design (major-version API breaks). SEC-2 from the old tracker was not a finding and is dropped. |
