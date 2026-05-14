@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
 import type { OperatorWalletsRepository } from '../../storage/repositories/operator-wallets.repo.js';
 import type { WalletActivityRepository } from '../../storage/repositories/wallet-activity.repo.js';
+import { cacheControl } from '../cache-control.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
 
 export interface OperatorWalletsRoutesDeps {
@@ -47,9 +48,6 @@ interface ActivityResponse {
   }>;
 }
 
-const OPERATOR_WALLET_CACHE_MAX_AGE_SEC = 300;
-const OPERATOR_WALLET_CACHE_S_MAXAGE_SEC = 1800;
-
 /**
  * Phase 4 read surface for registered operator wallets.
  *
@@ -91,10 +89,9 @@ const operatorWalletsRoutes: FastifyPluginAsync<OperatorWalletsRoutesDeps> = asy
       throw new NotFoundError('operator wallet', params.data.wallet);
     }
     const rows = await opts.walletActivityRepo.listRecent(params.data.wallet, query.data.days);
-    void reply.header(
-      'cache-control',
-      `public, max-age=${OPERATOR_WALLET_CACHE_MAX_AGE_SEC}, s-maxage=${OPERATOR_WALLET_CACHE_S_MAXAGE_SEC}`,
-    );
+    // SCORING tier — wallet activity is closed-day aggregates; a few
+    // minutes of staleness is harmless. See src/api/cache-control.ts.
+    void reply.header('cache-control', cacheControl('SCORING'));
     return {
       wallet: params.data.wallet,
       days: query.data.days,

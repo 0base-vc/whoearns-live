@@ -2,9 +2,10 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest 
 import satori from 'satori';
 import type { AppConfig } from '../../core/config.js';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
-import type { IdentityPubkey, VotePubkey } from '../../types/domain.js';
 import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
+import type { IdentityPubkey, VotePubkey } from '../../types/domain.js';
+import { cacheControl } from '../cache-control.js';
 import { imageRenderTotal } from '../metrics.js';
 import { loadInterFontOnce } from '../satori-font.js';
 import { BRAND_TOKENS, createImageLruCache, shortenPubkey } from '../satori-render.js';
@@ -266,10 +267,15 @@ const badgeRoutes: FastifyPluginAsync<BadgeRoutesDeps> = async (
   };
 
   const sendSvg = (reply: FastifyReply, svg: string): FastifyReply => {
-    return reply
-      .type('image/svg+xml; charset=utf-8')
-      .header('cache-control', 'public, max-age=3600, s-maxage=86400')
-      .send(svg);
+    return (
+      reply
+        .type('image/svg+xml; charset=utf-8')
+        // IMMUTABLE_ASSET tier — the badge renders a CLOSED epoch, so
+        // the bytes for a (validator, epoch) pair never change. See
+        // src/api/cache-control.ts.
+        .header('cache-control', cacheControl('IMMUTABLE_ASSET'))
+        .send(svg)
+    );
   };
 
   app.get<{ Params: { vote: string } }>(
@@ -337,7 +343,7 @@ const badgeRoutes: FastifyPluginAsync<BadgeRoutesDeps> = async (
         return reply
           .code(200)
           .type('image/svg+xml; charset=utf-8')
-          .header('cache-control', 'public, max-age=3600, s-maxage=86400')
+          .header('cache-control', cacheControl('IMMUTABLE_ASSET'))
           .send('');
       }
 

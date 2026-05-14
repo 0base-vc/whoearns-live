@@ -14,11 +14,19 @@ truth and the docs need a PR**.
 > totals, skip rate, on-chain median fee benchmarks, the `performance`
 > sort, OG image cards, the public `/badge/:vote.svg` SVG badge, the
 > **two-signal Node Tier** at `/v1/validators/:idOrVote/tier`
-> (Phase 1 partial — TVC ratio + Wilson skip lower-bound; the
-> remaining two signals are planned), and the **tenure + client
+> (Phase 1 partial — TVC ratio + Wilson skip **upper**-bound; the
+> remaining two signals are planned), the **tenure + client
 > badges** at `/v1/validators/:idOrVote/badges` (Phase 2 partial —
-> category leaderboards still planned). Phase 3+ formulas are
-> roadmap — don't cite them until the matching phase ships.
+> category leaderboards still planned), **Claim v2** (Phase 3 — GitHub
+> Gist + co-signed operator-wallet verification), the **wallet
+> activity** read surface (Phase 4 — tx-count indexing live, fee
+> anchoring planned), the **SIMD curation** scaffolding (Phase 5 —
+> callable code, ingest/scheduler not yet wired), and the **Operator
+> Activity Index** endpoint (Phase 6 — scoring math + endpoint live,
+> Discussions ingest not yet wired). Each phase section below carries
+> an explicit per-phase status line — read it before citing a
+> formula; "partial release" and "scaffolding shipped" mean exactly
+> what they say.
 
 ## Design principles
 
@@ -216,16 +224,6 @@ Storage:
   username + wallet count + freshness).
 - Reverse lookup endpoint for simd.watch governance ingest
   (`GET /v1/operator-wallets/lookup?wallet=…`).
-
-- **GitHub identity** via Keybase-style Gist verification (no OAuth
-  token retained). The Gist contains the validator-identity-signed
-  registration nonce. Cross-platform: enables governance integration
-  in Phase 6 + 7.
-- **Operator wallet registration** via co-signed off-chain message
-  (identity key signs, wallet key signs) plus an on-chain memo
-  anchoring the registration nonce, proving the wallet is operationally
-  alive at registration time. Capped at 3 wallets per validator,
-  re-attested quarterly, one-click unlink.
 - Squads multisig support: threshold-of-members signatures plus
   on-chain member-set read.
 
@@ -245,20 +243,17 @@ Storage:
 
 #### Planned next
 
-- **Fee anchoring**: `txFeesLamports` is reserved at zero today
+- **Fee anchoring**: `txFeesLamports` is reserved at `null` today
   because `getSignaturesForAddress` doesn't return fee data and
   per-signature `getTransaction` would 10× the RPC cost. A
   scheduled backfill batched against the priority-fee ingester's
   existing block reads will populate fees without new round-trips.
-- **Activity score**: per-day intensity = `log10(daily_fees + 1)`
-  percentile within the operator-wallet cohort. The 365-day grid
-  draws this directly. Cannot ship without fee data.
-
-Daily intensity = `log10(daily_tx_fees_lamports + 1)` percentile
-within the cohort of claimed operator wallets. The fee anchor makes
-gaming the score cost SOL — count alone could be inflated with
-1-lamport spam tx. Displayed as a GitHub-style 53×7 grid; the share
-asset is a 1200×630 PNG.
+- **Activity score**: per-day intensity =
+  `log10(daily_tx_fees_lamports + 1)` percentile within the cohort
+  of claimed operator wallets. The fee anchor makes gaming the score
+  cost SOL — count alone could be inflated with 1-lamport spam tx.
+  Displayed as a GitHub-style 53×7 grid; the share asset is a
+  1200×630 PNG. Cannot ship without the fee data above.
 
 ### Phase 5 — Pending SIMD widget + AI curation
 
@@ -289,25 +284,30 @@ asset is a 1200×630 PNG.
 - **Curation scheduler** — `SimdCurationService.runOnce()` is
   callable but no worker tick triggers it.
 - **Admin review endpoint** — `markReviewed()` exists as a repo
-  method but no HTTP route exposes it. Until both ship, the public
-  endpoint will return `{ "proposals": [] }` on every call.
-- **Helm wiring** for `ANTHROPIC_API_KEY` — config schema accepts
-  it, but the helm chart doesn't template a Secret. Deploys via
-  helm will run with curation disabled.
+  method but no HTTP route exposes it (tracked as SEC-2 in
+  `docs/gamification-hardening-tracking.md` — it needs an
+  admin-auth boundary that doesn't exist yet). Until the GitHub
+  mirror + curation scheduler + this endpoint all ship, the public
+  endpoint returns `{ "proposals": [] }` on every call.
 
 Operators reading scoring.md should treat Phase 5 as "the
-plumbing exists, the water isn't running yet."
+plumbing exists, the water isn't running yet." What DID land in the
+hardening pass: a byte-equality parity test between the published
+prompt and the runtime constant, an untrusted-body delimiter rule
 
-For each active SIMD proposal:
+- body-injection path, body-drift re-curation, and the Helm Secret
+  wiring for `ANTHROPIC_API_KEY` (so a helm deploy _can_ enable
+  curation once the missing jobs ship — see
+  `docs/gamification-hardening-tracking.md`).
 
-- A Claude Sonnet–generated 50-word _neutral_ summary plus 3-5
-  discussion questions tailored to validator operators (cost, risk,
-  asymmetric impact).
-- All prompts live in `prompts/` and all AI outputs land as PRs
-  reviewed by a human before deploy.
-- Operator answers are formatted as markdown by the WhoEarns UI and
-  posted by the operator personally on simd.watch (GitHub
-  Discussions–backed via Giscus). WhoEarns never proxies the post.
+Curation contract, for reference: each curated SIMD gets a Claude
+Sonnet–generated 50-word _neutral_ summary plus 3-5 discussion
+questions tailored to validator operators (cost, risk, asymmetric
+impact); the system prompt lives in `prompts/simd-curation.md`; no
+AI output reaches the public endpoint until a human reviewer signs
+off. Operator answers are posted by the operator personally on
+simd.watch (GitHub Discussions via Giscus) — WhoEarns never proxies
+the post.
 
 ### Phase 6 + 7 — Governance + Operator Activity Index
 
@@ -384,25 +384,16 @@ Governance:
   Not in chart yet.
 
 The composite formula in `services/operator-activity-index.ts`
-documents both the LIVE subset and the documented final shape. As
-the missing components land, the file's `livePortion` constant
-shifts and the existing tests catch any regression.
+documents both the LIVE subset and the documented final shape (see
+the "Documented final shape" block above — not repeated here to
+avoid two drifting copies). As the missing components land, the
+file's `livePortion` constant shifts and the existing tests catch
+any regression.
 
-GitHub Discussions API ingest reads simd.watch's discussion repo and
-attributes comments + reactions to claimed validators by GitHub
-username. Composite score:
-
-```
-OperatorActivityIndex =
-    0.50 × WalletActivity_90d
-    0.50 × GovernanceParticipation_180d
-        ├─ 0.40 × on-chain SIMD vote rate (vote-by-stake)
-        ├─ 0.35 × GitHub Discussions comment count on SIMD threads
-        ├─ 0.15 × peer-validator reactions received
-        └─ 0.10 × Realms major-DAO votes (optional)
-```
-
-Always rendered with per-component breakdown. Never used as a single
+When the GitHub Discussions ingest job ships it will read
+simd.watch's discussion repo and attribute comments + reactions to
+claimed validators by GitHub username. The OAI is always rendered
+with its per-component breakdown and is never used as a single
 global leaderboard.
 
 ## Anti-patterns we deliberately do not ship

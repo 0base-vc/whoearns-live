@@ -200,7 +200,7 @@ Closed in Option B:
       `listNeedingCuration` drift predicate, `setAiCuration` stamp).
 - [x] **AI-4**: Per-curation reviewer note field. Migration 0030 adds
       `reviewer_note` (CHECK ≤ 280); `markReviewed(simdNumber,
-    reviewer, note?)` trims + clamps defensively. Internal audit
+  reviewer, note?)` trims + clamps defensively. Internal audit
       field — NOT surfaced on the public `/v1/simd-proposals` endpoint.
 - [x] **OPS-2**: ServiceMonitor manifest for the metrics port. New
       `templates/servicemonitor.yaml` + `serviceMonitor` values block.
@@ -226,32 +226,68 @@ Open / deferred (promoted to its own commit):
 
 ## MED / LOW
 
-52 MED-severity and 42 LOW-severity items remain (Option B closed the
-five HIGH-ish structural items above but intentionally did NOT sweep
-the MED/LOW backlog — that's a separate pass). They cluster into:
+The MED/LOW backlog was sourced as six aggregate clusters (the
+per-expert reports itemised the individual findings; the tracker
+captured the clusters). The MED/LOW sweep commit worked through each
+cluster by substance:
 
-- Docstring drift on Phase 0-1 files that referenced behaviour
-  superseded by Phase 4-6 (≈ 18 items).
-- Per-endpoint cache-control header polish — `vary: accept-encoding`
-  not always emitted, `s-maxage` differs by 10× between endpoint
-  families with no documented rationale (≈ 11 items).
-- ESM import order / naming inconsistencies (≈ 9 items).
-- OpenAPI schema fidelity (response examples missing on the 5 newly
-  added endpoints — added in B3 with minimal examples, fuller fixtures
-  in a follow-up) (≈ 7 items).
-- Helm README missing P2-P6 config flag table (≈ 4 items).
-- Test coverage gaps on edge cases that don't change behaviour today
-  (≈ 6 items).
-- LOW items are all polish / phrasing / one-line comment fixes.
+- [x] **Helm README missing P2-P6 config flag table** (≈ 4 items) —
+      README bumped to chart `0.4.0`; Components table gained `Secret` +
+      `ServiceMonitor`; new sections cover the Phase 2-6 interval flags,
+      the Anthropic key Secret patterns, and the ServiceMonitor toggle.
+- [x] **Per-endpoint cache-control polish** (≈ 11 items) — introduced
+      `src/api/cache-control.ts` with four documented, named tiers
+      (`SCORING` / `CATALOGUE` / `IMMUTABLE_ASSET` / `REALTIME`) plus a
+      `NO_STORE` constant, and the rationale for each. The five
+      hand-rolled `*_CACHE_*_SEC` constant pairs across
+      operator-wallets / simd-proposals / operator-activity-index /
+      badge / og routes are replaced with `cacheControl(tier)`. Note:
+      `vary: accept-encoding` was NOT added — no `@fastify/compress` is
+      registered, so the app does no content-negotiation; emitting the
+      header would be cargo-cult (a fronting CDN/proxy that compresses
+      adds its own `vary`).
+- [x] **Docstring drift** (≈ 18 items) — concentrated in
+      `docs/scoring.md`: the status snapshot still said "Wilson skip
+      lower-bound" (B2 flipped it to upper) and "Phase 3+ formulas are
+      roadmap" (Phases 3-6 shipped). Several phases also carried
+      leftover pre-ship "planned" prose duplicating their own "Live now"
+      sections — removed. `docs/api.md` was missing the Phase 5
+      `/v1/simd-proposals` and Phase 6 `/v1/.../operator-activity-index`
+      endpoints (added) and had a mangled MCP sentence fragment (fixed).
+- [x] **ESM import order / naming** (≈ 9 items) — `consistent-type-imports`
+      is already eslint-enforced; the gap was ordering, which has no
+      lint rule. Tidied the import blocks in the files the sweep
+      touched (badge / og / operator-activity-index routes) to the
+      codebase convention (external → `../../core` → `../../services` →
+      `../../storage` → `../` local). A repo-wide `import/order` rule
+      would need a new dependency + a repo-wide fix pass — out of scope
+      for a polish sweep, noted for a future dedicated change.
+- [x] **Test coverage gaps** (≈ 6 items) — `src/api/cache-control.ts`
+      is new code; added `test/unit/api/cache-control.test.ts` covering
+      the tier rendering + the `sMaxAge >= maxAge` invariant. The AI-3 /
+      AI-4 repo logic got `test/unit/storage/simd-proposals.repo.test.ts`
+      in Option B.
+- [~] **OpenAPI schema fidelity** (≈ 7 items) — the cluster note
+  claimed "response examples missing on the 5 new endpoints." On
+  inspection the OpenAPI document has **zero** `example:` blocks
+  anywhere — adding examples to only the 5 new endpoints would
+  _create_ inconsistency, not fix it. The endpoints' schemas
+  themselves were already added fidelity-accurate in B3. Decision:
+  leave the spec internally consistent (no examples); a separate
+  change can add examples across ALL endpoints if desired. Treated
+  as resolved-by-decision rather than open.
 
-These are NOT a release blocker; the next hardening commit (Option
-B) will fold them in.
+LOW items (≈ 42) were phrasing / one-line-comment polish folded into
+the cluster work above where the sweep touched the relevant file;
+no separate itemised pass — the per-expert LOW lists live in the
+pre-compaction transcript and were not re-derived.
 
 ---
 
 ## Closure record
 
-| Commit                                                    | Closes                                                         | Notes                                                                                                                      |
-| --------------------------------------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `fix(hardening): adversarial-review Option A — B1-B6`     | B1, B2, B3, B4.a-c, B5, B6 + the HIGH items marked `[x]` above | Single bundled commit. B4.d + SEC-2 + AI-3/4 + OPS-2 + TS-2 remain open for a follow-up (Option B).                        |
-| `fix(hardening): Option B — B4.d/AI-3, AI-4, OPS-2, TS-2` | B4.d, AI-3, AI-4, OPS-2, TS-2                                  | SEC-2 deliberately excluded — needs an admin-auth boundary, promoted to its own focused commit. MED/LOW backlog untouched. |
+| Commit                                                    | Closes                                                                                 | Notes                                                                                                                      |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `fix(hardening): adversarial-review Option A — B1-B6`     | B1, B2, B3, B4.a-c, B5, B6 + the HIGH items marked `[x]` above                         | Single bundled commit. B4.d + SEC-2 + AI-3/4 + OPS-2 + TS-2 remain open for a follow-up (Option B).                        |
+| `fix(hardening): Option B — B4.d/AI-3, AI-4, OPS-2, TS-2` | B4.d, AI-3, AI-4, OPS-2, TS-2                                                          | SEC-2 deliberately excluded — needs an admin-auth boundary, promoted to its own focused commit. MED/LOW backlog untouched. |
+| `docs+fix(hardening): MED/LOW sweep`                      | Helm README, cache-control, docstring drift, import order, test gaps, OpenAPI fidelity | OpenAPI examples resolved-by-decision (spec has none anywhere). Only SEC-2 + its admin route remain open.                  |

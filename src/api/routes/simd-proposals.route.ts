@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { ValidationError } from '../../core/errors.js';
 import type { SimdProposalsRepository } from '../../storage/repositories/simd-proposals.repo.js';
+import { cacheControl } from '../cache-control.js';
 
 export interface SimdProposalsRoutesDeps {
   repo: Pick<SimdProposalsRepository, 'listReviewed'>;
@@ -31,9 +32,6 @@ interface ProposalListResponse {
   }>;
 }
 
-const SIMD_CACHE_MAX_AGE_SEC = 600;
-const SIMD_CACHE_S_MAXAGE_SEC = 3600;
-
 /**
  * Public read for the Pending SIMD widget.
  *
@@ -57,10 +55,9 @@ const simdProposalsRoutes: FastifyPluginAsync<SimdProposalsRoutesDeps> = async (
       });
     }
     const proposals = await opts.repo.listReviewed(query.data.limit);
-    void reply.header(
-      'cache-control',
-      `public, max-age=${SIMD_CACHE_MAX_AGE_SEC}, s-maxage=${SIMD_CACHE_S_MAXAGE_SEC}`,
-    );
+    // CATALOGUE tier — reviewed SIMDs appear on a human-review
+    // cadence (hours), never sub-minute. See src/api/cache-control.ts.
+    void reply.header('cache-control', cacheControl('CATALOGUE'));
     return {
       proposals: proposals
         .filter((p) => p.aiSummary !== null && p.aiQuestions !== null && p.reviewedAt !== null)

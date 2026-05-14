@@ -3,9 +3,10 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest 
 import satori from 'satori';
 import type { AppConfig } from '../../core/config.js';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
-import type { IdentityPubkey, VotePubkey } from '../../types/domain.js';
 import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
+import type { IdentityPubkey, VotePubkey } from '../../types/domain.js';
+import { cacheControl } from '../cache-control.js';
 import { imageRenderTotal } from '../metrics.js';
 import { _resetFontCacheForTesting, loadInterFontOnce } from '../satori-font.js';
 import { BRAND_TOKENS, createImageLruCache, shortenPubkey } from '../satori-render.js';
@@ -286,10 +287,14 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
   };
 
   const sendPng = (reply: FastifyReply, buf: Buffer): FastifyReply => {
-    return reply
-      .type('image/png')
-      .header('cache-control', 'public, max-age=3600, s-maxage=86400')
-      .send(buf);
+    return (
+      reply
+        .type('image/png')
+        // IMMUTABLE_ASSET tier — the card renders a CLOSED epoch, so a
+        // CDN-cached image never lies mid-epoch. See src/api/cache-control.ts.
+        .header('cache-control', cacheControl('IMMUTABLE_ASSET'))
+        .send(buf)
+    );
   };
 
   // Default OG image — the static one referenced by the layout's
@@ -301,7 +306,7 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
       return reply
         .code(200)
         .type('image/png')
-        .header('cache-control', 'public, max-age=3600, s-maxage=86400')
+        .header('cache-control', cacheControl('IMMUTABLE_ASSET'))
         .send('');
     }
     const buf = await renderOrFail('__default__', {
@@ -381,7 +386,7 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
       return reply
         .code(200)
         .type('image/png')
-        .header('cache-control', 'public, max-age=3600, s-maxage=86400')
+        .header('cache-control', cacheControl('IMMUTABLE_ASSET'))
         .send('');
     }
 

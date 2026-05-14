@@ -706,7 +706,92 @@ unregistered or expired-registration wallets return HTTP 404
 (`not_found`) — the route is not a public existence oracle for
 arbitrary pubkeys.
 
-Cache-Control: `public, max-age=300, s-maxage=1800`.
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier — see `src/api/cache-control.ts`).
+
+## `GET /v1/simd-proposals`
+
+Phase 5 read endpoint for the Pending SIMD widget. Returns AI-curated
+SIMD proposals that a human reviewer has signed off on.
+
+Query parameters:
+
+- `limit` — 1-25, default 20. Number of reviewed proposals to return.
+
+Response:
+
+```json
+{
+  "proposals": [
+    {
+      "simdNumber": 228,
+      "title": "Example SIMD title",
+      "status": "Review",
+      "sourceUrl": "https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0228-example.md",
+      "aiSummary": "Neutral ~50-word plain-text summary of what the SIMD changes.",
+      "aiQuestions": [
+        "How does this change a validator's per-slot hardware load?",
+        "What second-order effects on commission economics could land first?",
+        "Which operator tiers take the asymmetric cost?"
+      ],
+      "reviewedAt": "2026-05-10T12:00:00.000Z"
+    }
+  ]
+}
+```
+
+Only `reviewed_at IS NOT NULL` rows surface — AI-generated curation
+that hasn't been spot-checked stays hidden. Newest-reviewed first.
+The curation system prompt is published verbatim at
+`prompts/simd-curation.md` (byte-equality enforced against the
+runtime constant by a unit test). The internal `reviewer_note`
+audit field is **not** included in the response.
+
+Cache-Control: `public, max-age=600, s-maxage=3600` (the shared
+`CATALOGUE` tier).
+
+## `GET /v1/validators/:idOrVote/operator-activity-index`
+
+Phase 6 read endpoint. Returns the Operator Activity Index (OAI) — a
+0-100 composite blending governance participation (50%) with wallet
+liveness (50%). See `docs/scoring.md` for the formula.
+
+Accepts a vote OR identity pubkey. Gated on three conditions, all of
+which 404 on failure (the cases are collapsed to avoid leaking claim
+/ opt-out state):
+
+- the validator is known to the indexer;
+- the validator is **claimed** (Phase 3) — no claim, no public OAI;
+- the validator has **not opted out** of public scoring.
+
+Response:
+
+```json
+{
+  "vote": "Vote111...",
+  "identity": "Node111...",
+  "composite": 62,
+  "components": {
+    "walletScore": 70,
+    "governance": {
+      "score": 54,
+      "commentCount": 8,
+      "reactionsReceived": 21,
+      "activeWindowCount": 2
+    }
+  }
+}
+```
+
+`composite` is `null` when neither half has any signal (the
+cold-start case) — clients should render an empty state rather than
+a half-shown score. Only ACTIVE (non-expired) Phase 3 registrations
+contribute signal; lapsed GitHub links / operator wallets silently
+drop out. `HEAD` is supported and short-circuits before the scoring
+queries.
+
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier).
 
 ## `POST /mcp`
 
@@ -715,7 +800,6 @@ tools: `get_current_epoch`, `get_leaderboard`, `get_validator`, and
 `get_validator_leader_slots`. `get_leaderboard` supports the same window
 model as `/v1/leaderboard`, including `decade_epoch`, and includes
 `decadeEpochStart`, `decadeEpochEnd`, and `decadeRank` on rows when relevant.
-MCP calls use the same public per-IP rate limit.
-The public stateless transport accepts POST only; GET/DELETE return 405 to
-avoid unauthenticated long-lived stream connections.
-as `/v1/*`; tool schemas also cap response sizes.
+MCP calls use the same public per-IP rate limit as `/v1/*`; tool schemas
+also cap response sizes. The public stateless transport accepts POST only;
+GET/DELETE return 405 to avoid unauthenticated long-lived stream connections.

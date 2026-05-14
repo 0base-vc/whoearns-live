@@ -8,6 +8,7 @@ import type { SimdDiscussionsRepository } from '../../storage/repositories/simd-
 import type { ValidatorGithubRepository } from '../../storage/repositories/validator-github.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import type { WalletActivityRepository } from '../../storage/repositories/wallet-activity.repo.js';
+import { cacheControl } from '../cache-control.js';
 import { VoteOrIdentityParamSchema } from '../schemas/requests.js';
 
 export interface OaiRoutesDeps {
@@ -35,8 +36,10 @@ interface OaiResponse {
   };
 }
 
-const OAI_CACHE_MAX_AGE_SEC = 300;
-const OAI_CACHE_S_MAXAGE_SEC = 1800;
+// SCORING tier — the OAI composite is derived from closed-epoch /
+// closed-day signals + re-attestation state; minutes of staleness
+// are harmless. Shared rationale: src/api/cache-control.ts.
+const OAI_CACHE_CONTROL = cacheControl('SCORING');
 
 /**
  * Operator Activity Index — Phase 6+7 partial release.
@@ -97,10 +100,7 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
       if (request.method === 'HEAD') {
         return reply
           .code(200)
-          .header(
-            'cache-control',
-            `public, max-age=${OAI_CACHE_MAX_AGE_SEC}, s-maxage=${OAI_CACHE_S_MAXAGE_SEC}`,
-          )
+          .header('cache-control', OAI_CACHE_CONTROL)
           .send('') as unknown as OaiResponse;
       }
 
@@ -141,10 +141,7 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
         wallet: { activeDaysLast90 },
       });
 
-      void reply.header(
-        'cache-control',
-        `public, max-age=${OAI_CACHE_MAX_AGE_SEC}, s-maxage=${OAI_CACHE_S_MAXAGE_SEC}`,
-      );
+      void reply.header('cache-control', OAI_CACHE_CONTROL);
       return {
         vote: validator.votePubkey,
         identity: validator.identityPubkey,
