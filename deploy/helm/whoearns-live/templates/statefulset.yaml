@@ -72,6 +72,33 @@ spec:
               value: {{ .Values.postgres.password | quote }}
             - name: POSTGRES_DB
               value: {{ .Values.postgres.database | quote }}
+            {{- /*
+              Anthropic API key — Secret reference only. Two
+              acceptable wirings (see values.yaml `anthropic:` block):
+                a) `anthropic.existingSecret` set → secretKeyRef points
+                   there. Caller owns rotation, audit, and rollback.
+                b) `anthropic.apiKey` set, `existingSecret` empty →
+                   the chart provisions a managed Secret named
+                   `<fullname>-anthropic` (see templates/secret.yaml)
+                   and we point at that.
+              Empty values keep `ANTHROPIC_API_KEY` unset; the app
+              treats that as "curation disabled" (the zod schema in
+              src/core/config.ts marks it optional).
+            */}}
+            {{- $secretName := "" }}
+            {{- if .Values.anthropic.existingSecret }}
+            {{-   $secretName = .Values.anthropic.existingSecret }}
+            {{- else if .Values.anthropic.apiKey }}
+            {{-   $secretName = printf "%s-anthropic" $fullName }}
+            {{- end }}
+            {{- if $secretName }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName | quote }}
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

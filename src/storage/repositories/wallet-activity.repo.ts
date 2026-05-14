@@ -32,10 +32,30 @@ export class WalletActivityRepository {
 
   /**
    * Batch-write per-day aggregates. Uses UNNEST so a 30-day backfill
-   * is one round-trip. Existing rows are overwritten (the ingester
-   * always recomputes the daily aggregate from scratch — partial
-   * progress doesn't survive across runs because tx fees can be
-   * complete only once the day is fully past).
+   * is one round-trip.
+   *
+   * **Last-writer-wins semantics (B6.b fix).** The previous version of
+   * this query used `GREATEST(existing, EXCLUDED)` for both
+   * `tx_count` and `tx_fees_lamports`. The intent was "don't lose
+   * count during partial backfills" but the effect was "lock in the
+   * highest value ever seen, including bad ones." A single buggy
+   * reindex that over-counted (e.g. double-counted a signature)
+   * would imprint the inflated value forever, since every subsequent
+   * correct count is smaller than the bad one and GREATEST keeps the
+   * bad value.
+   *
+   * The ingester always recomputes the daily aggregate from scratch
+   * for the day (per its docstring and the architecture of the
+   * cursor-based scan over `getSignaturesForAddress`). The latest
+   * write is therefore the most authoritative reading for that day
+   * — last-writer-wins is the correct semantics, not GREATEST.
+   *
+   * Tradeoff: a partial run that wrote `tx_count = 5` and was
+   * followed by a full run writing `tx_count = 7` correctly bumps to
+   * 7. A partial run that wrote `7` followed by a full run writing
+   * `5` correctly settles to 5 (whatever the latest pass said).
+   * Cross-day monotonicity is not a property this table is allowed
+   * to claim — it's a daily aggregate, not a running total.
    */
   async upsertBatch(rows: ReadonlyArray<DailyActivityUpsert>): Promise<{ written: number }> {
     if (rows.length === 0) return { written: 0 };
@@ -52,8 +72,8 @@ export class WalletActivityRepository {
          FROM UNNEST($1::text[], $2::text[], $3::int[], $4::text[])
               AS v(wallet_pubkey, activity_date, tx_count, tx_fees_lamports)
        ON CONFLICT (wallet_pubkey, activity_date) DO UPDATE
-         SET tx_count         = GREATEST(wallet_daily_activity.tx_count, EXCLUDED.tx_count),
-             tx_fees_lamports = GREATEST(wallet_daily_activity.tx_fees_lamports, EXCLUDED.tx_fees_lamports),
+         SET tx_count         = EXCLUDED.tx_count,
+             tx_fees_lamports = EXCLUDED.tx_fees_lamports,
              indexed_at       = NOW()`,
       [wallets, dates, counts, fees],
     );

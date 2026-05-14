@@ -656,7 +656,12 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
           slotsAssigned: 100,
           slotsProduced: 100,
           slotsSkipped: 0,
-          voteCredits: 800n, // 100 slots × 8 = max
+          // voteCredits accrue per cluster slot (≈432_000/epoch on
+          // mainnet) at up to 16 credits/vote under SIMD-0033. A
+          // "near-perfect" validator earns ~99.5% of the upper bound;
+          // seed 6_877_440 = 0.995 × 432_000 × 16 per epoch so the
+          // 5-epoch window resolves to tvcRatio ≈ 0.995 → forge.
+          voteCredits: 6_877_440n,
           voteCreditsUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
         }),
       );

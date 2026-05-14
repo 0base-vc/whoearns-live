@@ -71,9 +71,11 @@ go directly to the operator identity, not through validator commission.
 skip_rate = slots_skipped / slots_assigned
 ```
 
-Reported as-is on the profile. Used as an input to the future Node
-Tier composite (Phase 1) with a Wilson 95% lower-bound to prevent
-small-sample "perfect skip rate" inflation.
+Reported as-is on the profile. Used as an input to the Node Tier
+composite (Phase 1) with the 95% Wilson **upper** bound of skip rate
+to prevent small-sample "perfect skip rate" inflation. The composite
+uses `1 − upperBound(skipRate)` (= the **lower** bound of success
+rate) so reliability is pessimistic, not optimistic.
 
 ### Median fee / tip / total
 
@@ -108,16 +110,23 @@ unrated   = slotsAssigned < 10 OR maxCredits < 1 OR all rows unmeasured
 
 Where:
 
-- `tvcRatio` = `voteCredits / (slotsAssigned × 8)`, clamped to [0, 1].
-  Rows with `voteCreditsUpdatedAt = NULL` (vote-credit indexer hasn't
-  written this row yet) contribute slots **only** to the reliability
-  signal — neither voteCredits nor maxCredits — so ingestion lag
-  cannot inflate the apparent ratio.
-- `wilsonSkipRate` = 95% Wilson lower bound of `slotsSkipped /
+- `tvcRatio` = `voteCredits / (measuredEpochs × 432_000 × 16)`,
+  clamped to [0, 1]. Denominator is the SIMD-0033 cluster-relative
+  upper bound (16 max credits/vote × one vote per cluster slot ×
+  432_000 mainnet/testnet slots per epoch). The earlier denominator
+  used a per-leader-slot count which off-by-≈clusterSize'd the
+  scale and saturated every measured validator at 1.0 — see commit
+  history if you're auditing the change. Rows with
+  `voteCreditsUpdatedAt = NULL` (vote-credit indexer hasn't written
+  this row yet) contribute slots **only** to the reliability signal
+  — neither voteCredits nor the denominator — so ingestion lag
+  cannot inflate **or** deflate the apparent ratio.
+- `wilsonSkipRate` = 95% Wilson **upper** bound of `slotsSkipped /
 slotsAssigned`. z = 1.959963984540054 (qnorm(0.975)). A tiny
-  sample with 0 skips does NOT register as 100% reliable — it
-  registers as the bound permits, then the leader-slot floor of 10
-  forces an `unrated` tier when the sample is too small to classify.
+  sample with 0 skips does NOT register as 0% skip — the upper bound
+  on (0, 11) is ~25%, so a small-sample validator earns ~75%
+  reliability, not 100%. The leader-slot floor of 10 still forces
+  an `unrated` tier when the sample is too small to classify at all.
 - `composite` is `null` when `tier === 'unrated'` (no half-shown
   scores).
 
@@ -140,7 +149,7 @@ ship, the composite expands to the full four-signal formula:
   - 40% Timely-Vote-Credits ratio
   - 25% Vote-latency p99
   - 20% CU per leader slot conditioned on congestion
-  - 15% Wilson-lower-bound skip rate
+  - 15% Wilson-upper-bound skip rate (pessimistic reliability)
     10-epoch recency-weighted window (the live release uses a flat 5-
     closed-epoch window — extending to recency-weighted 10 ships with
     the new signals so all four are exercised on the same axis).

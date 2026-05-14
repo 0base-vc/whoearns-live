@@ -245,8 +245,71 @@ config:
   # fills missing processed block rows, then rebuilds aggregate totals
   # from `processed_blocks`.
   closedEpochReconcileIntervalMs: 300000
+  # Phase 2 — gossip ContactInfo refresh. Drives client-kind +
+  # client-version indexing on the full cluster (~2000 entries).
+  # 30 min balances "fresh during a Firedancer-Pioneer release" against
+  # ~500 KB payload per tick.
+  #
+  # NOTE: the interval values below are deliberately QUOTED. Helm
+  # loads YAML through a JSON pass that widens bare integers to
+  # float64 — a bare `1800000` would then render as `"1.8e+06"` via
+  # `quote`. Quoting at the source keeps them exact decimal strings.
+  clusterNodesIntervalMs: '1800000'
+  # Phase 2 — on-chain validator-info refresh for the WATCHED set
+  # (operator renames / icon changes). 6 hr × 4 watched validators
+  # = 16 RPC calls/day; very light.
+  validatorInfoIntervalMs: '21600000'
+  # Phase 4 — wallet-activity indexer cadence. 6 hr is the right
+  # resolution for a daily-bucketed heatmap; cuts RPC pressure by
+  # ~4× vs hourly. Idempotent so partial runs are safe.
+  walletActivityIntervalMs: '21600000'
+  # Phase 5 — SIMD curation cadence. 12 hr keeps Anthropic token
+  # spend modest while still catching newly-listed SIMDs within
+  # half a day. Set to a longer interval (e.g. 24 hr) if your token
+  # budget is tight; set to 0 to disable the periodic job entirely.
+  simdCurationIntervalMs: '43200000'
   slotFinalityBuffer: 32
   shutdownTimeoutMs: 15000
+
+# Phase 5 — Anthropic Claude API config. Optional: when unset,
+# the SIMD curation pipeline is disabled (the public read endpoint
+# still serves already-curated rows; new SIMDs just stay pre-review
+# until populated manually).
+#
+# The chart NEVER lets the key live in the ConfigMap — it is wired
+# exclusively via `valueFrom.secretKeyRef`. Two patterns:
+#
+#   1. Inline (dev / fork demo). Set `anthropic.apiKey` and the
+#      chart creates a Secret with that value.
+#         anthropic:
+#           apiKey: sk-ant-...
+#   2. External Secret (production). Pre-create a Secret in the
+#      release namespace with key `ANTHROPIC_API_KEY`, then set
+#      `anthropic.existingSecret` to its name. The chart does NOT
+#      create / manage that Secret — it only references it. This is
+#      the pattern to use with external-secrets / sealed-secrets /
+#      cloud KMS injection so the key never lives in values files
+#      or chart history.
+#         anthropic:
+#           existingSecret: anthropic-credentials
+#
+# `anthropic.apiKey` and `anthropic.existingSecret` are mutually
+# exclusive; setting both is a configuration error (the chart
+# template renders the existingSecret reference and ignores the
+# inline value, but you should not rely on that — pick one).
+anthropic:
+  # Inline API key (development / forks only). Leave empty in
+  # production. When non-empty AND `existingSecret` is empty, the
+  # chart provisions a Secret named `<fullname>-anthropic` holding
+  # this value.
+  apiKey: ''
+  # Name of a pre-existing Secret in the release namespace, with
+  # key `ANTHROPIC_API_KEY`. Takes precedence over `apiKey`.
+  existingSecret: ''
+  # Model identifier passed to the Anthropic Messages API. Pinning a
+  # specific minor version protects against silent behaviour shifts
+  # — the curation prompt was tuned against the default below.
+  model: claude-sonnet-4-6
 
 # Embedded Postgres auth. Picked up by the entrypoint at first boot. Once
 # the PVC is initialised these values are locked in — changing them on a

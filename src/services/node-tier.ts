@@ -10,11 +10,20 @@ export interface TierInput {
   /** Sum of vote credits over the considered window. */
   voteCredits: bigint;
   /**
-   * Best-effort denominator for the timely-vote-credits ratio.
-   * Set to `slotsAssigned × 8` (the max per-leader-slot credit under
-   * SIMD-0033) or to the window's `total_blocks × 8` cluster figure
-   * when known. When zero, the validator has no measurable activity
-   * in the window and ends up in the unrated bucket.
+   * Cluster-relative max for the timely-vote-credits ratio.
+   *
+   * Under SIMD-0033 a validator earns up to 16 credits per timely
+   * vote (latency-1 bonus = 16, decaying by 1 each slot to a floor
+   * of 1). They can cast at most one vote per cluster slot. The
+   * per-window upper bound is therefore
+   *   `measuredEpochs × SOLANA_SLOTS_PER_EPOCH × 16`
+   * — NOT `slotsAssigned × 16`, because vote credits accrue on every
+   * vote, not just on the validator's own leader slots. The earlier
+   * per-leader-slot denominator was off by a factor of ~clusterSize
+   * (≈1500×) which saturated every measured validator at 1.0.
+   *
+   * When zero, the validator has no measurable activity in the
+   * window and ends up in the unrated bucket.
    */
   maxCredits: bigint;
   /** Window-aggregate slot counters (NOT per-epoch — pre-summed). */
@@ -46,8 +55,16 @@ export interface TierResult {
   composite: number | null;
   /** Per-component sub-scores for breakdown rendering. */
   components: {
-    tvcRatio: number; // 0-1, vote credits / max possible
-    wilsonSkipRate: number; // 0-1, Wilson 95% lower bound of skip rate
+    tvcRatio: number; // 0-1, voteCredits / clusterMaxCredits (SIMD-33)
+    /**
+     * 0-1, **UPPER** Wilson 95% bound of skip rate. This is the worst
+     * plausible skip rate given the sample — small-sample validators
+     * with 0 measured skips still report a meaningfully non-zero
+     * value here, preventing reliability inflation. Reliability used
+     * in the composite is `1 - wilsonSkipRate` (= lower bound of
+     * success rate, i.e. pessimistic).
+     */
+    wilsonSkipRate: number;
   };
 }
 
@@ -60,30 +77,50 @@ export interface TierResult {
 const WILSON_Z_95 = 1.959963984540054;
 
 /**
- * Wilson score lower bound for a Bernoulli proportion at z=1.96 (95%).
- * A validator with 3 leader slots and 0 skips has a point-estimate skip
- * rate of 0% but the Wilson UPPER bound is ~70% — i.e. statistically
- * indistinguishable from a 30%-skip validator. We rank on the LOWER
- * bound to prevent small-sample inflation.
+ * Wilson score confidence interval for a Bernoulli proportion at z=1.96
+ * (95%, two-sided). Returns both bounds so callers pick the direction
+ * appropriate for the metric.
  *
- * Returns the LOWER bound, i.e. "the worst this metric plausibly is."
- * For skip rate, lower bound on skip = OPTIMISTIC estimate of reliability.
- * Tiering converts it to "1 - lowerBoundSkip" so higher = better.
+ * A validator with 3 leader slots and 0 skips has a point-estimate
+ * skip rate of 0%, a Wilson lower bound of 0%, and a Wilson UPPER
+ * bound of ~70% — i.e. statistically indistinguishable from a
+ * 30%-skip validator. Ranking on the UPPER bound of an undesired
+ * outcome (skip) — equivalently, the LOWER bound of the desired
+ * outcome (success) — prevents small-sample inflation.
  *
  * Defensive against impossible inputs (negative successes, more
- * successes than trials): returns 0 rather than letting `Math.sqrt`
- * produce a NaN that would propagate through every consumer.
+ * successes than trials): returns `{ lower: 0, upper: 0 }` rather
+ * than letting `Math.sqrt` produce a NaN that propagates through
+ * every consumer.
  */
-export function wilsonLowerBound(successes: number, trials: number): number {
-  if (trials <= 0) return 0;
-  if (successes < 0 || successes > trials) return 0;
-  if (!Number.isFinite(successes) || !Number.isFinite(trials)) return 0;
+export interface WilsonInterval {
+  lower: number;
+  upper: number;
+}
+
+export function wilsonInterval(successes: number, trials: number): WilsonInterval {
+  if (trials <= 0) return { lower: 0, upper: 0 };
+  if (successes < 0 || successes > trials) return { lower: 0, upper: 0 };
+  if (!Number.isFinite(successes) || !Number.isFinite(trials)) return { lower: 0, upper: 0 };
   const z = WILSON_Z_95;
   const phat = successes / trials;
   const denom = 1 + (z * z) / trials;
   const centre = phat + (z * z) / (2 * trials);
   const margin = z * Math.sqrt((phat * (1 - phat) + (z * z) / (4 * trials)) / trials);
-  return Math.max(0, (centre - margin) / denom);
+  return {
+    lower: Math.max(0, (centre - margin) / denom),
+    upper: Math.min(1, (centre + margin) / denom),
+  };
+}
+
+/**
+ * Convenience wrapper. Kept for back-compat with callers that
+ * genuinely want the LOWER bound (e.g. "lower bound on success rate"
+ * = pessimistic reliability). For "upper bound on skip rate" use
+ * `wilsonInterval(...).upper`.
+ */
+export function wilsonLowerBound(successes: number, trials: number): number {
+  return wilsonInterval(successes, trials).lower;
 }
 
 /**
@@ -127,8 +164,14 @@ export function computeTier(input: TierInput): TierResult {
     tvcRatio = Number.isFinite(ratio) ? Math.max(0, Math.min(1, ratio)) : 0;
   }
 
-  const wilsonSkipRate = wilsonLowerBound(input.slotsSkipped, input.slotsAssigned);
-  const reliability = 1 - wilsonSkipRate; // higher = more reliable
+  // Direction note: we want the worst plausible skip rate, not the
+  // best. Using `upper` of the Wilson interval here means a
+  // small-sample validator with 0 measured skips still surfaces a
+  // meaningfully non-zero `wilsonSkipRate` (the docstring on this
+  // function spells out why this prevents the small-sample
+  // inflation that the older `lower`-bound implementation caused).
+  const wilsonSkipRate = wilsonInterval(input.slotsSkipped, input.slotsAssigned).upper;
+  const reliability = 1 - wilsonSkipRate; // higher = more reliable (pessimistic)
   const rawComposite = Math.round((0.6 * tvcRatio + 0.4 * reliability) * 100);
 
   let tier: NodeTier = 'unrated';
@@ -187,6 +230,34 @@ export function effectiveLatencyPercentile(
 }
 
 /**
+ * Slots per epoch on Solana mainnet-beta and testnet. Devnet matches
+ * too. Local-cluster / custom genesis can differ — pass a different
+ * value via `tierInputFromHistory(..., { slotsPerEpoch })` rather
+ * than editing this constant. 432_000 = 64 slots/leader-schedule ×
+ * 6750 schedules/epoch.
+ */
+export const SOLANA_SLOTS_PER_EPOCH = 432_000n;
+
+/**
+ * SIMD-0033 maximum vote-credit award for a single timely vote.
+ * The credit decays linearly with landed latency (latency 1 → 16,
+ * latency 2 → 15, …, latency 16+ → 1). 16 is the absolute upper
+ * bound; a validator landing every vote at latency 1 across a full
+ * epoch hits `SOLANA_SLOTS_PER_EPOCH × 16` total credits.
+ */
+export const SIMD33_MAX_CREDITS_PER_VOTE = 16n;
+
+export interface TierInputFromHistoryOptions {
+  /**
+   * Override `SOLANA_SLOTS_PER_EPOCH` for non-mainnet clusters.
+   * Local-cluster harnesses sometimes ship a non-default epoch
+   * schedule; the constant default is correct for mainnet/testnet/
+   * devnet.
+   */
+  slotsPerEpoch?: bigint;
+}
+
+/**
  * Build a TierInput by summing the relevant counters across a window
  * of `EpochValidatorStats` rows. Assumes the rows are all for the
  * same validator. Pre-summing in this helper keeps the route layer
@@ -198,38 +269,42 @@ export function effectiveLatencyPercentile(
  * "zero earned" but "we don't know." Such rows contribute to
  * slots/skip counters (reliability is still measurable from
  * leader-schedule + processed_blocks data) but are excluded from the
- * credits numerator and the maxCredits denominator. This prevents an
- * ingest-lag period from silently inflating the apparent TVC ratio
- * by adding leader slots without their corresponding credits.
+ * credits numerator AND from the maxCredits denominator (one
+ * measured epoch dropping out drops one epoch's worth of cluster
+ * slots from the max). This prevents an ingest-lag period from
+ * silently inflating OR deflating the apparent TVC ratio.
  *
- * Denominator semantics: `slotsAssigned × 8` is the per-validator
- * lower-bound ceiling for credits earned during own leader slots
- * under SIMD-0033 (max 8 credits per timely vote, 1 vote/slot).
- * Cluster-level "max plausible credits per epoch" is larger because
- * validators also vote on slots they don't lead. Resulting TVC ratio
- * may therefore saturate at 1.0 for well-run validators — a known
- * limitation slated for Phase 2 cohort-relative tiering.
+ * Denominator semantics: each measured epoch contributes
+ * `SOLANA_SLOTS_PER_EPOCH × 16` to the maxCredits — i.e. the
+ * SIMD-0033 absolute upper bound (vote on every cluster slot at
+ * latency 1). The earlier per-leader-slot denominator
+ * (`slotsAssigned × 8`) was wrong on TWO axes: the constant should
+ * be 16 not 8, AND vote credits accrue per cluster vote not per
+ * own-leader-slot, so the scale was off by ≈clusterSize. Documented
+ * fully in `docs/scoring.md` Phase 1 section.
  */
 export function tierInputFromHistory(
   votePubkey: string,
   rows: ReadonlyArray<EpochValidatorStats>,
+  options: TierInputFromHistoryOptions = {},
 ): TierInput {
+  const slotsPerEpoch = options.slotsPerEpoch ?? SOLANA_SLOTS_PER_EPOCH;
   let voteCredits = 0n;
   let slotsAssigned = 0;
   let slotsSkipped = 0;
-  let totalLeaderSlotMax = 0n;
+  let measuredEpochs = 0n;
   for (const r of rows) {
     slotsAssigned += r.slotsAssigned;
     slotsSkipped += r.slotsSkipped;
     if (r.voteCreditsUpdatedAt !== null) {
       voteCredits += r.voteCredits;
-      totalLeaderSlotMax += BigInt(r.slotsAssigned) * 8n;
+      measuredEpochs += 1n;
     }
   }
   return {
     votePubkey,
     voteCredits,
-    maxCredits: totalLeaderSlotMax,
+    maxCredits: measuredEpochs * slotsPerEpoch * SIMD33_MAX_CREDITS_PER_VOTE,
     slotsAssigned,
     slotsSkipped,
   };
