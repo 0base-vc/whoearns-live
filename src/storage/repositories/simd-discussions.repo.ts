@@ -113,6 +113,28 @@ export class SimdDiscussionsRepository {
     }));
   }
 
+  /**
+   * True once the table holds at least one ingested comment. The
+   * GitHub Discussions ingest job that feeds this table is unshipped
+   * (see `docs/scoring.md` Phase 6+7 — "NOT yet live"), so in every
+   * real deployment today this returns `false`. The OAI route uses it
+   * to distinguish "the governance ingest hasn't run" (report
+   * `governance.score: null`) from "linked but genuinely has no
+   * comments" — a `0` would conflate the two. Whatever first writes
+   * rows (the ingest job, a backfill) flips the signal; deliberately
+   * NOT keyed on an `ingestion_cursors` job-name string so it needs
+   * no coordination with the still-unwritten job.
+   *
+   * `LIMIT 1` so Postgres can stop at the first row instead of
+   * counting the whole table.
+   */
+  async hasAnyData(): Promise<boolean> {
+    const { rows } = await this.pool.query<{ exists: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM simd_discussion_comments) AS exists`,
+    );
+    return rows[0]?.exists ?? false;
+  }
+
   async listRecentByUsername(username: string, limit = 50): Promise<SimdDiscussionComment[]> {
     const safe = Math.max(1, Math.min(limit, 200));
     const { rows } = await this.pool.query<SimdDiscussionCommentRow>(

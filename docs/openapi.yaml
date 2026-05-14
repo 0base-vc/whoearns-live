@@ -1938,7 +1938,7 @@ components:
 
     OperatorActivityIndex:
       type: object
-      required: [vote, identity, composite, components]
+      required: [vote, identity, composite, components, ingestStatus]
       properties:
         vote: { type: string }
         identity: { type: string }
@@ -1948,8 +1948,12 @@ components:
           maximum: 100
           description: |
             0-100 OAI composite (50% wallet score, 50% governance
-            score). `null` when neither half has data — UIs should
-            render an empty state rather than a half-shown score.
+            score). `null` when neither half has data (cold start), OR
+            when the governance ingest is inactive
+            (`ingestStatus.governanceIngestActive: false`) — an honest
+            50/50 blend cannot be reported with one half unknowable.
+            UIs should render an empty state rather than a half-shown
+            score.
         components:
           type: object
           required: [walletScore, governance]
@@ -1961,20 +1965,50 @@ components:
               description: |
                 Saturating sigmoid of distinct active days in the last
                 90 across all ACTIVE registered wallets, scaled to
-                100. Lapsed wallets do not contribute.
+                100. Lapsed wallets do not contribute. Always
+                populated — a wallet-only consumer can read this even
+                when `governance.score` is `null`.
             governance:
               type: object
               required: [score, commentCount, reactionsReceived, activeWindowCount]
               properties:
                 score:
-                  type: integer
+                  type: [integer, 'null']
                   minimum: 0
                   maximum: 100
                   description: |
                     Composite of comment count, reactions received,
                     and active-window count for the validator's
                     ACTIVE-linked GitHub username. Lapsed GitHub
-                    links do not contribute.
+                    links do not contribute. `null` while the GitHub
+                    Discussions ingest is inactive
+                    (`ingestStatus.governanceIngestActive: false`) —
+                    "we genuinely don't know yet", distinct from a
+                    real `0`. The sub-component counts below stay as
+                    their real (currently all-`0`) values regardless.
                 commentCount: { type: integer, minimum: 0 }
                 reactionsReceived: { type: integer, minimum: 0 }
                 activeWindowCount: { type: integer, minimum: 0 }
+        ingestStatus:
+          type: object
+          required: [governanceIngestActive, walletFeesIngestActive]
+          description: |
+            Self-documents the Phase 6+7 partial release so a consumer
+            can tell a `null` score / composite apart from a broken
+            endpoint.
+          properties:
+            governanceIngestActive:
+              type: boolean
+              description: |
+                True once the GitHub Discussions ingest has produced
+                data (`simd_discussion_comments` is non-empty). `false`
+                in every deployment until that job ships — while
+                `false`, `governance.score` and `composite` are
+                `null`.
+            walletFeesIngestActive:
+              type: boolean
+              description: |
+                True once per-day `txFeesLamports` data exists. P4
+                ships tx-counts only and `txFeesLamports` is
+                structurally `null` everywhere, so this is `false`
+                until the fee backfill ships.

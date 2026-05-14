@@ -770,25 +770,57 @@ Response:
 {
   "vote": "Vote111...",
   "identity": "Node111...",
-  "composite": 62,
+  "composite": null,
   "components": {
     "walletScore": 70,
     "governance": {
-      "score": 54,
-      "commentCount": 8,
-      "reactionsReceived": 21,
-      "activeWindowCount": 2
+      "score": null,
+      "commentCount": 0,
+      "reactionsReceived": 0,
+      "activeWindowCount": 0
     }
+  },
+  "ingestStatus": {
+    "governanceIngestActive": false,
+    "walletFeesIngestActive": false
   }
 }
 ```
 
-`composite` is `null` when neither half has any signal (the
-cold-start case) — clients should render an empty state rather than
-a half-shown score. Only ACTIVE (non-expired) Phase 3 registrations
-contribute signal; lapsed GitHub links / operator wallets silently
-drop out. `HEAD` is supported and short-circuits before the scoring
-queries.
+The example above is the shape **every linked validator sees today**:
+the GitHub Discussions ingest that feeds the governance half is
+unshipped, so `simd_discussion_comments` is empty in every real
+deployment. While that ingest is inactive
+(`ingestStatus.governanceIngestActive: false`), `governance.score`
+is `null` — "we genuinely don't know yet" — **not** `0`. A real `0`
+would be indistinguishable from "linked but has no comments", which
+would silently exclude every linked validator from a `score >= N`
+delegation filter. Because an honest 50/50 blend can't be reported
+with one half unknowable, `composite` is `null` too. Once the ingest
+ships and produces rows, `governanceIngestActive` flips to `true`
+and `governance.score` / `composite` become real numbers.
+
+The governance sub-component counts (`commentCount`,
+`reactionsReceived`, `activeWindowCount`) are always the real values
+(all `0` today) regardless of ingest status. `components.walletScore`
+is always populated, so a consumer who only wants wallet liveness can
+read it even when `governance.score` is `null`.
+
+`ingestStatus` self-documents the Phase 6+7 partial release:
+
+- `governanceIngestActive` — has the GitHub Discussions ingest
+  produced data? `false` until that worker job ships.
+- `walletFeesIngestActive` — does per-day `txFeesLamports` data
+  exist? P4 ships tx-counts only (`txFeesLamports` is structurally
+  `null` everywhere), so `false` until the fee backfill ships.
+
+`composite` is also `null` in the genuine cold-start case where
+neither half has any signal — clients should render an empty state
+rather than a half-shown score either way. Only ACTIVE (non-expired)
+Phase 3 registrations contribute signal; lapsed GitHub links /
+operator wallets silently drop out. `HEAD` is supported and
+short-circuits before the scoring queries (`ingestStatus` does not
+change `HEAD` behaviour).
 
 Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
 `SCORING` tier).

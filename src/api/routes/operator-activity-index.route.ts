@@ -18,21 +18,32 @@ export interface OaiRoutesDeps {
   validatorGithubRepo: Pick<ValidatorGithubRepository, 'findActiveByVote'>;
   operatorWalletsRepo: Pick<OperatorWalletsRepository, 'listActiveByVote'>;
   walletActivityRepo: Pick<WalletActivityRepository, 'listRecentForWallets'>;
-  simdDiscussionsRepo: Pick<SimdDiscussionsRepository, 'statsByUsername'>;
+  simdDiscussionsRepo: Pick<SimdDiscussionsRepository, 'statsByUsername' | 'hasAnyData'>;
 }
 
 interface OaiResponse {
   vote: string;
   identity: string;
+  // `null` when the governance half is unknowable (ingest inactive)
+  // — an honest 50/50 blend can't be reported with one half missing.
   composite: number | null;
   components: {
     walletScore: number;
     governance: {
-      score: number;
+      // `null` while the GitHub Discussions ingest is inactive — "we
+      // genuinely don't know yet", NOT 0. The sub-component counts
+      // below stay as their real (currently all-0) values.
+      score: number | null;
       commentCount: number;
       reactionsReceived: number;
       activeWindowCount: number;
     };
+  };
+  // Self-documents the Phase 6+7 partial release so a consumer can
+  // tell a `null` score / composite apart from a broken endpoint.
+  ingestStatus: {
+    governanceIngestActive: boolean;
+    walletFeesIngestActive: boolean;
   };
 }
 
@@ -58,6 +69,17 @@ const OAI_CACHE_CONTROL = cacheControl('SCORING');
  * linked-GitHub / registered-wallet set as a public enumeration
  * oracle; clients can read `composite === null` for the cold-start
  * case where no half has data.
+ *
+ * Partial-release honesty (CROSS-H1 / CROSS-H3): the GitHub
+ * Discussions ingest that feeds the governance half is unshipped, so
+ * `simd_discussion_comments` is empty in every real deployment. When
+ * that ingest is inactive the route returns `governance.score: null`
+ * (and therefore `composite: null`) rather than `0` — a real `0` is
+ * indistinguishable from "linked but has no comments", which would
+ * silently exclude every linked validator from a `score >= N` filter.
+ * The sub-component counts (`commentCount` etc.) and `walletScore`
+ * stay populated so a wallet-only consumer still gets a number. A
+ * top-level `ingestStatus` block makes the partial state explicit.
  */
 const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
   app: FastifyInstance,
@@ -110,6 +132,16 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
         return;
       }
 
+      // Governance ingest liveness — true once `simd_discussion_comments`
+      // holds any row. The GitHub Discussions ingest job is unshipped,
+      // so this is `false` in every real deployment today; it drives
+      // BOTH the `governance.score`/`composite` null-out below AND the
+      // `ingestStatus.governanceIngestActive` flag (one query, one
+      // signal). Keyed on the table the score reads — not an
+      // `ingestion_cursors` job-name string — so it needs no
+      // coordination with the still-unwritten ingest job.
+      const governanceIngestActive = await opts.simdDiscussionsRepo.hasAnyData();
+
       // Governance — only counts comments from the validator's
       // ACTIVE-linked GitHub username (expired attestations excluded).
       const githubLink = await opts.validatorGithubRepo.findActiveByVote(validator.votePubkey);
@@ -142,24 +174,44 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
       }
       const activeDaysLast90 = activeDaysSet.size;
 
+      // The service stays a pure input→output function: it always
+      // computes a numeric `governance.score` + `composite` from the
+      // pre-summed inputs. The route owns the partial-release honesty
+      // — when the governance ingest is inactive its `score` is not a
+      // real `0` but "unknown", so we null it out HERE (and with it
+      // the 50/50 `composite`, which can't honestly blend a missing
+      // half). `walletScore` and the governance sub-component counts
+      // stay as the service computed them.
       const oai = computeOperatorActivityIndex({
         governance: governanceInput,
         wallet: { activeDaysLast90 },
       });
+      const governanceScore = governanceIngestActive ? oai.governance.score : null;
+      const composite = governanceScore === null ? null : oai.composite;
 
       void reply.header('cache-control', OAI_CACHE_CONTROL);
       return {
         vote: validator.votePubkey,
         identity: validator.identityPubkey,
-        composite: oai.composite,
+        composite,
         components: {
           walletScore: oai.walletScore,
           governance: {
-            score: oai.governance.score,
+            score: governanceScore,
             commentCount: oai.governance.components.commentCount,
             reactionsReceived: oai.governance.components.reactionsReceived,
             activeWindowCount: oai.governance.components.activeWindowCount,
           },
+        },
+        ingestStatus: {
+          governanceIngestActive,
+          // P4 ships tx-counts only; `wallet_daily_activity.txFeesLamports`
+          // is structurally `null` everywhere until the fee backfill
+          // ships (see `docs/scoring.md` Phase 4 — "Fee anchoring"
+          // planned). No per-day fee data exists to detect, so this is
+          // an honest constant `false` rather than an over-engineered
+          // detector for a provably-always-null field.
+          walletFeesIngestActive: false,
         },
       };
     },

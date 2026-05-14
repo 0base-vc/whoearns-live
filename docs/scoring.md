@@ -343,6 +343,20 @@ Governance:
 - Endpoint is gated on (a) validator is claimed, (b) not opted
   out of public scoring, (c) registrations are not expired.
 - Composite is `null` when neither half has any signal.
+- **Partial-release honesty.** Because the GitHub Discussions
+  ingest is unshipped (see "NOT yet live" below),
+  `simd_discussion_comments` is empty in every real deployment, so
+  the endpoint reports `components.governance.score: null` — "we
+  genuinely don't know yet" — rather than `0`, which would be
+  indistinguishable from "linked but has no comments" and would
+  silently drop every linked validator from a `score >= N` filter.
+  `composite` is then also `null` (an honest 50/50 blend can't be
+  reported with one half unknowable). The governance sub-component
+  counts and `walletScore` stay populated. A top-level
+  `ingestStatus: { governanceIngestActive, walletFeesIngestActive }`
+  block makes the partial state explicit — both flags are `false`
+  today and flip when their respective ingests ship. Exact response
+  shape: `docs/api.md`.
 
 #### Live now
 
@@ -369,8 +383,10 @@ Governance:
 - **GitHub Discussions ingest job** — the table can be written
   via the repo, but no worker tick calls
   `octokit.discussions.listComments()` to feed it. Until that
-  ships the table stays empty and every validator scores 0 on
-  governance.
+  ships the table stays empty, so the endpoint reports
+  `governance.score: null` (not `0`) and `ingestStatus
+.governanceIngestActive: false` for every validator — see the
+  "Partial-release honesty" bullet above.
 - **`active_window` classifier** — the column exists; what
   determines a "live" discussion (open vote window, recent
   upstream activity) needs definition + cross-reference with
