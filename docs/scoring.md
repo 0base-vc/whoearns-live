@@ -253,33 +253,41 @@ asset is a 1200×630 PNG.
 
 ### Phase 5 — Pending SIMD widget + AI curation
 
-**Status: partial release — AI curation pipeline + read endpoint live; GitHub-sync job + writeable admin review planned.**
+**Status: scaffolding shipped; pipeline not yet active.**
 
-#### Live now
+#### Shipped (callable code, no automatic data flow yet)
 
-- `simd_proposals` table mirrors the GitHub SIMD list (one row per
-  SIMD number, with `body_sha256` for change detection).
-- `AnthropicClient` thin wrapper around the Messages API
-  (`claude-sonnet-4-6` default, 30 s timeout, no SDK lock-in).
-- `SimdCurationService` parses model output (`SUMMARY:` +
-  `QUESTIONS:` with 3-5 `Q: ` lines) and writes to the DB.
-  Unparseable output is logged + skipped (never persisted).
-- `prompts/simd-curation.md` ships the load-bearing system prompt
-  as committed source — auditors can read what framing the model
-  was given before trusting the output.
-- `GET /v1/simd-proposals?limit=N` returns reviewed-only rows for
-  the Pending SIMD widget.
+- `simd_proposals` table + repository for tracking SIMD rows with
+  AI summary, AI questions, and reviewer state.
+- `AnthropicClient` thin Messages-API wrapper (`claude-sonnet-4-6`
+  default, 30 s timeout, no SDK lock-in).
+- `SimdCurationService.runOnce()` reads un-curated rows, calls
+  Anthropic, parses output, writes the result. Parser enforces
+  defense-in-depth gates (length cap, partisan-phrase blocklist,
+  no HTML chars).
+- `prompts/simd-curation.md` mirrors the production system prompt
+  as committed source — see the service file for the runtime
+  copy. Two sources of truth kept aligned by a unit test.
+- `GET /v1/simd-proposals?limit=N` (max 25) returns reviewed-only
+  rows. Conditionally registered only when the repo dep is wired
+  in.
 
-#### Planned next
+#### NOT yet live
 
-- GitHub mirror job — pull the SIMD list from
-  `solana-foundation/solana-improvement-documents` periodically
-  and feed rows into the curation pipeline.
-- Admin review endpoint — let a 1XP reviewer mark `reviewed_at`
-  on individual curations after spot-checking.
-- Markdown-export + simd.watch deep-link on the operator-facing
-  widget so claimed validators can post discussion comments
-  directly to GitHub Discussions.
+- **GitHub mirror job** — there's no worker job pulling the SIMD
+  list from `solana-foundation/solana-improvement-documents`. The
+  `simd_proposals` table stays empty until something inserts rows.
+- **Curation scheduler** — `SimdCurationService.runOnce()` is
+  callable but no worker tick triggers it.
+- **Admin review endpoint** — `markReviewed()` exists as a repo
+  method but no HTTP route exposes it. Until both ship, the public
+  endpoint will return `{ "proposals": [] }` on every call.
+- **Helm wiring** for `ANTHROPIC_API_KEY` — config schema accepts
+  it, but the helm chart doesn't template a Secret. Deploys via
+  helm will run with curation disabled.
+
+Operators reading scoring.md should treat Phase 5 as "the
+plumbing exists, the water isn't running yet."
 
 For each active SIMD proposal:
 

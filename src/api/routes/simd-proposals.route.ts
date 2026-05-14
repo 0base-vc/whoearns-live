@@ -7,10 +7,16 @@ export interface SimdProposalsRoutesDeps {
   repo: Pick<SimdProposalsRepository, 'listReviewed'>;
 }
 
+// Hard cap at 25 — the widget renders maybe 5 proposals on screen
+// and a bot scraping the full set should paginate via a yet-to-ship
+// `cursor` parameter (or just rely on the cached response). Lowering
+// from 100 keeps the worst-case response size bounded.
+const MAX_PROPOSALS_PER_REQUEST = 25;
+
 const QuerySchema = z.object({
   limit: z
     .preprocess((value) => value ?? 20, z.coerce.number().int())
-    .transform((value) => Math.min(100, Math.max(1, value))),
+    .transform((value) => Math.min(MAX_PROPOSALS_PER_REQUEST, Math.max(1, value))),
 });
 
 interface ProposalListResponse {

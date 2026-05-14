@@ -65,6 +65,32 @@ describe('parseCurationOutput', () => {
     const crlf = `   \r\n${WELL_FORMED_OUTPUT.replace(/\n/g, '\r\n')}`;
     expect(parseCurationOutput(crlf)).not.toBeNull();
   });
+
+  it('rejects an oversized summary (>600 chars)', () => {
+    const longSummary = 'word '.repeat(200);
+    const bad = `SUMMARY:\n${longSummary}\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c`;
+    expect(parseCurationOutput(bad)).toBeNull();
+  });
+
+  it('rejects a summary containing voting recommendations', () => {
+    const partisan = `SUMMARY:\nValidators should vote yes on this important proposal.\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c`;
+    expect(parseCurationOutput(partisan)).toBeNull();
+  });
+
+  it('rejects HTML / code chars in summary', () => {
+    const html = `SUMMARY:\n<script>x</script>\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c`;
+    expect(parseCurationOutput(html)).toBeNull();
+  });
+
+  it('rejects HTML chars in any question', () => {
+    const html = `SUMMARY:\nfoo\n\nQUESTIONS:\nQ: how does <img onerror=x> work?\nQ: b\nQ: c`;
+    expect(parseCurationOutput(html)).toBeNull();
+  });
+
+  it('rejects partisan phrasing in any question', () => {
+    const partisan = `SUMMARY:\nfoo\n\nQUESTIONS:\nQ: This must pass — what risks?\nQ: b\nQ: c`;
+    expect(parseCurationOutput(partisan)).toBeNull();
+  });
 });
 
 describe('SIMD_CURATION_SYSTEM_PROMPT', () => {
