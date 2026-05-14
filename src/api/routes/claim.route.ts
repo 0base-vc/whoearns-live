@@ -15,24 +15,7 @@ import type { ValidatorGithubRepository } from '../../storage/repositories/valid
 import { cacheControl } from '../cache-control.js';
 import { sendError } from '../error-handler.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
-
-/**
- * Local Zod-safeParse unwrap, matching the pattern used in
- * `leaderboard.route.ts`. Kept inline (not extracted to a shared
- * helper) because the error-handler middleware reads the thrown
- * `ValidationError` shape and we don't want cross-module coupling
- * on that shape until we have >2 call sites — just duplicating a
- * 10-line function.
- */
-function unwrap<T>(
-  result: { success: true; data: T } | { success: false; error: unknown },
-  context: string,
-): T {
-  if (result.success) return result.data;
-  throw new ValidationError(`${context} failed validation`, {
-    issues: (result.error as { issues?: unknown[] }).issues ?? [result.error],
-  });
-}
+import { unwrap } from '../zod-helpers.js';
 
 /**
  * Claim + profile API routes.
@@ -506,7 +489,7 @@ function humanMessageFor(reason: ClaimVerifyFailure): string {
 
 // Re-export ValidationError so the API's existing error handler
 // surfaces Zod-rejection messages in the standard envelope.
-// (Referenced via `unwrap` above.)
+// (Thrown by the shared `unwrap` helper in `../zod-helpers.js`.)
 export { ValidationError, NotFoundError };
 
 export default claimRoutes;

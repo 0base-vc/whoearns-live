@@ -267,6 +267,13 @@ Storage:
 - Operator wallets in the table feed directly from Phase 3
   registrations.
 
+> **Day-boundary uncertainty (accepted).** UTC bucketing uses Solana
+> `blockTime`, a leader-reported wall-clock with documented ±minutes
+> drift, so a tx landing within ~2 min of UTC midnight can bucket
+> into the adjacent day. This is accepted, not a bug: the grid shows
+> aggregate per-day counts, a single mis-bucketed tx is invisible at
+> that scale, and the drift averages out.
+
 #### Planned next
 
 - **Fee anchoring**: `txFeesLamports` is reserved at `null` today

@@ -1,3 +1,17 @@
+/**
+ * Migration conventions
+ * ----------------------
+ * Migrations are forward-only and applied exactly once, in lexical
+ * filename order (`0001_*`, `0002_*`, ...). There is no down/rollback
+ * path — to undo something, write a new migration that reverses it.
+ *
+ * `CREATE OR REPLACE FUNCTION` (and any other `CREATE OR REPLACE`)
+ * is last-writer-wins: a name collision silently overrides whatever
+ * the prior definition was, with no error. So a function *rewrite*
+ * must live in a NEW migration (never edit the original), and the
+ * author must be aware it silently clobbers the previous definition
+ * — there is no warning if an older migration also defined that name.
+ */
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

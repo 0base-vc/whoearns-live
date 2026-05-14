@@ -1,7 +1,6 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppConfig } from '../../core/config.js';
-import { ValidationError } from '../../core/errors.js';
 import {
   DEFAULT_NONCE_TTL_MS,
   GITHUB_LINK_NONCE_PURPOSE,
@@ -29,6 +28,7 @@ import type { ValidatorGithubRepository } from '../../storage/repositories/valid
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import { sendError } from '../error-handler.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
+import { unwrap } from '../zod-helpers.js';
 
 /**
  * Best-effort audit-log write (SEC-M4). Mirrors `recordClaimEvent` in
@@ -53,24 +53,6 @@ async function recordClaimEvent(
       'claim-v2.route: audit-log append failed (best-effort, mutation still succeeded)',
     );
   }
-}
-
-/**
- * Local Zod-safeParse unwrap, matching the pattern used in
- * `claim.route.ts` / `leaderboard.route.ts`. Kept inline (each route
- * file carries its own copy) so a `.safeParse` failure surfaces as a
- * `ValidationError` — picked up by the central error handler with a
- * consistent `validation_error` code + context message — rather than
- * a raw `ZodError`.
- */
-function unwrap<T>(
-  result: { success: true; data: T } | { success: false; error: unknown },
-  context: string,
-): T {
-  if (result.success) return result.data;
-  throw new ValidationError(`${context} failed validation`, {
-    issues: (result.error as { issues?: unknown[] }).issues ?? [result.error],
-  });
 }
 
 /** The `reason` discriminant of a Gist-verification failure. */

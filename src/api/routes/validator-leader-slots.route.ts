@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
-import { NotFoundError, ValidationError } from '../../core/errors.js';
+import { NotFoundError } from '../../core/errors.js';
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
 import type { ProcessedBlocksRepository } from '../../storage/repositories/processed-blocks.repo.js';
 import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
@@ -11,6 +11,7 @@ import {
   serializeValidatorEpochSlotStats,
   type ValidatorEpochSlotStatsResponse,
 } from '../serializers/leader-slots-response.js';
+import { unwrap } from '../zod-helpers.js';
 
 export interface ValidatorLeaderSlotsRoutesDeps {
   statsRepo: Pick<StatsRepository, 'findByVoteEpoch'>;
@@ -18,16 +19,6 @@ export interface ValidatorLeaderSlotsRoutesDeps {
   epochsRepo: Pick<EpochsRepository, 'findByEpoch'>;
   processedBlocksRepo: Pick<ProcessedBlocksRepository, 'getValidatorEpochSlotStats'>;
   profilesRepo: Pick<ProfilesRepository, 'findByVote'>;
-}
-
-function unwrap<T>(
-  result: { success: true; data: T } | { success: false; error: unknown },
-  context: string,
-): T {
-  if (result.success) return result.data;
-  throw new ValidationError(`${context} failed validation`, {
-    issues: (result.error as { issues?: unknown[] }).issues ?? [result.error],
-  });
 }
 
 async function findValidatorByVoteOrIdentity(

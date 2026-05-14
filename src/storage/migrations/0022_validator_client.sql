@@ -23,5 +23,11 @@ ALTER TABLE validators
 
 -- Index supports category leaderboards (`?category=firedancer`).
 -- Sparse, low cardinality (~6 distinct kinds), so a btree is fine.
+--
+-- FORWARD-LOOKING: as of this branch no shipping query filters
+-- `WHERE client_kind = ...` — this index is unused today. It is kept
+-- on purpose for the planned client-category leaderboard on the
+-- roadmap; write-amplification on a ~2000-row table is negligible.
+-- Don't mistake it for dead weight, and don't delete it.
 CREATE INDEX IF NOT EXISTS idx_validators_client_kind
   ON validators (client_kind);

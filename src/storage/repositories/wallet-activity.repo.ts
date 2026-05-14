@@ -109,10 +109,16 @@ export class WalletActivityRepository {
     if (wallets.length === 0) return [];
     const safeDays = Math.max(1, Math.min(days, 365));
     const { rows } = await this.pool.query<WalletDailyActivityRow>(
+      // Window-floor is computed in UTC, not the session TZ:
+      // `activity_date` rows are bucketed by `utcDateString` in the
+      // indexer, and the column is a bare `DATE`. `CURRENT_DATE` is
+      // the session-TZ transaction date, so on a non-UTC process it
+      // would drift the boundary by a day. `(NOW() AT TIME ZONE
+      // 'UTC')::date` matches how the rows were bucketed.
       `SELECT wallet_pubkey, activity_date, tx_count, tx_fees_lamports, indexed_at
          FROM wallet_daily_activity
         WHERE wallet_pubkey = ANY($1::text[])
-          AND activity_date >= (CURRENT_DATE - ($2 || ' days')::interval)
+          AND activity_date >= ((NOW() AT TIME ZONE 'UTC')::date - ($2 || ' days')::interval)
         ORDER BY wallet_pubkey, activity_date DESC`,
       [wallets as string[], safeDays],
     );
@@ -126,10 +132,12 @@ export class WalletActivityRepository {
   async listRecent(wallet: string, days: number): Promise<WalletDailyActivity[]> {
     const safeDays = Math.max(1, Math.min(days, 365));
     const { rows } = await this.pool.query<WalletDailyActivityRow>(
+      // UTC window-floor — see `listRecentForWallets` for why
+      // `CURRENT_DATE` (session TZ) would drift the boundary.
       `SELECT wallet_pubkey, activity_date, tx_count, tx_fees_lamports, indexed_at
          FROM wallet_daily_activity
         WHERE wallet_pubkey = $1
-          AND activity_date >= (CURRENT_DATE - ($2 || ' days')::interval)
+          AND activity_date >= ((NOW() AT TIME ZONE 'UTC')::date - ($2 || ' days')::interval)
         ORDER BY activity_date DESC`,
       [wallet, safeDays],
     );

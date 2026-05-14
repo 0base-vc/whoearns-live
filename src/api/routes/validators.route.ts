@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { AppError, NotFoundError, ValidationError } from '../../core/errors.js';
+import { AppError, NotFoundError } from '../../core/errors.js';
 import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
@@ -23,6 +23,7 @@ import {
   serializeValidatorPlaceholder,
 } from '../serializers/validator-response.js';
 import { cacheControl } from '../cache-control.js';
+import { unwrap } from '../zod-helpers.js';
 import {
   computeTier,
   tierInputFromHistory,
@@ -71,16 +72,6 @@ interface ValidatorSearchResponse {
     website: string | null;
     claimed: boolean;
   }>;
-}
-
-function unwrap<T>(
-  result: { success: true; data: T } | { success: false; error: unknown },
-  context: string,
-): T {
-  if (result.success) return result.data;
-  throw new ValidationError(`${context} failed validation`, {
-    issues: (result.error as { issues?: unknown[] }).issues ?? [result.error],
-  });
 }
 
 /**

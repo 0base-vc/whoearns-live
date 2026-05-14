@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { AppError, NotFoundError, ValidationError } from '../../core/errors.js';
+import { AppError, NotFoundError } from '../../core/errors.js';
 import { lamportsToSol, lamportsToString } from '../../core/lamports.js';
 import { TtlCache } from '../../core/ttl-cache.js';
 import { normaliseHttpUrlOrNull } from '../../core/url.js';
@@ -18,6 +18,7 @@ import type {
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import type { EpochInfo, IdentityPubkey } from '../../types/domain.js';
 import { setClientReadCache } from '../cache-headers.js';
+import { unwrap } from '../zod-helpers.js';
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -153,16 +154,6 @@ interface LeaderboardResponse {
     medianBlockFeeLamports: string | null;
     medianBlockTipLamports: string | null;
   } | null;
-}
-
-function unwrap<T>(
-  result: { success: true; data: T } | { success: false; error: unknown },
-  context: string,
-): T {
-  if (result.success) return result.data;
-  throw new ValidationError(`${context} failed validation`, {
-    issues: (result.error as { issues?: unknown[] }).issues ?? [result.error],
-  });
 }
 
 function sampleStatus(slots: number): SampleStatus {

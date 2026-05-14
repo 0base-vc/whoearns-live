@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
-import { NotFoundError, ValidationError } from '../../core/errors.js';
+import { NotFoundError } from '../../core/errors.js';
 import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import type { ValidatorService } from '../../services/validator.service.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
@@ -18,6 +18,7 @@ import type {
 import { setNoStoreCache } from '../cache-headers.js';
 import { HistoryQuerySchema, VoteOrIdentityParamSchema } from '../schemas/requests.js';
 import { serializeValidator } from '../serializers/validator-response.js';
+import { unwrap } from '../zod-helpers.js';
 
 /**
  * Sample size used when joining the cluster benchmark onto history rows.
@@ -101,16 +102,6 @@ interface HistoryResponse {
    * Used by the UI to render the "verified" badge.
    */
   claimed: boolean;
-}
-
-function unwrap<T>(
-  result: { success: true; data: T } | { success: false; error: unknown },
-  context: string,
-): T {
-  if (result.success) return result.data;
-  throw new ValidationError(`${context} failed validation`, {
-    issues: (result.error as { issues?: unknown[] }).issues ?? [result.error],
-  });
 }
 
 function synthEpochInfo(epoch: number): EpochInfo {
