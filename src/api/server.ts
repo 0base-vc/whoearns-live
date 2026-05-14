@@ -35,6 +35,7 @@ import claimRoutes from './routes/claim.route.js';
 import claimV2Routes from './routes/claim-v2.route.js';
 import oaiRoutes from './routes/operator-activity-index.route.js';
 import operatorWalletsRoutes from './routes/operator-wallets.route.js';
+import scoringRoutes from './routes/scoring.route.js';
 import simdProposalsRoutes from './routes/simd-proposals.route.js';
 import epochsRoutes from './routes/epochs.route.js';
 import healthRoutes from './routes/health.route.js';
@@ -357,6 +358,24 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     // simd-discussions repos.
     await scope.register(oaiRoutes, {
       validatorsRepo: deps.repos.validators,
+      claimsRepo: deps.repos.claims,
+      profilesRepo: deps.repos.profiles,
+      validatorGithubRepo: deps.repos.validatorGithub,
+      operatorWalletsRepo: deps.repos.operatorWallets,
+      walletActivityRepo: deps.repos.walletActivity,
+      simdDiscussionsRepo: deps.repos.simdDiscussions,
+    });
+    // REST-M8 — `/scoring` aggregate. The profile-page one-shot:
+    // does the validator lookup ONCE and returns tier + tenure +
+    // client + OAI together. ADDITIVE — `/tier`, `/badges`, and
+    // `/operator-activity-index` stay live and unchanged for
+    // consumers wanting one component with its own CDN cache. Its
+    // deps are the UNION of the validators-route + OAI-route repos,
+    // all of which `repos` already exposes.
+    await scope.register(scoringRoutes, {
+      validatorsRepo: deps.repos.validators,
+      statsRepo: deps.repos.stats,
+      epochsRepo: deps.repos.epochs,
       claimsRepo: deps.repos.claims,
       profilesRepo: deps.repos.profiles,
       validatorGithubRepo: deps.repos.validatorGithub,

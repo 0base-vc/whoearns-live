@@ -94,7 +94,13 @@ function epochInfoOrShim(epochInfo: EpochInfo | null, epoch: number): EpochInfo 
   };
 }
 
-async function findValidatorByVoteOrIdentity(
+/**
+ * Resolve a validator from a vote-OR-identity pubkey: try the vote
+ * index first, fall back to the identity index. Shared by every
+ * `:idOrVote` route here AND by `/scoring` (scoring.route.ts) so the
+ * "vote first, then identity" lookup lives in exactly one place.
+ */
+export async function findValidatorByVoteOrIdentity(
   validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>,
   idOrVote: VotePubkey,
 ): Promise<Validator | null> {
@@ -108,7 +114,7 @@ async function findValidatorByVoteOrIdentity(
  * the closed-epoch rows it was derived from, so a caller can also
  * surface the window size / oldest-credit freshness without re-reading.
  */
-interface ResolvedTier {
+export interface ResolvedTier {
   result: TierResult;
   input: TierInput;
   closedRows: EpochValidatorStats[];
@@ -126,7 +132,7 @@ interface ResolvedTier {
  * pointing at a CLOSED epoch, which the old "skip row 0" rule silently
  * discarded from the window.
  */
-async function resolveTierForValidator(
+export async function resolveTierForValidator(
   statsRepo: Pick<StatsRepository, 'findHistoryByVote'>,
   epochsRepo: Pick<EpochsRepository, 'findCurrent'>,
   votePubkey: VotePubkey,
@@ -142,6 +148,89 @@ async function resolveTierForValidator(
   const input = tierInputFromHistory(votePubkey, closedRows);
   const result = computeTier(input);
   return { result, input, closedRows };
+}
+
+/**
+ * The `/tier` response body MINUS `vote` / `identity` — i.e. the
+ * `{ window, tier, composite, components }` block. Built from a
+ * `ResolvedTier` so `/tier` and `/scoring` produce a byte-identical
+ * tier object from the exact same code (the only difference between
+ * the two endpoints' tier data is that `/scoring` nests it under a
+ * `tier` key and drops the top-level `vote` / `identity`).
+ */
+export type TierBody = Omit<NodeTierResponse, 'vote' | 'identity'>;
+
+/**
+ * Assemble the `/tier` body block from a resolved tier. The oldest-
+ * credit-freshness reduce + the window numerics live here so the two
+ * routes serving this object can't drift.
+ */
+export function tierBodyFromResolved(resolved: ResolvedTier): TierBody {
+  const { result, input, closedRows } = resolved;
+  // Surface the staleness of the oldest credit timestamp so a UI
+  // can grey out the tier when ingestion has stalled. `null` when
+  // the window has no credit-bearing rows.
+  const voteCreditsUpdatedAt = closedRows
+    .map((r) => r.voteCreditsUpdatedAt)
+    .filter((d): d is Date => d !== null)
+    .reduce<Date | null>((oldest, cur) => (oldest === null || cur < oldest ? cur : oldest), null);
+  return {
+    window: {
+      epochs: closedRows.length,
+      slotsAssigned: input.slotsAssigned,
+      slotsSkipped: input.slotsSkipped,
+      voteCredits: input.voteCredits.toString(),
+      maxCredits: input.maxCredits.toString(),
+      voteCreditsUpdatedAt: voteCreditsUpdatedAt?.toISOString() ?? null,
+    },
+    tier: result.tier,
+    composite: result.composite,
+    components: {
+      tvcRatio: result.components.tvcRatio,
+      wilsonSkipRate: result.components.wilsonSkipRate,
+    },
+  };
+}
+
+/**
+ * The `tenure` + `client` blocks of the `/badges` response — the
+ * part of `/badges` that ISN'T the tier (the badges tier is just a
+ * summary of the full `/tier` object, which `/scoring` already
+ * carries at top level, so `/scoring` reuses ONLY this helper for
+ * the tenure/client halves and skips the badges tier summary
+ * entirely — no duplication).
+ *
+ * Pure: takes the already-fetched validator + current epoch so the
+ * caller owns the DB reads (badges + scoring fetch the current
+ * epoch alongside their other concurrent work).
+ */
+export function tenureClientBlocks(
+  validator: Validator,
+  currentEpoch: EpochInfo | null,
+): Pick<BadgesResponse, 'tenure' | 'client'> {
+  const tenure = summariseTenure(
+    validator.firstSeenEpoch,
+    currentEpoch !== null ? currentEpoch.epoch : validator.lastSeenEpoch,
+  );
+  // Re-narrow the stored client kind to the documented enum at the
+  // public boundary. The DB column is intentionally wide so a
+  // future-extended classifier writes without a migration, but the
+  // OpenAPI contract is the closed enum — any other value would
+  // break strictly-typed SDK consumers.
+  const clientKind = narrowToDocumentedKind(validator.clientKind);
+  return {
+    tenure: {
+      firstSeenEpoch: tenure.firstSeenEpoch,
+      activeEpochs: tenure.activeEpochs,
+      landmark: tenure.landmark,
+      badge: tenure.badge,
+    },
+    client: {
+      kind: clientKind,
+      version: validator.clientVersion,
+      updatedAt: validator.clientUpdatedAt?.toISOString() ?? null,
+    },
+  };
 }
 
 const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
@@ -362,23 +451,11 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
         return;
       }
       // History fetch + closed-epoch windowing + composite — shared
-      // with /badges via `resolveTierForValidator` so the window logic
-      // can no longer drift between the two routes.
-      const { result, input, closedRows } = await resolveTierForValidator(
-        statsRepo,
-        epochsRepo,
-        validator.votePubkey,
-      );
-      // Surface the staleness of the oldest credit timestamp so a UI
-      // can grey out the tier when ingestion has stalled. `null` when
-      // the window has no credit-bearing rows.
-      const voteCreditsUpdatedAt = closedRows
-        .map((r) => r.voteCreditsUpdatedAt)
-        .filter((d): d is Date => d !== null)
-        .reduce<Date | null>(
-          (oldest, cur) => (oldest === null || cur < oldest ? cur : oldest),
-          null,
-        );
+      // with /badges via `resolveTierForValidator`, and the body
+      // assembly itself (window numerics + oldest-credit reduce)
+      // shared with /scoring via `tierBodyFromResolved`, so neither
+      // the window logic nor the response shape can drift.
+      const resolved = await resolveTierForValidator(statsRepo, epochsRepo, validator.votePubkey);
 
       // SCORING tier — tier is derived purely from CLOSED-epoch rows,
       // so it only moves on an epoch boundary (~2 days); a few minutes
@@ -391,20 +468,7 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       return {
         vote: validator.votePubkey,
         identity: validator.identityPubkey,
-        window: {
-          epochs: closedRows.length,
-          slotsAssigned: input.slotsAssigned,
-          slotsSkipped: input.slotsSkipped,
-          voteCredits: input.voteCredits.toString(),
-          maxCredits: input.maxCredits.toString(),
-          voteCreditsUpdatedAt: voteCreditsUpdatedAt?.toISOString() ?? null,
-        },
-        tier: result.tier,
-        composite: result.composite,
-        components: {
-          tvcRatio: result.components.tvcRatio,
-          wilsonSkipRate: result.components.wilsonSkipRate,
-        },
+        ...tierBodyFromResolved(resolved),
       };
     },
   );
@@ -438,23 +502,13 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
 
       // /badges also needs the current epoch for the tenure summary,
       // so fetch it alongside the shared tier resolution. The tier's
-      // own closed-epoch windowing lives in `resolveTierForValidator`.
+      // own closed-epoch windowing lives in `resolveTierForValidator`;
+      // the tenure/client assembly lives in `tenureClientBlocks`
+      // (shared with /scoring) so those blocks can't drift either.
       const [{ result: tierResult, closedRows }, currentEpoch] = await Promise.all([
         resolveTierForValidator(statsRepo, epochsRepo, validator.votePubkey),
         epochsRepo.findCurrent(),
       ]);
-
-      const tenure = summariseTenure(
-        validator.firstSeenEpoch,
-        currentEpoch !== null ? currentEpoch.epoch : validator.lastSeenEpoch,
-      );
-
-      // Re-narrow the stored client kind to the documented enum at the
-      // public boundary. The DB column is intentionally wide so a
-      // future-extended classifier writes without a migration, but the
-      // OpenAPI contract is the closed enum — any other value would
-      // break strictly-typed SDK consumers.
-      const clientKind = narrowToDocumentedKind(validator.clientKind);
 
       // HEAD short-circuit: after the existence check the route is
       // semantically valid, so return headers without paying the
@@ -474,17 +528,11 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       return {
         vote: validator.votePubkey,
         identity: validator.identityPubkey,
-        tenure: {
-          firstSeenEpoch: tenure.firstSeenEpoch,
-          activeEpochs: tenure.activeEpochs,
-          landmark: tenure.landmark,
-          badge: tenure.badge,
-        },
-        client: {
-          kind: clientKind,
-          version: validator.clientVersion,
-          updatedAt: validator.clientUpdatedAt?.toISOString() ?? null,
-        },
+        ...tenureClientBlocks(validator, currentEpoch),
+        // The badges `tier` is a SUMMARY of the full /tier object
+        // (just tier + composite + windowEpochs). /scoring carries
+        // the FULL /tier object instead, so it deliberately does
+        // NOT reuse this summary — see scoring.route.ts.
         tier: {
           tier: tierResult.tier,
           composite: tierResult.composite,
@@ -495,7 +543,7 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
   );
 };
 
-interface BadgesResponse {
+export interface BadgesResponse {
   vote: string;
   identity: string;
   tenure: {
@@ -518,7 +566,7 @@ interface BadgesResponse {
   };
 }
 
-interface NodeTierResponse {
+export interface NodeTierResponse {
   vote: string;
   identity: string;
   window: {

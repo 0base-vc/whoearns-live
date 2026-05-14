@@ -384,6 +384,74 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /v1/validators/{idOrVote}/scoring:
+    get:
+      summary: Aggregate scoring bundle — tier + badges + OAI in one round-trip (REST-M8)
+      description: |
+        The profile-page one-shot. `/tier`, `/badges`, and
+        `/operator-activity-index` each repeat the same validator
+        lookup; `/scoring` does that lookup ONCE and returns all
+        three: the full Node Tier, the tenure + client badges, and
+        the Operator Activity Index.
+
+        ADDITIVE — `/tier`, `/badges`, and
+        `/operator-activity-index` all stay live and unchanged. They
+        are kept as granular routes so a consumer wanting one
+        component still gets that component's own CDN cache;
+        `/scoring` serves the profile-page "one fetch" case.
+
+        Composition (no duplication):
+        - `tier` — the full `/tier` body (`window`, `tier`,
+          `composite`, `components`), minus the top-level `vote` /
+          `identity`.
+        - `tenure` / `client` — the tenure + client blocks of
+          `/badges`. The `/badges` payload also nests a `tier`
+          summary, but `/scoring` already carries the FULL tier
+          object, so that summary is deliberately omitted.
+        - `oai` — the `/operator-activity-index` payload minus
+          `vote` / `identity`, OR `null`.
+
+        Gate handling — `/scoring` 404s ONLY when the validator
+        pubkey is unknown to the indexer (the same 404 `/tier`
+        returns). When the validator IS known but is unclaimed /
+        opted-out / identity-drifted — the cases the OAI route 404s
+        — `/scoring` returns `200` with `oai: null` (tier + tenure +
+        client still populated). `oai: null` means "OAI not
+        available for this validator", distinct from a broken
+        endpoint.
+
+        Caches at the shared `SCORING` tier (`Cache-Control:
+        public, max-age=300, s-maxage=1800`) — `/scoring` bundles
+        the OAI, the shortest-lived component, so the whole
+        aggregate pins to that tier. A consumer needing the
+        longer-lived tier/badges caching should hit `/tier` or
+        `/badges` directly. `HEAD` is supported and short-circuits
+        after the validator existence check.
+      parameters:
+        - $ref: '#/components/parameters/IdOrVotePath'
+      responses:
+        '200':
+          description: |
+            Aggregate scoring bundle. `tier` + `tenure` + `client`
+            are always populated for a known validator; `oai` is the
+            OAI payload, or `null` when the validator is gated out
+            of the OAI surface (unclaimed / opted-out /
+            identity-drift).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidatorScoring'
+        '400':
+          description: Invalid pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Validator pubkey unknown to the indexer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /v1/validators/current-epoch/batch:
     post:
       summary: Bulk lookup for the current epoch
@@ -996,65 +1064,55 @@ components:
         pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
 
   schemas:
-    Badges:
-      type: object
-      required: [vote, identity, tenure, client, tier]
-      properties:
-        vote: { type: string }
-        identity: { type: string }
-        tenure:
-          type: object
-          required: [firstSeenEpoch, activeEpochs, landmark, badge]
-          properties:
-            firstSeenEpoch: { type: integer, minimum: 0 }
-            activeEpochs: { type: integer, minimum: 0 }
-            landmark:
-              type: string
-              enum:
-                - MAINNET_BETA_LAUNCH
-                - CYCLE_1_OG
-                - CROSS_CHAIN_ERA
-                - DEFI_2
-                - PRE_FTX
-                - JITO_V2
-                - FIREDANCER_LAUNCH
-                - RECENT
-                - recent_operator
-            badge: { type: string }
-        client:
-          type: object
-          required: [kind, version, updatedAt]
-          properties:
-            kind:
-              type: string
-              enum: [agave, jito_solana, firedancer, frankendancer, paladin, sig, unknown]
-            version:
-              type: string
-              nullable: true
-            updatedAt:
-              type: string
-              format: date-time
-              nullable: true
-        tier:
-          type: object
-          required: [tier, composite, windowEpochs]
-          properties:
-            tier:
-              type: string
-              enum: [forge, anvil, hearth, kindling, unrated]
-            composite:
-              type: integer
-              nullable: true
-              minimum: 0
-              maximum: 100
-            windowEpochs: { type: integer, minimum: 0 }
+    # --- Shared scoring sub-objects ---------------------------------------
+    # Extracted so `Badges`, `NodeTier`, `OperatorActivityIndex`, and the
+    # `ValidatorScoring` aggregate (REST-M8) all reference ONE definition
+    # per block instead of re-inlining it. Editing a block here updates
+    # every endpoint that carries it.
 
-    NodeTier:
+    TenureBadge:
       type: object
-      required: [vote, identity, window, tier, composite, components]
+      required: [firstSeenEpoch, activeEpochs, landmark, badge]
       properties:
-        vote: { type: string }
-        identity: { type: string }
+        firstSeenEpoch: { type: integer, minimum: 0 }
+        activeEpochs: { type: integer, minimum: 0 }
+        landmark:
+          type: string
+          enum:
+            - MAINNET_BETA_LAUNCH
+            - CYCLE_1_OG
+            - CROSS_CHAIN_ERA
+            - DEFI_2
+            - PRE_FTX
+            - JITO_V2
+            - FIREDANCER_LAUNCH
+            - RECENT
+            - recent_operator
+        badge: { type: string }
+
+    ClientBadge:
+      type: object
+      required: [kind, version, updatedAt]
+      properties:
+        kind:
+          type: string
+          enum: [agave, jito_solana, firedancer, frankendancer, paladin, sig, unknown]
+        version:
+          type: string
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    # The full `/tier` payload MINUS `vote` / `identity` — the
+    # `{ window, tier, composite, components }` block. `NodeTier` adds
+    # `vote` / `identity` on top; `ValidatorScoring` nests this under
+    # its `tier` key.
+    NodeTierBody:
+      type: object
+      required: [window, tier, composite, components]
+      properties:
         window:
           type: object
           required:
@@ -1090,6 +1148,37 @@ components:
           properties:
             tvcRatio: { type: number, minimum: 0, maximum: 1 }
             wilsonSkipRate: { type: number, minimum: 0, maximum: 1 }
+
+    Badges:
+      type: object
+      required: [vote, identity, tenure, client, tier]
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+        tenure: { $ref: '#/components/schemas/TenureBadge' }
+        client: { $ref: '#/components/schemas/ClientBadge' }
+        tier:
+          type: object
+          required: [tier, composite, windowEpochs]
+          properties:
+            tier:
+              type: string
+              enum: [forge, anvil, hearth, kindling, unrated]
+            composite:
+              type: integer
+              nullable: true
+              minimum: 0
+              maximum: 100
+            windowEpochs: { type: integer, minimum: 0 }
+
+    NodeTier:
+      type: object
+      required: [vote, identity, window, tier, composite, components]
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+      allOf:
+        - $ref: '#/components/schemas/NodeTierBody'
 
     Error:
       type: object
@@ -2172,12 +2261,13 @@ components:
 
     # --- Phase 6 Operator Activity Index ----------------------------------
 
-    OperatorActivityIndex:
+    # The OAI payload MINUS `vote` / `identity`. `OperatorActivityIndex`
+    # adds `vote` / `identity` on top; `ValidatorScoring` (REST-M8)
+    # carries this (or `null`) under its `oai` key.
+    OaiBody:
       type: object
-      required: [vote, identity, composite, components, ingestStatus]
+      required: [composite, components, ingestStatus]
       properties:
-        vote: { type: string }
-        identity: { type: string }
         composite:
           type: [integer, 'null']
           minimum: 0
@@ -2248,3 +2338,49 @@ components:
                 ships tx-counts only and `txFeesLamports` is
                 structurally `null` everywhere, so this is `false`
                 until the fee backfill ships.
+
+    OperatorActivityIndex:
+      type: object
+      required: [vote, identity, composite, components, ingestStatus]
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+      allOf:
+        - $ref: '#/components/schemas/OaiBody'
+
+    # --- REST-M8 aggregate scoring bundle ---------------------------------
+
+    ValidatorScoring:
+      type: object
+      description: |
+        The `/v1/validators/{idOrVote}/scoring` aggregate — the
+        profile-page one-shot. A UNION of the `/tier`, `/badges`, and
+        `/operator-activity-index` payloads with NO duplication: the
+        full Node Tier body, the tenure + client badges, and the OAI
+        body. The `/badges` tier summary is deliberately omitted —
+        `tier` below carries the FULL Node Tier object instead.
+      required: [vote, identity, tier, tenure, client, oai]
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+        tier:
+          allOf:
+            - $ref: '#/components/schemas/NodeTierBody'
+          description: |
+            The full `/tier` body (`window`, `tier`, `composite`,
+            `components`), minus the top-level `vote` / `identity`.
+        tenure: { $ref: '#/components/schemas/TenureBadge' }
+        client: { $ref: '#/components/schemas/ClientBadge' }
+        oai:
+          oneOf:
+            - $ref: '#/components/schemas/OaiBody'
+            - type: 'null'
+          description: |
+            The `/operator-activity-index` body (minus `vote` /
+            `identity`), OR `null` when the validator is known but
+            gated out of the OAI surface — unclaimed, opted out, or
+            its on-chain identity has drifted from the claimed
+            identity. `null` means "OAI not available for this
+            validator", distinct from a broken endpoint. `tier` /
+            `tenure` / `client` are still fully populated when `oai`
+            is `null`.

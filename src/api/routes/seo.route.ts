@@ -251,6 +251,7 @@ GET unless noted. Full descriptions + query params in /llms-full.txt.
 - ${SITE_URL}/v1/validators/{idOrVote}/tier: Node Tier composite (5-epoch window)
 - ${SITE_URL}/v1/validators/{idOrVote}/badges: Tenure + client + tier badge bundle
 - ${SITE_URL}/v1/validators/{idOrVote}/operator-activity-index: Operator Activity Index (governance + wallet)
+- ${SITE_URL}/v1/validators/{idOrVote}/scoring: Aggregate scoring bundle — tier + badges + OAI in one round-trip
 - ${SITE_URL}/v1/operator-wallets/{wallet}/activity: Daily on-chain activity for a registered operator wallet
 - ${SITE_URL}/v1/simd-proposals: Human-reviewed AI-curated SIMD proposal feed
 - ${SITE_URL}/badge/{vote}.svg: Embeddable SVG performance badge
@@ -406,6 +407,21 @@ identity, composite, components }. composite is null in the
 cold-start case where neither half has signal. Only ACTIVE (non-
 expired) Phase 3 GitHub links / operator wallets contribute. HEAD is
 supported and short-circuits before the scoring queries.
+
+### GET /v1/validators/{idOrVote}/scoring
+Aggregate scoring bundle — the profile-page one round-trip. Does the
+validator lookup once and returns tier + badges + OAI together:
+{ vote, identity, tier, tenure, client, oai }. tier is the full
+GET /tier body (window + tier + composite + components); tenure and
+client are the GET /badges blocks; oai is the GET
+/operator-activity-index body, OR null. ADDITIVE — /tier, /badges,
+and /operator-activity-index all stay live and unchanged for
+consumers wanting one component with its own CDN cache. 404s ONLY
+when the validator pubkey is unknown; a known-but-unclaimed /
+opted-out / identity-drifted validator returns 200 with oai: null
+(tier + tenure + client still populated). Accepts a vote OR identity
+pubkey; no query params. HEAD is supported and short-circuits after
+the existence check.
 
 ### POST /v1/validators/current-epoch/batch
 Body: { "votes": ["Vote111...", ...] }. Bulk lookup; returns

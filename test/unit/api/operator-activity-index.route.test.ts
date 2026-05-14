@@ -56,14 +56,23 @@ function buildDeps(overrides: {
    * identity rotation that left the claim stale (identity-drift gate).
    */
   validatorIdentityPubkey?: string;
+  /**
+   * When `null`, `claimsRepo.findByVote` resolves `null` — the
+   * validator row exists but was never claimed (claim gate). Default
+   * (`undefined`) keeps the standard `IDENTITY_1`-bound claim.
+   */
+  claim?: ValidatorClaim | null;
 }): OaiRoutesDeps {
   const validator = makeValidator(overrides.validatorIdentityPubkey ?? IDENTITY_1);
-  const claim: ValidatorClaim = {
-    votePubkey: VOTE_1,
-    identityPubkey: IDENTITY_1,
-    claimedAt: new Date(),
-    lastNonceUsed: 'nonce',
-  };
+  const claim: ValidatorClaim | null =
+    overrides.claim === undefined
+      ? {
+          votePubkey: VOTE_1,
+          identityPubkey: IDENTITY_1,
+          claimedAt: new Date(),
+          lastNonceUsed: 'nonce',
+        }
+      : overrides.claim;
   return {
     validatorsRepo: {
       findByVote: async (v) => (v === VOTE_1 ? validator : null),
@@ -172,14 +181,52 @@ describe('GET /v1/validators/:idOrVote/operator-activity-index', () => {
     await app.close();
   });
 
-  it('HEAD short-circuits with 200 and an empty body, unaffected by ingestStatus', async () => {
-    const app = await makeApp(buildDeps({ governanceIngestActive: false }));
+  it('HEAD short-circuits with 200 and an empty body without running the resolver fan-out', async () => {
+    // REST-M8 HEAD-cost guard. A HEAD probe must pay only the two
+    // cheap gate lookups (`passesOaiGates`) and never the two-wave
+    // repo fan-out — that's REST-M3's "a HEAD doesn't pay the full DB
+    // cost" intent, which a naive `resolveOaiForValidator`-then-HEAD
+    // ordering would regress. Every fan-out repo is wired to throw;
+    // reaching one on a HEAD is exactly the regression this pins.
+    const deps = buildDeps({ governanceIngestActive: false });
+    const fanOutReached = (): never => {
+      throw new Error('HEAD must not reach the resolver fan-out');
+    };
+    deps.simdDiscussionsRepo.hasAnyData = fanOutReached;
+    deps.simdDiscussionsRepo.statsByUsername = fanOutReached;
+    deps.validatorGithubRepo.findActiveByVote = fanOutReached;
+    deps.operatorWalletsRepo.listActiveByVote = fanOutReached;
+    deps.walletActivityRepo.listRecentForWallets = fanOutReached;
+    const app = await makeApp(deps);
     const res = await app.inject({
       method: 'HEAD',
       url: `/v1/validators/${VOTE_1}/operator-activity-index`,
     });
     expect(res.statusCode).toBe(200);
     expect(res.body).toBe('');
+    await app.close();
+  });
+
+  it('HEAD on an unclaimed validator 404s — the claim gate fires before the fan-out', async () => {
+    // The validator row exists but was never claimed. A HEAD must
+    // still 404 (the claim gate inside `passesOaiGates` fires
+    // identically to the GET path), and it must do so without
+    // reaching the fan-out — so unknown / unclaimed / opted-out /
+    // drift all collapse to one status on HEAD too. Fan-out repos
+    // throw to pin that the claim gate short-circuits first.
+    const deps = buildDeps({ claim: null });
+    const fanOutReached = (): never => {
+      throw new Error('HEAD must not reach the resolver fan-out');
+    };
+    deps.simdDiscussionsRepo.hasAnyData = fanOutReached;
+    deps.validatorGithubRepo.findActiveByVote = fanOutReached;
+    deps.operatorWalletsRepo.listActiveByVote = fanOutReached;
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'HEAD',
+      url: `/v1/validators/${VOTE_1}/operator-activity-index`,
+    });
+    expect(res.statusCode).toBe(404);
     await app.close();
   });
 });

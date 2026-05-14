@@ -1026,6 +1026,102 @@ view stays well under it.
 Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
 `SCORING` tier).
 
+## `GET /v1/validators/:idOrVote/scoring`
+
+REST-M8 aggregate endpoint — the profile-page **one round-trip**.
+`/tier`, `/badges`, and `/operator-activity-index` each repeat the
+same validator lookup; `/scoring` does that lookup once and returns
+all three. Accepts a vote OR identity pubkey; no query params.
+
+**Additive, not a replacement.** `/tier`, `/badges`, and
+`/operator-activity-index` all stay live and unchanged — they are
+kept as granular routes so a consumer wanting one component still
+gets that component's own CDN cache. `/scoring` serves the
+profile-page case where one fetch beats three.
+
+Response — a union of the three sibling payloads with **no
+duplication**:
+
+```json
+{
+  "vote": "VOTE_PUBKEY",
+  "identity": "IDENTITY_PUBKEY",
+  "tier": {
+    "window": {
+      "epochs": 5,
+      "slotsAssigned": 432,
+      "slotsSkipped": 3,
+      "voteCredits": "3400000",
+      "maxCredits": "3456000",
+      "voteCreditsUpdatedAt": "2026-05-12T08:00:00.000Z"
+    },
+    "tier": "forge",
+    "composite": 96,
+    "components": { "tvcRatio": 0.985, "wilsonSkipRate": 0.012 }
+  },
+  "tenure": {
+    "firstSeenEpoch": 100,
+    "activeEpochs": 900,
+    "landmark": "CYCLE_1_OG",
+    "badge": "Cycle 1 OG"
+  },
+  "client": {
+    "kind": "firedancer",
+    "version": "0.405.20218",
+    "updatedAt": "2026-05-13T08:00:00.000Z"
+  },
+  "oai": {
+    "composite": null,
+    "components": {
+      "walletScore": 70,
+      "governance": {
+        "score": null,
+        "commentCount": 0,
+        "reactionsReceived": 0,
+        "activeWindowCount": 0
+      }
+    },
+    "ingestStatus": {
+      "governanceIngestActive": false,
+      "walletFeesIngestActive": false
+    }
+  }
+}
+```
+
+- `tier` — the **full** `GET /tier` body (`window` + `tier` +
+  `composite` + `components`), minus the top-level `vote` /
+  `identity`. The `/badges` payload also nests a `tier` _summary_,
+  but `/scoring` carries the full object here, so that summary is
+  deliberately omitted — it would be a strict subset of this.
+- `tenure` / `client` — the tenure + client blocks of `GET /badges`,
+  byte-identical to that endpoint.
+- `oai` — the `GET /operator-activity-index` body minus `vote` /
+  `identity`, **or `null`**.
+
+**404 vs `oai: null`.** `/scoring` returns `404` **only** when the
+validator pubkey is unknown to the indexer — the same 404 `/tier`
+returns today. When the validator **is** known but is unclaimed /
+opted-out / identity-drifted — the cases the OAI route 404s —
+`/scoring` returns `200` with `oai: null`; `tier` + `tenure` +
+`client` are still fully populated. `oai: null` means "OAI not
+available for this validator", distinct from a broken endpoint.
+
+| HTTP | `code`             | When                                        |
+| ---- | ------------------ | ------------------------------------------- |
+| 200  | —                  | Validator is known (`oai` may be `null`).   |
+| 400  | `validation_error` | Invalid pubkey.                             |
+| 404  | `not_found`        | Validator pubkey is unknown to the indexer. |
+
+`HEAD` is supported and short-circuits after the validator existence
+check, before the tier history read + OAI repo fan-out.
+
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier). `/scoring` bundles the OAI — the shortest-lived of
+the three components — so the whole aggregate pins to the `SCORING`
+tier. A consumer that needs the longer-lived `/tier` or `/badges`
+caching should hit those granular routes directly.
+
 ## UI integration map
 
 Where each gamification endpoint (Phase 1-6) is intended to render in
@@ -1033,16 +1129,21 @@ a future WhoEarns UI. This is a planning aid — the endpoints are live
 and usable today regardless of UI status; the surfaces below are not
 all built yet.
 
-| Endpoint                                           | Intended UI surface                                        |
-| -------------------------------------------------- | ---------------------------------------------------------- |
-| `/v1/validators/:idOrVote/tier`                    | Profile header — Node Tier badge + composite breakdown     |
-| `/v1/validators/:idOrVote/badges`                  | Profile header — tenure + client + tier badge row          |
-| `/v1/validators/:idOrVote/operator-activity-index` | Profile scoring panel — OAI composite + sub-component bars |
-| `/v1/claims/:vote`                                 | Operator dashboard — claim-progress / re-attest reminders  |
-| `/v1/claims/:vote/audit`                           | Operator dashboard — claim-change forensic timeline        |
-| `/v1/operator-wallets/:wallet`                     | Profile wallet panel — wallet registration metadata header |
-| `/v1/operator-wallets/:wallet/activity`            | Profile wallet panel — 365-day activity heatmap grid       |
-| `/v1/simd-proposals`                               | Governance widget / leaderboard sidebar — pending SIMDs    |
+| Endpoint                                           | Intended UI surface                                                    |
+| -------------------------------------------------- | ---------------------------------------------------------------------- |
+| `/v1/validators/:idOrVote/scoring`                 | Profile page — the one-shot fetch backing tier + badges + OAI together |
+| `/v1/validators/:idOrVote/tier`                    | Profile header — Node Tier badge + composite breakdown (granular)      |
+| `/v1/validators/:idOrVote/badges`                  | Profile header — tenure + client + tier badge row (granular)           |
+| `/v1/validators/:idOrVote/operator-activity-index` | Profile scoring panel — OAI composite + sub-component bars (granular)  |
+| `/v1/claims/:vote`                                 | Operator dashboard — claim-progress / re-attest reminders              |
+| `/v1/claims/:vote/audit`                           | Operator dashboard — claim-change forensic timeline                    |
+| `/v1/operator-wallets/:wallet`                     | Profile wallet panel — wallet registration metadata header             |
+| `/v1/operator-wallets/:wallet/activity`            | Profile wallet panel — 365-day activity heatmap grid                   |
+| `/v1/simd-proposals`                               | Governance widget / leaderboard sidebar — pending SIMDs                |
+
+The profile page uses `/scoring` for its initial render; `/tier`,
+`/badges`, and `/operator-activity-index` remain available for any
+consumer that wants a single component with its own CDN cache.
 
 ## `POST /mcp`
 
