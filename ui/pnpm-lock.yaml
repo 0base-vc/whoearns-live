@@ -19,13 +19,13 @@ importers:
         specifier: ^3.0.10
         version: 3.0.10(@sveltejs/kit@2.57.1(@sveltejs/vite-plugin-svelte@7.0.0(svelte@5.55.4)(vite@8.0.9(jiti@1.21.7)))(svelte@5.55.4)(typescript@6.0.3)(vite@8.0.9(jiti@1.21.7)))
       '@sveltejs/kit':
-        specifier: ^2.57.0
+        specifier: ^2.57.1
         version: 2.57.1(@sveltejs/vite-plugin-svelte@7.0.0(svelte@5.55.4)(vite@8.0.9(jiti@1.21.7)))(svelte@5.55.4)(typescript@6.0.3)(vite@8.0.9(jiti@1.21.7))
       '@sveltejs/vite-plugin-svelte':
         specifier: ^7.0.0
         version: 7.0.0(svelte@5.55.4)(vite@8.0.9(jiti@1.21.7))
       '@tailwindcss/vite':
-        specifier: ^4.2.3
+        specifier: ^4.2.4
         version: 4.2.4(vite@8.0.9(jiti@1.21.7))
       prettier:
         specifier: ^3.8.3
@@ -34,19 +34,19 @@ importers:
         specifier: ^3.5.1
         version: 3.5.1(prettier@3.8.3)(svelte@5.55.4)
       svelte:
-        specifier: ^5.55.2
+        specifier: ^5.55.4
         version: 5.55.4
       svelte-check:
         specifier: ^4.4.6
         version: 4.4.6(picomatch@4.0.4)(svelte@5.55.4)(typescript@6.0.3)
       tailwindcss:
-        specifier: ^4.2.3
+        specifier: ^4.2.4
         version: 4.2.4
       typescript:
-        specifier: ^6.0.2
+        specifier: ^6.0.3
         version: 6.0.3
       vite:
-        specifier: ^8.0.7
+        specifier: ^8.0.9
         version: 8.0.9(jiti@1.21.7)
 
 packages:
@@ -547,8 +547,8 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
-  devalue@5.7.1:
-    resolution: {integrity: sha512-MUbZ586EgQqdRnC4yDrlod3BEdyvE4TapGYHMW2CiaW+KkkFmWEFqBUaLltEZCGi0iFXCEjRF0OjF0DV2QHjOA==}
+  devalue@5.8.1:
+    resolution: {integrity: sha512-4CXDYRBGqN+57wVJkuXBYmpAVUSg3L6JAQa/DFqm238G73E1wuyc/JhGQJzN7vUf/CMphYau2zXbfWzDR5aTEw==}
 
   didyoumean@1.2.2:
     resolution: {integrity: sha512-gxtyfqMg7GKyhQmb056K7M3xszy/myH8w+B4RT+QXBQsvAOdc3XymqDDPHx1BgPgsdAA5SIifona89YtRATDzw==}
@@ -1250,7 +1250,7 @@ snapshots:
       '@types/cookie': 0.6.0
       acorn: 8.16.0
       cookie: 0.7.2
-      devalue: 5.7.1
+      devalue: 5.8.1
       esm-env: 1.2.2
       kleur: 4.1.5
       magic-string: 0.30.21
@@ -1511,7 +1511,7 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
-  devalue@5.7.1: {}
+  devalue@5.8.1: {}
 
   didyoumean@1.2.2: {}
 
@@ -1894,7 +1894,7 @@ snapshots:
       aria-query: 5.3.1
       axobject-query: 4.1.0
       clsx: 2.1.1
-      devalue: 5.7.1
+      devalue: 5.8.1
       esm-env: 1.2.2
       esrap: 2.2.5
       is-reference: 3.0.3
