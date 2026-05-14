@@ -2,6 +2,7 @@ import type pg from 'pg';
 import type {
   IdentityPubkey,
   Validator,
+  ValidatorClientUpsertInput,
   ValidatorInfo,
   ValidatorUpsertInput,
   VotePubkey,
@@ -152,11 +153,7 @@ export class ValidatorsRepository {
    * if a caller ever passes `null`/`undefined`.
    */
   async upsertClientBatch(
-    entries: ReadonlyArray<{
-      identityPubkey: IdentityPubkey;
-      clientKind: string;
-      clientVersion: string | null;
-    }>,
+    entries: ReadonlyArray<ValidatorClientUpsertInput>,
   ): Promise<{ updated: number; attempted: number }> {
     if (entries.length === 0) return { updated: 0, attempted: 0 };
     const identities = entries.map((e) => e.identityPubkey);

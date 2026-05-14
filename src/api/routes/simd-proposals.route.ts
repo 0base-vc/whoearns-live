@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { ValidationError } from '../../core/errors.js';
 import type { SimdProposalsRepository } from '../../storage/repositories/simd-proposals.repo.js';
+import type { SimdProposal } from '../../types/domain.js';
 import { cacheControl } from '../cache-control.js';
 
 export interface SimdProposalsRoutesDeps {
@@ -60,15 +61,29 @@ const simdProposalsRoutes: FastifyPluginAsync<SimdProposalsRoutesDeps> = async (
     void reply.header('cache-control', cacheControl('CATALOGUE'));
     return {
       proposals: proposals
-        .filter((p) => p.aiSummary !== null && p.aiQuestions !== null && p.reviewedAt !== null)
+        // Type predicate (not a bare boolean callback) so TS narrows
+        // `aiSummary` / `aiQuestions` / `reviewedAt` to non-null for
+        // the `.map` below — the `as` casts that papered over the
+        // un-narrowed `.filter` are gone. The repo's `listReviewed`
+        // already enforces `reviewed_at IS NOT NULL`; this is the
+        // belt-and-braces type-level mirror of that runtime filter.
+        .filter(
+          (
+            p,
+          ): p is SimdProposal & {
+            aiSummary: string;
+            aiQuestions: string[];
+            reviewedAt: Date;
+          } => p.aiSummary !== null && p.aiQuestions !== null && p.reviewedAt !== null,
+        )
         .map((p) => ({
           simdNumber: p.simdNumber,
           title: p.title,
           status: p.status,
           sourceUrl: p.sourceUrl,
-          aiSummary: p.aiSummary as string,
-          aiQuestions: p.aiQuestions as string[],
-          reviewedAt: (p.reviewedAt as Date).toISOString(),
+          aiSummary: p.aiSummary,
+          aiQuestions: p.aiQuestions,
+          reviewedAt: p.reviewedAt.toISOString(),
         })),
     };
   });

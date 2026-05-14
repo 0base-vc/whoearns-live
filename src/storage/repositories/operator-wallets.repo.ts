@@ -28,30 +28,69 @@ const COLS = `vote_pubkey, wallet_pubkey, label, signed_nonce,
 
 export const OPERATOR_WALLET_CAP_PER_VALIDATOR = 3;
 
+/**
+ * Result of `OperatorWalletsRepository.insert` (TS-M6). The DB
+ * constraint violations the route used to inspect by pg SQLSTATE
+ * string — `23514` (the 3-wallet cap trigger) and `23505` (the
+ * `signed_nonce` UNIQUE replay guard) — are caught HERE and surfaced
+ * as a typed `reason`, so the route branches on a domain value with
+ * no pg-errcode knowledge. Any other pg error still throws.
+ */
+export type OperatorWalletInsertResult =
+  | { ok: true }
+  | { ok: false; reason: 'wallet_cap_reached' | 'nonce_replay' };
+
 export class OperatorWalletsRepository {
   constructor(private readonly pool: pg.Pool) {}
 
   /**
    * Insert a new operator wallet. The DB trigger enforces the 3-wallet
    * cap as defense-in-depth; the route layer should also count first
-   * and surface a clean 400 before this fires.
+   * and surface a clean 409 before this fires.
+   *
+   * Returns a typed discriminated result rather than letting a raw pg
+   * error escape (TS-M6): a `23514` check_violation (the cap trigger,
+   * lost a race) maps to `wallet_cap_reached`, a `23505`
+   * unique_violation (the only UNIQUE here is `signed_nonce`, added by
+   * migration 0025) maps to `nonce_replay`. Matching by SQLSTATE code,
+   * not message text, is robust to a migration reword. Any other pg
+   * error is rethrown unchanged.
    */
-  async insert(wallet: OperatorWallet): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO operator_wallets
-         (vote_pubkey, wallet_pubkey, label, signed_nonce,
-          anchor_tx_signature, registered_at, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        wallet.votePubkey,
-        wallet.walletPubkey,
-        wallet.label,
-        wallet.signedNonce,
-        wallet.anchorTxSignature,
-        wallet.registeredAt,
-        wallet.expiresAt,
-      ],
-    );
+  async insert(wallet: OperatorWallet): Promise<OperatorWalletInsertResult> {
+    try {
+      await this.pool.query(
+        `INSERT INTO operator_wallets
+           (vote_pubkey, wallet_pubkey, label, signed_nonce,
+            anchor_tx_signature, registered_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          wallet.votePubkey,
+          wallet.walletPubkey,
+          wallet.label,
+          wallet.signedNonce,
+          wallet.anchorTxSignature,
+          wallet.registeredAt,
+          wallet.expiresAt,
+        ],
+      );
+      return { ok: true };
+    } catch (err) {
+      const pgErr = err as { code?: string };
+      // SQLSTATE 23514 = check_violation — the 3-wallet cap trigger
+      // uses ERRCODE = 'check_violation'. Reaching here means the
+      // route's count-first check lost a race against a concurrent
+      // insert.
+      if (pgErr.code === '23514') {
+        return { ok: false, reason: 'wallet_cap_reached' };
+      }
+      // SQLSTATE 23505 = unique_violation — the only UNIQUE on this
+      // table is `signed_nonce` (migration 0025), so this is a replay
+      // of an already-accepted nonce.
+      if (pgErr.code === '23505') {
+        return { ok: false, reason: 'nonce_replay' };
+      }
+      throw err;
+    }
   }
 
   async listByVote(vote: VotePubkey): Promise<OperatorWallet[]> {

@@ -2,7 +2,7 @@ import type { SolanaRpcClient } from '../clients/solana-rpc.js';
 import type { Logger } from '../core/logger.js';
 import { classifyClient } from '../services/client-kind.js';
 import type { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
-import type { IdentityPubkey } from '../types/domain.js';
+import type { IdentityPubkey, ValidatorClientUpsertInput } from '../types/domain.js';
 import type { Job } from './scheduler.js';
 
 export interface ClusterNodesIngesterJobDeps {
@@ -51,10 +51,7 @@ export function createClusterNodesIngesterJob(deps: ClusterNodesIngesterJobDeps)
         // ... FROM UNNEST` SQL doesn't fail on duplicates the way
         // `INSERT ... ON CONFLICT` does, but pinning the last value
         // here keeps the indexed result deterministic.
-        const byIdentity = new Map<
-          IdentityPubkey,
-          { identityPubkey: IdentityPubkey; clientKind: string; clientVersion: string | null }
-        >();
+        const byIdentity = new Map<IdentityPubkey, ValidatorClientUpsertInput>();
         for (const node of nodes) {
           if (typeof node.pubkey !== 'string' || node.pubkey.length === 0) continue;
           const version = node.version ?? null;

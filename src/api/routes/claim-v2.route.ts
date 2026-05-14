@@ -266,27 +266,27 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
         requestId: request.id,
       });
     }
-    try {
-      await opts.validatorGithubRepo.upsert(result.link);
-    } catch (err) {
-      const pgErr = err as { code?: string };
-      if (pgErr.code === '23505') {
-        // The UNIQUE on `signed_nonce` fired — another submission
-        // (possibly a scraper, possibly the operator's other tab)
-        // landed this exact nonce first. Re-read by vote: if the
-        // stored row already links the same username this request
-        // wanted, the intent is satisfied — return it as 200.
-        const stored = await opts.validatorGithubRepo.findByVote(body.votePubkey);
-        const idempotent = idempotentReplay(stored);
-        if (idempotent !== null) return idempotent;
-        return sendError(reply, {
-          code: 'nonce_replay',
-          statusCode: 403,
-          message: 'this nonce has already been used',
-          requestId: request.id,
-        });
-      }
-      throw err;
+    // TS-M6: the repo catches the pg `23505` unique_violation and
+    // returns a typed `{ ok: false, reason: 'nonce_replay' }` — the
+    // route no longer inspects SQLSTATE strings. `nonce_replay` here
+    // means the `signed_nonce` UNIQUE fired: another submission
+    // (possibly a scraper, possibly the operator's other tab) landed
+    // this exact nonce first.
+    const upsertResult = await opts.validatorGithubRepo.upsert(result.link);
+    if (!upsertResult.ok) {
+      // Re-read by vote: if the stored row already links the same
+      // username this request wanted, the intent is satisfied —
+      // return it as 200 (SEC-M2 idempotent-replay path). Otherwise
+      // it's a genuine replay → 403.
+      const stored = await opts.validatorGithubRepo.findByVote(body.votePubkey);
+      const idempotent = idempotentReplay(stored);
+      if (idempotent !== null) return idempotent;
+      return sendError(reply, {
+        code: 'nonce_replay',
+        statusCode: 403,
+        message: 'this nonce has already been used',
+        requestId: request.id,
+      });
     }
     // SEC-M4 — best-effort audit write. We're past every replay /
     // idempotent-200 branch above, so reaching here means the upsert
@@ -403,14 +403,14 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
         requestId: request.id,
       });
     }
-    try {
-      await opts.operatorWalletsRepo.insert(result.wallet);
-    } catch (err) {
-      const pgErr = err as { code?: string };
-      // SQLSTATE 23514 = check_violation; the 3-wallet trigger uses
-      // ERRCODE = 'check_violation' for the cap. Matching by code
-      // (not message text) is robust to migration reword.
-      if (pgErr.code === '23514') {
+    // TS-M6: the repo catches the pg constraint violations
+    // (`23514` check_violation = the 3-wallet cap trigger lost a
+    // race; `23505` unique_violation = a `signed_nonce` replay) and
+    // returns a typed `reason` — the route no longer inspects
+    // SQLSTATE strings, it branches on the domain value.
+    const insertResult = await opts.operatorWalletsRepo.insert(result.wallet);
+    if (!insertResult.ok) {
+      if (insertResult.reason === 'wallet_cap_reached') {
         return sendError(reply, {
           code: 'wallet_cap_reached',
           statusCode: 409,
@@ -418,18 +418,13 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
           requestId: request.id,
         });
       }
-      // SQLSTATE 23505 = unique_violation; the only UNIQUE on this
-      // table is `signed_nonce` (added by migration 0025), so this
-      // means a replay of an already-accepted nonce.
-      if (pgErr.code === '23505') {
-        return sendError(reply, {
-          code: 'nonce_replay',
-          statusCode: 403,
-          message: 'this nonce has already been used',
-          requestId: request.id,
-        });
-      }
-      throw err;
+      // reason === 'nonce_replay'
+      return sendError(reply, {
+        code: 'nonce_replay',
+        statusCode: 403,
+        message: 'this nonce has already been used',
+        requestId: request.id,
+      });
     }
     // SEC-M4 — best-effort audit write. Reaching here means the
     // INSERT committed: a genuinely new operator wallet (the cap-race
