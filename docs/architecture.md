@@ -119,6 +119,46 @@ top-N validator sample. It does not call RPC. These medians power the
 income page's validator-vs-cluster context; Decade leaderboard badges are
 computed from stored 10-epoch leaderboard windows.
 
+### Validator-info refresh (`VALIDATOR_INFO_INTERVAL_MS`, default 6h)
+
+Re-fetches on-chain validator-info (moniker, icon) for the watched
+set only and updates `validators`. A one-shot backfill for watched
+validators with no info record also runs once after worker start.
+
+### Cluster-nodes ingester (`CLUSTER_NODES_INTERVAL_MS`, default 30min)
+
+Polls `getClusterNodes` (~500 KB) and writes each gossip identity's
+`(client_kind, client_version)` to `validators`. Drives the
+client-family badges (Agave / Jito-Solana / Firedancer / ...). No
+cursor — every tick re-classifies the full cluster.
+
+### Wallet-activity ingester (`WALLET_ACTIVITY_INTERVAL_MS`, default 6h)
+
+Enumerates registered `operator_wallets` and runs
+`getSignaturesForAddress` once per wallet, upserting per-day tx
+counts into `wallet_daily_activity`. The upsert is idempotent, so a
+partial tick is resumed on the next one.
+
+### SIMD curation pipeline (`SIMD_CURATION_INTERVAL_MS`, default 12h)
+
+Enriches pending `simd_proposals` rows via the Anthropic API
+(`ANTHROPIC_MODEL`). Gated on `ANTHROPIC_API_KEY`: with no key the
+pipeline is disabled and SIMDs stay pre-review. This is the only job
+that calls an API other than Solana RPC.
+
+The RPC-bursty jobs above carry staggered first-tick delays
+(`initialDelayMs` in `entrypoints/worker.ts`) so a cold start does
+not fire every job's first RPC call simultaneously. Every tick emits
+`jobs_executed_total{job,outcome}` + `jobs_tick_duration_seconds{job}`
+on the `/metrics` endpoint.
+
+The Phase 2-6 jobs above write the gamification tables —
+`validators` (client columns), `validator_github`,
+`operator_wallets`, `wallet_daily_activity`, `simd_proposals`,
+`simd_discussion_comments`, `validator_claim_events` — alongside the
+claim surface (`validator_claims`, `validator_profiles`). The API
+process reads these for the operator/SIMD/badge surfaces.
+
 ## Data flow
 
 For any `(epoch, vote)`:

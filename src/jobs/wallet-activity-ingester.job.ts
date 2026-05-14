@@ -60,10 +60,21 @@ export function createWalletActivityIngesterJob(deps: WalletActivityIngesterJobD
           deps.logger.warn({ err, wallet }, 'wallet-activity-ingester: indexWallet failed');
         }
       }
-      deps.logger.info(
-        { walletsIndexed, totalDays, totalSigs },
-        'wallet-activity-ingester: tick complete',
-      );
+      // No new signatures across every wallet means the tick did no
+      // real work — at a 6 h cadence that's just noise in the log
+      // aggregator. Drop it to `debug`; keep `info` for ticks that
+      // actually wrote activity.
+      if (totalSigs === 0) {
+        deps.logger.debug(
+          { walletsIndexed, totalDays, totalSigs },
+          'wallet-activity-ingester: tick complete (no new activity)',
+        );
+      } else {
+        deps.logger.info(
+          { walletsIndexed, totalDays, totalSigs },
+          'wallet-activity-ingester: tick complete',
+        );
+      }
     },
   };
 }

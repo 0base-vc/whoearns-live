@@ -181,6 +181,16 @@ export async function startWorker(): Promise<void> {
     logger.info({ topN }, 'worker: watch mode is "top:N" (stake-ranked sample)');
   }
 
+  // Cold-start stagger (OPS-M2/M3). `runLoop` runs each job's first
+  // tick immediately unless `initialDelayMs` is set, so without these
+  // offsets every RPC-bursty job — slot/fee ingest, the ~500 KB
+  // `getClusterNodes` poll, the hundreds-of-`getSignaturesForAddress`
+  // wallet-activity sweep — hammers RPC at second 0 of a boot and
+  // 429s a public endpoint while `/healthz` is still `degraded`.
+  // Fixed per-job offsets (no jitter — single replica, deterministic
+  // is easier to reason about). The epoch watcher stays immediate:
+  // it's the readiness gate and is one cheap `getEpochInfo` call. The
+  // aggregates job stays immediate too — pure SQL, no RPC.
   scheduler.register(
     createEpochWatcherJob({
       epochService,
@@ -189,8 +199,8 @@ export async function startWorker(): Promise<void> {
       logger,
     }),
   );
-  scheduler.register(
-    createSlotIngesterJob({
+  scheduler.register({
+    ...createSlotIngesterJob({
       epochService,
       validatorService,
       slotService,
@@ -203,9 +213,12 @@ export async function startWorker(): Promise<void> {
       finalityBuffer: config.SLOT_FINALITY_BUFFER,
       logger,
     }),
-  );
-  scheduler.register(
-    createFeeIngesterJob({
+    // +2s: let the epoch watcher's first tick land before slot ingest
+    // starts reading the schedule.
+    initialDelayMs: 2_000,
+  });
+  scheduler.register({
+    ...createFeeIngesterJob({
       epochService,
       epochsRepo,
       validatorService,
@@ -222,7 +235,10 @@ export async function startWorker(): Promise<void> {
       finalityBuffer: config.SLOT_FINALITY_BUFFER,
       logger,
     }),
-  );
+    // +6s: the heaviest steady-state RPC consumer (`getBlock` batches);
+    // give it room after slot ingest.
+    initialDelayMs: 6_000,
+  });
   scheduler.register(
     createAggregatesComputerJob({
       epochService,
@@ -236,8 +252,8 @@ export async function startWorker(): Promise<void> {
       logger,
     }),
   );
-  scheduler.register(
-    createIncomeReconcilerJob({
+  scheduler.register({
+    ...createIncomeReconcilerJob({
       epochService,
       epochsRepo,
       validatorService,
@@ -252,10 +268,13 @@ export async function startWorker(): Promise<void> {
       batchSize: config.FEE_INGEST_BATCH_SIZE,
       logger,
     }),
-  );
+    // +12s: closed-epoch backfill, also `getBlock`-heavy but not
+    // latency-sensitive — happy to wait out the live-path jobs.
+    initialDelayMs: 12_000,
+  });
 
-  scheduler.register(
-    createValidatorInfoRefreshJob({
+  scheduler.register({
+    ...createValidatorInfoRefreshJob({
       epochService,
       validatorService,
       validatorsRepo,
@@ -265,16 +284,21 @@ export async function startWorker(): Promise<void> {
       intervalMs: config.VALIDATOR_INFO_INTERVAL_MS,
       logger,
     }),
-  );
+    // +20s: one RPC per watched validator; off the cold-start path.
+    initialDelayMs: 20_000,
+  });
 
-  scheduler.register(
-    createClusterNodesIngesterJob({
+  scheduler.register({
+    ...createClusterNodesIngesterJob({
       rpc,
       validatorsRepo,
       intervalMs: config.CLUSTER_NODES_INTERVAL_MS,
       logger,
     }),
-  );
+    // +30s: single ~500 KB `getClusterNodes` response; pull it well
+    // clear of the boot RPC burst.
+    initialDelayMs: 30_000,
+  });
 
   // Phase 4 — wallet-activity indexer. Runs alongside the validator
   // jobs because it reads `operator_wallets` (a worker-owned writeable
@@ -288,14 +312,19 @@ export async function startWorker(): Promise<void> {
     cursors: cursorsRepo,
     logger,
   });
-  scheduler.register(
-    createWalletActivityIngesterJob({
+  scheduler.register({
+    ...createWalletActivityIngesterJob({
       operatorWalletsRepo,
       indexer: walletActivityIndexer,
       intervalMs: config.WALLET_ACTIVITY_INTERVAL_MS,
       logger,
     }),
-  );
+    // +45s: the burstiest cold-start job — one
+    // `getSignaturesForAddress` per registered operator wallet
+    // (hundreds at scale). Last in the stagger so the live-path
+    // ingest jobs get RPC headroom first.
+    initialDelayMs: 45_000,
+  });
 
   shutdown.register('scheduler', async () => {
     await scheduler.stop();

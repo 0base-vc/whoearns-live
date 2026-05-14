@@ -99,6 +99,19 @@ kubectl -n whoearns-live exec -i sts/whoearns-live -- \
 
 Run this before restarting the API and worker.
 
+> **Gamification tables — full-DB dump/restore only.** Of the Phase
+> 2-6 tables (`validator_github`, `operator_wallets`,
+> `wallet_daily_activity`, `simd_proposals`, `simd_discussion_comments`,
+> `validator_claim_events`), `validator_github` and `operator_wallets`
+> carry `ON DELETE CASCADE` foreign keys to `validator_claims` (which
+> in turn cascades from `validators`). The rest deliberately omit FK
+> constraints but are still logically keyed to the same claim/wallet
+> rows. A partial, single-table `pg_dump`/`pg_restore` can fail on a
+> missing parent — or, worse, silently drop linked rows when the
+> parent is `--clean`-ed out from under it. Always snapshot and
+> restore the whole database: the `pg_dump -Fc` / `pg_restore` flow
+> above is the only safe path.
+
 ## Migrations
 
 SQL migrations live in `src/storage/migrations/` and are applied by
@@ -110,6 +123,32 @@ SQL migrations live in `src/storage/migrations/` and are applied by
 - Rollback via `pnpm run migrate:down` is supported only within the
   last applied migration. Schema changes are **not** auto-reversible
   — for anything non-trivial, restore from backup.
+
+## Worker jobs
+
+The worker runs a fixed set of cooperative-timer jobs (see
+[`architecture.md`](./architecture.md) for the data-flow view). The
+core ingestion jobs — epoch watcher, slot ingester, fee ingester,
+aggregates, closed-epoch reconciler, validator-info refresh — are
+covered there. The Phase 2-6 gamification jobs are:
+
+| Job                      | Env interval                  | Default | What it does                                                                                                                                                                                                                                                                                |
+| ------------------------ | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cluster-nodes ingester   | `CLUSTER_NODES_INTERVAL_MS`   | 30 min  | Polls `getClusterNodes` (~500 KB) and writes each identity's `(client_kind, client_version)` to `validators`. Drives the client-family badges.                                                                                                                                              |
+| Wallet-activity ingester | `WALLET_ACTIVITY_INTERVAL_MS` | 6 h     | One `getSignaturesForAddress` per registered operator wallet; upserts per-day tx counts into `wallet_daily_activity`. Idempotent.                                                                                                                                                           |
+| SIMD curation pipeline   | `SIMD_CURATION_INTERVAL_MS`   | 12 h    | Enriches pending `simd_proposals` rows via the Anthropic API. **Gated on `ANTHROPIC_API_KEY`** — unset means curation is disabled entirely (the SIMD route still serves already-curated rows; new SIMDs stay pre-review). `ANTHROPIC_MODEL` selects the model, default `claude-sonnet-4-6`. |
+
+Cold-start note: the RPC-bursty jobs (slot/fee ingest, cluster-nodes,
+wallet-activity, validator-info, closed-epoch reconcile) carry
+staggered first-tick delays so a fresh boot doesn't fire every job's
+first RPC call at second 0 — see `initialDelayMs` in
+`src/entrypoints/worker.ts`. The epoch watcher and aggregates job
+still tick immediately.
+
+Each tick emits `jobs_executed_total{job,outcome}` and
+`jobs_tick_duration_seconds{job}` on the `/metrics` endpoint — alert
+on a rising `outcome="fail"` rate to catch a job that is silently
+failing every tick.
 
 ## Scaling
 

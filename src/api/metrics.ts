@@ -143,6 +143,41 @@ export const imageRenderTotal = new Counter({
 });
 
 /**
+ * `jobs_executed_total` — per-tick outcome counter for the worker's
+ * scheduler jobs (fee ingester, slot ingester, cluster-nodes,
+ * wallet-activity, ...). `outcome` is `success` or `fail`. Without
+ * this a job that throws on every tick is silent — there's no
+ * alerting signal beyond log lines. Cardinality: ~10 jobs × 2
+ * outcomes = 20 series.
+ *
+ * Lives on the same shared `registry` so the existing `/metrics`
+ * listener exposes it. `metrics.ts` is a shared prom-client registry
+ * module rather than API-only logic, so the worker importing it is
+ * fine — every metric MUST land on the one registry the `/metrics`
+ * route serves.
+ */
+export const jobsExecutedTotal = new Counter({
+  name: 'jobs_executed_total',
+  help: 'Count of scheduler job ticks, labelled by job name and outcome (success | fail).',
+  labelNames: ['job', 'outcome'] as const,
+  registers: [registry],
+});
+
+/**
+ * `jobs_tick_duration_seconds` — per-job tick latency histogram.
+ * Observed for every tick regardless of outcome. Buckets span the
+ * range from a near-no-op tick (no work to do) to a multi-minute
+ * RPC-bound catch-up batch.
+ */
+export const jobsTickDurationSeconds = new Histogram({
+  name: 'jobs_tick_duration_seconds',
+  help: 'Scheduler job tick latency in seconds, labelled by job name.',
+  labelNames: ['job'] as const,
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300],
+  registers: [registry],
+});
+
+/**
  * Map a Fastify request to a low-cardinality "route" label. Falls
  * back to the raw URL pathname when no route matched (404 / SPA
  * fallback) — these get bucketed under `__notfound__` to keep the

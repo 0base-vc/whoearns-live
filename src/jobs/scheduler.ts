@@ -1,3 +1,4 @@
+import { jobsExecutedTotal, jobsTickDurationSeconds } from '../api/metrics.js';
 import type { Logger } from '../core/logger.js';
 
 export interface Job {
@@ -5,6 +6,16 @@ export interface Job {
   name: string;
   /** Interval between the end of one tick and the start of the next, in ms. */
   intervalMs: number;
+  /**
+   * Optional delay before the FIRST tick, in ms. When omitted the first
+   * tick runs immediately at boot (the historical default). Heavy /
+   * RPC-bursty jobs set this to a staggered offset so a cold start
+   * doesn't fire every job's first tick at second 0 — see
+   * `entrypoints/worker.ts` for the chosen offsets. The wait is
+   * abortable: a `stop()` during the initial delay exits cleanly
+   * without ever ticking.
+   */
+  initialDelayMs?: number;
   /**
    * Perform one unit of work. Implementations MUST respect `signal` and
    * return promptly when it is aborted.
@@ -84,12 +95,32 @@ export class Scheduler {
    */
   private async runLoop(job: Job, signal: AbortSignal): Promise<void> {
     const log = this.logger.child({ job: job.name });
-    // First tick runs immediately.
+    // Opt-in cold-start stagger: jobs that set `initialDelayMs` wait
+    // before their first tick so a boot doesn't fire every RPC-bursty
+    // job at second 0. Jobs that don't set it keep the historical
+    // immediate-first-tick behaviour.
+    if (job.initialDelayMs !== undefined && job.initialDelayMs > 0) {
+      try {
+        await sleep(job.initialDelayMs, signal);
+      } catch {
+        // Aborted during the initial delay — exit before the first tick.
+        log.debug('scheduler: loop exited');
+        return;
+      }
+    }
     while (!signal.aborted) {
+      // `jobsExecutedTotal{job,outcome}` + `jobsTickDurationSeconds{job}`
+      // give every tick an alerting signal — without this a job that
+      // silently fails every tick is invisible to Prometheus.
+      const endTimer = jobsTickDurationSeconds.startTimer({ job: job.name });
       try {
         await job.tick(signal);
+        jobsExecutedTotal.inc({ job: job.name, outcome: 'success' });
       } catch (err) {
+        jobsExecutedTotal.inc({ job: job.name, outcome: 'fail' });
         log.error({ err }, 'scheduler: tick failed — continuing');
+      } finally {
+        endTimer();
       }
       if (signal.aborted) break;
       try {
