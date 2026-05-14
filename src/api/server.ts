@@ -21,6 +21,7 @@ import type { SimdProposalsRepository } from '../storage/repositories/simd-propo
 import type { WalletActivityRepository } from '../storage/repositories/wallet-activity.repo.js';
 import type { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../storage/repositories/claims.repo.js';
+import type { ValidatorClaimEventsRepository } from '../storage/repositories/validator-claim-events.repo.js';
 import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import type { ProfilesRepository } from '../storage/repositories/profiles.repo.js';
 import type { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
@@ -83,6 +84,13 @@ export interface BuildServerDeps {
      * through `services.claim`.
      */
     claims: ClaimsRepository;
+    /**
+     * SEC-M4 — immutable, append-only audit log of claim-surface
+     * mutations. Written best-effort by the v1 + v2 claim routes
+     * after each successful mutation; read by the public
+     * `GET /v1/claim/:vote/audit` endpoint.
+     */
+    validatorClaimEvents: ValidatorClaimEventsRepository;
     /**
      * Phase 3 Claim v2 — GitHub Gist link + operator wallet
      * registration.
@@ -305,6 +313,8 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     await scope.register(claimRoutes, {
       config: deps.config,
       claimService: deps.services.claim,
+      // SEC-M4 — best-effort audit log for claim/profile mutations.
+      claimEventsRepo: deps.repos.validatorClaimEvents,
     });
     // Phase 3 — Claim v2: GitHub Gist link + operator wallet
     // registration. Split into its own plugin from the v1 claim
@@ -317,6 +327,8 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       operatorWalletsRepo: deps.repos.operatorWallets,
       githubGistService: deps.services.githubGist,
       operatorWalletService: deps.services.operatorWallet,
+      // SEC-M4 — best-effort audit log for github-link / wallet-register.
+      claimEventsRepo: deps.repos.validatorClaimEvents,
     });
     // Phase 4 — wallet activity read endpoint. The worker writes the
     // table; the API just reads.

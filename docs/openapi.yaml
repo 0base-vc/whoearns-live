@@ -438,6 +438,37 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /v1/claim/{vote}/audit:
+    get:
+      summary: Public claim-change audit log for a validator vote pubkey
+      description: |
+        SEC-M4 — an immutable, append-only log of claim-surface
+        mutations for this vote pubkey, newest first: claims,
+        re-claims, profile edits, GitHub links, operator-wallet
+        registrations. Lets an operator notice an identity-key
+        compromise after the fact — a `reclaim` event with a non-null
+        `priorIdentityPubkey` is the signal that the validator
+        identity was silently rotated.
+
+        No auth, like `/v1/claim/{vote}/status` — every field returned
+        is already public (on-chain pubkeys, operator-published GitHub
+        usernames, operator-chosen wallet labels). The forensic
+        `submitted_ip` recorded with each event is deliberately NOT in
+        the response. Cache: `public, max-age=300, s-maxage=1800`.
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
+      responses:
+        '200':
+          description: Recent claim-surface events, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidatorClaimEventList' }
+        '400':
+          description: Invalid vote pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /v1/claim/verify:
     post:
       summary: Verify validator ownership without changing profile fields
@@ -1482,6 +1513,53 @@ components:
                   properties:
                     updatedAt: { type: string, format: date-time }
             - type: 'null'
+
+    ValidatorClaimEvent:
+      type: object
+      required: [eventType, identityPubkey, priorIdentityPubkey, detail, createdAt]
+      description: |
+        One immutable claim-surface mutation (SEC-M4). The forensic
+        `submitted_ip` stored with each event is NOT included here.
+      properties:
+        eventType:
+          type: string
+          enum: [claim, reclaim, profile_update, github_link, wallet_register]
+          description: |
+            `claim` — first-ever claim of this vote pubkey.
+            `reclaim` — a subsequent claim (nonce-bump or identity rotation).
+            `profile_update` — operator edited the public profile.
+            `github_link` — a GitHub username was linked.
+            `wallet_register` — an operator wallet was registered.
+        identityPubkey:
+          type: [string, 'null']
+          description: Identity pubkey as of this event.
+        priorIdentityPubkey:
+          type: [string, 'null']
+          description: |
+            The previous identity pubkey — populated ONLY for a
+            `reclaim` where the identity actually rotated. Non-null
+            here is the smoking gun for an identity-key-compromise
+            re-claim.
+        detail:
+          type: [object, 'null']
+          additionalProperties: true
+          description: |
+            Event-specific extras. Shape varies by `eventType`:
+            `github_link` → `{ githubUsername, priorGithubUsername }`;
+            `wallet_register` → `{ walletPubkey, label }`; null for
+            `claim` / `reclaim` / `profile_update`. All values are
+            already-public.
+        createdAt: { type: string, format: date-time }
+
+    ValidatorClaimEventList:
+      type: object
+      required: [votePubkey, events]
+      properties:
+        votePubkey: { type: string }
+        events:
+          type: array
+          description: Recent claim-surface events, newest first.
+          items: { $ref: '#/components/schemas/ValidatorClaimEvent' }
 
     ProfileUpdateRequest:
       allOf:

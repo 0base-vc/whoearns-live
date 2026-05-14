@@ -11,6 +11,7 @@ import { ValidatorService } from '../services/validator.service.js';
 import { closePool, createPool } from '../storage/db.js';
 import { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
 import { ClaimsRepository } from '../storage/repositories/claims.repo.js';
+import { ValidatorClaimEventsRepository } from '../storage/repositories/validator-claim-events.repo.js';
 import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
 import { ProfilesRepository } from '../storage/repositories/profiles.repo.js';
@@ -47,6 +48,7 @@ export async function startApi(): Promise<void> {
     watchedDynamic: new WatchedDynamicRepository(pool),
     profiles: profilesRepo,
     claims: claimsRepo,
+    validatorClaimEvents: new ValidatorClaimEventsRepository(pool),
     validatorGithub: new ValidatorGithubRepository(pool),
     operatorWallets: new OperatorWalletsRepository(pool),
     walletActivity: new WalletActivityRepository(pool),

@@ -694,3 +694,57 @@ export interface ValidatorProfile {
   narrativeOverride: string | null;
   updatedAt: Date;
 }
+
+/**
+ * Kinds of claim-surface mutation recorded in `validator_claim_events`
+ * (SEC-M4). Free-text in the DB so a new kind needs no migration, but
+ * the writer only ever emits these five — keeping it a union here lets
+ * the route + repo stay typed.
+ */
+export type ValidatorClaimEventType =
+  | 'claim'
+  | 'reclaim'
+  | 'profile_update'
+  | 'github_link'
+  | 'wallet_register';
+
+/**
+ * SEC-M4 — one immutable, append-only audit-log row covering a single
+ * claim-surface mutation (claim / re-claim / profile edit / GitHub link
+ * / operator-wallet registration).
+ *
+ * The table has NO foreign key to `validator_claims`: the log must
+ * survive a claim deletion, which is the whole point — an operator (or
+ * we) can still see the change history that led up to an unclaim.
+ * Written best-effort AFTER the underlying mutation succeeds; a failed
+ * audit write logs a `warn` and never fails the operator's request.
+ * See migration 0034 for the data-model rationale.
+ *
+ * `submittedIp` is a forensic field captured from `request.ip`. It is
+ * NOT surfaced by the public `GET /v1/claim/:vote/audit` endpoint —
+ * everything else here is already-public (on-chain pubkeys,
+ * operator-chosen labels, public GitHub usernames).
+ */
+export interface ValidatorClaimEvent {
+  id: number;
+  votePubkey: VotePubkey;
+  eventType: ValidatorClaimEventType;
+  /** Identity pubkey as of this event; null only if unresolved. */
+  identityPubkey: IdentityPubkey | null;
+  /**
+   * The previous identity pubkey — populated ONLY for `reclaim` events
+   * where the identity actually rotated (the smoking gun for an
+   * identity-key-compromise re-claim). Null otherwise.
+   */
+  priorIdentityPubkey: IdentityPubkey | null;
+  /**
+   * Event-specific extras. Shape varies by `eventType`:
+   *   github_link     → { githubUsername, priorGithubUsername }
+   *   wallet_register → { walletPubkey, label }
+   * All values are already-public, so this IS surfaced publicly.
+   */
+  detail: Record<string, unknown> | null;
+  /** `request.ip` at write time. Forensic — NOT publicly surfaced. */
+  submittedIp: string | null;
+  createdAt: Date;
+}

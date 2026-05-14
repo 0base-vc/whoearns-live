@@ -1,8 +1,13 @@
-import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
+import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppConfig } from '../../core/config.js';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
 import type { ClaimService, ClaimVerifyFailure } from '../../services/claim.service.js';
+import type {
+  ClaimEventInput,
+  ValidatorClaimEventsRepository,
+} from '../../storage/repositories/validator-claim-events.repo.js';
+import { cacheControl } from '../cache-control.js';
 import { sendError } from '../error-handler.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
 
@@ -50,6 +55,37 @@ function unwrap<T>(
 export interface ClaimRoutesDeps {
   config: AppConfig;
   claimService: ClaimService;
+  /**
+   * SEC-M4 — append-only audit log. The `verify` and `profile` write
+   * paths record an event here after a successful mutation. Only
+   * `append` (write) + `listByVote` (the `/audit` read) are used.
+   */
+  claimEventsRepo: Pick<ValidatorClaimEventsRepository, 'append' | 'listByVote'>;
+}
+
+/**
+ * Best-effort audit-log write (SEC-M4).
+ *
+ * Called AFTER a claim-surface mutation has already succeeded. If the
+ * append throws we log a `warn` and swallow it — a failed audit write
+ * must NEVER turn an operator's successful claim into an error
+ * response. (A fully transactional audit log would need the claim
+ * repo + events repo to share a transaction; that's out of scope for
+ * this pass — this is the deliberate best-effort tradeoff.)
+ */
+async function recordClaimEvent(
+  repo: Pick<ValidatorClaimEventsRepository, 'append'>,
+  request: FastifyRequest,
+  event: ClaimEventInput,
+): Promise<void> {
+  try {
+    await repo.append(event);
+  } catch (err) {
+    request.log.warn(
+      { err, vote: event.votePubkey, eventType: event.eventType },
+      'claim.route: audit-log append failed (best-effort, claim still succeeded)',
+    );
+  }
 }
 
 /**
@@ -201,6 +237,47 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
   });
 
   /**
+   * Public claim-change audit log (SEC-M4). Returns the recent
+   * claim-surface mutations for a vote pubkey, newest first —
+   * claims, re-claims, profile edits, GitHub links, wallet
+   * registrations. Lets an operator notice an identity-key
+   * compromise after the fact (a `reclaim` row with a non-null
+   * `priorIdentityPubkey` is the smoking gun for a silent identity
+   * rotation).
+   *
+   * No auth — like `/v1/claim/:vote/status`, this is a read of
+   * already-public facts. PRIVACY: the forensic `submitted_ip`
+   * column is NOT in the response — IP stays in the DB. Everything
+   * surfaced here (pubkeys, GitHub usernames, wallet pubkeys,
+   * operator-chosen labels) is already public on-chain or
+   * operator-published.
+   *
+   * Cache: SCORING tier (5 min client / 30 min CDN). Audit history
+   * only changes when the operator makes a claim-surface mutation —
+   * a rare, deliberate action — so a short public/CDN cache is
+   * fine and shields the table from scraping. CATALOGUE would also
+   * fit; SCORING is the slightly tighter choice so a freshly-recorded
+   * event surfaces sooner during an active claim flow.
+   */
+  app.get('/v1/claim/:vote/audit', async (request, reply) => {
+    const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
+    const events = await opts.claimEventsRepo.listByVote(params.vote);
+    void reply.header('cache-control', cacheControl('SCORING'));
+    return {
+      votePubkey: params.vote,
+      // `submittedIp` is intentionally omitted — forensic field, see
+      // the PRIVACY note above.
+      events: events.map((e) => ({
+        eventType: e.eventType,
+        identityPubkey: e.identityPubkey,
+        priorIdentityPubkey: e.priorIdentityPubkey,
+        detail: e.detail,
+        createdAt: e.createdAt.toISOString(),
+      })),
+    };
+  });
+
+  /**
    * First-time (or re-) claim. Verifies the signature without
    * touching profile state — useful for operators who want to
    * "lock in" ownership before editing anything. Idempotent: calling
@@ -208,6 +285,12 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
    */
   app.post('/v1/claim/verify', async (request, reply) => {
     const body = unwrap(ClaimVerifyBodySchema.safeParse(request.body), 'body');
+    // Read the prior claim BEFORE verifying: `verifySigned` upserts
+    // the row, so afterwards we can no longer tell a first-ever claim
+    // from a re-claim, nor recover the previous identity pubkey. This
+    // snapshot is what lets the audit log distinguish `claim` vs
+    // `reclaim` and capture an identity rotation (SEC-M4).
+    const priorClaim = await opts.claimService.getClaim(body.votePubkey);
     const result = await opts.claimService.verifySigned({
       body: {
         purpose: 'claim',
@@ -228,6 +311,21 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
         requestId: request.id,
       });
     }
+
+    // SEC-M4 — best-effort audit write AFTER the claim mutation
+    // succeeded. First-ever claim → `claim`; any subsequent claim →
+    // `reclaim`, with `priorIdentityPubkey` populated only when the
+    // identity actually rotated (a same-identity nonce-bump leaves it
+    // null). A throw here is logged + swallowed: see `recordClaimEvent`.
+    const identityRotated =
+      priorClaim !== null && priorClaim.identityPubkey !== result.claim.identityPubkey;
+    await recordClaimEvent(opts.claimEventsRepo, request, {
+      votePubkey: result.claim.votePubkey,
+      eventType: priorClaim === null ? 'claim' : 'reclaim',
+      identityPubkey: result.claim.identityPubkey,
+      priorIdentityPubkey: identityRotated ? priorClaim.identityPubkey : null,
+      submittedIp: request.ip,
+    });
 
     return {
       claimed: true,
@@ -290,6 +388,17 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
         requestId: request.id,
       });
     }
+
+    // SEC-M4 — best-effort audit write after the profile mutation
+    // succeeded. `identityPubkey` is the signer's identity (the same
+    // one the signature verified against). A throw is logged +
+    // swallowed; see `recordClaimEvent`.
+    await recordClaimEvent(opts.claimEventsRepo, request, {
+      votePubkey: body.votePubkey,
+      eventType: 'profile_update',
+      identityPubkey: body.identityPubkey,
+      submittedIp: request.ip,
+    });
 
     return {
       profile: {

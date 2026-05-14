@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
+import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppConfig } from '../../core/config.js';
 import { ValidationError } from '../../core/errors.js';
@@ -19,9 +19,38 @@ import {
   OPERATOR_WALLET_CAP_PER_VALIDATOR,
   type OperatorWalletsRepository,
 } from '../../storage/repositories/operator-wallets.repo.js';
+import type {
+  ClaimEventInput,
+  ValidatorClaimEventsRepository,
+} from '../../storage/repositories/validator-claim-events.repo.js';
 import type { ValidatorGithubRepository } from '../../storage/repositories/validator-github.repo.js';
 import { sendError } from '../error-handler.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
+
+/**
+ * Best-effort audit-log write (SEC-M4). Mirrors `recordClaimEvent` in
+ * `claim.route.ts` — each route file carries its own copy (same
+ * convention as the inline `unwrap` helper) rather than coupling on a
+ * shared export. Called AFTER a claim-surface mutation succeeds; a
+ * throw is logged `warn` and swallowed so a failed audit write can
+ * never fail the operator's request. A fully transactional audit log
+ * would need the events repo + claim repo to share a transaction —
+ * out of scope for this pass.
+ */
+async function recordClaimEvent(
+  repo: Pick<ValidatorClaimEventsRepository, 'append'>,
+  request: FastifyRequest,
+  event: ClaimEventInput,
+): Promise<void> {
+  try {
+    await repo.append(event);
+  } catch (err) {
+    request.log.warn(
+      { err, vote: event.votePubkey, eventType: event.eventType },
+      'claim-v2.route: audit-log append failed (best-effort, mutation still succeeded)',
+    );
+  }
+}
 
 /**
  * Local Zod-safeParse unwrap, matching the pattern used in
@@ -66,6 +95,12 @@ export interface ClaimV2RoutesDeps {
   operatorWalletsRepo: OperatorWalletsRepository;
   githubGistService: GithubGistVerificationService;
   operatorWalletService: OperatorWalletVerificationService;
+  /**
+   * SEC-M4 — append-only audit log. `github/verify` and
+   * `wallet/verify` record an event here after a successful mutation
+   * (best-effort; see `recordClaimEvent`).
+   */
+  claimEventsRepo: Pick<ValidatorClaimEventsRepository, 'append'>;
 }
 
 const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
@@ -253,6 +288,24 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
       }
       throw err;
     }
+    // SEC-M4 — best-effort audit write. We're past every replay /
+    // idempotent-200 branch above, so reaching here means the upsert
+    // genuinely changed the linkage (a fresh link OR a re-point to a
+    // different username). The SEC-M2 idempotent-replay 200 paths
+    // return earlier and deliberately do NOT emit — nothing changed,
+    // so a duplicate `github_link` event would be noise. `priorLink`
+    // (read above for the replay check) carries the pre-existing
+    // username, if any.
+    await recordClaimEvent(opts.claimEventsRepo, request, {
+      votePubkey: result.link.votePubkey,
+      eventType: 'github_link',
+      identityPubkey: existingClaim.identityPubkey,
+      detail: {
+        githubUsername: result.link.githubUsername,
+        priorGithubUsername: priorLink?.githubUsername ?? null,
+      },
+      submittedIp: request.ip,
+    });
     return linkResponse(result.link);
   });
 
@@ -378,6 +431,20 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
       }
       throw err;
     }
+    // SEC-M4 — best-effort audit write. Reaching here means the
+    // INSERT committed: a genuinely new operator wallet (the cap-race
+    // and nonce-replay branches above return earlier). A throw is
+    // logged + swallowed; see `recordClaimEvent`.
+    await recordClaimEvent(opts.claimEventsRepo, request, {
+      votePubkey: result.wallet.votePubkey,
+      eventType: 'wallet_register',
+      identityPubkey: existingClaim.identityPubkey,
+      detail: {
+        walletPubkey: result.wallet.walletPubkey,
+        label: result.wallet.label,
+      },
+      submittedIp: request.ip,
+    });
     return {
       wallet: {
         walletPubkey: result.wallet.walletPubkey,

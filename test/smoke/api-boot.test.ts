@@ -24,6 +24,7 @@ import type { ProcessedBlocksRepository } from '../../src/storage/repositories/p
 import type { SimdDiscussionsRepository } from '../../src/storage/repositories/simd-discussions.repo.js';
 import type { SimdProposalsRepository } from '../../src/storage/repositories/simd-proposals.repo.js';
 import type { StatsRepository } from '../../src/storage/repositories/stats.repo.js';
+import type { ValidatorClaimEventsRepository } from '../../src/storage/repositories/validator-claim-events.repo.js';
 import type { ValidatorGithubRepository } from '../../src/storage/repositories/validator-github.repo.js';
 import type { ValidatorsRepository } from '../../src/storage/repositories/validators.repo.js';
 import type { WalletActivityRepository } from '../../src/storage/repositories/wallet-activity.repo.js';
@@ -117,6 +118,13 @@ function makeDeps(): Parameters<typeof buildServer>[0] {
         upsert: async () => {},
         bumpNonce: async () => {},
       } as unknown as ClaimsRepository,
+      // Stub: SEC-M4 audit log. The smoke test never hits a
+      // claim-surface mutation or the `/v1/claim/:vote/audit` read,
+      // so a no-op `append` + empty `listByVote` satisfy DI.
+      validatorClaimEvents: {
+        append: async () => {},
+        listByVote: async () => [],
+      } as unknown as ValidatorClaimEventsRepository,
       // Stubs: the Phase 3-6 repos (Claim v2, wallet-activity,
       // SIMD proposals/discussions) are wired into `buildServer`
       // unconditionally. The smoke test never hits the routes that

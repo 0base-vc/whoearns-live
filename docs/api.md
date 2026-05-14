@@ -535,6 +535,7 @@ validator identity key. No account, cookie, or password is created.
 | ------ | ------------------------ | -------------------------------------------------- |
 | GET    | `/v1/claim/challenge`    | Returns `{ nonce, timestampSec, expiresInSec }`.   |
 | GET    | `/v1/claim/:vote/status` | Public claim/profile state for a vote pubkey.      |
+| GET    | `/v1/claim/:vote/audit`  | Public, append-only claim-change audit log.        |
 | POST   | `/v1/claim/verify`       | Verify a signed claim without editing profile.     |
 | POST   | `/v1/claim/profile`      | Verify signature and update public profile fields. |
 
@@ -560,6 +561,52 @@ Mutation bodies include:
 The signed payload binds the purpose (`claim` or `profile`), timestamp, nonce,
 pubkeys, and profile fields, so a profile signature cannot be replayed as a
 different operation.
+
+### `GET /v1/claim/:vote/audit`
+
+An immutable, append-only log of every claim-surface mutation for a vote
+pubkey — claims, re-claims, profile edits, GitHub links, and operator-wallet
+registrations — newest first. The point is forensic: if a validator identity
+key is compromised an attacker can silently re-claim, re-link GitHub, and
+register a wallet, and without this log the real operator would have no way to
+notice. A `reclaim` event whose `priorIdentityPubkey` is non-null is the
+signal that the validator identity was rotated.
+
+Public and unauthenticated, like `/v1/claim/:vote/status` — every field
+returned is already public on-chain or operator-published. The `submitted_ip`
+recorded with each event (the request IP at write time) is a forensic field
+that stays in the database and is **not** included in the response. Cache:
+`public, max-age=300, s-maxage=1800` (5 min browser, 30 min CDN) — audit
+history only changes on a deliberate claim-surface mutation.
+
+```json
+{
+  "votePubkey": "Vote111111111111111111111111111111111111111",
+  "events": [
+    {
+      "eventType": "reclaim",
+      "identityPubkey": "Node222222222222222222222222222222222222222",
+      "priorIdentityPubkey": "Node111111111111111111111111111111111111111",
+      "detail": null,
+      "createdAt": "2026-05-14T12:00:00.000Z"
+    },
+    {
+      "eventType": "github_link",
+      "identityPubkey": "Node111111111111111111111111111111111111111",
+      "priorIdentityPubkey": null,
+      "detail": { "githubUsername": "alice", "priorGithubUsername": null },
+      "createdAt": "2026-05-10T09:30:00.000Z"
+    }
+  ]
+}
+```
+
+`detail` is event-specific: `{ githubUsername, priorGithubUsername }` for
+`github_link`, `{ walletPubkey, label }` for `wallet_register`, and `null` for
+`claim` / `reclaim` / `profile_update`. The audit write is best-effort — it
+happens after the underlying mutation commits, so a transient audit-write
+failure never fails the operator's claim (and, by the same token, is not yet
+transactional with it).
 
 ## Image surfaces
 
