@@ -184,17 +184,19 @@ The first version of this tracker's HIGH section was a **reconstruction
 from memory after a context compaction** — it mapped every HIGH item
 onto B1-B6 and marked them all `[x]`. That was wrong. The eight raw
 per-expert reports were later recovered from the session transcript
-and reconciled against the three hardening commits. The corrected
+and reconciled against the hardening commits. The corrected
 itemisation below is sourced directly from those reports (agent IDs
 cited per domain so the full text stays recoverable).
 
-**Headline correction: ~10 of the 22 per-report HIGH items are still
-open.** B1-B6 + the MED/LOW sweep genuinely closed 12 HIGH items;
-they did NOT close the REST error-envelope items, the four TypeScript
-architecture items, or the two cross-cutting OAI-semantics items. The
-earlier "SEC-1 / REST-1..5 / SOL-3 / TS-1 / SEC-2" labels were invented
-during the reconstruction and do not correspond to real findings —
-they are replaced wholesale below.
+**The reconciliation found 10 genuinely-open HIGH items** that B1-B6 +
+the MED/LOW sweep had NOT closed — the four REST items, the four
+TypeScript-architecture items, and the two cross-cutting OAI-semantics
+items. Those were then closed by a dedicated three-agent fix pass
+(commits `3f13b18` TS, `4cf711b` REST, `8357bef` Cross-cutting).
+**All 22 per-report HIGH items are now closed.** The MED (~52) and LOW
+(~42) backlogs remain. The earlier "SEC-1 / REST-1..5 / SOL-3 / TS-1 /
+SEC-2" labels were invented during the reconstruction and do not
+correspond to real findings — they are replaced wholesale below.
 
 ## HIGH-severity items (itemised, per expert report)
 
@@ -238,94 +240,104 @@ said 21 — it under-counted TypeScript by one).
 - [x] **OPS-H1**: Helm chart templates none of the P2-P6 env vars. → B5.a.
 - [x] **OPS-H2**: `ANTHROPIC_API_KEY` has no Secret pattern. → B5.b.
 
-### REST / HTTP — 5 HIGH, 1 closed / 4 OPEN _(agent a711d2da)_
+### REST / HTTP — 5 HIGH, ALL CLOSED _(agent a711d2da)_
 
 - [x] **REST-H1**: 5 P3-P6 endpoints absent from `docs/openapi.yaml`. → B3.
-- [ ] **REST-H2**: `llms.txt` + `llms-full.txt` are **stale** —
-      `seo.route.ts:193-345` emits them as **hand-written static
-      strings** enumerating only the v0.4 surface. **The earlier
-      tracker claimed these were "dynamically emitted from OpenAPI" —
-      verified false.** They list none of `/badge/*`, `/tier`,
-      `/badges`, `/v1/simd-proposals`, OAI, claim-v2. Fix: regenerate
-      both bodies in lockstep with the OpenAPI surface.
-- [ ] **REST-H3**: `robots.txt` AI-crawler allow-list
-      (`seo.route.ts:154-191`) only permits GPTBot/ClaudeBot/PerplexityBot
-      on `/v1/leaderboard`, `/v1/epoch/current`, `/v1/validators/search`
-      — every new public GET is `Disallow`. _(Solana/REST split: the
-      REST expert tagged the robots line MED and the llms lines HIGH;
-      counted here with REST-H2 as the "OpenAPI/llms drift ×3" the
-      report summary cites. Treated as HIGH-adjacent — fix alongside H2.)_
-- [ ] **REST-H4**: inline `reply.code().send({error})` payloads omit
-      the `details` field the central `error-handler.ts` supports —
-      ~20 call sites in `claim.route.ts`, plus `operator-activity-index`,
-      `badge`, `og`. Clients must branch on handler-envelope vs
-      route-envelope. Fix: a `sendError(reply, code, status, msg, details?)`
-      helper, route all inline errors through it.
-- [ ] **REST-H5**: `claim/github/verify` + `claim/wallet/verify` call
-      `Schema.parse()` instead of the `safeParse()` + `unwrap()` pattern
-      every other claim endpoint uses — inconsistent error `code`
-      (`validation_error` vs `ValidationError`) for the same failure.
+- [x] **REST-H2**: `llms.txt` + `llms-full.txt` were **stale** —
+      `seo.route.ts` emits them as **hand-written static strings** that
+      enumerated only the v0.4 surface. **The earlier tracker claimed
+      these were "dynamically emitted from OpenAPI" — verified false.**
+      → `4cf711b`: added an "API endpoints" section to `llms.txt` and
+      nine `### <METHOD> <path>` reference sections to `llms-full.txt`
+      covering tier / badges / OAI / operator-wallets activity /
+      simd-proposals / SVG badge / both claim-v2 POSTs.
+- [x] **REST-H3**: `robots.txt` AI-crawler allow-list only permitted
+      GPTBot/ClaudeBot/PerplexityBot/Googlebot on three v0.4 endpoints.
+      → `4cf711b`: widened to the full public GET read surface via
+      prefix matches (`/v1/validators/`, `/badge/`,
+      `/v1/operator-wallets/`, `/v1/simd-proposals`); POST `/v1/claim/*`
+      mutations deliberately excluded.
+- [x] **REST-H4**: inline `reply.code().send({error})` payloads omit
+      the `details` field the central `error-handler.ts` supports.
+      → `4cf711b`: added an exported `sendError(reply, {code,
+    statusCode, message, requestId, details?})` helper routing
+      through the same `makePayload` the central handler uses;
+      converted 19 inline sites across claim / claim-v2 / badge / og.
+      (`operator-activity-index.route.ts` had none — it throws
+      `AppError`s. `mcp.route.ts` has a hand-built envelope but is a
+      separate JSON-RPC surface — left as a follow-up, see REST-M.)
+- [x] **REST-H5**: `claim/github/verify` + `claim/wallet/verify` called
+      `Schema.parse()` instead of the `safeParse()` + `unwrap()` pattern.
+      → `4cf711b`: switched both (now in `claim-v2.route.ts`) to
+      `unwrap(...safeParse(...), 'body')`.
 
-### TypeScript architecture — 4 HIGH, 0 closed / 4 OPEN _(agent a1801710)_
+### TypeScript architecture — 4 HIGH, ALL CLOSED _(agent a1801710)_
 
-- [ ] **TS-H1**: optional-dep facade with no actual flag. Every P3+
-      repo is declared `?:` "for when the gamification flag is off" —
-      but **there is no flag**; `api.ts` instantiates all five repos
-      unconditionally. `requireP3Deps()` + the four
-      `if (deps.repos.X !== undefined)` blocks are dead code that can
-      never fire. Fix: land a real `GAMIFICATION_ENABLED` config flag
-      OR collapse the `?:` to required and delete the guards.
-- [ ] **TS-H2**: `as unknown as <PayloadType>` on the HEAD
-      short-circuits (`validators.route.ts:413`,
-      `operator-activity-index.route.ts:104`) lies about the runtime
-      value (`''` typed as `BadgesResponse`/`OaiResponse`). _Note: the
-      MED/LOW sweep and Option A both edited the OAI HEAD path and
-      **kept** this cast._ Fix: type the handler `void`/`reply`, or
-      split GET and HEAD into separate handlers.
-- [ ] **TS-H3**: `claim.route.ts` is 694 lines housing two unrelated
-      concerns (v1 claim + v2 Gist/wallet), with crypto-adjacent
-      freshness/nonce/SQLSTATE logic inlined at the route layer. Fix:
-      split `claim-v2.route.ts`, push freshness/replay into the
-      verification services.
-- [ ] **TS-H4**: `_fakes.ts` covers none of the five new repos
-      (`ValidatorGithubRepository`, `OperatorWalletsRepository`,
-      `WalletActivityRepository`, `SimdProposalsRepository`,
-      `SimdDiscussionsRepository`) — each test file hand-rolls its own
-      fake, free to drift from the real repo. Fix: lift the five repo
-      fakes into the shared `_fakes.ts`.
+- [x] **TS-H1**: optional-dep facade with no actual flag — every P3+
+      repo declared `?:` "for when the gamification flag is off" but no
+      flag existed; `api.ts` instantiated all repos unconditionally, so
+      `requireP3Deps()` + the four `if (deps.repos.X !== undefined)`
+      blocks were unreachable dead code. → `3f13b18`: collapsed the
+      `?:` deps to required, deleted `requireP3Deps()` + call sites,
+      made the four conditional registrations unconditional. No config
+      flag added — the honest fix is dropping the pretence.
+- [x] **TS-H2**: `as unknown as <PayloadType>` on the HEAD
+      short-circuits lied about the runtime value (`''` typed as a
+      structured response). → `3f13b18`: widened both handler return
+      types to `Promise<<Payload> | void>` and changed the HEAD path to
+      `void reply...send(''); return;`. `badge.route.ts` inspected — no
+      cast lie there, left as-is.
+- [x] **TS-H3**: `claim.route.ts` was 694 lines housing two unrelated
+      concerns. → `3f13b18`: pure mechanical move — the two v2 endpoints + their exclusive helpers split into `claim-v2.route.ts`, wired
+      into `server.ts`; `claim.route.ts` 694→339 lines, identical
+      routes/behaviour. _(The deeper "push freshness/replay into the
+      verification services" part of the original finding was NOT
+      done — scoped to the file split only; tracked as TS-M6-adjacent.)_
+- [x] **TS-H4**: `_fakes.ts` covered none of the five new repos. →
+      `3f13b18`: lifted the two repo fakes that were actually inlined
+      (`FakeWalletActivityRepo`, `FakeSimdProposalsRepo`) into the
+      shared `test/unit/services/_fakes.ts`, re-exported from
+      `test/unit/api`. The other three repos have no test consumer, so
+      no unused fakes were invented.
 - _(`TS-2` in the old tracker — "promote OAI types to domain.ts" — was
   NOT a review finding. It shipped in Option B and is harmless, but the
   TS expert actually flagged `domain.ts` as a growing **god-module**
   that should be **split** — see TS-M1 below.)_
 
-### Cross-cutting integration — 3 HIGH, 1 closed / 2 OPEN _(agent a4264d40)_
+### Cross-cutting integration — 3 HIGH, ALL CLOSED _(agent a4264d40)_
 
 - [x] **CROSS-H2**: `docs/api.md` + `docs/openapi.yaml` out of sync
       with shipped code. → B3 (openapi) + MED/LOW sweep (api.md got the
       missing Phase 5 + 6 sections).
-- [ ] **CROSS-H1**: the documented `claim → github → wallet → OAI`
-      happy-path has **no working happy-path** — OAI returns
-      `composite: null` or a wallet-only number because the Discussions
-      ingest job is unshipped and P4 fees are `null`. The response
-      can't distinguish "linked but no comments" from "ingest not
-      running." Fix: add a top-level `ingestStatus`
-      (`{ governanceIngestActive, walletFeesIngestActive }`) block.
-- [ ] **CROSS-H3**: the public OAI endpoint scores `governance.score: 0`
-      for **every** linked validator during the pre-ingest period (real
-      number, not a sentinel). A pool-delegation script filtering
-      `score >= 50` silently excludes everyone. Fix: return
-      `governance.score: null` until the ingest cursor has advanced;
-      document the `null` semantics.
+- [x] **CROSS-H1**: the documented `claim → github → wallet → OAI`
+      happy-path had no working happy-path — OAI couldn't distinguish
+      "linked but no comments" from "ingest not running." → `8357bef`:
+      added a top-level `ingestStatus`
+      (`{ governanceIngestActive, walletFeesIngestActive }`) block so
+      the response self-documents the partial release.
+- [x] **CROSS-H3**: the public OAI endpoint scored `governance.score: 0`
+      for **every** linked validator during the pre-ingest period — a
+      real `0` indistinguishable from "no comments." → `8357bef`:
+      returns `governance.score: null` (and `composite: null`, since a
+      50/50 blend can't be honestly reported with one half unknowable)
+      while the GitHub Discussions ingest is inactive — signalled by
+      `SimdDiscussionsRepository.hasAnyData()`. `walletScore` + the
+      sub-component counts stay populated. Service kept pure; the route
+      owns the partial-release honesty. Docs + a 3-case route test added.
 
 ### HIGH scorecard
 
-**12 of the 22 HIGH closed** — DB-H1, DB-H2, SOL-H1, SOL-H2,
-AI-H1, AI-H2, AI-H3, AI-H4, OPS-H1, OPS-H2, REST-H1, CROSS-H2.
-(Plus the Wilson-direction fix, which the Solana expert tagged MED
-but the synthesis elevated to BLOCKER B2 — also closed.)
+**ALL 22 of the 22 HIGH items closed.**
 
-**10 of the 22 HIGH still open** — REST-H2, REST-H3, REST-H4,
-REST-H5, TS-H1, TS-H2, TS-H3, TS-H4, CROSS-H1, CROSS-H3.
+- Option A (`7299b3b`) — DB-H1, DB-H2, SOL-H1, SOL-H2, Wilson (B2),
+  AI-H1, AI-H2, AI-H3, AI-H4, OPS-H1, OPS-H2, REST-H1, CROSS-H2 (the
+  openapi half).
+- TS domain (`3f13b18`) — TS-H1, TS-H2, TS-H3, TS-H4.
+- REST domain (`4cf711b`) — REST-H2, REST-H3, REST-H4, REST-H5.
+- Cross-cutting domain (`8357bef`) — CROSS-H1, CROSS-H3.
+
+Remaining open work is the **MED backlog** (~52 items, below) and the
+LOW backlog (~42). No HIGH items remain.
 
 ## MED items (itemised, per expert report)
 
@@ -387,7 +399,7 @@ by the three hardening commits; **most are open.**
 - [ ] **REST-M1**: `robots.txt` allow-list stale (see REST-H3).
 - [ ] **REST-M2**: Gist/wallet failure responses set `code` = `message`
       = the machine reason string (`{code:"fetch_failed",
-    message:"fetch_failed"}`) — needs a `humanMessageFor...` lookup.
+  message:"fetch_failed"}`) — needs a `humanMessageFor...` lookup.
 - [ ] **REST-M3**: `/v1/simd-proposals` + `/v1/operator-wallets/:wallet/activity` + `/v1/validators/:idOrVote/tier` lack HEAD short-circuits — HEAD
       pays the full DB cost.
 - [ ] **REST-M4**: OAI runs 5-7 queries inside the 60/min/IP budget —
@@ -531,9 +543,13 @@ MED backlog. Treat the MED list above as the source of truth.
 
 ## Closure record
 
-| Commit                                                    | Genuinely closed                                                                                                                    | Notes                                                                                                                                  |
-| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `fix(hardening): adversarial-review Option A — B1-B6`     | B1 (SOL-H1/H2), B2 (Wilson), B3 (REST-H1 + CROSS-H2 openapi half), B4.a-c (AI-H1/H2/H4 + AI-H3 path), B5 (OPS-H1/H2), B6 (DB-H1/H2) | 11 HIGH. The bundled tracker's "REST-1..5 / SOL-3 / TS-1 / SEC-1" labels were reconstruction artefacts.                                |
-| `fix(hardening): Option B — B4.d/AI-3, AI-4, OPS-2, TS-2` | B4.d/AI-3 (body-drift re-curation), AI-4 (reviewer note)                                                                            | OPS-2 (ServiceMonitor) + TS-2 (type promotion) were **self-directed**, not review findings — harmless but not in the 22 HIGH / 52 MED. |
-| `docs+fix(hardening): MED/LOW sweep`                      | CROSS-H2 (api.md half), substance of REST-M-cache/CROSS-M3                                                                          | Scoped against the cluster approximation, not this itemised list — see "What the three commits actually did" above.                    |
-| _pending_                                                 | REST-H2/H3/H4/H5, TS-H1/H2/H3/H4, CROSS-H1/H3 (~10 HIGH) + the MED backlog                                                          | The real remaining work. SEC-2 from the old tracker was not a finding and is dropped.                                                  |
+| Commit                                                               | Genuinely closed                                                                                                                    | Notes                                                                                                                                  |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `fix(hardening): adversarial-review Option A — B1-B6`                | B1 (SOL-H1/H2), B2 (Wilson), B3 (REST-H1 + CROSS-H2 openapi half), B4.a-c (AI-H1/H2/H4 + AI-H3 path), B5 (OPS-H1/H2), B6 (DB-H1/H2) | 11 HIGH. The bundled tracker's "REST-1..5 / SOL-3 / TS-1 / SEC-1" labels were reconstruction artefacts.                                |
+| `fix(hardening): Option B — B4.d/AI-3, AI-4, OPS-2, TS-2`            | B4.d/AI-3 (body-drift re-curation), AI-4 (reviewer note)                                                                            | OPS-2 (ServiceMonitor) + TS-2 (type promotion) were **self-directed**, not review findings — harmless but not in the 22 HIGH / 52 MED. |
+| `docs+fix(hardening): MED/LOW sweep`                                 | CROSS-H2 (api.md half), substance of REST-M-cache/CROSS-M3                                                                          | Scoped against the cluster approximation, not this itemised list — see "What the three commits actually did" above.                    |
+| `docs(hardening): correct tracker from recovered transcript reports` | (no code) — replaced the reconstructed HIGH section with the itemised list recovered from the 8 transcript reports                  | This document. Surfaced the 10 genuinely-open HIGH items the reconstruction had hidden.                                                |
+| `fix(hardening): close 4 TypeScript-architecture HIGH items`         | TS-H1, TS-H2, TS-H3, TS-H4                                                                                                          | Dedicated fix pass — TS agent `a667329478b61de94`. 529 unit+smoke tests pass.                                                          |
+| `fix(hardening): close 4 REST/HTTP HIGH items`                       | REST-H2, REST-H3, REST-H4, REST-H5                                                                                                  | Dedicated fix pass — REST agent `ad7427fec7cacdb90`. 529 unit+smoke tests pass.                                                        |
+| `fix(hardening): close 2 cross-cutting OAI-semantics HIGH items`     | CROSS-H1, CROSS-H3                                                                                                                  | Dedicated fix pass — Cross-cutting agent `a80125a6b9980b84d`. 532 unit+smoke tests pass.                                               |
+| _pending_                                                            | The MED backlog (~52 items, itemised above) + the LOW backlog (~42)                                                                 | All 22 HIGH items are now closed. SEC-2 from the old tracker was not a finding and is dropped.                                         |
