@@ -51,7 +51,13 @@ const JITO_RE = /-jito/i;
 const FIREDANCER_RE = /^0\./; // 0.x.y semver — Firedancer / Frankendancer
 const FRANKENDANCER_RE = /(frkd|frankendancer)/i;
 const PALADIN_RE = /paladin/i;
-const SIG_RE = /-sig$|^sig-/i;
+// `sig` (Syndica's Sig client) shows up in several gossip-string
+// shapes in the wild: hyphen-suffixed (`...-sig`), hyphen-prefixed
+// (`sig-0.1.0`), embedded in a longer vendor product string
+// (`solana-sig-validator/0.1.0`), or space-separated (`Sig 0.1.0`).
+// The `sig` token must be word-delimited so it can't match an
+// arbitrary substring (e.g. `signature`, `design`).
+const SIG_RE = /(^|[\s/_-])sig([\s/_-]|$)/i;
 
 /**
  * Classify a validator's gossip `version` string into one of the

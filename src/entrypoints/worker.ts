@@ -70,9 +70,11 @@ export async function startWorker(): Promise<void> {
   // so validators tracked on-demand from the API start flowing through
   // without a worker restart.
   const watchedDynamicRepo = new WatchedDynamicRepository(pool);
-  // CursorsRepository is instantiated for future use by jobs that checkpoint
-  // progress through longer pipelines. Not consumed directly here yet.
-  new CursorsRepository(pool);
+  // Per-job ingest checkpoint store. Consumed by the wallet-activity
+  // indexer (per-wallet "newest signature seen" cursor — SOL-M1
+  // backward pagination); available for any future job that needs to
+  // checkpoint progress through a longer pipeline.
+  const cursorsRepo = new CursorsRepository(pool);
 
   // Cost-aware upstream rate limit, keyed off env. When
   // `SOLANA_RPC_CREDITS_PER_SEC` is 0 (default), we skip the bucket
@@ -283,6 +285,7 @@ export async function startWorker(): Promise<void> {
   const walletActivityIndexer = new WalletActivityIndexerService({
     rpc,
     repo: walletActivityRepo,
+    cursors: cursorsRepo,
     logger,
   });
   scheduler.register(

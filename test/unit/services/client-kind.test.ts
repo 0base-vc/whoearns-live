@@ -27,6 +27,24 @@ describe('classifyClient', () => {
     expect(classifyClient('sig-0.1.0')).toBe('sig');
   });
 
+  it('detects sig client across real-world gossip-string shapes', () => {
+    // Hyphen-suffixed, vendor-product-string, and space-separated
+    // forms all observed in the wild — see SIG_RE comment.
+    expect(classifyClient('0.1.0-sig')).toBe('sig');
+    expect(classifyClient('solana-sig-validator/0.1.0')).toBe('sig');
+    expect(classifyClient('Sig 0.1.0')).toBe('sig');
+    // The `sig` token is word-delimited — a substring match must not
+    // mis-classify an unrelated string.
+    expect(classifyClient('2.0.18-signature-thing')).not.toBe('sig');
+  });
+
+  it('classifies hybrid Frankendancer/Jito strings as frankendancer', () => {
+    // A `0.x` Frankendancer build carrying a `-jito` marker is still
+    // Frankendancer — the `frkd` token wins because FRANKENDANCER_RE
+    // is matched before both the JITO and bare-0.x rules.
+    expect(classifyClient('0.405.20218-jito-frkd-rc1')).toBe('frankendancer');
+  });
+
   it('returns unknown for null / empty / unrecognised strings', () => {
     expect(classifyClient(null)).toBe('unknown');
     expect(classifyClient(undefined)).toBe('unknown');

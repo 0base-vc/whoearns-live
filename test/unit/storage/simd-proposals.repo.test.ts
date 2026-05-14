@@ -66,6 +66,9 @@ describe('SimdProposalsRepository — AI-3 body-drift', () => {
     // Re-curation demotes the row back to needs-review.
     expect(sql).toMatch(/reviewed_at\s*=\s*NULL/);
     expect(sql).toMatch(/reviewer_note\s*=\s*NULL/);
+    // `ai_questions` is JSONB (0031) — written as a JSON string param
+    // cast `::jsonb`, not a bare Postgres array literal.
+    expect(sql).toMatch(/ai_questions\s*=\s*\$3::jsonb/);
     expect(params[0]).toBe(42);
     expect(params[1]).toBe('neutral summary');
     expect(params[2]).toBe(JSON.stringify(['Q: a', 'Q: b', 'Q: c']));
@@ -80,7 +83,9 @@ describe('SimdProposalsRepository — AI-3 body-drift', () => {
         source_url: 'https://example.test/0007.md',
         body_sha256: 'newhash',
         ai_summary: 's',
-        ai_questions: JSON.stringify(['Q: x', 'Q: y', 'Q: z']),
+        // JSONB column (0031): `pg` returns the already-parsed array,
+        // NOT a JSON string — the FakePool row mirrors that shape.
+        ai_questions: ['Q: x', 'Q: y', 'Q: z'],
         ai_generated_at: new Date('2026-01-01T00:00:00Z'),
         ai_body_sha256: 'oldhash',
         reviewed_at: null,
@@ -95,6 +100,32 @@ describe('SimdProposalsRepository — AI-3 body-drift', () => {
     expect(proposal!.aiBodySha256).toBe('oldhash');
     expect(proposal!.bodySha256).toBe('newhash');
     expect(proposal!.reviewerNote).toBe('looked fine');
+    // Round-trips the parsed JSONB array through the string narrowing.
+    expect(proposal!.aiQuestions).toEqual(['Q: x', 'Q: y', 'Q: z']);
+  });
+
+  it('reads ai_questions back as null when the JSONB value is NULL', async () => {
+    pool.nextRows = [
+      {
+        simd_number: 8,
+        title: 'T',
+        status: 'review',
+        source_url: 'https://example.test/0008.md',
+        body_sha256: 'h',
+        ai_summary: null,
+        ai_questions: null,
+        ai_generated_at: null,
+        ai_body_sha256: null,
+        reviewed_at: null,
+        reviewed_by: null,
+        reviewer_note: null,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+      },
+    ];
+    const proposal = await repo.findByNumber(8);
+    expect(proposal).not.toBeNull();
+    expect(proposal!.aiQuestions).toBeNull();
   });
 });
 

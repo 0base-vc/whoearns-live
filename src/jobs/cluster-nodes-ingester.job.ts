@@ -70,17 +70,25 @@ export function createClusterNodesIngesterJob(deps: ClusterNodesIngesterJobDeps)
           deps.logger.warn('cluster-nodes-ingester: empty getClusterNodes response');
           return;
         }
-        const { updated } = await deps.validatorsRepo.upsertClientBatch(entries);
-        // Only log when the steady-state is moving — otherwise this is
-        // ~2000 unchanged rows every 30 minutes and not worth a line.
+        const { updated, attempted } = await deps.validatorsRepo.upsertClientBatch(entries);
+        // `attempted - updated` (DB-M2) folds together identities
+        // already at their current classification (the steady-state)
+        // and gossip identities with no `validators` row — the
+        // UPDATE...FROM no-match. We can't split the two cheaply here,
+        // but logging the gap at `debug` makes gossip/validators
+        // divergence observable instead of fully silent.
+        const unchangedOrSkipped = attempted - updated;
+        // Only log at `info` when the steady-state is moving —
+        // otherwise this is ~2000 unchanged rows every 30 minutes and
+        // not worth a line.
         if (updated > 0) {
           deps.logger.info(
-            { observed: entries.length, updated },
+            { observed: entries.length, updated, unchangedOrSkipped },
             'cluster-nodes-ingester: classifications updated',
           );
         } else {
           deps.logger.debug(
-            { observed: entries.length },
+            { observed: entries.length, unchangedOrSkipped },
             'cluster-nodes-ingester: no client drift this tick',
           );
         }

@@ -63,6 +63,22 @@ export class WalletActivityRepository {
     const dates = rows.map((r) => r.activityDate);
     const counts = rows.map((r) => r.txCount);
     const fees = rows.map((r) => r.txFeesLamports.toString());
+    // DB-M7: UNNEST silently truncates to the SHORTEST array, so a
+    // length mismatch would write a partial, corrupt batch with no
+    // error. All four arrays are `.map()`-derived from the same
+    // `rows` list — a mismatch is a programming error, so fail fast
+    // with a clear message instead of issuing the query.
+    if (
+      wallets.length !== dates.length ||
+      wallets.length !== counts.length ||
+      wallets.length !== fees.length
+    ) {
+      throw new Error(
+        `upsertBatch: array length mismatch ` +
+          `(wallets=${wallets.length}, dates=${dates.length}, ` +
+          `counts=${counts.length}, fees=${fees.length})`,
+      );
+    }
 
     const { rowCount } = await this.pool.query(
       `INSERT INTO wallet_daily_activity

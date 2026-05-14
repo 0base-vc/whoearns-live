@@ -179,7 +179,15 @@ export const ConfigSchema = z.object({
   SOLANA_RPC_BURST_CREDITS: NonNegativeInt.default(0),
 
   POSTGRES_URL: NonEmptyString,
-  POSTGRES_POOL_SIZE: PositiveInt.default(10),
+  /**
+   * Max connections in the `pg` pool. Bumped 10 → 20 (DB-M6): routes
+   * like the Operator Activity Index now fan several independent
+   * reads out concurrently via `Promise.all`, so a single in-flight
+   * request can hold more than one connection at once. 20 keeps
+   * headroom for a handful of concurrent fan-out requests without
+   * starving the pool; raise further for high-concurrency deploys.
+   */
+  POSTGRES_POOL_SIZE: PositiveInt.default(20),
   POSTGRES_STATEMENT_TIMEOUT_MS: PositiveInt.default(10_000),
 
   VALIDATORS_WATCH_LIST: WatchListSchema,

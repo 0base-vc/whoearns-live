@@ -18,15 +18,16 @@ describe('summariseTenure', () => {
 
   it('assigns the OLDEST landmark the validator predates (no double-counting)', () => {
     // A validator with first_seen = 100 predates BOTH MAINNET_BETA_LAUNCH (0)
-    // AND CYCLE_1_OG (150). They should receive the latter (the most-recent
+    // AND CYCLE_1_OG. They should receive the latter (the most-recent
     // landmark they still predate) — not the earliest one they predate.
     const t = summariseTenure(100, 1000);
     expect(t.landmark).toBe('CYCLE_1_OG');
   });
 
   it('classifies a recent-era operator into the RECENT landmark', () => {
-    // FIREDANCER_LAUNCH (850) < first_seen <= RECENT (950) → RECENT.
-    const t = summariseTenure(TENURE_LANDMARKS.FIREDANCER_LAUNCH + 100, 1000);
+    // FIREDANCER_LAUNCH < first_seen <= RECENT → RECENT. Computed off
+    // the constants so the recalibration in tenure.ts can't desync it.
+    const t = summariseTenure(TENURE_LANDMARKS.FIREDANCER_LAUNCH + 100, TENURE_LANDMARKS.RECENT);
     expect(t.landmark).toBe('RECENT');
     expect(t.badge).toBe('Recent-Era Operator');
   });

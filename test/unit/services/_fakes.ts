@@ -28,6 +28,7 @@ import type {
   EpochPeerBenchmark,
   EpochValidatorStats,
   IdentityPubkey,
+  IngestionCursor,
   ProcessedBlock,
   SimdProposal,
   Slot,
@@ -1480,6 +1481,28 @@ export class FakeWalletActivityRepo {
     return [...this.rows.values()]
       .filter((r) => r.walletPubkey === wallet)
       .sort((a, b) => b.activityDate.getTime() - a.activityDate.getTime());
+  }
+}
+
+/**
+ * Fake CursorsRepository — in-memory mirror of `ingestion_cursors`.
+ * Used by the wallet-activity indexer tests to exercise the SOL-M1
+ * per-wallet checkpoint read/write without a live Postgres. Only the
+ * `get` / `upsert` surface the indexer touches is modelled.
+ */
+export class FakeCursorsRepo {
+  readonly rows = new Map<string, IngestionCursor>();
+
+  async get(jobName: string): Promise<IngestionCursor | null> {
+    return this.rows.get(jobName) ?? null;
+  }
+
+  async upsert(c: Omit<IngestionCursor, 'updatedAt'>): Promise<void> {
+    this.rows.set(c.jobName, { ...c, updatedAt: new Date() });
+  }
+
+  async clear(jobName: string): Promise<void> {
+    this.rows.delete(jobName);
   }
 }
 

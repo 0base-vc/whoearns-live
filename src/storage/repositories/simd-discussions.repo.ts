@@ -58,6 +58,26 @@ export class SimdDiscussionsRepository {
     const reactions = comments.map((c) => c.reactionsCount);
     const actives = comments.map((c) => c.activeWindow);
     const createdAts = comments.map((c) => c.createdAt.toISOString());
+    // DB-M7: UNNEST silently truncates to the SHORTEST array, so a
+    // length mismatch would write a partial, corrupt batch with no
+    // error. All six arrays are `.map()`-derived from the same
+    // `comments` list — a mismatch is a programming error, so fail
+    // fast with a clear message instead of issuing the query.
+    const n = discussionNumbers.length;
+    if (
+      commentIds.length !== n ||
+      usernames.length !== n ||
+      reactions.length !== n ||
+      actives.length !== n ||
+      createdAts.length !== n
+    ) {
+      throw new Error(
+        `upsertBatch: array length mismatch ` +
+          `(discussionNumbers=${n}, commentIds=${commentIds.length}, ` +
+          `usernames=${usernames.length}, reactions=${reactions.length}, ` +
+          `actives=${actives.length}, createdAts=${createdAts.length})`,
+      );
+    }
 
     const { rowCount } = await this.pool.query(
       `INSERT INTO simd_discussion_comments

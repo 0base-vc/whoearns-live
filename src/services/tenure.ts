@@ -23,20 +23,20 @@
 export const TENURE_LANDMARKS = {
   /** Mainnet-beta launch (March 16, 2020). */
   MAINNET_BETA_LAUNCH: 0,
-  /** Epoch ~150 = end of 2020, "Cycle 1 OG" cutoff. */
-  CYCLE_1_OG: 150,
-  /** Wormhole launch era (~epoch 230). */
-  CROSS_CHAIN_ERA: 230,
-  /** "DeFi summer 2.0" / Phantom launch era. */
+  /** Calibrated estimate: ~end of 2020, "Cycle 1 OG" cutoff. */
+  CYCLE_1_OG: 200,
+  /** Calibrated estimate: Wormhole / cross-chain bridge era. */
+  CROSS_CHAIN_ERA: 250,
+  /** Calibrated estimate: "DeFi summer 2.0" / Phantom launch era. */
   DEFI_2: 350,
-  /** Pre-FTX collapse. */
+  /** Pre-FTX collapse (Nov 2022) — anchored to the known event. */
   PRE_FTX: 360,
-  /** 2024 — Jito v2 rollout. */
-  JITO_V2: 700,
-  /** 2025 — Firedancer mainnet. */
-  FIREDANCER_LAUNCH: 850,
-  /** 2026 onward — recent operators. */
-  RECENT: 950,
+  /** Calibrated estimate: 2024 Jito v2 rollout. */
+  JITO_V2: 560,
+  /** Calibrated estimate: Frankendancer-on-mainnet (pure Firedancer is not mainnet yet). */
+  FIREDANCER_LAUNCH: 712,
+  /** Calibrated estimate: recent operators (today, 2026-05, is ~epoch 1015). */
+  RECENT: 1000,
 } as const;
 
 export interface TenureSummary {
@@ -66,7 +66,7 @@ export interface TenureSummary {
  *     and violates the OpenAPI `integer, minimum: 0` contract.
  *
  * **Landmark maintenance.** Today the highest landmark is
- * `RECENT: 950`. As mainnet epoch advances past `RECENT + ~200`,
+ * `RECENT: 1000`. As mainnet epoch advances past `RECENT + ~200`,
  * the "Recent Operator" bucket will widen indefinitely — add a new
  * landmark for the most recent meaningful network event and bump
  * `RECENT` accordingly. Keep the chain short; bloat dilutes the

@@ -8,7 +8,13 @@ interface SimdProposalRow {
   source_url: string;
   body_sha256: string | null;
   ai_summary: string | null;
-  ai_questions: string | null;
+  // `ai_questions` is a JSONB column (migration 0031) — `pg` returns
+  // the already-parsed value, so this is `unknown[] | null` here, not
+  // the raw JSON string the pre-0031 TEXT column produced. A DB CHECK
+  // (`jsonb_typeof = 'array'`) guarantees array-or-NULL, but we still
+  // narrow defensively in `rowToProposal` rather than trusting the
+  // shape blindly.
+  ai_questions: unknown[] | null;
   ai_generated_at: Date | null;
   ai_body_sha256: string | null;
   reviewed_at: Date | null;
@@ -19,18 +25,16 @@ interface SimdProposalRow {
 }
 
 function rowToProposal(row: SimdProposalRow): SimdProposal {
+  // `ai_questions` arrives pre-parsed from the JSONB column (0031).
+  // The DB CHECK enforces array-or-NULL, but a row could still hold a
+  // non-string element if something wrote one before the CHECK
+  // existed — keep the per-element string narrowing so the typed
+  // `string[] | null` contract holds. No try/catch needed: there is
+  // no JSON string to parse, so the old "corrupt JSON silently reads
+  // back as null" failure mode is gone.
   let aiQuestions: string[] | null = null;
-  if (row.ai_questions !== null) {
-    try {
-      const parsed: unknown = JSON.parse(row.ai_questions);
-      if (Array.isArray(parsed) && parsed.every((q) => typeof q === 'string')) {
-        aiQuestions = parsed;
-      }
-    } catch {
-      // Corrupt JSON — keep aiQuestions null rather than crashing the
-      // read path. The sync job will overwrite on next AI pass.
-      aiQuestions = null;
-    }
+  if (Array.isArray(row.ai_questions) && row.ai_questions.every((q) => typeof q === 'string')) {
+    aiQuestions = row.ai_questions as string[];
   }
   return {
     simdNumber: row.simd_number,
@@ -110,10 +114,16 @@ export class SimdProposalsRepository {
     aiSummary: string;
     aiQuestions: readonly string[];
   }): Promise<void> {
+    // `ai_questions` is JSONB (migration 0031). The idiomatic pg-node
+    // path is `JSON.stringify` the array and cast the text param
+    // `::jsonb` — passing the JS array bare would make `pg` encode it
+    // as a Postgres ARRAY literal, not JSON. The `::jsonb` cast also
+    // means a malformed value would fail the write loudly rather than
+    // being stored and silently read back as null.
     await this.pool.query(
       `UPDATE simd_proposals
           SET ai_summary       = $2,
-              ai_questions     = $3,
+              ai_questions     = $3::jsonb,
               ai_generated_at  = NOW(),
               ai_body_sha256   = body_sha256,
               reviewed_at      = NULL,

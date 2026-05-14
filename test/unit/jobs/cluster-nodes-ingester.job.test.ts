@@ -36,9 +36,12 @@ class FakeRepo {
       clientKind: string;
       clientVersion: string | null;
     }>,
-  ): Promise<{ updated: number }> {
+  ): Promise<{ updated: number; attempted: number }> {
     this.upsertCalls.push([...entries]);
-    return { updated: this.upsertedCount };
+    // `attempted` mirrors the real repo's contract (DB-M2): every
+    // identity we tried to classify, regardless of whether the row
+    // changed or even exists.
+    return { updated: this.upsertedCount, attempted: entries.length };
   }
 }
 

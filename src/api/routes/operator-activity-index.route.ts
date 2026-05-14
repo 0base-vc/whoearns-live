@@ -132,40 +132,56 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
         return;
       }
 
-      // Governance ingest liveness — true once `simd_discussion_comments`
-      // holds any row. The GitHub Discussions ingest job is unshipped,
-      // so this is `false` in every real deployment today; it drives
-      // BOTH the `governance.score`/`composite` null-out below AND the
-      // `ingestStatus.governanceIngestActive` flag (one query, one
-      // signal). Keyed on the table the score reads — not an
-      // `ingestion_cursors` job-name string — so it needs no
-      // coordination with the still-unwritten ingest job.
-      const governanceIngestActive = await opts.simdDiscussionsRepo.hasAnyData();
+      // DB-M6: the scoring work is a set of independent repo reads.
+      // Wave 1 — the three reads with NO data dependency on each
+      // other run concurrently:
+      //   - `hasAnyData`: governance ingest liveness — true once
+      //     `simd_discussion_comments` holds any row. The GitHub
+      //     Discussions ingest job is unshipped, so this is `false`
+      //     in every real deployment today; it drives BOTH the
+      //     `governance.score`/`composite` null-out below AND the
+      //     `ingestStatus.governanceIngestActive` flag (one query,
+      //     one signal). Keyed on the table the score reads — not an
+      //     `ingestion_cursors` job-name string — so it needs no
+      //     coordination with the still-unwritten ingest job.
+      //   - `findActiveByVote`: the validator's ACTIVE-linked GitHub
+      //     username (expired attestations excluded).
+      //   - `listActiveByVote`: the validator's ACTIVE registered
+      //     wallets.
+      const [governanceIngestActive, githubLink, wallets] = await Promise.all([
+        opts.simdDiscussionsRepo.hasAnyData(),
+        opts.validatorGithubRepo.findActiveByVote(validator.votePubkey),
+        opts.operatorWalletsRepo.listActiveByVote(validator.votePubkey),
+      ]);
 
-      // Governance — only counts comments from the validator's
-      // ACTIVE-linked GitHub username (expired attestations excluded).
-      const githubLink = await opts.validatorGithubRepo.findActiveByVote(validator.votePubkey);
+      // Wave 2 — the two reads that DEPEND on wave 1's results
+      // (governance stats need the GitHub username; wallet activity
+      // needs the wallet list). They're independent of EACH OTHER,
+      // so they also run concurrently.
+      const walletPubkeys = wallets.map((w) => w.walletPubkey);
+      const [governanceStats, activityRows] = await Promise.all([
+        // Governance — only counts comments from the validator's
+        // ACTIVE-linked GitHub username.
+        githubLink === null
+          ? Promise.resolve([])
+          : opts.simdDiscussionsRepo.statsByUsername([githubLink.githubUsername]),
+        // Wallet — sum active days across all ACTIVE registered
+        // wallets in a single batched query.
+        walletPubkeys.length === 0
+          ? Promise.resolve([])
+          : opts.walletActivityRepo.listRecentForWallets(walletPubkeys, 90),
+      ]);
+
       let governanceInput = { commentCount: 0, reactionsReceived: 0, activeWindowCount: 0 };
-      if (githubLink !== null) {
-        const stats = await opts.simdDiscussionsRepo.statsByUsername([githubLink.githubUsername]);
-        const row = stats[0];
-        if (row !== undefined) {
-          governanceInput = {
-            commentCount: row.commentCount,
-            reactionsReceived: row.reactionsReceived,
-            activeWindowCount: row.activeWindowCount,
-          };
-        }
+      const governanceRow = governanceStats[0];
+      if (governanceRow !== undefined) {
+        governanceInput = {
+          commentCount: governanceRow.commentCount,
+          reactionsReceived: governanceRow.reactionsReceived,
+          activeWindowCount: governanceRow.activeWindowCount,
+        };
       }
 
-      // Wallet — sum active days across all ACTIVE registered wallets
-      // in a single batched query.
-      const wallets = await opts.operatorWalletsRepo.listActiveByVote(validator.votePubkey);
-      const walletPubkeys = wallets.map((w) => w.walletPubkey);
-      const activityRows =
-        walletPubkeys.length === 0
-          ? []
-          : await opts.walletActivityRepo.listRecentForWallets(walletPubkeys, 90);
       const activeDaysSet = new Set<string>();
       for (const r of activityRows) {
         if (r.txCount > 0) {

@@ -13,9 +13,38 @@
 -- scan. The choice to bucket by UTC DATE rather than by epoch follows
 -- the GitHub-graph convention operators will recognise.
 --
--- The cursor for ingest progress lives in `ingestion_cursors`
--- keyed by `job_name = 'wallet-activity:<wallet>'` (see
--- src/jobs/wallet-activity-ingester.job.ts).
+-- The per-wallet ingest cursor lives in `ingestion_cursors` keyed by
+-- `job_name = 'wallet-activity:<wallet>'` — the wallet-activity
+-- indexer writes a "newest signature seen" checkpoint there each tick
+-- so the next tick doesn't re-scan signatures it already counted
+-- (see src/services/wallet-activity-indexer.service.ts). The
+-- `ingestion_cursors.job_name` column is VARCHAR(64); the
+-- `wallet-activity:` prefix (15 chars) plus a base58 pubkey (≤44
+-- chars) stays inside that bound.
+--
+-- NO FOREIGN KEY to `operator_wallets` — deliberate. ----------------
+-- `wallet_pubkey` here is intentionally NOT constrained by an FK to
+-- `operator_wallets.wallet_pubkey`. The two tables have different
+-- lifecycles on purpose:
+--
+--   * A one-click wallet unlink DELETEs the `operator_wallets` row.
+--     We do NOT want that to cascade-delete the activity history —
+--     an operator who unlinks and later re-links the same wallet
+--     should see their heatmap intact, not silently reset to empty.
+--     So the history rows are allowed to "orphan" by design.
+--
+--   * Consequence for data-deletion requests: a full GDPR-style
+--     "forget this operator / wallet" purge CANNOT rely on an
+--     ON DELETE CASCADE. It MUST explicitly delete from BOTH tables —
+--     `wallet_daily_activity` (by `wallet_pubkey`) AND
+--     `operator_wallets` — or the activity history is left behind.
+--     This is a known, accepted operational cost of keeping history
+--     across unlink/relink; the operations runbook documents the
+--     two-table purge procedure.
+--
+-- Do not add an FK / cascade here without revisiting both points
+-- above — the orphaning is the intended behaviour, not an oversight.
+-- -------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS wallet_daily_activity (
   wallet_pubkey    TEXT        NOT NULL,

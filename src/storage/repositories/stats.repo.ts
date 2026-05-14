@@ -560,6 +560,22 @@ export class StatsRepository {
     const identities = entries.map((e) => e.identityPubkey);
     const credits = entries.map((e) => e.voteCredits.toString());
     const prevCredits = entries.map((e) => e.prevEpochVoteCredits.toString());
+    // DB-M7: UNNEST silently truncates to the SHORTEST array, so a
+    // length mismatch would write a partial, corrupt batch with no
+    // error. All four arrays are `.map()`-derived from the same
+    // `entries` list — a mismatch is a programming error, so fail
+    // fast with a clear message instead of issuing the query.
+    if (
+      votes.length !== identities.length ||
+      votes.length !== credits.length ||
+      votes.length !== prevCredits.length
+    ) {
+      throw new Error(
+        `upsertVoteCreditsBatch: array length mismatch ` +
+          `(votes=${votes.length}, identities=${identities.length}, ` +
+          `credits=${credits.length}, prevCredits=${prevCredits.length})`,
+      );
+    }
 
     const { rowCount } = await this.pool.query(
       `INSERT INTO epoch_validator_stats

@@ -124,14 +124,32 @@ export class ValidatorsRepository {
    *
    * Identity is the natural key (a validator may rotate vote
    * accounts, but identity is stable). Rows whose identity_pubkey
-   * isn't in the `validators` table are silently skipped — the
-   * cluster-nodes refresh runs alongside the vote-accounts refresh,
-   * but if a node is in gossip without a corresponding vote account,
-   * it's not a validator we care about for the badge surface.
+   * isn't in the `validators` table are silently no-op'd by the
+   * `UPDATE ... FROM` no-match — the cluster-nodes refresh runs
+   * alongside the vote-accounts refresh, but if a node is in gossip
+   * without a corresponding vote account, it's not a validator we
+   * care about for the badge surface.
    *
-   * Returns the number of rows whose client_kind OR client_version
-   * actually changed — useful for logging "N classifications drifted
-   * this tick" without spamming on the steady-state.
+   * Return shape (DB-M2): `{ updated, attempted }`.
+   *   - `attempted` = `entries.length` — every identity we tried to
+   *     classify this tick.
+   *   - `updated` = the rowCount, i.e. rows whose client_kind OR
+   *     client_version actually CHANGED. This is intentionally NOT
+   *     "rows matched" — the `IS DISTINCT FROM` guard means an
+   *     unchanged row contributes 0.
+   * The repo has no logger, so it surfaces both numbers and lets the
+   * caller decide what to log. `attempted - updated` conflates two
+   * cases the caller can disambiguate with context: (a) identities
+   * already at their current classification (the steady-state, the
+   * vast majority) and (b) gossip identities with no `validators`
+   * row at all (gossip/validators divergence). The cluster-nodes
+   * ingester logs the gap at `debug` so the divergence is observable
+   * without spamming the steady-state.
+   *
+   * DB-M3: `client_kind` is `NOT NULL DEFAULT 'unknown'` at the DB
+   * layer. `COALESCE(src.client_kind, 'unknown')` degrades a missing
+   * kind to `'unknown'` rather than tripping the NOT NULL constraint
+   * if a caller ever passes `null`/`undefined`.
    */
   async upsertClientBatch(
     entries: ReadonlyArray<{
@@ -139,27 +157,38 @@ export class ValidatorsRepository {
       clientKind: string;
       clientVersion: string | null;
     }>,
-  ): Promise<{ updated: number }> {
-    if (entries.length === 0) return { updated: 0 };
+  ): Promise<{ updated: number; attempted: number }> {
+    if (entries.length === 0) return { updated: 0, attempted: 0 };
     const identities = entries.map((e) => e.identityPubkey);
     const kinds = entries.map((e) => e.clientKind);
     const versions = entries.map((e) => e.clientVersion);
+    // DB-M7: UNNEST silently truncates to the shortest array, so a
+    // length mismatch would corrupt the batch. All three arrays are
+    // `.map()`-derived from the same `entries` list — a mismatch is a
+    // programming error, so fail fast with a clear message rather
+    // than writing a silently-truncated batch.
+    if (identities.length !== kinds.length || identities.length !== versions.length) {
+      throw new Error(
+        `upsertClientBatch: array length mismatch ` +
+          `(identities=${identities.length}, kinds=${kinds.length}, versions=${versions.length})`,
+      );
+    }
 
     const { rowCount } = await this.pool.query(
       `UPDATE validators v
-          SET client_kind       = src.client_kind,
+          SET client_kind       = COALESCE(src.client_kind, 'unknown'),
               client_version    = src.client_version,
               client_updated_at = NOW()
          FROM UNNEST($1::text[], $2::text[], $3::text[])
               AS src(identity_pubkey, client_kind, client_version)
         WHERE v.identity_pubkey = src.identity_pubkey
           AND (
-            v.client_kind     IS DISTINCT FROM src.client_kind OR
+            v.client_kind     IS DISTINCT FROM COALESCE(src.client_kind, 'unknown') OR
             v.client_version  IS DISTINCT FROM src.client_version
           )`,
       [identities, kinds, versions],
     );
-    return { updated: rowCount ?? 0 };
+    return { updated: rowCount ?? 0, attempted: entries.length };
   }
 
   async findByVote(vote: VotePubkey): Promise<Validator | null> {
