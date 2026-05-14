@@ -122,7 +122,7 @@ export type ValidatorClaimEventType =
  * See migration 0034 for the data-model rationale.
  *
  * `submittedIp` is a forensic field captured from `request.ip`. It is
- * NOT surfaced by the public `GET /v1/claim/:vote/audit` endpoint —
+ * NOT surfaced by the public `GET /v1/claims/:vote/audit` endpoint —
  * everything else here is already-public (on-chain pubkeys,
  * operator-chosen labels, public GitHub usernames).
  */

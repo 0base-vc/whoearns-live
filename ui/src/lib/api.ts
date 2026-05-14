@@ -155,20 +155,21 @@ export function fetchValidatorLeaderSlots(
  * first-party surface minimal.
  */
 export function fetchClaimChallenge(fetchFn: typeof fetch = fetch): Promise<ClaimChallenge> {
-  return call<ClaimChallenge>('/v1/claim/challenge', fetchFn);
+  return call<ClaimChallenge>('/v1/claims/challenge', fetchFn);
 }
 
 /**
  * Read-only status check. Used by both the /income page ("should we
  * show an Edit Profile button?") and the /claim page ("is this
- * already claimed, and if so what are the current values?").
+ * already claimed, and if so what are the current values?"). This is
+ * a plain GET of the claim instance — `/v1/claims/:vote`.
  */
 export function fetchClaimStatus(
   vote: string,
   fetchFn: typeof fetch = fetch,
 ): Promise<ClaimStatus> {
   const safe = encodeURIComponent(vote);
-  return call<ClaimStatus>(`/v1/claim/${safe}/status`, fetchFn);
+  return call<ClaimStatus>(`/v1/claims/${safe}`, fetchFn);
 }
 
 /**
@@ -177,6 +178,12 @@ export function fetchClaimStatus(
  * `validator_claims` row on success. Throws `ApiError` on any
  * verification failure — inspect `err.code` for the specific reason
  * (`stale_timestamp`, `nonce_replay`, `bad_signature`, etc.).
+ *
+ * Idempotent upsert of the claim instance, so this is a `PUT` to
+ * `/v1/claims/:vote`. The vote pubkey rides in the path AND the
+ * signed body; the server rejects a mismatch (`vote_pubkey_mismatch`)
+ * — but since we derive the path straight from `body.votePubkey` they
+ * are the same value by construction.
  */
 export function verifyClaim(
   body: {
@@ -188,7 +195,8 @@ export function verifyClaim(
   },
   fetchFn: typeof fetch = fetch,
 ): Promise<{ claimed: true; votePubkey: string; claimedAt: string }> {
-  return postJson('/v1/claim/verify', body, fetchFn);
+  const safe = encodeURIComponent(body.votePubkey);
+  return putJson(`/v1/claims/${safe}`, body, fetchFn);
 }
 
 /**
@@ -197,6 +205,11 @@ export function verifyClaim(
  * reconstructs the canonical message from these exact fields and
  * verifies — an attacker who swaps the profile state between the
  * operator's sign step and the submission breaks the signature.
+ *
+ * `PUT` of the profile sub-resource of the claim instance —
+ * `/v1/claims/:vote/profile`. The vote pubkey rides in the path AND
+ * the signed body (server rejects a mismatch); the path is derived
+ * from `body.votePubkey` so they always agree.
  */
 export function updateClaimProfile(
   body: {
@@ -218,22 +231,30 @@ export function updateClaimProfile(
   },
   fetchFn: typeof fetch = fetch,
 ): Promise<{ profile: ValidatorProfile & { updatedAt: string } }> {
-  return postJson('/v1/claim/profile', body, fetchFn);
+  const safe = encodeURIComponent(body.votePubkey);
+  return putJson(`/v1/claims/${safe}/profile`, body, fetchFn);
 }
 
 /**
- * Shared POST-JSON helper. Mirrors `call()` for errors but sets the
- * method + Content-Type header. Kept local because the API is
- * mostly read-only; only the claim routes POST.
+ * Shared JSON-body helper. Mirrors `call()` for errors but sets the
+ * HTTP method + Content-Type header. Kept local because the API is
+ * mostly read-only; only the claim routes carry a request body.
+ *
+ * `putJson` is the only method-bound wrapper the UI needs today — the
+ * claim verify + profile flows are both idempotent upserts (`PUT`).
+ * The wallet-append endpoint (`POST /v1/claims/:vote/wallets`) is not
+ * called from the UI; a `postJson` wrapper can be added back the day
+ * it is, mirroring `putJson`.
  */
-async function postJson<TResponse>(
+async function sendJson<TResponse>(
+  method: 'POST' | 'PUT',
   path: string,
   body: unknown,
   fetchFn: typeof fetch = fetch,
 ): Promise<TResponse> {
   const url = `${getApiBase()}${path}`;
   const res = await fetchFn(url, {
-    method: 'POST',
+    method,
     headers: { accept: 'application/json', 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
@@ -252,4 +273,13 @@ async function postJson<TResponse>(
     throw new ApiError(res.status, code, message);
   }
   return (await res.json()) as TResponse;
+}
+
+/** PUT a JSON body — used for idempotent upserts (claim verify, profile). */
+function putJson<TResponse>(
+  path: string,
+  body: unknown,
+  fetchFn: typeof fetch = fetch,
+): Promise<TResponse> {
+  return sendJson<TResponse>('PUT', path, body, fetchFn);
 }

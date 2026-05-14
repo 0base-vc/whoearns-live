@@ -73,7 +73,7 @@ interface WalletResponse {
  *   GET /v1/operator-wallets/:wallet/activity?days=N — per-day tx counts
  *
  * Both read-only — the wallet itself is registered via the Phase 3
- * `POST /v1/claim/wallet/verify` flow. Days in `/activity` are UTC;
+ * `POST /v1/claims/:vote/wallets` flow. Days in `/activity` are UTC;
  * values for missing days are zero (omitted from the response).
  *
  * Both endpoints gate on an ACTIVE (not-expired) registration so

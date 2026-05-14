@@ -177,13 +177,13 @@ const walletBody = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-describe('POST /v1/claim/github/verify', () => {
+describe('PUT /v1/claims/:vote/github', () => {
   it('links a GitHub username on the happy path and writes an audit event', async () => {
     const { deps, appended } = buildDeps();
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/github/verify',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}/github`,
       payload: githubBody(),
     });
     expect(res.statusCode).toBe(200);
@@ -196,8 +196,8 @@ describe('POST /v1/claim/github/verify', () => {
     const { deps } = buildDeps();
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/github/verify',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}/github`,
       payload: githubBody({ githubUsername: 'not a valid username!' }),
     });
     expect(res.statusCode).toBe(400);
@@ -205,12 +205,30 @@ describe('POST /v1/claim/github/verify', () => {
     await app.close();
   });
 
+  it('returns 400 vote_pubkey_mismatch when the path vote disagrees with the body', async () => {
+    // REST-M7 — the vote pubkey rides in the path AND the request
+    // body; the body stays authoritative for the Gist proof, and a
+    // path pointing at a different validator is rejected up front.
+    const { deps, appended } = buildDeps();
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'PUT',
+      url: `/v1/claims/${IDENTITY_1}/github`, // valid pubkey, but != body.votePubkey (VOTE_1)
+      payload: githubBody(),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('vote_pubkey_mismatch');
+    // Rejected before any verification work — no audit event.
+    expect(appended).toHaveLength(0);
+    await app.close();
+  });
+
   it('returns 403 stale_timestamp when the timestamp is outside the freshness window', async () => {
     const { deps } = buildDeps();
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/github/verify',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}/github`,
       payload: githubBody({ timestampMs: Date.now() - 60 * 60 * 1000 }),
     });
     expect(res.statusCode).toBe(403);
@@ -222,8 +240,8 @@ describe('POST /v1/claim/github/verify', () => {
     const { deps } = buildDeps({ claim: null });
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/github/verify',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}/github`,
       payload: githubBody(),
     });
     expect(res.statusCode).toBe(403);
@@ -237,8 +255,8 @@ describe('POST /v1/claim/github/verify', () => {
     });
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/github/verify',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}/github`,
       payload: githubBody(),
     });
     expect(res.statusCode).toBe(502);
@@ -255,8 +273,8 @@ describe('POST /v1/claim/github/verify', () => {
     });
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/github/verify',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}/github`,
       payload: githubBody(),
     });
     expect(res.statusCode).toBe(403);
@@ -274,8 +292,8 @@ describe('POST /v1/claim/github/verify', () => {
     });
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/github/verify',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}/github`,
       payload: githubBody(),
     });
     expect(res.statusCode).toBe(200);
@@ -287,13 +305,13 @@ describe('POST /v1/claim/github/verify', () => {
   });
 });
 
-describe('POST /v1/claim/wallet/verify', () => {
+describe('POST /v1/claims/:vote/wallets', () => {
   it('registers an operator wallet on the happy path and writes an audit event', async () => {
     const { deps, appended } = buildDeps();
     const app = await makeApp(deps);
     const res = await app.inject({
       method: 'POST',
-      url: '/v1/claim/wallet/verify',
+      url: `/v1/claims/${VOTE_1}/wallets`,
       payload: walletBody(),
     });
     expect(res.statusCode).toBe(200);
@@ -307,11 +325,29 @@ describe('POST /v1/claim/wallet/verify', () => {
     const app = await makeApp(deps);
     const res = await app.inject({
       method: 'POST',
-      url: '/v1/claim/wallet/verify',
+      url: `/v1/claims/${VOTE_1}/wallets`,
       payload: walletBody({ identitySignatureB58: 'short' }),
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('validation_error');
+    await app.close();
+  });
+
+  it('returns 400 vote_pubkey_mismatch when the path vote disagrees with the body', async () => {
+    // REST-M7 — the vote pubkey rides in the path AND the request
+    // body; the body stays authoritative for the dual-signature
+    // proof, and a path pointing at a different validator is rejected
+    // before any verification work.
+    const { deps, appended } = buildDeps();
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/claims/${IDENTITY_1}/wallets`, // valid pubkey, but != body.votePubkey (VOTE_1)
+      payload: walletBody(),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('vote_pubkey_mismatch');
+    expect(appended).toHaveLength(0);
     await app.close();
   });
 
@@ -320,7 +356,7 @@ describe('POST /v1/claim/wallet/verify', () => {
     const app = await makeApp(deps);
     const res = await app.inject({
       method: 'POST',
-      url: '/v1/claim/wallet/verify',
+      url: `/v1/claims/${VOTE_1}/wallets`,
       payload: walletBody({ walletPubkey: VOTE_1 }),
     });
     expect(res.statusCode).toBe(400);
@@ -337,7 +373,7 @@ describe('POST /v1/claim/wallet/verify', () => {
     const app = await makeApp(deps);
     const res = await app.inject({
       method: 'POST',
-      url: '/v1/claim/wallet/verify',
+      url: `/v1/claims/${VOTE_1}/wallets`,
       payload: walletBody(),
     });
     expect(res.statusCode).toBe(400);
@@ -352,7 +388,7 @@ describe('POST /v1/claim/wallet/verify', () => {
     const app = await makeApp(deps);
     const res = await app.inject({
       method: 'POST',
-      url: '/v1/claim/wallet/verify',
+      url: `/v1/claims/${VOTE_1}/wallets`,
       payload: walletBody(),
     });
     expect(res.statusCode).toBe(409);
@@ -371,7 +407,7 @@ describe('POST /v1/claim/wallet/verify', () => {
     const app = await makeApp(deps);
     const res = await app.inject({
       method: 'POST',
-      url: '/v1/claim/wallet/verify',
+      url: `/v1/claims/${VOTE_1}/wallets`,
       payload: walletBody(),
     });
     expect(res.statusCode).toBe(409);
@@ -386,7 +422,7 @@ describe('POST /v1/claim/wallet/verify', () => {
     const app = await makeApp(deps);
     const res = await app.inject({
       method: 'POST',
-      url: '/v1/claim/wallet/verify',
+      url: `/v1/claims/${VOTE_1}/wallets`,
       payload: walletBody(),
     });
     expect(res.statusCode).toBe(403);
@@ -401,7 +437,7 @@ describe('POST /v1/claim/wallet/verify', () => {
     const app = await makeApp(deps);
     const res = await app.inject({
       method: 'POST',
-      url: '/v1/claim/wallet/verify',
+      url: `/v1/claims/${VOTE_1}/wallets`,
       payload: walletBody(),
     });
     expect(res.statusCode).toBe(403);

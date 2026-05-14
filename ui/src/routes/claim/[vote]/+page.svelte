@@ -9,7 +9,7 @@
          box.
        - Operator runs the command, pastes the base58 signature into
          the form, submits.
-       - POST /v1/claim/verify → on success, page reloads into
+       - PUT /v1/claims/:vote → on success, page reloads into
          profile-editor mode (effectively: `status` is re-fetched).
 
     2. **Profile edit** (`status.claimed === true`):
@@ -17,7 +17,7 @@
        - Operator tweaks (twitter handle, hide-footer, opt-out),
          re-generates a signable message, pastes a fresh signature,
          submits.
-       - POST /v1/claim/profile → on success, updated profile
+       - PUT /v1/claims/:vote/profile → on success, updated profile
          values are shown.
 
   No wallet connect, no browser-side Ed25519 signing. The operator's
@@ -29,7 +29,7 @@
   to do.
 
   Nonce + timestamp are generated server-side via
-  `/v1/claim/challenge`. UI treats them as opaque — they feed into
+  `/v1/claims/challenge`. UI treats them as opaque — they feed into
   the message template that gets copy-pasted. Client never needs
   to know the crypto rules.
 -->

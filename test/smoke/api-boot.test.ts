@@ -119,7 +119,7 @@ function makeDeps(): Parameters<typeof buildServer>[0] {
         bumpNonce: async () => {},
       } as unknown as ClaimsRepository,
       // Stub: SEC-M4 audit log. The smoke test never hits a
-      // claim-surface mutation or the `/v1/claim/:vote/audit` read,
+      // claim-surface mutation or the `/v1/claims/:vote/audit` read,
       // so a no-op `append` + empty `listByVote` satisfy DI.
       validatorClaimEvents: {
         append: async () => {},
@@ -140,14 +140,14 @@ function makeDeps(): Parameters<typeof buildServer>[0] {
     },
     services: {
       validator: new FakeValidatorService() as unknown as ValidatorService,
-      // Stub: claim service is only invoked by the POST /v1/claim/*
-      // endpoints; the smoke test boots the server and hits /healthz,
-      // so nothing reaches claimService in practice. The empty object
-      // satisfies the TypeScript constructor signature.
+      // Stub: claim service is only invoked by the /v1/claims/:vote
+      // mutating endpoints; the smoke test boots the server and hits
+      // /healthz, so nothing reaches claimService in practice. The
+      // empty object satisfies the TypeScript constructor signature.
       claim: {} as unknown as ClaimService,
       // Stubs: Claim v2 verification services — only invoked by the
-      // POST /v1/claim/{github,wallet}/verify endpoints, which the
-      // smoke test never reaches.
+      // PUT /v1/claims/:vote/github + POST /v1/claims/:vote/wallets
+      // endpoints, which the smoke test never reaches.
       githubGist: {} as unknown as GithubGistVerificationService,
       operatorWallet: {} as unknown as OperatorWalletVerificationService,
     },

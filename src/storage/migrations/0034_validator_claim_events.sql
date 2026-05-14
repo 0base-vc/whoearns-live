@@ -15,7 +15,7 @@
 --
 -- Fix. `validator_claim_events` — an append-only log written
 -- best-effort by every claim-surface write path AFTER the underlying
--- mutation succeeds. A public read endpoint (`GET /v1/claim/:vote/audit`)
+-- mutation succeeds. A public read endpoint (`GET /v1/claims/:vote/audit`)
 -- lets an operator audit their own validator's change history.
 --
 -- Append-only by CONVENTION. There is no UPDATE or DELETE path to this
@@ -40,7 +40,7 @@
 -- `submitted_ip` is a forensic field — `request.ip` captured at write
 -- time. It is stored so an operator (or we) can correlate a suspicious
 -- change with an origin, but it is NOT surfaced by the public
--- `/v1/claim/:vote/audit` endpoint (see the route's PRIVACY note). The
+-- `/v1/claims/:vote/audit` endpoint (see the route's PRIVACY note). The
 -- public response exposes only already-public data (pubkeys, GitHub
 -- usernames, wallet pubkeys, operator-chosen labels).
 --
@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS validator_claim_events (
   -- by the public read endpoint.
   detail                JSONB,
   -- `request.ip` at write time. Forensic field — NOT exposed by the
-  -- public `/v1/claim/:vote/audit` endpoint (see route PRIVACY note).
+  -- public `/v1/claims/:vote/audit` endpoint (see route PRIVACY note).
   submitted_ip          TEXT,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

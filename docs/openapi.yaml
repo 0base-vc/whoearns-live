@@ -411,9 +411,13 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
-  /v1/claim/challenge:
+  /v1/claims/challenge:
     get:
       summary: Issue a short-lived nonce for validator ownership claims
+      description: |
+        Route ordering note: `challenge` is a static path segment, so
+        it resolves ahead of `/v1/claims/{vote}` — and it is not
+        base58-pubkey-shaped, so the two cannot collide regardless.
       responses:
         '200':
           description: Challenge payload to include in the signed message.
@@ -421,9 +425,14 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ClaimChallenge' }
 
-  /v1/claim/{vote}/status:
+  /v1/claims/{vote}:
     get:
       summary: Public claim/profile status for a validator vote pubkey
+      description: |
+        The GET of the claim instance — "status" is just reading the
+        resource. Public claim/profile state for a vote pubkey in a
+        single fetch (also folds in GitHub-link + operator-wallet
+        state, CROSS-M1).
       parameters:
         - $ref: '#/components/parameters/VotePath'
       responses:
@@ -437,8 +446,44 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+    put:
+      summary: Verify validator ownership without changing profile fields
+      description: |
+        Idempotent upsert of the claim instance — re-verifying with a
+        fresh nonce keeps bumping the row. The vote pubkey travels in
+        BOTH the path and the signed body; the signed body stays
+        authoritative for the signature, and a `params.vote` ≠
+        `votePubkey` mismatch is rejected `400 vote_pubkey_mismatch`.
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaimVerifyRequest' }
+      responses:
+        '200':
+          description: Claim verified and stored.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaimVerifyResponse' }
+        '400':
+          description: Malformed body or signature, or `vote_pubkey_mismatch` (path ≠ body).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Signature rejected, stale, replayed, mismatched, or below stake floor.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Vote pubkey is unknown.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
-  /v1/claim/{vote}/audit:
+  /v1/claims/{vote}/audit:
     get:
       summary: Public claim-change audit log for a validator vote pubkey
       description: |
@@ -450,7 +495,7 @@ paths:
         `priorIdentityPubkey` is the signal that the validator
         identity was silently rotated.
 
-        No auth, like `/v1/claim/{vote}/status` — every field returned
+        No auth, like `GET /v1/claims/{vote}` — every field returned
         is already public (on-chain pubkeys, operator-published GitHub
         usernames, operator-chosen wallet labels). The forensic
         `submitted_ip` recorded with each event is deliberately NOT in
@@ -469,39 +514,18 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
-  /v1/claim/verify:
-    post:
-      summary: Verify validator ownership without changing profile fields
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ClaimVerifyRequest' }
-      responses:
-        '200':
-          description: Claim verified and stored.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ClaimVerifyResponse' }
-        '400':
-          description: Malformed body or signature.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-        '403':
-          description: Signature rejected, stale, replayed, mismatched, or below stake floor.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-        '404':
-          description: Vote pubkey is unknown.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-
-  /v1/claim/profile:
-    post:
+  /v1/claims/{vote}/profile:
+    put:
       summary: Verify validator ownership and update public profile fields
+      description: |
+        `PUT` of the profile sub-resource of the claim instance. Same
+        signed envelope as the claim verify, plus the desired profile
+        fields. The vote pubkey travels in BOTH the path and the
+        signed body; the signed body stays authoritative, and a
+        `params.vote` ≠ `votePubkey` mismatch is rejected
+        `400 vote_pubkey_mismatch`.
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
       requestBody:
         required: true
         content:
@@ -514,7 +538,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ProfileUpdateResponse' }
         '400':
-          description: Malformed body or signature.
+          description: Malformed body or signature, or `vote_pubkey_mismatch` (path ≠ body).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -529,8 +553,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
-  /v1/claim/github/verify:
-    post:
+  /v1/claims/{vote}/github:
+    put:
       summary: Verify a Keybase-style GitHub Gist linking a vote pubkey to a GitHub username
       description: |
         Phase 3 Claim v2 — the operator publishes a public Gist
@@ -539,13 +563,19 @@ paths:
         signature against the identity pubkey on file for the claim,
         and records the (vote, githubUsername) link with a 90-day
         expiry. Lapsed links stop contributing scoring signal (e.g.
-        SIMD-comment governance) until re-attested.
+        SIMD-comment governance) until re-attested. Idempotent — a
+        re-link replaces, hence `PUT`.
 
+        The vote pubkey travels in BOTH the path and the request body;
+        the body stays authoritative and a `params.vote` ≠
+        `votePubkey` mismatch is rejected `400 vote_pubkey_mismatch`.
         The flow is gated behind an existing claim — `403 not_claimed`
         if the validator hasn't been claimed yet via
-        `/v1/claim/verify`. Replay defense: a per-Gist nonce can only
-        be redeemed once across all validators (the `signed_nonce` is
-        DB-UNIQUE; same-vote replay also rejected at the route layer).
+        `PUT /v1/claims/{vote}`. Replay defense: a per-Gist nonce can
+        only be redeemed once across all validators (the `signed_nonce`
+        is DB-UNIQUE; same-vote replay also rejected at the route layer).
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
       requestBody:
         required: true
         content:
@@ -558,7 +588,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ClaimGithubVerifyResponse' }
         '400':
-          description: Malformed body.
+          description: Malformed body, or `vote_pubkey_mismatch` (path ≠ body).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -586,7 +616,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
-  /v1/claim/wallet/verify:
+  /v1/claims/{vote}/wallets:
     post:
       summary: Register an operator-controlled wallet against a claimed validator
       description: |
@@ -597,13 +627,20 @@ paths:
         server verifies both Ed25519 signatures against the nonce
         bytes (which carry both pubkeys, preventing rebinding) and
         records the (vote, wallet) tuple with a 90-day expiry.
+        Appends to a bounded collection (≤3 wallets), hence `POST` +
+        the plural `wallets` path.
 
+        The vote pubkey travels in BOTH the path and the request body;
+        the body stays authoritative and a `params.vote` ≠
+        `votePubkey` mismatch is rejected `400 vote_pubkey_mismatch`.
         Per-validator cap: **3 wallets** (cold / warm / multisig).
         Re-attestation is required every 90 days; lapsed wallets stop
         contributing scoring signal until re-registered. Self-
         registration (wallet pubkey equal to vote/identity) is
         rejected with `400 pubkey_role_collision` since it pollutes
         downstream activity analytics.
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
       requestBody:
         required: true
         content:
@@ -616,7 +653,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ClaimWalletVerifyResponse' }
         '400':
-          description: Malformed body or `pubkey_role_collision`.
+          description: Malformed body, `pubkey_role_collision`, or `vote_pubkey_mismatch` (path ≠ body).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

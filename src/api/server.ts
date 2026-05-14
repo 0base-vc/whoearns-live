@@ -88,7 +88,7 @@ export interface BuildServerDeps {
      * SEC-M4 — immutable, append-only audit log of claim-surface
      * mutations. Written best-effort by the v1 + v2 claim routes
      * after each successful mutation; read by the public
-     * `GET /v1/claim/:vote/audit` endpoint.
+     * `GET /v1/claims/:vote/audit` endpoint.
      */
     validatorClaimEvents: ValidatorClaimEventsRepository;
     /**
@@ -315,7 +315,7 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       claimService: deps.services.claim,
       // SEC-M4 — best-effort audit log for claim/profile mutations.
       claimEventsRepo: deps.repos.validatorClaimEvents,
-      // CROSS-M1 — `/v1/claim/:vote/status` folds in GitHub-link +
+      // CROSS-M1 — `GET /v1/claims/:vote` folds in GitHub-link +
       // operator-wallet state so a dashboard needs one fetch, not
       // four. Same repos the OAI route reads.
       validatorGithubRepo: deps.repos.validatorGithub,
@@ -324,12 +324,12 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     // Phase 3 — Claim v2: GitHub Gist link + operator wallet
     // registration. Split into its own plugin from the v1 claim
     // surface (see claim-v2.route.ts) — the two share only the
-    // `/v1/claim/*` prefix, not behaviour.
+    // `/v1/claims/*` prefix, not behaviour.
     await scope.register(claimV2Routes, {
       config: deps.config,
       claimsRepo: deps.repos.claims,
-      // SEC-L4 — `wallet/verify` rejects a walletPubkey that is some
-      // other validator's identity pubkey via `findByIdentity`.
+      // SEC-L4 — `POST /v1/claims/:vote/wallets` rejects a walletPubkey
+      // that is some other validator's identity pubkey via `findByIdentity`.
       validatorsRepo: deps.repos.validators,
       validatorGithubRepo: deps.repos.validatorGithub,
       operatorWalletsRepo: deps.repos.operatorWallets,

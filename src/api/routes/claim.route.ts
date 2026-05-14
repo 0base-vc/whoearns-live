@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppConfig } from '../../core/config.js';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
@@ -22,12 +22,20 @@ import { unwrap } from '../zod-helpers.js';
  *
  * Four endpoints, split purposefully:
  *
- *   POST /v1/claim/verify        — first-time claim, no profile changes
- *   POST /v1/claim/profile       — update profile (must already be claimed OR claim in same step)
- *   GET  /v1/claim/:vote/status  — "is this validator claimed? / what's the profile?"
- *   GET  /v1/claim/challenge     — returns a server-issued nonce + current timestamp
- *                                  so the UI doesn't need to crypto-random on the
- *                                  client (cross-browser UUID availability varies).
+ *   PUT  /v1/claims/:vote          — first-time (or re-) claim, no profile changes
+ *                                    (idempotent upsert of the claim instance)
+ *   PUT  /v1/claims/:vote/profile  — update profile (must already be claimed OR claim in same step)
+ *   GET  /v1/claims/:vote          — "is this validator claimed? / what's the profile?"
+ *                                    (the claim-instance representation)
+ *   GET  /v1/claims/challenge      — returns a server-issued nonce + current timestamp
+ *                                    so the UI doesn't need to crypto-random on the
+ *                                    client (cross-browser UUID availability varies).
+ *
+ * The `:vote` mutating endpoints carry the vote pubkey BOTH in the
+ * path and in the signed body. The signed body stays the authoritative
+ * source for the signature; the path is a cheap consistency guard —
+ * a `params.vote !== body.votePubkey` mismatch is rejected `400`
+ * `vote_pubkey_mismatch` before any verification work.
  *
  * All mutating endpoints bind signature + timestamp to the specific
  * operation being requested (`purpose: 'claim' | 'profile'`), so a
@@ -50,7 +58,7 @@ export interface ClaimRoutesDeps {
    */
   claimEventsRepo: Pick<ValidatorClaimEventsRepository, 'append' | 'listByVote'>;
   /**
-   * CROSS-M1 — the `/v1/claim/:vote/status` response now folds in
+   * CROSS-M1 — the `GET /v1/claims/:vote` response now folds in
    * GitHub-link + operator-wallet state so a dashboard gets the whole
    * claim picture in ONE fetch instead of three. These are the same
    * ACTIVE-only reads the OAI route uses (`findActiveByVote` /
@@ -163,6 +171,31 @@ const ProfileUpdateBodySchema = SignedEnvelopeSchema.extend({
 const VoteParamSchema = z.object({ vote: PubkeySchema });
 
 /**
+ * REST-M7 path/body consistency guard for the `:vote` mutating
+ * endpoints (`PUT /v1/claims/:vote`, `/:vote/profile`). The vote
+ * pubkey now travels in BOTH the path and the signed body; the signed
+ * body remains the authoritative source for the signature, so this is
+ * just a cheap guard against a caller pointing the path at a different
+ * validator than the one they signed for. Returns `true` (and sends
+ * the `400`) when the two disagree; the caller bails on a `true`.
+ */
+function rejectVoteMismatch(
+  reply: FastifyReply,
+  requestId: string,
+  paramVote: string,
+  bodyVote: string,
+): boolean {
+  if (paramVote === bodyVote) return false;
+  sendError(reply, {
+    code: 'vote_pubkey_mismatch',
+    statusCode: 400,
+    message: 'vote pubkey in the path does not match votePubkey in the signed body',
+    requestId,
+  });
+  return true;
+}
+
+/**
  * Map verify failures onto HTTP status codes the client can branch
  * on. 400 for caller-side mistakes (malformed payload, bad sig),
  * 403 for policy/replay refusals, 404 for unknown validator.
@@ -192,8 +225,13 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
    * server timestamp. The UI renders these into a signable message
    * template. Pure convenience; a client that generates its own
    * UUID + `Date.now()` can skip this and call verify directly.
+   *
+   * Route ordering note: Fastify matches static path segments before
+   * `:param` segments, so `/v1/claims/challenge` resolves to THIS
+   * route, not `GET /v1/claims/:vote` below — and `challenge` isn't
+   * base58-pubkey-shaped anyway, so the two couldn't collide.
    */
-  app.get('/v1/claim/challenge', async () => {
+  app.get('/v1/claims/challenge', async () => {
     // Crypto-random nonce. Node 18+ has crypto.randomUUID globally.
     const nonce = crypto.randomUUID();
     return {
@@ -236,8 +274,11 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
    * All four reads run in parallel — they're independent, and the
    * extra two-row trip is negligible against the UX win of a
    * one-fetch dashboard.
+   *
+   * This is the GET of the claim instance — "status" is just reading
+   * the resource at `/v1/claims/:vote`, no separate sub-path needed.
    */
-  app.get('/v1/claim/:vote/status', async (request) => {
+  app.get('/v1/claims/:vote', async (request) => {
     const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
     const [claim, profile, githubLink, activeWallets] = await Promise.all([
       opts.claimService.getClaim(params.vote),
@@ -293,7 +334,7 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
    * `priorIdentityPubkey` is the smoking gun for a silent identity
    * rotation).
    *
-   * No auth — like `/v1/claim/:vote/status`, this is a read of
+   * No auth — like `GET /v1/claims/:vote`, this is a read of
    * already-public facts. PRIVACY: the forensic `submitted_ip`
    * column is NOT in the response — IP stays in the DB. Everything
    * surfaced here (pubkeys, GitHub usernames, wallet pubkeys,
@@ -307,7 +348,7 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
    * fit; SCORING is the slightly tighter choice so a freshly-recorded
    * event surfaces sooner during an active claim flow.
    */
-  app.get('/v1/claim/:vote/audit', async (request, reply) => {
+  app.get('/v1/claims/:vote/audit', async (request, reply) => {
     const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
     const events = await opts.claimEventsRepo.listByVote(params.vote);
     void reply.header('cache-control', cacheControl('SCORING'));
@@ -326,13 +367,19 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
   });
 
   /**
-   * First-time (or re-) claim. Verifies the signature without
-   * touching profile state — useful for operators who want to
-   * "lock in" ownership before editing anything. Idempotent: calling
-   * verify repeatedly with fresh nonces keeps bumping the row.
+   * First-time (or re-) claim — an idempotent upsert of the claim
+   * instance at `/v1/claims/:vote`, hence `PUT`. Verifies the
+   * signature without touching profile state — useful for operators
+   * who want to "lock in" ownership before editing anything. Calling
+   * it repeatedly with fresh nonces keeps bumping the row.
    */
-  app.post('/v1/claim/verify', async (request, reply) => {
+  app.put('/v1/claims/:vote', async (request, reply) => {
+    const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
     const body = unwrap(ClaimVerifyBodySchema.safeParse(request.body), 'body');
+    // REST-M7 — path/body consistency guard. The signed body is still
+    // authoritative for the signature; this just rejects a path that
+    // points at a different validator than the one signed for.
+    if (rejectVoteMismatch(reply, request.id, params.vote, body.votePubkey)) return reply;
     // Read the prior claim BEFORE verifying: `verifySigned` upserts
     // the row, so afterwards we can no longer tell a first-ever claim
     // from a re-claim, nor recover the previous identity pubkey. This
@@ -383,13 +430,17 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
   });
 
   /**
-   * Update profile. Same signed envelope, plus the desired profile
-   * state. Verifies + persists atomically; an attacker who swaps the
-   * profile fields between signing and submission breaks the
-   * signature and the request fails.
+   * Update profile — `PUT` of the profile sub-resource of the claim
+   * instance. Same signed envelope, plus the desired profile state.
+   * Verifies + persists atomically; an attacker who swaps the profile
+   * fields between signing and submission breaks the signature and
+   * the request fails.
    */
-  app.post('/v1/claim/profile', async (request, reply) => {
+  app.put('/v1/claims/:vote/profile', async (request, reply) => {
+    const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
     const body = unwrap(ProfileUpdateBodySchema.safeParse(request.body), 'body');
+    // REST-M7 — path/body consistency guard (see `PUT /v1/claims/:vote`).
+    if (rejectVoteMismatch(reply, request.id, params.vote, body.votePubkey)) return reply;
 
     // Normalise twitter handle: "" and null both mean "unset". We
     // DB-store null so queries can use IS NULL checks.

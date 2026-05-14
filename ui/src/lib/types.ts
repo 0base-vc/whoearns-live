@@ -151,9 +151,9 @@ export interface ValidatorProfile {
 }
 
 /**
- * Claim-status payload from `GET /v1/claim/:vote/status`. Light
- * wrapper used by the /claim/:vote page to decide what to render
- * (claim form vs. profile editor).
+ * Claim-status payload from `GET /v1/claims/:vote`. Light wrapper
+ * used by the /claim/:vote page to decide what to render (claim form
+ * vs. profile editor).
  */
 export interface ClaimStatus {
   claimed: boolean;
@@ -165,7 +165,7 @@ export interface ClaimStatus {
 }
 
 /**
- * `GET /v1/claim/challenge` response. The UI renders the returned
+ * `GET /v1/claims/challenge` response. The UI renders the returned
  * nonce + timestamp into the message the operator will sign with
  * `solana sign-offchain-message`.
  */

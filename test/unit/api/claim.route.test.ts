@@ -139,11 +139,11 @@ const signedEnvelope = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-describe('GET /v1/claim/challenge', () => {
+describe('GET /v1/claims/challenge', () => {
   it('returns a fresh nonce and timestamp', async () => {
     const { deps } = buildDeps();
     const app = await makeApp(deps);
-    const res = await app.inject({ method: 'GET', url: '/v1/claim/challenge' });
+    const res = await app.inject({ method: 'GET', url: '/v1/claims/challenge' });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(typeof body.nonce).toBe('string');
@@ -153,11 +153,11 @@ describe('GET /v1/claim/challenge', () => {
   });
 });
 
-describe('GET /v1/claim/:vote/status', () => {
+describe('GET /v1/claims/:vote', () => {
   it('reports claimed:false with a null profile when never claimed', async () => {
     const { deps } = buildDeps({ claim: null, profile: null });
     const app = await makeApp(deps);
-    const res = await app.inject({ method: 'GET', url: `/v1/claim/${VOTE_1}/status` });
+    const res = await app.inject({ method: 'GET', url: `/v1/claims/${VOTE_1}` });
     expect(res.statusCode).toBe(200);
     // CROSS-M1 — the envelope now also carries `githubLink` (null when
     // no ACTIVE link) and a `wallets` summary (zeroed when none).
@@ -173,7 +173,7 @@ describe('GET /v1/claim/:vote/status', () => {
   it('reports claimed:true plus the profile when claimed and edited', async () => {
     const { deps } = buildDeps({ claim: makeClaim(), profile: makeProfile() });
     const app = await makeApp(deps);
-    const res = await app.inject({ method: 'GET', url: `/v1/claim/${VOTE_1}/status` });
+    const res = await app.inject({ method: 'GET', url: `/v1/claims/${VOTE_1}` });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.claimed).toBe(true);
@@ -195,7 +195,7 @@ describe('GET /v1/claim/:vote/status', () => {
       ],
     });
     const app = await makeApp(deps);
-    const res = await app.inject({ method: 'GET', url: `/v1/claim/${VOTE_1}/status` });
+    const res = await app.inject({ method: 'GET', url: `/v1/claims/${VOTE_1}` });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.githubLink).toEqual({
@@ -222,7 +222,7 @@ describe('GET /v1/claim/:vote/status', () => {
       ],
     });
     const app = await makeApp(deps);
-    const res = await app.inject({ method: 'GET', url: `/v1/claim/${VOTE_1}/status` });
+    const res = await app.inject({ method: 'GET', url: `/v1/claims/${VOTE_1}` });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.githubLink).toBeNull();
@@ -234,14 +234,14 @@ describe('GET /v1/claim/:vote/status', () => {
   it('returns 400 on a malformed vote path parameter', async () => {
     const { deps } = buildDeps();
     const app = await makeApp(deps);
-    const res = await app.inject({ method: 'GET', url: '/v1/claim/not-a-pubkey/status' });
+    const res = await app.inject({ method: 'GET', url: '/v1/claims/not-a-pubkey' });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('validation_error');
     await app.close();
   });
 });
 
-describe('GET /v1/claim/:vote/audit', () => {
+describe('GET /v1/claims/:vote/audit', () => {
   it('returns the audit events newest-first without the forensic submittedIp', async () => {
     const event: ValidatorClaimEvent = {
       id: 1,
@@ -255,7 +255,7 @@ describe('GET /v1/claim/:vote/audit', () => {
     };
     const { deps } = buildDeps({ auditEvents: [event] });
     const app = await makeApp(deps);
-    const res = await app.inject({ method: 'GET', url: `/v1/claim/${VOTE_1}/audit` });
+    const res = await app.inject({ method: 'GET', url: `/v1/claims/${VOTE_1}/audit` });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.events).toHaveLength(1);
@@ -265,7 +265,7 @@ describe('GET /v1/claim/:vote/audit', () => {
   });
 });
 
-describe('POST /v1/claim/verify', () => {
+describe('PUT /v1/claims/:vote', () => {
   it('verifies a claim on the happy path and writes an audit event', async () => {
     const { deps, appended } = buildDeps({
       claim: null, // no prior claim → first-ever `claim` event
@@ -273,8 +273,8 @@ describe('POST /v1/claim/verify', () => {
     });
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/verify',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}`,
       payload: signedEnvelope(),
     });
     expect(res.statusCode).toBe(200);
@@ -288,12 +288,29 @@ describe('POST /v1/claim/verify', () => {
     const { deps } = buildDeps();
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/verify',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}`,
       payload: signedEnvelope({ signatureBase58: 'short' }),
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('validation_error');
+    await app.close();
+  });
+
+  it('returns 400 vote_pubkey_mismatch when the path vote disagrees with the signed body', async () => {
+    // REST-M7 — the vote pubkey now rides in the path AND the signed
+    // body. A path that points at a different validator than the one
+    // signed for is rejected before any verification work; the body
+    // stays authoritative for the signature.
+    const { deps } = buildDeps();
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'PUT',
+      url: `/v1/claims/${IDENTITY_1}`, // valid pubkey, but != body.votePubkey (VOTE_1)
+      payload: signedEnvelope(),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('vote_pubkey_mismatch');
     await app.close();
   });
 
@@ -303,8 +320,8 @@ describe('POST /v1/claim/verify', () => {
     });
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/verify',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}`,
       payload: signedEnvelope(),
     });
     expect(res.statusCode).toBe(404);
@@ -318,8 +335,8 @@ describe('POST /v1/claim/verify', () => {
     });
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/verify',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}`,
       payload: signedEnvelope(),
     });
     expect(res.statusCode).toBe(403);
@@ -328,15 +345,15 @@ describe('POST /v1/claim/verify', () => {
   });
 });
 
-describe('POST /v1/claim/profile', () => {
+describe('PUT /v1/claims/:vote/profile', () => {
   it('updates the profile on the happy path and writes a profile_update audit event', async () => {
     const { deps, appended } = buildDeps({
       updateResult: { ok: true, profile: makeProfile({ optedOut: true }) },
     });
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/profile',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}/profile`,
       payload: signedEnvelope({
         profile: { twitterHandle: 'operator', hideFooterCta: false, optedOut: true },
       }),
@@ -348,14 +365,30 @@ describe('POST /v1/claim/profile', () => {
     await app.close();
   });
 
+  it('returns 400 vote_pubkey_mismatch when the path vote disagrees with the signed body', async () => {
+    // REST-M7 — same path/body consistency guard as PUT /v1/claims/:vote.
+    const { deps } = buildDeps();
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'PUT',
+      url: `/v1/claims/${IDENTITY_1}/profile`, // valid pubkey, but != body.votePubkey
+      payload: signedEnvelope({
+        profile: { twitterHandle: 'operator', hideFooterCta: false, optedOut: false },
+      }),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('vote_pubkey_mismatch');
+    await app.close();
+  });
+
   it('returns 403 when the profile-update signature fails verification', async () => {
     const { deps } = buildDeps({
       updateResult: { ok: false, reason: 'bad_signature' },
     });
     const app = await makeApp(deps);
     const res = await app.inject({
-      method: 'POST',
-      url: '/v1/claim/profile',
+      method: 'PUT',
+      url: `/v1/claims/${VOTE_1}/profile`,
       payload: signedEnvelope({
         profile: { twitterHandle: 'operator', hideFooterCta: false, optedOut: false },
       }),

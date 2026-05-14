@@ -10,10 +10,11 @@ import type {
  * Repository for the `validator_claim_events` table (SEC-M4).
  *
  * An append-only audit log of claim-surface mutations. Every write
- * path on the claim surface (`POST /v1/claim/verify`, `.../profile`,
- * `.../github/verify`, `.../wallet/verify`) calls `append` AFTER its
- * underlying mutation succeeds, so an operator can later audit their
- * own validator's change history via `GET /v1/claim/:vote/audit`.
+ * path on the claim surface (`PUT /v1/claims/:vote`, `.../:vote/profile`,
+ * `.../:vote/github`, `POST /v1/claims/:vote/wallets`) calls `append`
+ * AFTER its underlying mutation succeeds, so an operator can later
+ * audit their own validator's change history via
+ * `GET /v1/claims/:vote/audit`.
  *
  * Append-only by CONVENTION — this repo deliberately exposes ONLY
  * `append` (write) and `listByVote` (read). There is no UPDATE or
@@ -130,7 +131,7 @@ export class ValidatorClaimEventsRepository {
 
   /**
    * Recent audit events for a vote pubkey, newest first. Backs the
-   * public `GET /v1/claim/:vote/audit` endpoint. `limit` is clamped to
+   * public `GET /v1/claims/:vote/audit` endpoint. `limit` is clamped to
    * `[1, CLAIM_EVENTS_MAX_LIMIT]` so a caller-supplied value can't
    * request an unbounded scan.
    *

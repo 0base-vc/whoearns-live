@@ -224,13 +224,13 @@ ship, the composite expands to the full four-signal formula:
 
 #### Live now
 
-- `POST /v1/claim/github/verify` accepts a public Gist URL whose
+- `PUT /v1/claims/:vote/github` accepts a public Gist URL whose
   body contains the canonical nonce + a base58 Ed25519 signature.
   The Gist URL's username must match the requested
   `githubUsername` (prevents publishing under someone else's
   account). Verification is stateless on the WhoEarns side — no
   OAuth token retained, GitHub never sees a callback.
-- `POST /v1/claim/wallet/verify` accepts co-signatures from BOTH
+- `POST /v1/claims/:vote/wallets` accepts co-signatures from BOTH
   the validator identity key AND the operator wallet key over a
   canonical nonce. An `anchorTxSignature` (Solana tx signature for
   the operator-published memo) provides the "operationally alive"

@@ -157,7 +157,7 @@ ${urls.join('\n')}
     // matches, so `/v1/validators/` covers search, history, current-
     // epoch, leader-slots, tier, badges, and operator-activity-index
     // in one line — every path under it is a public crawlable GET.
-    // `/badge/` is the embeddable SVG. The POST /v1/claim/* mutations
+    // `/badge/` is the embeddable SVG. The /v1/claims/* mutations
     // are intentionally NOT listed — they're not crawlable. `*` keeps
     // the existing disallow on /v1/* for unknown agents.
     const body = `User-agent: *
@@ -255,8 +255,8 @@ GET unless noted. Full descriptions + query params in /llms-full.txt.
 - ${SITE_URL}/v1/simd-proposals: Human-reviewed AI-curated SIMD proposal feed
 - ${SITE_URL}/badge/{vote}.svg: Embeddable SVG performance badge
 - ${SITE_URL}/v1/validators/current-epoch/batch: POST — bulk current-epoch lookup
-- ${SITE_URL}/v1/claim/github/verify: POST — link a GitHub identity via a signed Gist
-- ${SITE_URL}/v1/claim/wallet/verify: POST — register an operator wallet via dual-signature proof
+- ${SITE_URL}/v1/claims/{vote}/github: PUT — link a GitHub identity via a signed Gist
+- ${SITE_URL}/v1/claims/{vote}/wallets: POST — register an operator wallet via dual-signature proof
 
 ## AI-assisted operations
 
@@ -439,19 +439,23 @@ CDN-cached badge cannot be caught lying mid-epoch. Ships <title> +
 <desc> accessibility metadata with the validator name + closed-epoch
 summary. Cache-Control: public, max-age=3600, s-maxage=86400.
 
-### POST /v1/claim/github/verify
+### PUT /v1/claims/{vote}/github
 Links a GitHub identity to a CLAIMED validator via a Keybase-style
-public Gist; no OAuth token is retained. Body: { votePubkey,
-identityPubkey, githubUsername, gistUrl, timestampMs }. The Gist must
-contain the canonical WhoEarns nonce plus the operator's Ed25519
-signature over it. 200 on success, 403 for nonce/sig/policy
-failures, 502 for upstream Gist fetch errors, 503 when the feature
-deps are not wired in. Replayed nonces return 403 nonce_replay.
+public Gist; no OAuth token is retained. The vote pubkey is in the
+path AND the body — they must match (400 vote_pubkey_mismatch
+otherwise). Body: { votePubkey, identityPubkey, githubUsername,
+gistUrl, timestampMs }. The Gist must contain the canonical WhoEarns
+nonce plus the operator's Ed25519 signature over it. 200 on success,
+403 for nonce/sig/policy failures, 502 for upstream Gist fetch
+errors, 503 when the feature deps are not wired in. Replayed nonces
+return 403 nonce_replay.
 
-### POST /v1/claim/wallet/verify
-Registers an operator day-to-day wallet, co-signed by the validator
-identity AND wallet keys and anchored by a Solana memo transaction.
-Body: { votePubkey, identityPubkey, walletPubkey, label, timestampMs,
+### POST /v1/claims/{vote}/wallets
+Registers (appends) an operator day-to-day wallet, co-signed by the
+validator identity AND wallet keys and anchored by a Solana memo
+transaction. The vote pubkey is in the path AND the body — they must
+match (400 vote_pubkey_mismatch otherwise). Body: { votePubkey,
+identityPubkey, walletPubkey, label, timestampMs,
 identitySignatureB58, walletSignatureB58, anchorTxSignature }. Cap of
 3 wallets per validator (409 wallet_cap_reached). The validator must
 already be CLAIMED. anchorTxSignature is currently shape-validated
@@ -466,7 +470,7 @@ PerplexityBot) are whitelisted via robots.txt to the public GET read
 surface: /v1/leaderboard, /v1/epoch/current, everything under
 /v1/validators/ (search, history, current-epoch, leader-slots, tier,
 badges, operator-activity-index), /v1/operator-wallets/, /v1/simd-proposals,
-and /badge/. The POST /v1/claim/* mutations are not crawlable. MCP calls
+and /badge/. The /v1/claims/* mutations are not crawlable. MCP calls
 use the same public per-IP budget. Higher-volume queries should run a
 self-hosted indexer.
 

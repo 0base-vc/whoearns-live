@@ -541,13 +541,16 @@ epoch (~2 days), `client.kind` ticks on operator upgrade cycles,
 Validator operators can prove ownership by signing a short message with the
 validator identity key. No account, cookie, or password is created.
 
-| Method | Path                     | Purpose                                            |
-| ------ | ------------------------ | -------------------------------------------------- |
-| GET    | `/v1/claim/challenge`    | Returns `{ nonce, timestampSec, expiresInSec }`.   |
-| GET    | `/v1/claim/:vote/status` | Public claim/profile state for a vote pubkey.      |
-| GET    | `/v1/claim/:vote/audit`  | Public, append-only claim-change audit log.        |
-| POST   | `/v1/claim/verify`       | Verify a signed claim without editing profile.     |
-| POST   | `/v1/claim/profile`      | Verify signature and update public profile fields. |
+| Method | Path                       | Purpose                                            |
+| ------ | -------------------------- | -------------------------------------------------- |
+| GET    | `/v1/claims/challenge`     | Returns `{ nonce, timestampSec, expiresInSec }`.   |
+| GET    | `/v1/claims/:vote`         | Public claim/profile state for a vote pubkey.      |
+| GET    | `/v1/claims/:vote/audit`   | Public, append-only claim-change audit log.        |
+| PUT    | `/v1/claims/:vote`         | Verify a signed claim without editing profile.     |
+| PUT    | `/v1/claims/:vote/profile` | Verify signature and update public profile fields. |
+
+`GET /v1/claims/:vote` is the claim instance — "status" is just the GET of
+the resource. The two mutating endpoints are idempotent upserts, hence `PUT`.
 
 Mutation bodies include:
 
@@ -557,7 +560,13 @@ Mutation bodies include:
 - `timestampSec`
 - `signatureBase58`
 
-`/v1/claim/profile` also includes `profile`:
+The mutating `:vote` endpoints carry the vote pubkey in **both** the path and
+the signed body. The signed body stays authoritative (the signature is bound
+to its fields); the path is a cheap consistency guard — a `params.vote` that
+disagrees with `votePubkey` is rejected `400 vote_pubkey_mismatch` before any
+verification work.
+
+`PUT /v1/claims/:vote/profile` also includes `profile`:
 
 ```json
 {
@@ -572,9 +581,10 @@ The signed payload binds the purpose (`claim` or `profile`), timestamp, nonce,
 pubkeys, and profile fields, so a profile signature cannot be replayed as a
 different operation.
 
-### `GET /v1/claim/:vote/status`
+### `GET /v1/claims/:vote`
 
-Public, unauthenticated. The whole-claim picture for a vote pubkey in a
+Public, unauthenticated. The GET of the claim instance — "status" is just
+reading the resource. The whole-claim picture for a vote pubkey in a
 **single** fetch — a dashboard does not have to chase this with separate
 GitHub-link and operator-wallet reads.
 
@@ -618,10 +628,10 @@ The four claim-surface mutation endpoints split into **two signing ceremonies
 with different parameters** — a library author writing one signer for all four
 needs to know this up front:
 
-| Endpoints                                            | Timestamp field | Unit                  | Freshness window                          | Replay guard                                                   |
-| ---------------------------------------------------- | --------------- | --------------------- | ----------------------------------------- | -------------------------------------------------------------- |
-| **v1** — `/v1/claim/verify`, `/v1/claim/profile`     | `timestampSec`  | Unix seconds          | ±5 min (symmetric)                        | Per-claim `lastNonceUsed` (the service rejects a reused nonce) |
-| **v2** — `/v1/claim/github/verify`, `/wallet/verify` | `timestampMs`   | Unix **milliseconds** | 5 min past / **60 s future** (asymmetric) | `signed_nonce` UNIQUE index (migration 0025)                   |
+| Endpoints                                                       | Timestamp field | Unit                  | Freshness window                          | Replay guard                                                   |
+| --------------------------------------------------------------- | --------------- | --------------------- | ----------------------------------------- | -------------------------------------------------------------- |
+| **v1** — `PUT /v1/claims/:vote`, `PUT /v1/claims/:vote/profile` | `timestampSec`  | Unix seconds          | ±5 min (symmetric)                        | Per-claim `lastNonceUsed` (the service rejects a reused nonce) |
+| **v2** — `PUT /v1/claims/:vote/github`, `POST .../wallets`      | `timestampMs`   | Unix **milliseconds** | 5 min past / **60 s future** (asymmetric) | `signed_nonce` UNIQUE index (migration 0025)                   |
 
 Why the asymmetry exists:
 
@@ -641,7 +651,7 @@ timestampMs + TTL`, so it works in milliseconds end-to-end. The units are
 
 This subsection is documentation only — the endpoints' behaviour is unchanged.
 
-### `GET /v1/claim/:vote/audit`
+### `GET /v1/claims/:vote/audit`
 
 An immutable, append-only log of every claim-surface mutation for a vote
 pubkey — claims, re-claims, profile edits, GitHub links, and operator-wallet
@@ -651,7 +661,7 @@ register a wallet, and without this log the real operator would have no way to
 notice. A `reclaim` event whose `priorIdentityPubkey` is non-null is the
 signal that the validator identity was rotated.
 
-Public and unauthenticated, like `/v1/claim/:vote/status` — every field
+Public and unauthenticated, like `GET /v1/claims/:vote` — every field
 returned is already public on-chain or operator-published. The `submitted_ip`
 recorded with each event (the request IP at write time) is a forensic field
 that stays in the database and is **not** included in the response. Cache:
@@ -722,12 +732,16 @@ Embedding example:
 
 ## Claim v2 endpoints (Phase 3)
 
-Two additional flows on top of `POST /v1/claim/verify`:
+Two additional flows on top of `PUT /v1/claims/:vote`. Both carry the vote
+pubkey in **both** the path and the request body; a mismatch is rejected
+`400 vote_pubkey_mismatch` (the request body stays authoritative for the
+cryptographic proof).
 
-### `POST /v1/claim/github/verify`
+### `PUT /v1/claims/:vote/github`
 
 Links a GitHub identity to a claimed validator via a Keybase-style
-public Gist. No OAuth token is retained.
+public Gist. No OAuth token is retained. Idempotent — a re-link replaces,
+hence `PUT`.
 
 Request body:
 
@@ -755,10 +769,12 @@ Status codes: 200 on success, 403 for nonce/sig/policy failures, 502
 for upstream Gist fetch errors, 503 when the P3 feature deps are not
 wired in.
 
-### `POST /v1/claim/wallet/verify`
+### `POST /v1/claims/:vote/wallets`
 
-Registers an operator-day-to-day wallet, co-signed by validator
-identity AND wallet keys, anchored by a Solana memo transaction.
+Registers (appends) an operator-day-to-day wallet, co-signed by validator
+identity AND wallet keys, anchored by a Solana memo transaction. The
+wallets are a bounded collection (≤3 per validator), so this is a `POST`
+to the plural `wallets` sub-path.
 
 Request body:
 
@@ -1022,8 +1038,8 @@ all built yet.
 | `/v1/validators/:idOrVote/tier`                    | Profile header — Node Tier badge + composite breakdown     |
 | `/v1/validators/:idOrVote/badges`                  | Profile header — tenure + client + tier badge row          |
 | `/v1/validators/:idOrVote/operator-activity-index` | Profile scoring panel — OAI composite + sub-component bars |
-| `/v1/claim/:vote/status`                           | Operator dashboard — claim-progress / re-attest reminders  |
-| `/v1/claim/:vote/audit`                            | Operator dashboard — claim-change forensic timeline        |
+| `/v1/claims/:vote`                                 | Operator dashboard — claim-progress / re-attest reminders  |
+| `/v1/claims/:vote/audit`                           | Operator dashboard — claim-change forensic timeline        |
 | `/v1/operator-wallets/:wallet`                     | Profile wallet panel — wallet registration metadata header |
 | `/v1/operator-wallets/:wallet/activity`            | Profile wallet panel — 365-day activity heatmap grid       |
 | `/v1/simd-proposals`                               | Governance widget / leaderboard sidebar — pending SIMDs    |

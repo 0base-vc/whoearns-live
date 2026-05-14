@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppConfig } from '../../core/config.js';
 import {
@@ -113,18 +113,61 @@ function humanMessageForWalletFailure(reason: WalletFailureReason): string {
 }
 
 /**
+ * REST-M7 — `:vote` path parameter schema. Mirrors `VoteParamSchema`
+ * in `claim.route.ts` (each route file carries its own copy, same
+ * convention as the inline `recordClaimEvent` helper) — both validate
+ * with the shared `PubkeySchema`.
+ */
+const VoteParamSchema = z.object({ vote: PubkeySchema });
+
+/**
+ * REST-M7 path/body consistency guard. The vote pubkey now travels in
+ * BOTH the path and the request body; the body remains authoritative
+ * (the signatures are bound to its fields), so this is a cheap guard
+ * against a caller pointing the path at a different validator than
+ * the one they signed for. Returns `true` (and sends the `400`) when
+ * the two disagree; the caller bails on a `true`. Mirrors
+ * `rejectVoteMismatch` in `claim.route.ts`.
+ */
+function rejectVoteMismatch(
+  reply: FastifyReply,
+  requestId: string,
+  paramVote: string,
+  bodyVote: string,
+): boolean {
+  if (paramVote === bodyVote) return false;
+  sendError(reply, {
+    code: 'vote_pubkey_mismatch',
+    statusCode: 400,
+    message: 'vote pubkey in the path does not match votePubkey in the signed body',
+    requestId,
+  });
+  return true;
+}
+
+/**
  * Claim v2 API routes — Phase 3 GitHub identity + operator wallet
  * registration.
  *
- *   POST /v1/claim/github/verify  — link a GitHub username via a
- *                                   signed Gist proof
- *   POST /v1/claim/wallet/verify  — register an operator wallet via
- *                                   a dual-signature + anchor-tx proof
+ *   PUT  /v1/claims/:vote/github   — link a GitHub username via a
+ *                                    signed Gist proof (idempotent
+ *                                    re-link → replaces, hence PUT)
+ *   POST /v1/claims/:vote/wallets  — append an operator wallet via a
+ *                                    dual-signature + anchor-tx proof
+ *                                    (a ≤3-entry collection, hence
+ *                                    POST + plural)
  *
  * Split out of `claim.route.ts` (the v1 claim/profile surface): the
- * two plugins share only the `/v1/claim/*` URL prefix, not behaviour
+ * two plugins share only the `/v1/claims/*` URL prefix, not behaviour
  * — v2 verifies external attestations (Gists, on-chain anchor txs)
- * rather than the bare offchain-message signatures v1 deals in.
+ * rather than the bare offchain-message signatures v1 deals in. The
+ * `claim-v2` file name is a code-organization split, not a URL
+ * version — both files serve under `/v1/claims/*`.
+ *
+ * Both endpoints carry `:vote` in BOTH the path and the request body;
+ * the body stays authoritative and a `params.vote !== body.votePubkey`
+ * mismatch is rejected `400 vote_pubkey_mismatch` before any
+ * verification work (REST-M7).
  *
  * Both endpoints require the validator to already have a CLAIM
  * (a `validator_claims` row); the v1 claim flow is the prerequisite.
@@ -205,8 +248,13 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     timestampMs: z.number().int().positive(),
   });
 
-  app.post('/v1/claim/github/verify', async (request, reply) => {
+  app.put('/v1/claims/:vote/github', async (request, reply) => {
+    const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
     const body = unwrap(GithubVerifyBodySchema.safeParse(request.body), 'body');
+    // REST-M7 — path/body consistency guard. The signed Gist proof is
+    // still authoritative; this just rejects a path pointing at a
+    // different validator than the body.
+    if (rejectVoteMismatch(reply, request.id, params.vote, body.votePubkey)) return reply;
     if (!freshnessOk(body.timestampMs)) {
       return sendError(reply, {
         code: 'stale_timestamp',
@@ -389,8 +437,13 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     anchorTxSignature: z.string().min(86).max(88),
   });
 
-  app.post('/v1/claim/wallet/verify', async (request, reply) => {
+  app.post('/v1/claims/:vote/wallets', async (request, reply) => {
+    const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
     const body = unwrap(WalletVerifyBodySchema.safeParse(request.body), 'body');
+    // REST-M7 — path/body consistency guard. The dual-signature proof
+    // is still authoritative; this just rejects a path pointing at a
+    // different validator than the body.
+    if (rejectVoteMismatch(reply, request.id, params.vote, body.votePubkey)) return reply;
     if (!freshnessOk(body.timestampMs)) {
       return sendError(reply, {
         code: 'stale_timestamp',
