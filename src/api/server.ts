@@ -315,6 +315,11 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       claimService: deps.services.claim,
       // SEC-M4 — best-effort audit log for claim/profile mutations.
       claimEventsRepo: deps.repos.validatorClaimEvents,
+      // CROSS-M1 — `/v1/claim/:vote/status` folds in GitHub-link +
+      // operator-wallet state so a dashboard needs one fetch, not
+      // four. Same repos the OAI route reads.
+      validatorGithubRepo: deps.repos.validatorGithub,
+      operatorWalletsRepo: deps.repos.operatorWallets,
     });
     // Phase 3 — Claim v2: GitHub Gist link + operator wallet
     // registration. Split into its own plugin from the v1 claim

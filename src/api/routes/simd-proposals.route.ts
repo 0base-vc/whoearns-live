@@ -22,7 +22,13 @@ const QuerySchema = z.object({
 });
 
 interface ProposalListResponse {
-  proposals: Array<{
+  /**
+   * Count of `items` — parity with the other list endpoints
+   * (`/v1/validators/search`, `/v1/leaderboard`) that ship a
+   * top-level `count` alongside the array.
+   */
+  count: number;
+  items: Array<{
     simdNumber: number;
     title: string;
     status: string;
@@ -32,6 +38,20 @@ interface ProposalListResponse {
     reviewedAt: string;
   }>;
 }
+
+/**
+ * `Cache-Control` for the reviewed-SIMD feed. The CATALOGUE tier
+ * (`public, max-age=600, s-maxage=3600`) plus a 24 h
+ * `stale-while-revalidate`: reviewed SIMDs change on a human-review
+ * cadence (hours, never sub-minute), so once the s-maxage lapses a
+ * CDN edge can serve the slightly-stale list instantly while it
+ * revalidates in the background — a visitor never eats the origin
+ * round-trip. Appended here rather than in `cacheControl()` because
+ * SWR is only appropriate for this slowly-changing tier; the SCORING
+ * / REALTIME tiers deliberately don't want a stale window.
+ */
+const SIMD_PROPOSALS_SWR_SEC = 86_400;
+const SIMD_PROPOSALS_CACHE_CONTROL = `${cacheControl('CATALOGUE')}, stale-while-revalidate=${SIMD_PROPOSALS_SWR_SEC}`;
 
 /**
  * Public read for the Pending SIMD widget.
@@ -48,44 +68,59 @@ const simdProposalsRoutes: FastifyPluginAsync<SimdProposalsRoutesDeps> = async (
   app: FastifyInstance,
   opts: SimdProposalsRoutesDeps,
 ) => {
-  app.get('/v1/simd-proposals', async (request, reply): Promise<ProposalListResponse> => {
+  // Return type is `ProposalListResponse | void`: the GET path
+  // resolves the structured body, the HEAD short-circuit calls
+  // `reply.send('')` and resolves `void`. The union keeps the HEAD
+  // path honest — no `as unknown as ProposalListResponse` cast
+  // claiming an empty string is a typed object.
+  app.get('/v1/simd-proposals', async (request, reply): Promise<ProposalListResponse | void> => {
     const query = QuerySchema.safeParse(request.query);
     if (!query.success) {
       throw new ValidationError('limit query parameter failed validation', {
         issues: query.error.issues,
       });
     }
+    // HEAD short-circuit AFTER input validation (so a HEAD with a
+    // bad `limit` still 400s) but BEFORE the `listReviewed` DB read a
+    // HEAD response would discard.
+    if (request.method === 'HEAD') {
+      void reply.code(200).header('cache-control', SIMD_PROPOSALS_CACHE_CONTROL).send('');
+      return;
+    }
     const proposals = await opts.repo.listReviewed(query.data.limit);
-    // CATALOGUE tier — reviewed SIMDs appear on a human-review
-    // cadence (hours), never sub-minute. See src/api/cache-control.ts.
-    void reply.header('cache-control', cacheControl('CATALOGUE'));
-    return {
-      proposals: proposals
-        // Type predicate (not a bare boolean callback) so TS narrows
-        // `aiSummary` / `aiQuestions` / `reviewedAt` to non-null for
-        // the `.map` below — the `as` casts that papered over the
-        // un-narrowed `.filter` are gone. The repo's `listReviewed`
-        // already enforces `reviewed_at IS NOT NULL`; this is the
-        // belt-and-braces type-level mirror of that runtime filter.
-        .filter(
-          (
-            p,
-          ): p is SimdProposal & {
-            aiSummary: string;
-            aiQuestions: string[];
-            reviewedAt: Date;
-          } => p.aiSummary !== null && p.aiQuestions !== null && p.reviewedAt !== null,
-        )
-        .map((p) => ({
-          simdNumber: p.simdNumber,
-          title: p.title,
-          status: p.status,
-          sourceUrl: p.sourceUrl,
-          aiSummary: p.aiSummary,
-          aiQuestions: p.aiQuestions,
-          reviewedAt: p.reviewedAt.toISOString(),
-        })),
-    };
+    // CATALOGUE tier + stale-while-revalidate — reviewed SIMDs appear
+    // on a human-review cadence (hours), never sub-minute. See
+    // SIMD_PROPOSALS_CACHE_CONTROL above + src/api/cache-control.ts.
+    void reply.header('cache-control', SIMD_PROPOSALS_CACHE_CONTROL);
+    const items = proposals
+      // Type predicate (not a bare boolean callback) so TS narrows
+      // `aiSummary` / `aiQuestions` / `reviewedAt` to non-null for
+      // the `.map` below — the `as` casts that papered over the
+      // un-narrowed `.filter` are gone. The repo's `listReviewed`
+      // already enforces `reviewed_at IS NOT NULL`; this is the
+      // belt-and-braces type-level mirror of that runtime filter.
+      .filter(
+        (
+          p,
+        ): p is SimdProposal & {
+          aiSummary: string;
+          aiQuestions: string[];
+          reviewedAt: Date;
+        } => p.aiSummary !== null && p.aiQuestions !== null && p.reviewedAt !== null,
+      )
+      .map((p) => ({
+        simdNumber: p.simdNumber,
+        title: p.title,
+        status: p.status,
+        sourceUrl: p.sourceUrl,
+        aiSummary: p.aiSummary,
+        aiQuestions: p.aiQuestions,
+        reviewedAt: p.reviewedAt.toISOString(),
+      }));
+    // `items` (not `proposals`) for envelope parity with every other
+    // list endpoint; `count` mirrors `ValidatorSearchResponse` /
+    // the leaderboard shape.
+    return { count: items.length, items };
   });
 };
 

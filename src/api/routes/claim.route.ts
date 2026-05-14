@@ -3,10 +3,15 @@ import { z } from 'zod';
 import type { AppConfig } from '../../core/config.js';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
 import type { ClaimService, ClaimVerifyFailure } from '../../services/claim.service.js';
+import {
+  OPERATOR_WALLET_CAP_PER_VALIDATOR,
+  type OperatorWalletsRepository,
+} from '../../storage/repositories/operator-wallets.repo.js';
 import type {
   ClaimEventInput,
   ValidatorClaimEventsRepository,
 } from '../../storage/repositories/validator-claim-events.repo.js';
+import type { ValidatorGithubRepository } from '../../storage/repositories/validator-github.repo.js';
 import { cacheControl } from '../cache-control.js';
 import { sendError } from '../error-handler.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
@@ -61,6 +66,16 @@ export interface ClaimRoutesDeps {
    * `append` (write) + `listByVote` (the `/audit` read) are used.
    */
   claimEventsRepo: Pick<ValidatorClaimEventsRepository, 'append' | 'listByVote'>;
+  /**
+   * CROSS-M1 — the `/v1/claim/:vote/status` response now folds in
+   * GitHub-link + operator-wallet state so a dashboard gets the whole
+   * claim picture in ONE fetch instead of three. These are the same
+   * ACTIVE-only reads the OAI route uses (`findActiveByVote` /
+   * `listActiveByVote`). Status is a read-only surface — no mutating
+   * methods are threaded in.
+   */
+  validatorGithubRepo: Pick<ValidatorGithubRepository, 'findActiveByVote'>;
+  operatorWalletsRepo: Pick<OperatorWalletsRepository, 'listActiveByVote'>;
 }
 
 /**
@@ -196,7 +211,7 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
 
   /**
    * Check claim / profile state for a validator. Public endpoint —
-   * no auth. Returns one of three combinations:
+   * no auth. Returns one of three `claimed`/`profile` combinations:
    *   - `claimed: false, profile: null`               → never claimed
    *   - `claimed: true, profile: null`                → claimed but
    *                                                     no profile
@@ -211,16 +226,38 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
    * earlier version did — meant the operator who claimed but didn't
    * fill any field would re-see the first-claim flow on every visit.
    *
-   * `claim` and `profile` are queried in parallel because they're
-   * independent reads. The two-row trip cost is negligible vs. the
-   * UX win of an accurate `claimed` flag.
+   * CROSS-M1 — the response also folds in `githubLink` and `wallets`
+   * so an operator dashboard renders the whole claim picture from a
+   * SINGLE fetch. Before this it had to chase the claim-status read
+   * with three more un-batched calls (`/operator-activity-index`
+   * read paths, etc.) just to know whether GitHub was linked and how
+   * many wallets were registered. Both are the ACTIVE-only reads —
+   * `githubLink` is `null` when there's no link OR the attestation
+   * lapsed; `wallets.count` counts only not-expired registrations —
+   * matching the OAI route's semantics so the dashboard sees the
+   * same "lapsed = inactive" view everywhere.
+   *
+   * All four reads run in parallel — they're independent, and the
+   * extra two-row trip is negligible against the UX win of a
+   * one-fetch dashboard.
    */
   app.get('/v1/claim/:vote/status', async (request) => {
     const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
-    const [claim, profile] = await Promise.all([
+    const [claim, profile, githubLink, activeWallets] = await Promise.all([
       opts.claimService.getClaim(params.vote),
       opts.claimService.getProfile(params.vote),
+      opts.validatorGithubRepo.findActiveByVote(params.vote),
+      opts.operatorWalletsRepo.listActiveByVote(params.vote),
     ]);
+    // Wallet summary derived from the ACTIVE-only list: count,
+    // whether the per-validator cap is hit, and the soonest-expiring
+    // attestation (so a dashboard can nudge "re-attest" before a
+    // wallet silently drops out of scoring). `oldestExpiresAt` is the
+    // MIN expiry across active rows — `null` when none are registered.
+    const oldestExpiresAt = activeWallets.reduce<Date | null>(
+      (oldest, w) => (oldest === null || w.expiresAt < oldest ? w.expiresAt : oldest),
+      null,
+    );
     return {
       claimed: claim !== null,
       profile:
@@ -233,6 +270,21 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
               narrativeOverride: profile.narrativeOverride,
               updatedAt: profile.updatedAt.toISOString(),
             },
+      // `null` when no ACTIVE GitHub link exists (never linked OR the
+      // attestation expired) — same "lapsed = gone" rule as OAI.
+      githubLink:
+        githubLink === null
+          ? null
+          : {
+              githubUsername: githubLink.githubUsername,
+              verifiedAt: githubLink.verifiedAt.toISOString(),
+              expiresAt: githubLink.expiresAt.toISOString(),
+            },
+      wallets: {
+        count: activeWallets.length,
+        capReached: activeWallets.length >= OPERATOR_WALLET_CAP_PER_VALIDATOR,
+        oldestExpiresAt: oldestExpiresAt?.toISOString() ?? null,
+      },
     };
   });
 

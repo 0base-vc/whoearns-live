@@ -28,6 +28,32 @@ truth and the docs need a PR**.
 > formula; "partial release" and "scaffolding shipped" mean exactly
 > what they say.
 
+### Phase-number crosswalk (scoring.md ↔ roadmap.md)
+
+**The word "Phase" means different things in this document and in
+[`docs/roadmap.md`](./roadmap.md).** This document numbers phases by
+_scoring feature_ (Phase 1 = Node Tier, Phase 2 = tenure/client
+badges, …). `roadmap.md` numbers phases by _product-rollout stage_
+(Phase 1 = infra guardrails, Phase 2 = public-goods core, …). They
+are not the same axis and the numbers do **not** line up. When a
+reader cites "Phase 3", use this table to disambiguate which axis
+they mean:
+
+| scoring.md phase                                   | roadmap.md phase that ships it                |
+| -------------------------------------------------- | --------------------------------------------- |
+| Phase 1 — Effective Latency + Node Tier            | Roadmap Phase 3 (Validator engagement) onward |
+| Phase 2 — Tenure, Client, Categories               | Roadmap Phase 3 (Validator engagement)        |
+| Phase 3 — Claim v2 (GitHub identity + wallet)      | Roadmap Phase 3 (Validator engagement)        |
+| Phase 4 — Wallet Activity (365-day grid)           | Roadmap Phase 4 (Ecosystem distribution)      |
+| Phase 5 — Pending SIMD widget + AI curation        | Roadmap Phase 4 (Ecosystem distribution)      |
+| Phase 6 + 7 — Governance + Operator Activity Index | Roadmap Phase 4 (Ecosystem distribution)      |
+
+Rule of thumb: a bare "Phase N" **in this document** is always a
+scoring-feature phase (the numbered `### Phase N` sections below). A
+"Phase N" in `roadmap.md` is a rollout stage. Neither document was
+renumbered — too many existing cross-references — so this crosswalk
+is the bridge.
+
 ## Design principles
 
 1. **Outcome over claim.** Every signal that can be derived from

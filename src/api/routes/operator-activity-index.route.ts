@@ -90,8 +90,25 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
   // resolves `void`. The union keeps the HEAD path honest — no
   // `as unknown as OaiResponse` cast claiming an empty string is a
   // typed object.
+  //
+  // REST-M4 — per-route rate-limit override. This handler runs 5-7
+  // independent DB reads per request (the two-wave fan-out below),
+  // ~5× the per-request DB cost of a typical `/v1/*` read. The global
+  // limiter (`@fastify/rate-limit`, registered in server.ts) honours
+  // a route-level `config.rateLimit` out of the box, so we cap this
+  // endpoint at 30/min/IP — half the global 60/min — to bound the
+  // worst-case DB load a single IP can drive here. A normal UI
+  // consumer (one OAI panel per profile view) stays well under it.
   app.get<{ Params: { idOrVote: string } }>(
     '/v1/validators/:idOrVote/operator-activity-index',
+    {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: '1 minute',
+        },
+      },
+    },
     async (request, reply): Promise<OaiResponse | void> => {
       const params = VoteOrIdentityParamSchema.safeParse(request.params);
       if (!params.success) {

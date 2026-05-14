@@ -180,6 +180,52 @@ describe('smoke: api server boots and routes 200/degraded', () => {
     }
   });
 
+  it('an unknown /v1/* path returns a JSON 404 envelope, not the SPA HTML shell (REST-M9)', async () => {
+    // Regression guard: the `setNotFoundHandler` SPA fallback only
+    // fires WITH a UI build dir, and it must NOT serve `spa-fallback.html`
+    // for `/v1/*` — an unknown API path has to 404 with the JSON
+    // error envelope so a typed client never parses an HTML body as
+    // a 200. The conditional route registration that originally
+    // motivated this finding is gone (deps are required, all routes
+    // always register), but the `/v1/` guard inside the handler
+    // still has to hold — this asserts it positively.
+    const uiDir = await mkdtemp(join(tmpdir(), 'whoearns-ui-build-'));
+    await writeFile(join(uiDir, 'index.html'), '<!doctype html><title>WhoEarns</title>');
+    await writeFile(join(uiDir, 'spa-fallback.html'), '<!doctype html><title>WhoEarns SPA</title>');
+    const deps = makeDeps();
+    deps.uiBuildDir = uiDir;
+    const app = await buildServer(deps);
+
+    try {
+      // Browser-style Accept header — the exact case where the SPA
+      // fallback is tempted to fire. It must still 404-as-JSON for /v1/*.
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/this-route-does-not-exist',
+        headers: { accept: 'text/html,application/xhtml+xml' },
+      });
+      expect(res.statusCode).toBe(404);
+      expect(res.headers['content-type']).toMatch(/^application\/json/);
+      const body = res.json() as { error?: { code?: string } };
+      expect(body.error?.code).toBe('not_found');
+      // Belt-and-braces: the body is the JSON envelope, not the shell.
+      expect(res.body).not.toContain('<!doctype html');
+
+      // A non-/v1/ unknown path with the same Accept SHOULD get the
+      // SPA shell — confirms the guard is path-scoped, not blanket-off.
+      const spa = await app.inject({
+        method: 'GET',
+        url: '/some-client-route',
+        headers: { accept: 'text/html' },
+      });
+      expect(spa.statusCode).toBe(200);
+      expect(spa.headers['content-type']).toMatch(/^text\/html/);
+    } finally {
+      await app.close();
+      await rm(uiDir, { recursive: true, force: true });
+    }
+  });
+
   it('serves immutable assets for one year while keeping HTML revalidated', async () => {
     const uiDir = await mkdtemp(join(tmpdir(), 'whoearns-ui-build-'));
     await mkdir(join(uiDir, '_app', 'immutable', 'entry'), { recursive: true });
@@ -357,7 +403,7 @@ describe('smoke: api server boots and routes 200/degraded', () => {
       // JSON-RPC `tools/list` is the cheapest probe: doesn't hit any
       // repo, just enumerates the registered tools. If MCP plumbing
       // is wired wrong this 500s; if the SDK is happy we get back
-      // four tool names. The MCP Inspector and Claude Desktop both
+      // six tool names. The MCP Inspector and Claude Desktop both
       // start with this exact request.
       const res = await app.inject({
         method: 'POST',
@@ -381,7 +427,9 @@ describe('smoke: api server boots and routes 200/degraded', () => {
         'get_current_epoch',
         'get_leaderboard',
         'get_validator',
+        'get_validator_badges',
         'get_validator_leader_slots',
+        'get_validator_tier',
       ]);
     } finally {
       await app.close();

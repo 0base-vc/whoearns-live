@@ -63,8 +63,12 @@ describe('GET /v1/simd-proposals', () => {
     const res = await app.inject({ method: 'GET', url: '/v1/simd-proposals' });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body.proposals).toHaveLength(1);
-    const p = body.proposals[0];
+    // REST-M5 — the list field is `items` (envelope parity with every
+    // other list endpoint), with a sibling `count`.
+    expect(body.items).toHaveLength(1);
+    expect(body.count).toBe(1);
+    expect(body).not.toHaveProperty('proposals');
+    const p = body.items[0];
     expect(p.simdNumber).toBe(96);
     expect(p.aiSummary).toBe('A concise summary of SIMD-96.');
     expect(p.aiQuestions).toHaveLength(2);
@@ -88,8 +92,25 @@ describe('GET /v1/simd-proposals', () => {
     const res = await app.inject({ method: 'GET', url: '/v1/simd-proposals' });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body.proposals).toHaveLength(1);
-    expect(body.proposals[0].simdNumber).toBe(96);
+    expect(body.items).toHaveLength(1);
+    // `count` reflects the post-filter length, not the raw row count.
+    expect(body.count).toBe(1);
+    expect(body.items[0].simdNumber).toBe(96);
+    await app.close();
+  });
+
+  it('HEAD short-circuits with 200 and an empty body (REST-M3)', async () => {
+    const app = await makeApp(buildDeps([makeProposal()]));
+    const res = await app.inject({ method: 'HEAD', url: '/v1/simd-proposals' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe('');
+    await app.close();
+  });
+
+  it('HEAD still 400s a bad limit (validation runs before the short-circuit)', async () => {
+    const app = await makeApp(buildDeps([]));
+    const res = await app.inject({ method: 'HEAD', url: '/v1/simd-proposals?limit=many' });
+    expect(res.statusCode).toBe(400);
     await app.close();
   });
 

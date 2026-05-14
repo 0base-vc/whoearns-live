@@ -480,8 +480,13 @@ detect stalled vote-credit ingestion by comparing this timestamp to
 the current epoch's expected start.
 
 The endpoint draws from `epoch_validator_stats` only — no live RPC.
-Response cache: `Cache-Control: public, max-age=300, s-maxage=3600`
-(closed-epoch data only changes at epoch boundaries, ~2 days).
+`HEAD` is supported and short-circuits after the validator existence
+check, before the history read + tier computation.
+
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier — see `src/api/cache-control.ts`). `tier` and `badges`
+serve the same closed-epoch-derived data class and now share this
+single named tier.
 
 ## `GET /v1/validators/:idOrVote/badges`
 
@@ -521,10 +526,15 @@ Returns composite profile-level badges (Phase 2):
 - `tier` mirrors `GET /v1/validators/:idOrVote/tier`. Bundled here so
   a profile page renders the full badge row in one round-trip.
 
-Cache: `public, max-age=300, s-maxage=1800` (5 min browser / 30 min
-CDN). All three sub-objects update on independent cadences:
-`tenure.activeEpochs` ticks each epoch (~2 days), `client.kind` ticks
-on operator upgrade cycles, `tier` ticks on epoch close.
+`HEAD` is supported and short-circuits after the validator existence
+check, before the history read.
+
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier — see `src/api/cache-control.ts`; the same tier
+`/tier` uses, so the two can no longer drift). All three sub-objects
+update on independent cadences: `tenure.activeEpochs` ticks each
+epoch (~2 days), `client.kind` ticks on operator upgrade cycles,
+`tier` ticks on epoch close.
 
 ## Claim/profile endpoints
 
@@ -561,6 +571,75 @@ Mutation bodies include:
 The signed payload binds the purpose (`claim` or `profile`), timestamp, nonce,
 pubkeys, and profile fields, so a profile signature cannot be replayed as a
 different operation.
+
+### `GET /v1/claim/:vote/status`
+
+Public, unauthenticated. The whole-claim picture for a vote pubkey in a
+**single** fetch — a dashboard does not have to chase this with separate
+GitHub-link and operator-wallet reads.
+
+```json
+{
+  "claimed": true,
+  "profile": {
+    "twitterHandle": "validator_name",
+    "hideFooterCta": false,
+    "optedOut": false,
+    "narrativeOverride": null,
+    "updatedAt": "2026-05-10T12:00:00.000Z"
+  },
+  "githubLink": {
+    "githubUsername": "alice",
+    "verifiedAt": "2026-02-01T00:00:00.000Z",
+    "expiresAt": "2026-05-01T00:00:00.000Z"
+  },
+  "wallets": {
+    "count": 2,
+    "capReached": false,
+    "oldestExpiresAt": "2026-04-15T00:00:00.000Z"
+  }
+}
+```
+
+- `claimed` / `profile` — `profile` is `null` when the validator is claimed
+  but has no profile edits yet, and also when never claimed (`claimed: false`).
+- `githubLink` — the ACTIVE linked GitHub identity, or `null` when there is no
+  link **or** the attestation has lapsed. Same "lapsed = inactive" rule the
+  OAI route applies.
+- `wallets` — summary of the ACTIVE (not-expired) registered operator wallets:
+  `count`, whether the per-validator cap (3) is `capReached`, and
+  `oldestExpiresAt` (the soonest-expiring attestation, or `null` when none are
+  registered) so a dashboard can nudge "re-attest" before a wallet drops out
+  of scoring.
+
+### Claim endpoints: v1 vs v2 signing
+
+The four claim-surface mutation endpoints split into **two signing ceremonies
+with different parameters** — a library author writing one signer for all four
+needs to know this up front:
+
+| Endpoints                                            | Timestamp field | Unit                  | Freshness window                          | Replay guard                                                   |
+| ---------------------------------------------------- | --------------- | --------------------- | ----------------------------------------- | -------------------------------------------------------------- |
+| **v1** — `/v1/claim/verify`, `/v1/claim/profile`     | `timestampSec`  | Unix seconds          | ±5 min (symmetric)                        | Per-claim `lastNonceUsed` (the service rejects a reused nonce) |
+| **v2** — `/v1/claim/github/verify`, `/wallet/verify` | `timestampMs`   | Unix **milliseconds** | 5 min past / **60 s future** (asymmetric) | `signed_nonce` UNIQUE index (migration 0025)                   |
+
+Why the asymmetry exists:
+
+- **Unit.** v1 predates v2; v2's canonical nonce embeds `expiresAtMs =
+timestampMs + TTL`, so it works in milliseconds end-to-end. The units are
+  **not** interchangeable — sending seconds where milliseconds are expected
+  (or vice versa) fails freshness, not validation.
+- **Window.** v2's future-skew is deliberately tight (60 s vs v1's 5 min):
+  a future timestamp asks the server to extend a signature's verifiable
+  lifetime, and combined with `expiresAtMs` a generous future-skew would push
+  the effective replay window out to ~35 min. v1 has no `expiresAtMs`
+  derivation, so a symmetric ±5 min is safe there.
+- **Replay mechanism.** v1 tracks the last nonce per claim row; v2 stores
+  every canonical nonce under a UNIQUE index. Both reject resubmission within
+  the freshness window — v1 with the service's nonce check, v2 with HTTP 403
+  `nonce_replay` from the constraint.
+
+This subsection is documentation only — the endpoints' behaviour is unchanged.
 
 ### `GET /v1/claim/:vote/audit`
 
@@ -719,6 +798,34 @@ rejected with `stale_timestamp` (the freshness window is asymmetric
 — 5 min past, 60 s future — so a captured request cannot extend its
 own usable lifetime).
 
+## `GET /v1/operator-wallets/:wallet`
+
+Parent resource for the `/activity` sub-path. Returns the wallet's
+registration metadata.
+
+```json
+{
+  "wallet": "Wallet11...",
+  "vote": "Vote111...",
+  "label": "cold",
+  "registeredAt": "2026-02-01T00:00:00.000Z",
+  "expiresAt": "2026-05-01T00:00:00.000Z"
+}
+```
+
+Gated identically to `/activity` — only ACTIVE (not-expired)
+registered wallets are exposed. An unregistered or
+expired-registration pubkey returns HTTP 404 (`not_found`), so the
+route is not a public existence oracle for arbitrary pubkeys. The
+forensic `signedNonce` / `anchorTxSignature` columns are deliberately
+omitted; everything returned is operator-published or derivable from
+the on-chain registration. `HEAD` is supported and short-circuits
+after the existence gate.
+
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier — registration metadata only changes on a deliberate
+claim-surface mutation).
+
 ## `GET /v1/operator-wallets/:wallet/activity`
 
 Phase 4 read endpoint. Returns the daily on-chain activity entries
@@ -751,7 +858,8 @@ indexer pass (see `docs/roadmap.md`).
 The endpoint is gated on registered-wallet membership. Probes for
 unregistered or expired-registration wallets return HTTP 404
 (`not_found`) — the route is not a public existence oracle for
-arbitrary pubkeys.
+arbitrary pubkeys. `HEAD` is supported and short-circuits after the
+existence gate, before the activity DB read.
 
 Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
 `SCORING` tier — see `src/api/cache-control.ts`).
@@ -769,7 +877,8 @@ Response:
 
 ```json
 {
-  "proposals": [
+  "count": 1,
+  "items": [
     {
       "simdNumber": 228,
       "title": "Example SIMD title",
@@ -787,15 +896,24 @@ Response:
 }
 ```
 
-Only `reviewed_at IS NOT NULL` rows surface — AI-generated curation
-that hasn't been spot-checked stays hidden. Newest-reviewed first.
-The curation system prompt is published verbatim at
-`prompts/simd-curation.md` (byte-equality enforced against the
-runtime constant by a unit test). The internal `reviewer_note`
-audit field is **not** included in the response.
+The list field is `items` (with a sibling `count`) — the same
+envelope shape as every other list endpoint (`/v1/validators/search`,
+`/v1/leaderboard`). Only `reviewed_at IS NOT NULL` rows surface —
+AI-generated curation that hasn't been spot-checked stays hidden.
+Newest-reviewed first. The curation system prompt is published
+verbatim at `prompts/simd-curation.md` (byte-equality enforced
+against the runtime constant by a unit test). The internal
+`reviewer_note` audit field is **not** included in the response.
 
-Cache-Control: `public, max-age=600, s-maxage=3600` (the shared
-`CATALOGUE` tier).
+`HEAD` is supported and short-circuits after `limit` validation but
+before the DB read.
+
+Cache-Control: `public, max-age=600, s-maxage=3600,
+stale-while-revalidate=86400` (the shared `CATALOGUE` tier plus a
+24 h stale-while-revalidate window — reviewed SIMDs change on an
+hours-scale human-review cadence, so a CDN edge can serve the
+slightly-stale list instantly while it revalidates in the
+background).
 
 ## `GET /v1/validators/:idOrVote/operator-activity-index`
 
@@ -869,16 +987,26 @@ operator wallets silently drop out. `HEAD` is supported and
 short-circuits before the scoring queries (`ingestStatus` does not
 change `HEAD` behaviour).
 
+**Rate limit.** This endpoint runs 5-7 DB queries per request — ~5×
+the per-request DB cost of a typical `/v1/*` read — so it carries a
+tighter per-route cap of **30 requests/min/IP** (half the global
+60/min). A normal UI consumer rendering one OAI panel per profile
+view stays well under it.
+
 Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
 `SCORING` tier).
 
 ## `POST /mcp`
 
-Streamable HTTP MCP endpoint for AI agents. The server exposes four read-only
-tools: `get_current_epoch`, `get_leaderboard`, `get_validator`, and
-`get_validator_leader_slots`. `get_leaderboard` supports the same window
+Streamable HTTP MCP endpoint for AI agents. The server exposes six read-only
+tools: `get_current_epoch`, `get_leaderboard`, `get_validator`,
+`get_validator_leader_slots`, `get_validator_tier`, and
+`get_validator_badges`. `get_leaderboard` supports the same window
 model as `/v1/leaderboard`, including `decade_epoch`, and includes
 `decadeEpochStart`, `decadeEpochEnd`, and `decadeRank` on rows when relevant.
-MCP calls use the same public per-IP rate limit as `/v1/*`; tool schemas
-also cap response sizes. The public stateless transport accepts POST only;
-GET/DELETE return 405 to avoid unauthenticated long-lived stream connections.
+`get_validator_tier` and `get_validator_badges` return the same data as
+`GET /v1/validators/:idOrVote/tier` and `/badges` respectively — both take a
+vote OR identity pubkey and respect operator opt-out. MCP calls use the same
+public per-IP rate limit as `/v1/*`; tool schemas also cap response sizes.
+The public stateless transport accepts POST only; GET/DELETE return 405 to
+avoid unauthenticated long-lived stream connections.

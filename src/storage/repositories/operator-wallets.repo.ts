@@ -163,6 +163,28 @@ export class OperatorWalletsRepository {
     return rows[0]?.exists === true;
   }
 
+  /**
+   * Registration metadata for a single ACTIVE (not-expired) wallet —
+   * backs `GET /v1/operator-wallets/:wallet`. Returns `null` when the
+   * wallet is unregistered OR its attestation has lapsed, so the
+   * public route can collapse both into one 404 and stay off the
+   * existence-oracle surface (same `expires_at > NOW()` gate as
+   * `existsActive`). A wallet pubkey is UNIQUE per registration in
+   * practice; `LIMIT 1` is belt-and-braces.
+   */
+  async findActiveByWallet(wallet: string): Promise<OperatorWallet | null> {
+    const { rows } = await this.pool.query<OperatorWalletRow>(
+      `SELECT ${COLS} FROM operator_wallets
+        WHERE wallet_pubkey = $1
+          AND expires_at > NOW()
+        ORDER BY registered_at ASC
+        LIMIT 1`,
+      [wallet],
+    );
+    const row = rows[0];
+    return row === undefined ? null : rowToWallet(row);
+  }
+
   /** One-click unlink. */
   async delete(vote: VotePubkey, wallet: string): Promise<boolean> {
     const { rowCount } = await this.pool.query(

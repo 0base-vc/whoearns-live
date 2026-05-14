@@ -5,10 +5,14 @@ import type { AppConfig } from '../../../src/core/config.js';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import claimRoutes, { type ClaimRoutesDeps } from '../../../src/api/routes/claim.route.js';
 import type { ClaimService, ClaimVerifyResult } from '../../../src/services/claim.service.js';
+import type { OperatorWalletsRepository } from '../../../src/storage/repositories/operator-wallets.repo.js';
 import type { ValidatorClaimEventsRepository } from '../../../src/storage/repositories/validator-claim-events.repo.js';
+import type { ValidatorGithubRepository } from '../../../src/storage/repositories/validator-github.repo.js';
 import type {
+  OperatorWallet,
   ValidatorClaim,
   ValidatorClaimEvent,
+  ValidatorGithubLink,
   ValidatorProfile,
 } from '../../../src/types/domain.js';
 import { IDENTITY_1, makeTestApp, VOTE_1 } from './_fakes.js';
@@ -45,11 +49,38 @@ function makeProfile(over: Partial<ValidatorProfile> = {}): ValidatorProfile {
   };
 }
 
+function makeGithubLink(over: Partial<ValidatorGithubLink> = {}): ValidatorGithubLink {
+  return {
+    votePubkey: VOTE_1,
+    githubUsername: 'operator-gh',
+    gistUrl: 'https://gist.github.com/operator-gh/abc',
+    gistId: 'abc',
+    signedNonce: 'gh-nonce',
+    verifiedAt: new Date('2026-02-01T00:00:00Z'),
+    expiresAt: new Date('2026-05-01T00:00:00Z'),
+    ...over,
+  };
+}
+
+function makeWallet(over: Partial<OperatorWallet> = {}): OperatorWallet {
+  return {
+    votePubkey: VOTE_1,
+    walletPubkey: 'WALL111111111111111111111111111111111111111',
+    label: 'hot',
+    signedNonce: 'wallet-nonce',
+    anchorTxSignature: 'z'.repeat(88),
+    registeredAt: new Date('2026-02-01T00:00:00Z'),
+    expiresAt: new Date('2026-05-01T00:00:00Z'),
+    ...over,
+  };
+}
+
 /**
  * The claim route's deps are the full `ClaimService` class plus a
- * narrow `Pick<>` events repo. The service is cast from a minimal
- * fake (same trick as `epochs.route.test.ts`); `overrides` swap one
- * behaviour per test.
+ * narrow `Pick<>` events repo and (CROSS-M1) the github-link +
+ * operator-wallet read repos. Each is cast from a minimal fake (same
+ * trick as `epochs.route.test.ts`); `overrides` swap one behaviour
+ * per test.
  */
 function buildDeps(
   overrides: {
@@ -58,6 +89,8 @@ function buildDeps(
     verifyResult?: ClaimVerifyResult;
     updateResult?: Awaited<ReturnType<ClaimService['updateProfile']>>;
     auditEvents?: ValidatorClaimEvent[];
+    githubLink?: ValidatorGithubLink | null;
+    activeWallets?: OperatorWallet[];
   } = {},
 ): { deps: ClaimRoutesDeps; appended: unknown[] } {
   const appended: unknown[] = [];
@@ -79,6 +112,13 @@ function buildDeps(
       },
       listByVote: async () => overrides.auditEvents ?? [],
     } as unknown as Pick<ValidatorClaimEventsRepository, 'append' | 'listByVote'>,
+    validatorGithubRepo: {
+      findActiveByVote: async () =>
+        overrides.githubLink === undefined ? null : overrides.githubLink,
+    } as unknown as Pick<ValidatorGithubRepository, 'findActiveByVote'>,
+    operatorWalletsRepo: {
+      listActiveByVote: async () => overrides.activeWallets ?? [],
+    } as unknown as Pick<OperatorWalletsRepository, 'listActiveByVote'>,
   };
   return { deps, appended };
 }
@@ -119,7 +159,14 @@ describe('GET /v1/claim/:vote/status', () => {
     const app = await makeApp(deps);
     const res = await app.inject({ method: 'GET', url: `/v1/claim/${VOTE_1}/status` });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ claimed: false, profile: null });
+    // CROSS-M1 — the envelope now also carries `githubLink` (null when
+    // no ACTIVE link) and a `wallets` summary (zeroed when none).
+    expect(res.json()).toEqual({
+      claimed: false,
+      profile: null,
+      githubLink: null,
+      wallets: { count: 0, capReached: false, oldestExpiresAt: null },
+    });
     await app.close();
   });
 
@@ -131,6 +178,56 @@ describe('GET /v1/claim/:vote/status', () => {
     const body = res.json();
     expect(body.claimed).toBe(true);
     expect(body.profile.twitterHandle).toBe('operator');
+    await app.close();
+  });
+
+  it('folds in the ACTIVE GitHub link and operator-wallet summary (CROSS-M1)', async () => {
+    const { deps } = buildDeps({
+      claim: makeClaim(),
+      githubLink: makeGithubLink({ githubUsername: 'alice' }),
+      activeWallets: [
+        makeWallet({ expiresAt: new Date('2026-06-01T00:00:00Z') }),
+        // Soonest-expiring active registration → drives oldestExpiresAt.
+        makeWallet({
+          walletPubkey: 'WALL222222222222222222222222222222222222222',
+          expiresAt: new Date('2026-05-15T00:00:00Z'),
+        }),
+      ],
+    });
+    const app = await makeApp(deps);
+    const res = await app.inject({ method: 'GET', url: `/v1/claim/${VOTE_1}/status` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.githubLink).toEqual({
+      githubUsername: 'alice',
+      verifiedAt: '2026-02-01T00:00:00.000Z',
+      expiresAt: '2026-05-01T00:00:00.000Z',
+    });
+    expect(body.wallets.count).toBe(2);
+    // Two of three → cap (3) not reached.
+    expect(body.wallets.capReached).toBe(false);
+    // MIN expiry across the active rows.
+    expect(body.wallets.oldestExpiresAt).toBe('2026-05-15T00:00:00.000Z');
+    await app.close();
+  });
+
+  it('reports capReached once the operator-wallet cap is hit (CROSS-M1)', async () => {
+    const { deps } = buildDeps({
+      claim: makeClaim(),
+      githubLink: null,
+      activeWallets: [
+        makeWallet({ walletPubkey: 'WALL111111111111111111111111111111111111111' }),
+        makeWallet({ walletPubkey: 'WALL222222222222222222222222222222222222222' }),
+        makeWallet({ walletPubkey: 'WALL333333333333333333333333333333333333333' }),
+      ],
+    });
+    const app = await makeApp(deps);
+    const res = await app.inject({ method: 'GET', url: `/v1/claim/${VOTE_1}/status` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.githubLink).toBeNull();
+    expect(body.wallets.count).toBe(3);
+    expect(body.wallets.capReached).toBe(true);
     await app.close();
   });
 

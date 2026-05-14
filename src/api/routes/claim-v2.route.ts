@@ -8,11 +8,13 @@ import {
   isValidGithubUsername,
   type GithubLinkNonce,
   type GithubGistVerificationService,
+  type VerifyGistFailure,
 } from '../../services/github-gist-verification.service.js';
 import {
   OPERATOR_WALLET_NONCE_PURPOSE,
   type OperatorWalletNonce,
   type OperatorWalletVerificationService,
+  type VerifyOperatorWalletFailure,
 } from '../../services/operator-wallet-verification.service.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
 import {
@@ -68,6 +70,63 @@ function unwrap<T>(
   throw new ValidationError(`${context} failed validation`, {
     issues: (result.error as { issues?: unknown[] }).issues ?? [result.error],
   });
+}
+
+/** The `reason` discriminant of a Gist-verification failure. */
+type GistFailureReason = Extract<VerifyGistFailure, { ok: false }>['reason'];
+/** The `reason` discriminant of an operator-wallet-verification failure. */
+type WalletFailureReason = Extract<VerifyOperatorWalletFailure, { ok: false }>['reason'];
+
+/**
+ * REST-M2 — map a `GithubGistVerificationService` failure `reason`
+ * (a stable MACHINE id like `fetch_failed`) onto a readable sentence
+ * for the error envelope's `message`. The `code` keeps the machine
+ * id; `message` becomes human prose. Mirrors `humanMessageFor` in
+ * `claim.route.ts` — without this the route sent
+ * `{ code: 'fetch_failed', message: 'fetch_failed' }`, i.e. an
+ * identifier where a human-facing string belongs. Exhaustive over
+ * the union so a new failure reason fails the build, not silently
+ * ships a machine id as prose.
+ */
+function humanMessageForGistFailure(reason: GistFailureReason): string {
+  switch (reason) {
+    case 'malformed_url':
+      return 'The gist URL is not a valid GitHub Gist URL.';
+    case 'username_mismatch':
+      return "The gist's owner does not match the GitHub username you submitted.";
+    case 'fetch_failed':
+      return 'Could not fetch the gist from GitHub. Check the URL is public and retry shortly.';
+    case 'gist_too_large':
+      return 'The gist is larger than the allowed proof size. Publish a gist containing only the proof.';
+    case 'malformed_proof':
+      return 'The gist body is not a well-formed WhoEarns proof.';
+    case 'nonce_mismatch':
+      return 'The proof in the gist does not match this request. Re-generate the proof and re-publish.';
+    case 'expired':
+      return 'The proof in the gist has expired. Generate a fresh proof and re-publish.';
+    case 'bad_signature':
+      return 'The signature in the gist did not verify against the validator identity key.';
+  }
+}
+
+/**
+ * REST-M2 — same as `humanMessageForGistFailure` but for the
+ * `OperatorWalletVerificationService` failure reasons. `code` keeps
+ * the stable machine id; `message` carries this readable sentence.
+ */
+function humanMessageForWalletFailure(reason: WalletFailureReason): string {
+  switch (reason) {
+    case 'expired':
+      return 'The signed nonce has expired. Generate a fresh one and re-sign.';
+    case 'bad_identity_signature':
+      return 'The validator identity signature did not verify against the nonce.';
+    case 'bad_wallet_signature':
+      return 'The wallet signature did not verify against the nonce.';
+    case 'invalid_anchor_signature':
+      return 'The anchor transaction signature is not a valid Solana transaction signature.';
+    case 'malformed_pubkey':
+      return 'One of the supplied pubkeys is not a valid base58 Solana pubkey.';
+  }
 }
 
 /**
@@ -197,10 +256,12 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     if (!result.ok) {
       const status =
         result.reason === 'fetch_failed' || result.reason === 'gist_too_large' ? 502 : 403;
+      // `code` stays the stable machine id; `message` is human prose
+      // (REST-M2) — previously both were the bare `result.reason`.
       return sendError(reply, {
         code: result.reason,
         statusCode: status,
-        message: result.reason,
+        message: humanMessageForGistFailure(result.reason),
         requestId: request.id,
       });
     }
@@ -396,10 +457,12 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
       anchorTxSignature: body.anchorTxSignature,
     });
     if (!result.ok) {
+      // `code` stays the stable machine id; `message` is human prose
+      // (REST-M2) — previously both were the bare `result.reason`.
       return sendError(reply, {
         code: result.reason,
         statusCode: 403,
-        message: result.reason,
+        message: humanMessageForWalletFailure(result.reason),
         requestId: request.id,
       });
     }

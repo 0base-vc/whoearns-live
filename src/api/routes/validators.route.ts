@@ -22,6 +22,7 @@ import {
   serializeValidator,
   serializeValidatorPlaceholder,
 } from '../serializers/validator-response.js';
+import { cacheControl } from '../cache-control.js';
 import {
   computeTier,
   tierInputFromHistory,
@@ -304,58 +305,82 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
    * has < 10 leader slots in the window, irrespective of the
    * computed composite.
    */
-  app.get('/v1/validators/:idOrVote/tier', async (request, reply): Promise<NodeTierResponse> => {
-    const params = unwrap(VoteOrIdentityParamSchema.safeParse(request.params), 'path parameters');
-    const validator = await findValidatorByVoteOrIdentity(validatorsRepo, params.idOrVote);
-    if (validator === null) {
-      throw new NotFoundError('validator', params.idOrVote);
-    }
-    // Identify closed rows explicitly rather than assuming `history[0]`
-    // is the running epoch. A validator outside the current leader
-    // schedule may have its newest history row pointing at a CLOSED
-    // epoch, in which case the previous "skip row 0" rule silently
-    // discarded a legitimate closed-epoch row from the window.
-    const [history, currentEpoch] = await Promise.all([
-      statsRepo.findHistoryByVote(validator.votePubkey, WINDOW_FETCH_ROWS),
-      epochsRepo.findCurrent(),
-    ]);
-    const closedRows =
-      currentEpoch !== null
-        ? history.filter((r) => r.epoch < currentEpoch.epoch).slice(0, WINDOW_CLOSED_EPOCHS)
-        : history.slice(0, WINDOW_CLOSED_EPOCHS);
-    const input = tierInputFromHistory(validator.votePubkey, closedRows);
-    const result = computeTier(input);
-    // Surface the staleness of the oldest credit timestamp so a UI
-    // can grey out the tier when ingestion has stalled. `null` when
-    // the window has no credit-bearing rows.
-    const voteCreditsUpdatedAt = closedRows
-      .map((r) => r.voteCreditsUpdatedAt)
-      .filter((d): d is Date => d !== null)
-      .reduce<Date | null>((oldest, cur) => (oldest === null || cur < oldest ? cur : oldest), null);
+  // Return type is `NodeTierResponse | void`: the GET path resolves
+  // the structured body, the HEAD short-circuit calls `reply.send('')`
+  // and resolves `void` — the union keeps the HEAD path honest with
+  // no `as unknown as NodeTierResponse` cast (mirrors /badges).
+  app.get(
+    '/v1/validators/:idOrVote/tier',
+    async (request, reply): Promise<NodeTierResponse | void> => {
+      const params = unwrap(VoteOrIdentityParamSchema.safeParse(request.params), 'path parameters');
+      const validator = await findValidatorByVoteOrIdentity(validatorsRepo, params.idOrVote);
+      if (validator === null) {
+        throw new NotFoundError('validator', params.idOrVote);
+      }
+      // HEAD short-circuit AFTER the existence check (so HEAD still
+      // returns the right 404 for unknown pubkeys) but BEFORE the
+      // history read + tier computation a HEAD response would throw
+      // away. The handler resolves `void` here — the
+      // `Promise<NodeTierResponse | void>` return type makes that
+      // honest without an `as unknown as NodeTierResponse` cast.
+      if (request.method === 'HEAD') {
+        void reply.code(200).header('cache-control', cacheControl('SCORING')).send('');
+        return;
+      }
+      // Identify closed rows explicitly rather than assuming `history[0]`
+      // is the running epoch. A validator outside the current leader
+      // schedule may have its newest history row pointing at a CLOSED
+      // epoch, in which case the previous "skip row 0" rule silently
+      // discarded a legitimate closed-epoch row from the window.
+      const [history, currentEpoch] = await Promise.all([
+        statsRepo.findHistoryByVote(validator.votePubkey, WINDOW_FETCH_ROWS),
+        epochsRepo.findCurrent(),
+      ]);
+      const closedRows =
+        currentEpoch !== null
+          ? history.filter((r) => r.epoch < currentEpoch.epoch).slice(0, WINDOW_CLOSED_EPOCHS)
+          : history.slice(0, WINDOW_CLOSED_EPOCHS);
+      const input = tierInputFromHistory(validator.votePubkey, closedRows);
+      const result = computeTier(input);
+      // Surface the staleness of the oldest credit timestamp so a UI
+      // can grey out the tier when ingestion has stalled. `null` when
+      // the window has no credit-bearing rows.
+      const voteCreditsUpdatedAt = closedRows
+        .map((r) => r.voteCreditsUpdatedAt)
+        .filter((d): d is Date => d !== null)
+        .reduce<Date | null>(
+          (oldest, cur) => (oldest === null || cur < oldest ? cur : oldest),
+          null,
+        );
 
-    void reply.header(
-      'cache-control',
-      `public, max-age=${TIER_CACHE_MAX_AGE_SEC}, s-maxage=${TIER_CACHE_S_MAXAGE_SEC}`,
-    );
-    return {
-      vote: validator.votePubkey,
-      identity: validator.identityPubkey,
-      window: {
-        epochs: closedRows.length,
-        slotsAssigned: input.slotsAssigned,
-        slotsSkipped: input.slotsSkipped,
-        voteCredits: input.voteCredits.toString(),
-        maxCredits: input.maxCredits.toString(),
-        voteCreditsUpdatedAt: voteCreditsUpdatedAt?.toISOString() ?? null,
-      },
-      tier: result.tier,
-      composite: result.composite,
-      components: {
-        tvcRatio: result.components.tvcRatio,
-        wilsonSkipRate: result.components.wilsonSkipRate,
-      },
-    };
-  });
+      // SCORING tier — tier is derived purely from CLOSED-epoch rows,
+      // so it only moves on an epoch boundary (~2 days); a few minutes
+      // of client staleness is harmless. Shared with /badges (same
+      // closed-epoch-derived data) and the OAI route via the named
+      // tier in src/api/cache-control.ts — the previous hand-rolled
+      // constants drifted (tier said s-maxage 3600, badges said 1800
+      // for the same data class).
+      void reply.header('cache-control', cacheControl('SCORING'));
+      return {
+        vote: validator.votePubkey,
+        identity: validator.identityPubkey,
+        window: {
+          epochs: closedRows.length,
+          slotsAssigned: input.slotsAssigned,
+          slotsSkipped: input.slotsSkipped,
+          voteCredits: input.voteCredits.toString(),
+          maxCredits: input.maxCredits.toString(),
+          voteCreditsUpdatedAt: voteCreditsUpdatedAt?.toISOString() ?? null,
+        },
+        tier: result.tier,
+        composite: result.composite,
+        components: {
+          tvcRatio: result.components.tvcRatio,
+          wilsonSkipRate: result.components.wilsonSkipRate,
+        },
+      };
+    },
+  );
 
   /**
    * GET /v1/validators/:idOrVote/badges
@@ -414,20 +439,14 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       // the `Promise<BadgesResponse | void>` return type makes that
       // honest without an `as unknown as BadgesResponse` cast.
       if (request.method === 'HEAD') {
-        void reply
-          .code(200)
-          .header(
-            'cache-control',
-            `public, max-age=${BADGES_CACHE_MAX_AGE_SEC}, s-maxage=${BADGES_CACHE_S_MAXAGE_SEC}`,
-          )
-          .send('');
+        void reply.code(200).header('cache-control', cacheControl('SCORING')).send('');
         return;
       }
 
-      void reply.header(
-        'cache-control',
-        `public, max-age=${BADGES_CACHE_MAX_AGE_SEC}, s-maxage=${BADGES_CACHE_S_MAXAGE_SEC}`,
-      );
+      // SCORING tier — tenure + client + tier are all closed-epoch-
+      // derived; see src/api/cache-control.ts. Shared with /tier so the
+      // two routes serving the same data class can no longer drift.
+      void reply.header('cache-control', cacheControl('SCORING'));
       return {
         vote: validator.votePubkey,
         identity: validator.identityPubkey,
@@ -452,9 +471,6 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
   );
 };
 
-const BADGES_CACHE_MAX_AGE_SEC = 300;
-const BADGES_CACHE_S_MAXAGE_SEC = 1800;
-
 interface BadgesResponse {
   vote: string;
   identity: string;
@@ -477,13 +493,6 @@ interface BadgesResponse {
     windowEpochs: number;
   };
 }
-
-// 5-minute browser cache, 1-hour CDN cache. Closed-epoch data updates
-// only on epoch boundaries (~2 days), so even the 1 h CDN cache is
-// conservative. Sized to absorb a viral share without N×validator
-// DB hits per visitor.
-const TIER_CACHE_MAX_AGE_SEC = 300;
-const TIER_CACHE_S_MAXAGE_SEC = 3600;
 
 interface NodeTierResponse {
   vote: string;

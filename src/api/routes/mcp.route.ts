@@ -31,6 +31,14 @@ import {
   type ValidatorEpochSlotStatsResponse,
 } from '../serializers/leader-slots-response.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
+import {
+  computeTier,
+  tierInputFromHistory,
+  WINDOW_CLOSED_EPOCHS,
+  WINDOW_FETCH_ROWS,
+} from '../../services/node-tier.js';
+import { narrowToDocumentedKind } from '../../services/client-kind.js';
+import { summariseTenure } from '../../services/tenure.js';
 
 const MCP_LEADERBOARD_CACHE_TTL_MS = 10_000;
 const MCP_LEADERBOARD_CACHE_MAX_ENTRIES = 128;
@@ -57,11 +65,12 @@ type LeaderboardPayload = Awaited<ReturnType<typeof buildLeaderboardPayload>>;
 type LeaderboardPayloadCache = TtlCache<string, Promise<LeaderboardPayload>>;
 
 /**
- * Streamable-HTTP MCP server in-process at `/mcp`. Exposes four
+ * Streamable-HTTP MCP server in-process at `/mcp`. Exposes six
  * read-only tools (`get_current_epoch`, `get_leaderboard`,
- * `get_validator`, `get_validator_leader_slots`) that AI agents —
- * Claude Desktop, Claude Code, custom MCP clients — can call directly
- * without scraping the UI or parsing OpenAPI.
+ * `get_validator`, `get_validator_leader_slots`, `get_validator_tier`,
+ * `get_validator_badges`) that AI agents — Claude Desktop, Claude
+ * Code, custom MCP clients — can call directly without scraping the
+ * UI or parsing OpenAPI.
  *
  * Why in-process Fastify routes instead of a sidecar:
  *   * No new Docker image, no Helm changes, no extra port.
@@ -161,11 +170,13 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
           'block fees (base + priority), and on-chain Jito tips — indexed by',
           `${opts.config.SITE_NAME} at`,
           `${opts.config.SITE_URL}.`,
-          'Four tools:',
+          'Six tools:',
           '  • get_current_epoch — returns the current epoch state (call first).',
           '  • get_leaderboard — top-N validators ranked by live-trend income / fees / reliability.',
           '  • get_validator — per-epoch history for one validator (vote OR identity).',
           '  • get_validator_leader_slots — block-level facts for one validator epoch.',
+          '  • get_validator_tier — Node Tier (forge/anvil/hearth/kindling/unrated) over closed epochs.',
+          '  • get_validator_badges — tenure + client + tier badge row for one validator.',
           'Data is read-only. Live-trend windows include running-epoch lower bounds;',
           'closed-epoch numbers are final. All lamport amounts are decimal',
           'strings — parse as BigInt to avoid precision loss.',
@@ -342,6 +353,65 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
           args.voteOrIdentity,
           args.epoch,
         );
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+          isError: result.found === false,
+        };
+      },
+    );
+
+    server.registerTool(
+      'get_validator_tier',
+      {
+        title: 'Get validator Node Tier',
+        description:
+          'Returns the Node Tier (forge / anvil / hearth / kindling / unrated) for ONE validator. Pass either a vote pubkey OR an identity pubkey. ' +
+          'The tier is a two-signal composite (0.6 × timely-vote-credit ratio + 0.4 × Wilson lower bound on success rate) computed over the most recent 5 CLOSED epochs — the running epoch is excluded so the tier never rides mid-epoch counters. ' +
+          'tier is "unrated" (and composite is null) when the closed-epoch window has too few leader slots to classify confidently. The response carries the window aggregates and per-component sub-scores so the classification is auditable. Same data as GET /v1/validators/{idOrVote}/tier. ' +
+          SHARED_TOOL_PROVENANCE_NOTE,
+        inputSchema: {
+          voteOrIdentity: z
+            .string()
+            .pipe(PubkeySchema)
+            .describe('Vote pubkey OR identity pubkey (base58, 32-44 chars).'),
+        },
+      },
+      async (args) => {
+        const result = await buildValidatorTierPayload(opts, args.voteOrIdentity);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+          isError: result.found === false,
+        };
+      },
+    );
+
+    server.registerTool(
+      'get_validator_badges',
+      {
+        title: 'Get validator badge row',
+        description:
+          'Returns the profile-level badge row for ONE validator: tenure (first-seen epoch, active-epoch count, landmark badge), client kind + version (from gossip ingestion), and Node Tier. Pass either a vote pubkey OR an identity pubkey. ' +
+          'This is the single-call equivalent of the badge strip on a validator profile page — use it when you need the "who is this operator" summary rather than per-epoch income. The tier sub-object is the same closed-epoch computation as get_validator_tier. Same data as GET /v1/validators/{idOrVote}/badges. ' +
+          SHARED_TOOL_PROVENANCE_NOTE,
+        inputSchema: {
+          voteOrIdentity: z
+            .string()
+            .pipe(PubkeySchema)
+            .describe('Vote pubkey OR identity pubkey (base58, 32-44 chars).'),
+        },
+      },
+      async (args) => {
+        const result = await buildValidatorBadgesPayload(opts, args.voteOrIdentity);
         return {
           content: [
             {
@@ -835,6 +905,162 @@ async function buildValidatorLeaderSlotsPayload(
   return {
     found: true,
     ...serializeValidatorEpochSlotStats(slotStats, epochRow?.isClosed ?? false),
+  };
+}
+
+/**
+ * Resolve the most-recent CLOSED-epoch history window for the tier
+ * computation. Mirrors the `/v1/validators/:idOrVote/tier` +
+ * `/badges` route logic exactly: fetch `WINDOW_FETCH_ROWS` rows, drop
+ * any whose epoch is >= the running epoch (so the running epoch's
+ * mid-flight counters never enter the tier), then take the newest
+ * `WINDOW_CLOSED_EPOCHS`. Returned alongside `currentEpoch` because
+ * the badges builder also needs it for the tenure cap.
+ */
+async function mcpResolveTierWindow(
+  opts: McpRoutesDeps,
+  vote: VotePubkey,
+): Promise<{ closedRows: EpochValidatorStats[]; currentEpoch: EpochInfo | null }> {
+  const [history, currentEpoch] = await Promise.all([
+    opts.statsRepo.findHistoryByVote(vote, WINDOW_FETCH_ROWS),
+    opts.epochsRepo.findCurrent(),
+  ]);
+  const closedRows =
+    currentEpoch !== null
+      ? history.filter((r) => r.epoch < currentEpoch.epoch).slice(0, WINDOW_CLOSED_EPOCHS)
+      : history.slice(0, WINDOW_CLOSED_EPOCHS);
+  return { closedRows, currentEpoch };
+}
+
+/**
+ * `get_validator_tier` payload. Same shape + computation as the
+ * `/v1/validators/:idOrVote/tier` route — the response is small
+ * (one tier classification + a handful of window aggregates), so no
+ * size discipline beyond the closed-epoch window the route already
+ * bounds. Opt-out is respected, mirroring `buildValidatorPayload`.
+ */
+async function buildValidatorTierPayload(
+  opts: McpRoutesDeps,
+  voteOrIdentity: string,
+): Promise<
+  | { found: false; reason: string }
+  | {
+      found: true;
+      vote: string;
+      identity: string;
+      window: {
+        epochs: number;
+        slotsAssigned: number;
+        slotsSkipped: number;
+        voteCredits: string;
+        maxCredits: string;
+        voteCreditsUpdatedAt: string | null;
+      };
+      tier: 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
+      composite: number | null;
+      components: { tvcRatio: number; wilsonSkipRate: number };
+    }
+> {
+  const validator = await resolveValidator(opts, voteOrIdentity);
+  if (validator === null) {
+    return { found: false, reason: `validator not found: ${voteOrIdentity}` };
+  }
+  const profile = await opts.profilesRepo.findByVote(validator.votePubkey);
+  if (profile?.optedOut === true) {
+    return { found: false, reason: `validator not found or opted out: ${voteOrIdentity}` };
+  }
+
+  const { closedRows } = await mcpResolveTierWindow(opts, validator.votePubkey);
+  const input = tierInputFromHistory(validator.votePubkey, closedRows);
+  const result = computeTier(input);
+  const voteCreditsUpdatedAt = closedRows
+    .map((r) => r.voteCreditsUpdatedAt)
+    .filter((d): d is Date => d !== null)
+    .reduce<Date | null>((oldest, cur) => (oldest === null || cur < oldest ? cur : oldest), null);
+
+  return {
+    found: true,
+    vote: validator.votePubkey,
+    identity: validator.identityPubkey,
+    window: {
+      epochs: closedRows.length,
+      slotsAssigned: input.slotsAssigned,
+      slotsSkipped: input.slotsSkipped,
+      voteCredits: input.voteCredits.toString(),
+      maxCredits: input.maxCredits.toString(),
+      voteCreditsUpdatedAt: voteCreditsUpdatedAt?.toISOString() ?? null,
+    },
+    tier: result.tier,
+    composite: result.composite,
+    components: {
+      tvcRatio: result.components.tvcRatio,
+      wilsonSkipRate: result.components.wilsonSkipRate,
+    },
+  };
+}
+
+/**
+ * `get_validator_badges` payload. Same shape + computation as the
+ * `/v1/validators/:idOrVote/badges` route: tenure + client + tier in
+ * one round-trip. Small fixed-size response; opt-out respected.
+ */
+async function buildValidatorBadgesPayload(
+  opts: McpRoutesDeps,
+  voteOrIdentity: string,
+): Promise<
+  | { found: false; reason: string }
+  | {
+      found: true;
+      vote: string;
+      identity: string;
+      tenure: { firstSeenEpoch: number; activeEpochs: number; landmark: string; badge: string };
+      client: { kind: string; version: string | null; updatedAt: string | null };
+      tier: {
+        tier: 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
+        composite: number | null;
+        windowEpochs: number;
+      };
+    }
+> {
+  const validator = await resolveValidator(opts, voteOrIdentity);
+  if (validator === null) {
+    return { found: false, reason: `validator not found: ${voteOrIdentity}` };
+  }
+  const profile = await opts.profilesRepo.findByVote(validator.votePubkey);
+  if (profile?.optedOut === true) {
+    return { found: false, reason: `validator not found or opted out: ${voteOrIdentity}` };
+  }
+
+  const { closedRows, currentEpoch } = await mcpResolveTierWindow(opts, validator.votePubkey);
+  const tierResult = computeTier(tierInputFromHistory(validator.votePubkey, closedRows));
+  const tenure = summariseTenure(
+    validator.firstSeenEpoch,
+    currentEpoch !== null ? currentEpoch.epoch : validator.lastSeenEpoch,
+  );
+  // Re-narrow the stored client kind to the documented enum at the
+  // public boundary — same as the /badges route.
+  const clientKind = narrowToDocumentedKind(validator.clientKind);
+
+  return {
+    found: true,
+    vote: validator.votePubkey,
+    identity: validator.identityPubkey,
+    tenure: {
+      firstSeenEpoch: tenure.firstSeenEpoch,
+      activeEpochs: tenure.activeEpochs,
+      landmark: tenure.landmark,
+      badge: tenure.badge,
+    },
+    client: {
+      kind: clientKind,
+      version: validator.clientVersion,
+      updatedAt: validator.clientUpdatedAt?.toISOString() ?? null,
+    },
+    tier: {
+      tier: tierResult.tier,
+      composite: tierResult.composite,
+      windowEpochs: closedRows.length,
+    },
   };
 }
 

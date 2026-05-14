@@ -643,6 +643,44 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /v1/operator-wallets/{wallet}:
+    get:
+      summary: Registration metadata for a registered operator wallet
+      description: |
+        Parent resource for the `/activity` sub-path. Returns the
+        wallet's registration metadata — which validator it belongs
+        to, the operator-chosen label, and the registration / expiry
+        timestamps.
+
+        **Existence-oracle defense.** Gated identically to
+        `/activity`: only ACTIVE (not-expired) registered wallets are
+        exposed. An unregistered or expired-registration pubkey
+        returns 404, so the route cannot be used to enumerate the
+        registered-wallet set.
+
+        The forensic `signedNonce` / `anchorTxSignature` columns are
+        deliberately omitted — everything returned is already
+        operator-published or derivable from the on-chain
+        registration.
+      parameters:
+        - $ref: '#/components/parameters/WalletPath'
+      responses:
+        '200':
+          description: Wallet registration metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperatorWalletResponse' }
+        '400':
+          description: Invalid wallet pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Wallet is not a currently-registered operator wallet.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /v1/operator-wallets/{wallet}/activity:
     get:
       summary: Daily on-chain activity for a registered operator wallet
@@ -1501,7 +1539,12 @@ components:
 
     ClaimStatus:
       type: object
-      required: [claimed, profile]
+      required: [claimed, profile, githubLink, wallets]
+      description: |
+        Whole-claim picture for a vote pubkey in one fetch (CROSS-M1).
+        Beyond `claimed` + `profile`, the response folds in the
+        ACTIVE-only GitHub-link and operator-wallet state a dashboard
+        would otherwise need three more requests to assemble.
       properties:
         claimed: { type: boolean }
         profile:
@@ -1513,6 +1556,38 @@ components:
                   properties:
                     updatedAt: { type: string, format: date-time }
             - type: 'null'
+        githubLink:
+          description: |
+            The validator's ACTIVE linked GitHub identity, or `null`
+            when there is no link OR the attestation has lapsed (same
+            "lapsed = inactive" rule the OAI route applies).
+          anyOf:
+            - type: object
+              required: [githubUsername, verifiedAt, expiresAt]
+              properties:
+                githubUsername: { type: string }
+                verifiedAt: { type: string, format: date-time }
+                expiresAt: { type: string, format: date-time }
+            - type: 'null'
+        wallets:
+          type: object
+          required: [count, capReached, oldestExpiresAt]
+          description: Summary of the validator's ACTIVE (not-expired) registered operator wallets.
+          properties:
+            count:
+              type: integer
+              minimum: 0
+              description: Number of ACTIVE registered operator wallets.
+            capReached:
+              type: boolean
+              description: True once `count` has reached the per-validator wallet cap (3).
+            oldestExpiresAt:
+              type: [string, 'null']
+              format: date-time
+              description: |
+                Soonest-expiring ACTIVE wallet attestation — lets a
+                dashboard nudge "re-attest" before a wallet drops out
+                of scoring. `null` when no wallets are registered.
 
     ValidatorClaimEvent:
       type: object
@@ -1930,6 +2005,34 @@ components:
 
     # --- Phase 4 Wallet activity ------------------------------------------
 
+    OperatorWalletResponse:
+      type: object
+      required: [wallet, vote, label, registeredAt, expiresAt]
+      description: |
+        Registration metadata for one ACTIVE operator wallet. The
+        forensic `signedNonce` / `anchorTxSignature` columns are NOT
+        included.
+      properties:
+        wallet:
+          type: string
+          description: The operator wallet's base58 pubkey.
+        vote:
+          type: string
+          description: Vote pubkey of the validator this wallet is registered under.
+        label:
+          type: string
+          description: Operator-chosen label (≤32 chars), e.g. "hot" / "cold".
+        registeredAt:
+          type: string
+          format: date-time
+          description: When the wallet registration was verified.
+        expiresAt:
+          type: string
+          format: date-time
+          description: |
+            When the registration attestation lapses. Past this the
+            wallet drops out of scoring and this endpoint 404s.
+
     WalletActivityResponse:
       type: object
       required: [wallet, days, entries]
@@ -2006,9 +2109,13 @@ components:
 
     SimdProposalListResponse:
       type: object
-      required: [proposals]
+      required: [count, items]
       properties:
-        proposals:
+        count:
+          type: integer
+          minimum: 0
+          description: Number of entries in `items` (envelope parity with the other list endpoints).
+        items:
           type: array
           items: { $ref: '#/components/schemas/SimdProposalItem' }
 
