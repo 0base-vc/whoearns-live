@@ -1,15 +1,40 @@
 import { verifyAsync as ed25519VerifyAsync } from '@noble/ed25519';
 import bs58 from 'bs58';
 import type { Logger } from '../core/logger.js';
+import { buildOffchainMessage } from './claim.service.js';
 import type { IdentityPubkey, OperatorWallet, VotePubkey } from '../types/domain.js';
+
+/**
+ * Domain-separation tag for the operator-wallet registration signing
+ * ceremony. Baked into the canonical nonce so a signature produced
+ * here can never be mistaken for one produced by another service
+ * that asks the same identity key to sign a JSON string (the
+ * GitHub-link flow, a future attestation flow). Mirrors the
+ * `purpose` field on `claim.service.ts`'s `SignedPayloadBody`.
+ */
+export const OPERATOR_WALLET_NONCE_PURPOSE = 'wallet-register' as const;
 
 /**
  * Nonce payload signed by BOTH the validator identity key and the
  * operator wallet key. Inclusion of both pubkeys inside the signed
  * message prevents a third party from re-binding a half-signed
  * message to a different counterparty.
+ *
+ * The canonical form is wrapped in Solana's `buildOffchainMessage`
+ * envelope (the same one `claim.service.ts` uses) before each
+ * Ed25519 verification — so the operator's `solana
+ * sign-offchain-message` invocation produces signatures this
+ * service accepts, and the P3 ceremonies stay byte-consistent with
+ * the v1 claim ceremony.
  */
 export interface OperatorWalletNonce {
+  /**
+   * Domain-separation tag — always `OPERATOR_WALLET_NONCE_PURPOSE`.
+   * Lives inside the signed bytes so both signatures are bound to
+   * the wallet-registration purpose and can't be replayed into
+   * another ceremony.
+   */
+  purpose: typeof OPERATOR_WALLET_NONCE_PURPOSE;
   votePubkey: VotePubkey;
   identityPubkey: IdentityPubkey;
   walletPubkey: string;
@@ -44,6 +69,9 @@ export const DEFAULT_OPERATOR_WALLET_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 da
 /**
  * Canonical serialisation of the nonce. Sorted keys, no whitespace.
  * Must be called identically on both sides — issuance + verification.
+ *
+ * `purpose` is included in the sorted-key set so the domain-separation
+ * tag is part of the signed bytes — see `OPERATOR_WALLET_NONCE_PURPOSE`.
  */
 export function canonicaliseOperatorNonce(n: OperatorWalletNonce): string {
   return JSON.stringify({
@@ -52,6 +80,7 @@ export function canonicaliseOperatorNonce(n: OperatorWalletNonce): string {
     identityPubkey: n.identityPubkey,
     issuedAtMs: n.issuedAtMs,
     label: n.label,
+    purpose: n.purpose,
     votePubkey: n.votePubkey,
     walletPubkey: n.walletPubkey,
   });
@@ -137,13 +166,18 @@ export class OperatorWalletVerificationService {
     }
 
     const canonical = canonicaliseOperatorNonce(args.issuedNonce);
-    const messageBytes = new TextEncoder().encode(canonical);
+    // Wrap the canonical nonce in Solana's offchain-message envelope
+    // before verifying — the SAME envelope `claim.service.ts` uses.
+    // Both the identity key and the wallet key sign that envelope via
+    // `solana sign-offchain-message`; verifying against raw UTF-8
+    // bytes would be a second, incompatible signing ceremony.
+    const signedBytes = buildOffchainMessage(canonical);
 
-    const identityOk = await ed25519VerifyAsync(identitySig, messageBytes, identityBytes);
+    const identityOk = await ed25519VerifyAsync(identitySig, signedBytes, identityBytes);
     if (!identityOk) {
       return { ok: false, reason: 'bad_identity_signature' };
     }
-    const walletOk = await ed25519VerifyAsync(walletSig, messageBytes, walletBytes);
+    const walletOk = await ed25519VerifyAsync(walletSig, signedBytes, walletBytes);
     if (!walletOk) {
       return { ok: false, reason: 'bad_wallet_signature' };
     }

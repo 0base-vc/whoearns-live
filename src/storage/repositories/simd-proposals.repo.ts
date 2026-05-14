@@ -66,6 +66,19 @@ const COLS = `simd_number, title, status, source_url, body_sha256,
  */
 export const REVIEWER_NOTE_MAX_CHARS = 280;
 
+/**
+ * Title length cap (SEC-M3). Mirrors the
+ * `chk_simd_proposals_title_length` DB CHECK from migration 0032.
+ * `title` originates from a third-party SIMD PR and flows verbatim
+ * into the Anthropic curation user message — an unbounded,
+ * instruction-shaped title is both a prompt-injection surface and a
+ * token-cost surface. The curation *body* was already bounded at
+ * 10 KB by a prior pass; this closes the title gap. Clamped
+ * defensively here (same pattern as `REVIEWER_NOTE_MAX_CHARS`) so a
+ * slightly-over caller never trips the constraint.
+ */
+export const SIMD_TITLE_MAX_CHARS = 400;
+
 export interface SimdProposalUpsert {
   simdNumber: number;
   title: string;
@@ -81,8 +94,14 @@ export class SimdProposalsRepository {
    * Upsert the canonical fields from the GitHub mirror. AI fields and
    * the review state are LEFT UNTOUCHED — they're owned by separate
    * write paths (curation pipeline + manual review).
+   *
+   * `title` is trimmed + clamped to `SIMD_TITLE_MAX_CHARS` before the
+   * write (SEC-M3): it comes from a third-party SIMD PR and feeds the
+   * Anthropic curation prompt, so an over-length / instruction-shaped
+   * title is bounded here as well as by the DB CHECK.
    */
   async upsertSource(input: SimdProposalUpsert): Promise<void> {
+    const safeTitle = input.title.trim().slice(0, SIMD_TITLE_MAX_CHARS);
     await this.pool.query(
       `INSERT INTO simd_proposals (simd_number, title, status, source_url, body_sha256)
        VALUES ($1, $2, $3, $4, $5)
@@ -92,7 +111,7 @@ export class SimdProposalsRepository {
              source_url  = EXCLUDED.source_url,
              body_sha256 = EXCLUDED.body_sha256,
              updated_at  = NOW()`,
-      [input.simdNumber, input.title, input.status, input.sourceUrl, input.bodySha256],
+      [input.simdNumber, safeTitle, input.status, input.sourceUrl, input.bodySha256],
     );
   }
 

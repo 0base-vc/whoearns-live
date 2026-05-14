@@ -102,7 +102,21 @@ export interface SimdDiscussionComment {
   discussionNumber: number;
   commentId: string;
   githubUsername: string;
-  reactionsCount: number;
+  /**
+   * Sum of EVERY GitHub user's positive reactions on the comment
+   * (THUMBS_UP + HEART + ROCKET + HOORAY). Honest all-users total —
+   * NOT the value the OAI governance score consumes (SEC-M5).
+   */
+  totalReactionsCount: number;
+  /**
+   * Subset of `totalReactionsCount` from GitHub users linked to a
+   * claimed validator (`validator_github`). This is the
+   * peer-validator count the OAI governance score actually uses —
+   * resistant to reaction-bot inflation. Computed by the (unshipped)
+   * GitHub Discussions ingester via a JOIN at ingest time; `0`
+   * everywhere until that ingester runs.
+   */
+  peerReactionsCount: number;
   activeWindow: boolean;
   createdAt: Date;
   ingestedAt: Date;

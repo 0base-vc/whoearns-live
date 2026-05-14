@@ -11,7 +11,7 @@
  *   0.30 × active_days / 90
  *
  * Governance decomposes (Phase 6+7):
- *   0.40 × on-chain SIMD vote rate         [PLANNED, currently 0]
+ *   0.40 × on-chain SIMD vote rate           [PLANNED, currently 0]
  *   0.35 × GitHub Discussions comment count  [LIVE]
  *   0.15 × peer-validator reactions received [LIVE — count subset]
  *   0.10 × Realms major-DAO votes            [PLANNED, currently 0]
@@ -20,6 +20,15 @@
  * using comment count + reactions). Wallet activity is folded in
  * separately by the route (Phase 4 fee data isn't shipping yet, so
  * the wallet contribution is also currently a partial signal).
+ *
+ * `reactionsReceived` here is the PEER-VALIDATOR reaction count
+ * (SEC-M5) — `simd_discussion_comments.peer_reactions_count`, the
+ * subset of reactions from GitHub users linked to a claimed
+ * validator, NOT the all-users `total_reactions_count`. Counting
+ * every GitHub user's reactions would let a reaction bot inflate
+ * the score. The peer subset is JOIN-computed by the (still
+ * unshipped) GitHub Discussions ingester; until it runs the count
+ * is 0 everywhere, so this component contributes nothing yet.
  *
  * Pure utility — no DB / RPC / logger. Pre-summed inputs only.
  *

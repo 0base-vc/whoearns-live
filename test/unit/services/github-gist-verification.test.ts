@@ -2,9 +2,11 @@ import * as ed from '@noble/ed25519';
 import bs58 from 'bs58';
 import { pino } from 'pino';
 import { describe, expect, it } from 'vitest';
+import { buildOffchainMessage } from '../../../src/services/claim.service.js';
 import {
   canonicaliseNonce,
   extractGistProof,
+  GITHUB_LINK_NONCE_PURPOSE,
   GithubGistVerificationService,
   isValidGithubUsername,
   parseGistUrl,
@@ -55,6 +57,7 @@ describe('parseGistUrl', () => {
 describe('canonicaliseNonce', () => {
   it('produces deterministic, sorted-key output', () => {
     const nonce: GithubLinkNonce = {
+      purpose: GITHUB_LINK_NONCE_PURPOSE,
       votePubkey: 'V',
       identityPubkey: 'I',
       githubUsername: 'alice',
@@ -68,6 +71,10 @@ describe('canonicaliseNonce', () => {
     // Field order in the serialised form is alphabetical:
     expect(a.indexOf('domain')).toBeLessThan(a.indexOf('expiresAtMs'));
     expect(a.indexOf('expiresAtMs')).toBeLessThan(a.indexOf('githubUsername'));
+    // The domain-separation tag is part of the canonical (signed) form.
+    expect(a).toContain(`"purpose":"${GITHUB_LINK_NONCE_PURPOSE}"`);
+    expect(a.indexOf('issuedAtMs')).toBeLessThan(a.indexOf('purpose'));
+    expect(a.indexOf('purpose')).toBeLessThan(a.indexOf('votePubkey'));
   });
 });
 
@@ -105,7 +112,11 @@ describe('GithubGistVerificationService.verify', () => {
   }
 
   async function makeGistBody(canonical: string, priv: Uint8Array): Promise<string> {
-    const msg = new TextEncoder().encode(canonical);
+    // The operator signs the canonical nonce wrapped in Solana's
+    // offchain-message envelope (`solana sign-offchain-message`) —
+    // the same envelope `claim.service.ts` uses. The service verifies
+    // against that envelope, so the test must sign it too.
+    const msg = buildOffchainMessage(canonical);
     const sig = await ed.signAsync(msg, priv);
     return `---\n${canonical}\n---\nsignature: ${bs58.encode(sig)}`;
   }
@@ -114,6 +125,7 @@ describe('GithubGistVerificationService.verify', () => {
     const { priv, pubB58 } = await makeKeypair();
     const now = Date.now();
     const nonce: GithubLinkNonce = {
+      purpose: GITHUB_LINK_NONCE_PURPOSE,
       votePubkey: 'Vote1',
       identityPubkey: pubB58,
       githubUsername: 'alice',
@@ -143,6 +155,7 @@ describe('GithubGistVerificationService.verify', () => {
   it('rejects when gist URL username mismatches the nonce', async () => {
     const { priv, pubB58 } = await makeKeypair();
     const nonce: GithubLinkNonce = {
+      purpose: GITHUB_LINK_NONCE_PURPOSE,
       votePubkey: 'Vote1',
       identityPubkey: pubB58,
       githubUsername: 'alice',
@@ -167,6 +180,7 @@ describe('GithubGistVerificationService.verify', () => {
   it('rejects a bad signature', async () => {
     const { priv, pubB58 } = await makeKeypair();
     const nonce: GithubLinkNonce = {
+      purpose: GITHUB_LINK_NONCE_PURPOSE,
       votePubkey: 'Vote1',
       identityPubkey: pubB58,
       githubUsername: 'alice',
@@ -176,8 +190,9 @@ describe('GithubGistVerificationService.verify', () => {
     };
     const canonical = canonicaliseNonce(nonce);
     // Sign a DIFFERENT message — the Gist will carry a valid-looking
-    // signature that doesn't match the canonical nonce.
-    const msg = new TextEncoder().encode('not the nonce');
+    // signature that doesn't match the canonical nonce (under the
+    // offchain-message envelope the service now verifies against).
+    const msg = buildOffchainMessage('not the nonce');
     const sig = await ed.signAsync(msg, priv);
     const gistBody = `---\n${canonical}\n---\nsignature: ${bs58.encode(sig)}`;
     const fakeFetch = (async () => ({
@@ -198,6 +213,7 @@ describe('GithubGistVerificationService.verify', () => {
     const { priv, pubB58 } = await makeKeypair();
     const now = Date.now();
     const nonce: GithubLinkNonce = {
+      purpose: GITHUB_LINK_NONCE_PURPOSE,
       votePubkey: 'Vote1',
       identityPubkey: pubB58,
       githubUsername: 'alice',

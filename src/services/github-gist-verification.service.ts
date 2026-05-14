@@ -1,14 +1,38 @@
 import { verifyAsync as ed25519VerifyAsync } from '@noble/ed25519';
 import bs58 from 'bs58';
 import type { Logger } from '../core/logger.js';
+import { buildOffchainMessage } from './claim.service.js';
 import type { IdentityPubkey, ValidatorGithubLink, VotePubkey } from '../types/domain.js';
+
+/**
+ * Domain-separation tag for the GitHub-link signing ceremony. Baked
+ * into the canonical nonce so a signature produced here can never be
+ * mistaken for one produced by another service that asks the same
+ * identity key to sign a JSON string (operator-wallet registration,
+ * a future attestation flow). Without this field, two ceremonies on
+ * one identity key could collide. Mirrors the `purpose` field on
+ * `claim.service.ts`'s `SignedPayloadBody`.
+ */
+export const GITHUB_LINK_NONCE_PURPOSE = 'github-link' as const;
 
 /**
  * Nonce payload signed inside a public Gist by the validator
  * identity keypair. The same shape is canonicalised (sorted keys,
  * no whitespace) before signing and verifying.
+ *
+ * The canonical form is then wrapped in Solana's `buildOffchainMessage`
+ * envelope (the same one `claim.service.ts` uses) before Ed25519
+ * verification — so the operator's `solana sign-offchain-message`
+ * invocation produces a signature this service accepts, and the
+ * P3 ceremonies stay byte-consistent with the v1 claim ceremony.
  */
 export interface GithubLinkNonce {
+  /**
+   * Domain-separation tag — always `GITHUB_LINK_NONCE_PURPOSE`. Lives
+   * inside the signed bytes so this signature is bound to the
+   * GitHub-link purpose and can't be replayed into another ceremony.
+   */
+  purpose: typeof GITHUB_LINK_NONCE_PURPOSE;
   votePubkey: VotePubkey;
   identityPubkey: IdentityPubkey;
   githubUsername: string;
@@ -91,6 +115,9 @@ export function parseGistUrl(url: string): ParsedGistUrl | null {
  * Canonical serialisation of the nonce. Sorted keys, no whitespace,
  * stable across platforms. The same function MUST be called at both
  * nonce-issuance and at signature-verification time.
+ *
+ * `purpose` is included in the sorted-key set so the domain-separation
+ * tag is part of the signed bytes — see `GITHUB_LINK_NONCE_PURPOSE`.
  */
 export function canonicaliseNonce(n: GithubLinkNonce): string {
   return JSON.stringify({
@@ -99,6 +126,7 @@ export function canonicaliseNonce(n: GithubLinkNonce): string {
     githubUsername: n.githubUsername,
     identityPubkey: n.identityPubkey,
     issuedAtMs: n.issuedAtMs,
+    purpose: n.purpose,
     votePubkey: n.votePubkey,
   });
 }
@@ -253,8 +281,13 @@ export class GithubGistVerificationService {
     if (signature.length !== 64 || identityBytes.length !== 32) {
       return { ok: false, reason: 'bad_signature' };
     }
-    const messageBytes = new TextEncoder().encode(expected);
-    const sigOk = await ed25519VerifyAsync(signature, messageBytes, identityBytes);
+    // Wrap the canonical nonce in Solana's offchain-message envelope
+    // before verifying — the SAME envelope `claim.service.ts` uses.
+    // The operator signs via `solana sign-offchain-message`, which
+    // emits that envelope; verifying against raw UTF-8 bytes here
+    // would be a second, incompatible signing ceremony on one branch.
+    const signedBytes = buildOffchainMessage(expected);
+    const sigOk = await ed25519VerifyAsync(signature, signedBytes, identityBytes);
     if (!sigOk) {
       return { ok: false, reason: 'bad_signature' };
     }

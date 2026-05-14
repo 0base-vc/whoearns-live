@@ -2,8 +2,10 @@ import * as ed from '@noble/ed25519';
 import bs58 from 'bs58';
 import { pino } from 'pino';
 import { describe, expect, it } from 'vitest';
+import { buildOffchainMessage } from '../../../src/services/claim.service.js';
 import {
   canonicaliseOperatorNonce,
+  OPERATOR_WALLET_NONCE_PURPOSE,
   OperatorWalletVerificationService,
   type OperatorWalletNonce,
 } from '../../../src/services/operator-wallet-verification.service.js';
@@ -19,13 +21,18 @@ async function makeKeypair(): Promise<{ priv: Uint8Array; pubB58: string }> {
 }
 
 async function signCanonical(canonical: string, priv: Uint8Array): Promise<string> {
-  const sig = await ed.signAsync(new TextEncoder().encode(canonical), priv);
+  // Both keys sign the canonical nonce wrapped in Solana's
+  // offchain-message envelope (`solana sign-offchain-message`) — the
+  // same envelope `claim.service.ts` uses and the service verifies
+  // against.
+  const sig = await ed.signAsync(buildOffchainMessage(canonical), priv);
   return bs58.encode(sig);
 }
 
 describe('canonicaliseOperatorNonce', () => {
   it('produces sorted-key deterministic output', () => {
     const nonce: OperatorWalletNonce = {
+      purpose: OPERATOR_WALLET_NONCE_PURPOSE,
       votePubkey: 'V',
       identityPubkey: 'I',
       walletPubkey: 'W',
@@ -38,6 +45,10 @@ describe('canonicaliseOperatorNonce', () => {
     const b = canonicaliseOperatorNonce({ ...nonce });
     expect(a).toBe(b);
     expect(a.indexOf('label')).toBeLessThan(a.indexOf('votePubkey'));
+    // The domain-separation tag is part of the canonical (signed) form.
+    expect(a).toContain(`"purpose":"${OPERATOR_WALLET_NONCE_PURPOSE}"`);
+    expect(a.indexOf('label')).toBeLessThan(a.indexOf('purpose'));
+    expect(a.indexOf('purpose')).toBeLessThan(a.indexOf('votePubkey'));
   });
 });
 
@@ -51,6 +62,7 @@ describe('OperatorWalletVerificationService.verify', () => {
     const wallet = await makeKeypair();
     const now = Date.now();
     const nonce: OperatorWalletNonce = {
+      purpose: OPERATOR_WALLET_NONCE_PURPOSE,
       votePubkey: 'Vote1',
       identityPubkey: identity.pubB58,
       walletPubkey: wallet.pubB58,
@@ -77,6 +89,7 @@ describe('OperatorWalletVerificationService.verify', () => {
     const wallet = await makeKeypair();
     const now = Date.now();
     const nonce: OperatorWalletNonce = {
+      purpose: OPERATOR_WALLET_NONCE_PURPOSE,
       votePubkey: 'Vote1',
       identityPubkey: identity.pubB58,
       walletPubkey: wallet.pubB58,
@@ -101,6 +114,7 @@ describe('OperatorWalletVerificationService.verify', () => {
     const wallet = await makeKeypair();
     const now = Date.now();
     const nonce: OperatorWalletNonce = {
+      purpose: OPERATOR_WALLET_NONCE_PURPOSE,
       votePubkey: 'Vote1',
       identityPubkey: identity.pubB58,
       walletPubkey: wallet.pubB58,
@@ -126,6 +140,7 @@ describe('OperatorWalletVerificationService.verify', () => {
     const other = await makeKeypair();
     const now = Date.now();
     const nonce: OperatorWalletNonce = {
+      purpose: OPERATOR_WALLET_NONCE_PURPOSE,
       votePubkey: 'Vote1',
       identityPubkey: identity.pubB58,
       walletPubkey: wallet.pubB58,
@@ -153,6 +168,7 @@ describe('OperatorWalletVerificationService.verify', () => {
     const other = await makeKeypair();
     const now = Date.now();
     const nonce: OperatorWalletNonce = {
+      purpose: OPERATOR_WALLET_NONCE_PURPOSE,
       votePubkey: 'Vote1',
       identityPubkey: identity.pubB58,
       walletPubkey: wallet.pubB58,

@@ -4,13 +4,15 @@ import type { AppConfig } from '../../core/config.js';
 import { ValidationError } from '../../core/errors.js';
 import {
   DEFAULT_NONCE_TTL_MS,
+  GITHUB_LINK_NONCE_PURPOSE,
   isValidGithubUsername,
   type GithubLinkNonce,
   type GithubGistVerificationService,
 } from '../../services/github-gist-verification.service.js';
-import type {
-  OperatorWalletNonce,
-  OperatorWalletVerificationService,
+import {
+  OPERATOR_WALLET_NONCE_PURPOSE,
+  type OperatorWalletNonce,
+  type OperatorWalletVerificationService,
 } from '../../services/operator-wallet-verification.service.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
 import {
@@ -145,6 +147,7 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
       });
     }
     const issuedNonce: GithubLinkNonce = {
+      purpose: GITHUB_LINK_NONCE_PURPOSE,
       votePubkey: body.votePubkey,
       identityPubkey: body.identityPubkey,
       githubUsername: body.githubUsername,
@@ -166,15 +169,61 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
         requestId: request.id,
       });
     }
+    /**
+     * Serialise a `ValidatorGithubLink` into the route's response
+     * envelope. Shared by the happy path and the idempotent-replay
+     * path below so both shapes stay identical.
+     */
+    const linkResponse = (link: typeof result.link) => ({
+      link: {
+        githubUsername: link.githubUsername,
+        gistUrl: link.gistUrl,
+        verifiedAt: link.verifiedAt.toISOString(),
+        expiresAt: link.expiresAt.toISOString(),
+      },
+    });
+
+    /**
+     * Race-to-link self-DoS neutraliser (SEC-M2). A nonce-replay is
+     * normally a 403 — but a freshly-published public Gist proof can
+     * be scraped and re-submitted by anyone, and because the proof
+     * itself is valid, the linkage it creates is CORRECT (vote → the
+     * real operator's GitHub username). If the EXISTING
+     * `validator_github` row already links the SAME
+     * `(vote_pubkey, github_username)` this request would create,
+     * the operator's intent is already satisfied regardless of who
+     * submitted first — so we return 200 with the existing link
+     * (idempotent success) instead of a 403 that would otherwise
+     * make the legitimate operator's own submit fail. A row that
+     * links a DIFFERENT username is a genuine replay → keep the 403.
+     *
+     * `null` return = not an idempotent match; the caller should
+     * fall through to the 403.
+     */
+    const idempotentReplay = (existing: typeof result.link | null) => {
+      if (
+        existing !== null &&
+        existing.votePubkey === result.link.votePubkey &&
+        existing.githubUsername.toLowerCase() === result.link.githubUsername.toLowerCase()
+      ) {
+        return linkResponse(existing);
+      }
+      return null;
+    };
+
     // Route-level replay defense for same-vote replays: the DB
     // UNIQUE constraint on signed_nonce catches cross-vote replays
     // (different vote_pubkey, same canonical nonce — impossible
     // unless someone forged the identity sig anyway, so 23505 here
     // is the defense). Same-vote replays would otherwise UPDATE
     // through the ON CONFLICT clause and silently refresh
-    // verified_at + expires_at — so we explicitly reject them.
+    // verified_at + expires_at — so we explicitly reject them,
+    // UNLESS the existing row already encodes the same linkage
+    // (see `idempotentReplay`).
     const priorLink = await opts.validatorGithubRepo.findByVote(body.votePubkey);
     if (priorLink !== null && priorLink.signedNonce === result.link.signedNonce) {
+      const idempotent = idempotentReplay(priorLink);
+      if (idempotent !== null) return idempotent;
       return sendError(reply, {
         code: 'nonce_replay',
         statusCode: 403,
@@ -187,6 +236,14 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     } catch (err) {
       const pgErr = err as { code?: string };
       if (pgErr.code === '23505') {
+        // The UNIQUE on `signed_nonce` fired — another submission
+        // (possibly a scraper, possibly the operator's other tab)
+        // landed this exact nonce first. Re-read by vote: if the
+        // stored row already links the same username this request
+        // wanted, the intent is satisfied — return it as 200.
+        const stored = await opts.validatorGithubRepo.findByVote(body.votePubkey);
+        const idempotent = idempotentReplay(stored);
+        if (idempotent !== null) return idempotent;
         return sendError(reply, {
           code: 'nonce_replay',
           statusCode: 403,
@@ -196,14 +253,7 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
       }
       throw err;
     }
-    return {
-      link: {
-        githubUsername: result.link.githubUsername,
-        gistUrl: result.link.gistUrl,
-        verifiedAt: result.link.verifiedAt.toISOString(),
-        expiresAt: result.link.expiresAt.toISOString(),
-      },
-    };
+    return linkResponse(result.link);
   });
 
   /**
@@ -277,6 +327,7 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
       });
     }
     const issuedNonce: OperatorWalletNonce = {
+      purpose: OPERATOR_WALLET_NONCE_PURPOSE,
       votePubkey: body.votePubkey,
       identityPubkey: body.identityPubkey,
       walletPubkey: body.walletPubkey,
