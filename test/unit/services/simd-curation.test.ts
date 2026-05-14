@@ -27,8 +27,10 @@ const SAMPLE_PROPOSAL: SimdProposal = {
   aiSummary: null,
   aiQuestions: null,
   aiGeneratedAt: null,
+  aiBodySha256: null,
   reviewedAt: null,
   reviewedBy: null,
+  reviewerNote: null,
   createdAt: new Date(),
   updatedAt: new Date(),
 };

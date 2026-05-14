@@ -22,13 +22,22 @@
  * the wallet contribution is also currently a partial signal).
  *
  * Pure utility — no DB / RPC / logger. Pre-summed inputs only.
+ *
+ * The input/output type SHAPES live in `src/types/domain.ts` (TS-2)
+ * — they're re-exported below so existing call sites that
+ * `import { OaiInputs } from '../services/operator-activity-index.js'`
+ * keep working, and so a reader landing in this file still sees the
+ * full picture.
  */
 
-export interface OaiGovernanceInputs {
-  commentCount: number;
-  reactionsReceived: number;
-  activeWindowCount: number;
-}
+import type {
+  GovernanceResult,
+  OaiGovernanceInputs,
+  OaiInputs,
+  OaiResult,
+} from '../types/domain.js';
+
+export type { GovernanceResult, OaiGovernanceInputs, OaiInputs, OaiResult };
 
 /**
  * Saturating sigmoid that maps `count` → [0, 1] with the half-way
@@ -44,17 +53,6 @@ function saturate(value: number, halfPoint: number): number {
 
 const GOVERNANCE_COMMENT_HALF_POINT = 10;
 const GOVERNANCE_REACTIONS_HALF_POINT = 25;
-
-export interface GovernanceResult {
-  /** 0-100 governance subscore, rounded. */
-  score: number;
-  components: {
-    commentCount: number;
-    reactionsReceived: number;
-    /** Active-window comments contribute a small bonus weighted in. */
-    activeWindowCount: number;
-  };
-}
 
 export function computeGovernance(input: OaiGovernanceInputs): GovernanceResult {
   // Active-window comments are worth 1.5× of stale-window comments —
@@ -80,23 +78,6 @@ export function computeGovernance(input: OaiGovernanceInputs): GovernanceResult 
       activeWindowCount: input.activeWindowCount,
     },
   };
-}
-
-export interface OaiInputs {
-  governance: OaiGovernanceInputs;
-  /**
-   * Wallet activity component (Phase 4). Pre-computed by the caller
-   * because the wallet route already has fast access to the
-   * `wallet_daily_activity` table.
-   */
-  wallet: { activeDaysLast90: number };
-}
-
-export interface OaiResult {
-  /** 0-100 overall, rounded. `null` when neither half has data. */
-  composite: number | null;
-  governance: GovernanceResult;
-  walletScore: number;
 }
 
 const WALLET_ACTIVE_DAYS_HALF_POINT = 30;

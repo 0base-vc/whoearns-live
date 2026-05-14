@@ -125,8 +125,24 @@ export interface SimdProposal {
   aiSummary: string | null;
   aiQuestions: string[] | null;
   aiGeneratedAt: Date | null;
+  /**
+   * The `bodySha256` value the current AI curation was generated
+   * against (AI-3). When this differs from `bodySha256` the upstream
+   * proposal text has changed since the model last saw it, so the
+   * row is eligible for re-curation. `null` for rows that have never
+   * been curated.
+   */
+  aiBodySha256: string | null;
   reviewedAt: Date | null;
   reviewedBy: string | null;
+  /**
+   * Optional free-text note the reviewer recorded when approving the
+   * curation (AI-4) — e.g. "summary slightly understates the
+   * compute-budget impact, acceptable" or "re-reviewed after body
+   * drift". Capped at 280 chars by a DB CHECK. Internal audit field;
+   * NOT surfaced on the public `/v1/simd-proposals` endpoint.
+   */
+  reviewerNote: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -144,6 +160,49 @@ export interface WalletDailyActivity {
   txCount: number;
   txFeesLamports: bigint;
   indexedAt: Date;
+}
+
+/**
+ * Phase 6+7 — Operator Activity Index (OAI) computation types.
+ *
+ * Promoted here (TS-2) from `src/services/operator-activity-index.ts`
+ * so a route or future consumer can import the input/output SHAPE
+ * without importing the service module just to reach a type — the
+ * service still owns the pure-function math and re-exports these for
+ * call-site convenience.
+ */
+export interface OaiGovernanceInputs {
+  commentCount: number;
+  reactionsReceived: number;
+  activeWindowCount: number;
+}
+
+export interface GovernanceResult {
+  /** 0-100 governance subscore, rounded. */
+  score: number;
+  components: {
+    commentCount: number;
+    reactionsReceived: number;
+    /** Active-window comments contribute a small bonus weighted in. */
+    activeWindowCount: number;
+  };
+}
+
+export interface OaiInputs {
+  governance: OaiGovernanceInputs;
+  /**
+   * Wallet activity component (Phase 4). Pre-computed by the caller
+   * because the wallet route already has fast access to the
+   * `wallet_daily_activity` table.
+   */
+  wallet: { activeDaysLast90: number };
+}
+
+export interface OaiResult {
+  /** 0-100 overall, rounded. `null` when neither half has data. */
+  composite: number | null;
+  governance: GovernanceResult;
+  walletScore: number;
 }
 
 /**

@@ -134,12 +134,12 @@ service itself.
       (what the reviewer attests when they call `markReviewed`) in the
       service docstring AND in the prompt md so the operator and
       reviewer see the same checklist.
-- [!] **B4.d** (deferred to a follow-up commit): the curation service
-  does not currently re-curate when `body_sha256` changes
-  (`listNeedingCuration` filters on `ai_generated_at IS NULL` only,
-  not on body drift). Not BLOCKER because the upstream upsert keeps
-  `body_sha256` current and the next pipeline pass can include a
-  body-drift detector. Tracked here so it doesn't fall through.
+- [x] **B4.d** (closed in Option B as AI-3): the curation service now
+      re-curates when `body_sha256` changes. Migration 0030 adds
+      `ai_body_sha256` (the body the model was last shown);
+      `listNeedingCuration` keys on
+      `ai_generated_at IS NULL OR ai_body_sha256 IS DISTINCT FROM body_sha256`;
+      `setAiCuration` stamps `ai_body_sha256 = body_sha256` from the row.
 
 ### B5 — Helm chart misses P2-P6 wiring
 
@@ -194,29 +194,41 @@ Closed in this hardening pass:
 - [x] **OPS-1**: Helm chart drift, no Secret pattern (B5).
 - [x] **TS-1**: `docs/scoring.md` claims about TVC scale (B1.c).
 
-Open / deferred (tracked here, not in Option A):
+Closed in Option B:
+
+- [x] **AI-3**: Body-drift re-curation trigger (B4.d). Migration 0030 + `simd-proposals.repo.ts` (`ai_body_sha256` column,
+      `listNeedingCuration` drift predicate, `setAiCuration` stamp).
+- [x] **AI-4**: Per-curation reviewer note field. Migration 0030 adds
+      `reviewer_note` (CHECK ≤ 280); `markReviewed(simdNumber,
+    reviewer, note?)` trims + clamps defensively. Internal audit
+      field — NOT surfaced on the public `/v1/simd-proposals` endpoint.
+- [x] **OPS-2**: ServiceMonitor manifest for the metrics port. New
+      `templates/servicemonitor.yaml` + `serviceMonitor` values block.
+      Guarded on `serviceMonitor.enabled && config.metricsPort > 0`;
+      independent of the existing `prometheus.io/scrape` annotations.
+- [x] **TS-2**: `OaiInputs` / `OaiResult` / `OaiGovernanceInputs` /
+      `GovernanceResult` promoted to `src/types/domain.ts`. The
+      service re-exports them so existing call-site imports still work.
+
+Open / deferred (promoted to its own commit):
 
 - [ ] **SEC-2**: `signalsAvailable` reintroduced as a non-public diag
       only behind admin-token gate. Currently omitted entirely from the
       OAI response (route docstring explains why) — operators can't see
       why their composite is null without DB access. Re-add behind an
-      authenticated admin route, not the public one.
-- [ ] **AI-3**: Body-drift re-curation trigger (B4.d).
-- [ ] **AI-4**: Per-curation reviewer note field (free-text, capped at
-      280 chars) on the `simd_proposals` table so reviewers can record
-      why they approved a specific version. Today only `reviewed_by` +
-      timestamp survives; the reasoning is lost.
-- [ ] **OPS-2**: PodMonitor / ServiceMonitor manifest for the metrics
-      port. Annotations are emitted (B5 keeps them) but a first-class
-      monitor manifest would let the chart work with prometheus-operator
-      installs that don't use annotation discovery.
-- [ ] **TS-2**: `OaiInputs` / `OaiResult` types currently live in the
-      service file. Promote them to `src/types/domain.ts` so the route
-      doesn't need to import a value to get a type.
+      authenticated admin route, not the public one. **Deliberately
+      NOT bundled into Option B**: there is no admin-auth boundary in
+      the codebase yet, and introducing a new authenticated surface
+      belongs in a focused, separately-reviewed commit — not folded
+      into a polish pass. That commit should also give `markReviewed`
+      (AI-4) an actual admin route — today the reviewer workflow is
+      only reachable via direct DB access.
 
 ## MED / LOW
 
-52 MED-severity and 42 LOW-severity items remain. They cluster into:
+52 MED-severity and 42 LOW-severity items remain (Option B closed the
+five HIGH-ish structural items above but intentionally did NOT sweep
+the MED/LOW backlog — that's a separate pass). They cluster into:
 
 - Docstring drift on Phase 0-1 files that referenced behaviour
   superseded by Phase 4-6 (≈ 18 items).
@@ -239,6 +251,7 @@ B) will fold them in.
 
 ## Closure record
 
-| Commit                                                | Closes                                                         | Notes                                                                                               |
-| ----------------------------------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `fix(hardening): adversarial-review Option A — B1-B6` | B1, B2, B3, B4.a-c, B5, B6 + the HIGH items marked `[x]` above | Single bundled commit. B4.d + SEC-2 + AI-3/4 + OPS-2 + TS-2 remain open for a follow-up (Option B). |
+| Commit                                                    | Closes                                                         | Notes                                                                                                                      |
+| --------------------------------------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `fix(hardening): adversarial-review Option A — B1-B6`     | B1, B2, B3, B4.a-c, B5, B6 + the HIGH items marked `[x]` above | Single bundled commit. B4.d + SEC-2 + AI-3/4 + OPS-2 + TS-2 remain open for a follow-up (Option B).                        |
+| `fix(hardening): Option B — B4.d/AI-3, AI-4, OPS-2, TS-2` | B4.d, AI-3, AI-4, OPS-2, TS-2                                  | SEC-2 deliberately excluded — needs an admin-auth boundary, promoted to its own focused commit. MED/LOW backlog untouched. |

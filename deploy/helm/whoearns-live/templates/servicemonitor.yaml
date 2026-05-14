@@ -1,0 +1,57 @@
+{{- /*
+  Prometheus Operator ServiceMonitor (OPS-2).
+
+  Rendered only when BOTH:
+    - `serviceMonitor.enabled: true`
+    - `config.metricsPort` > 0 (the app starts a /metrics listener)
+
+  When metricsPort is 0 there is no `metrics` port on the Service to
+  point at, so emitting a ServiceMonitor would produce a target that
+  never scrapes. The guard keeps the two settings honest.
+
+  This is the selector-based discovery path. It is INDEPENDENT of the
+  `prometheus.io/scrape` pod annotations the StatefulSet emits — most
+  clusters use one mechanism or the other. Both can be on at once
+  without conflict, but you'd be scraping the same endpoint twice.
+*/}}
+{{- if and .Values.serviceMonitor.enabled .Values.config.metricsPort (gt (int .Values.config.metricsPort) 0) }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "whoearns.fullname" . }}
+  {{- if .Values.serviceMonitor.namespace }}
+  namespace: {{ .Values.serviceMonitor.namespace | quote }}
+  {{- end }}
+  labels:
+    {{- include "whoearns.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # Select the chart's primary (non-headless) Service by its
+  # selector labels. The Service exposes the `metrics` named port
+  # only when metricsPort > 0 — same guard as this whole template.
+  selector:
+    matchLabels:
+      {{- include "whoearns.selectorLabels" . | nindent 6 }}
+  {{- if .Values.serviceMonitor.namespace }}
+  # When the ServiceMonitor lives in a different namespace from the
+  # Service, Prometheus Operator needs to be told where to look.
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace | quote }}
+  {{- end }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval | default "30s" | quote }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout | default "10s" | quote }}
+      {{- with .Values.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

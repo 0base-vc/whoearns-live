@@ -90,6 +90,42 @@ podDisruptionBudget:
   enabled: false
   minAvailable: 1
 
+# Prometheus Operator ServiceMonitor (OPS-2). The StatefulSet already
+# emits `prometheus.io/scrape` annotations for annotation-based
+# discovery (kube-prometheus-stack default); this block adds a
+# first-class ServiceMonitor CRD for clusters whose Prometheus is
+# configured to discover targets via ServiceMonitor selectors
+# instead — the two mechanisms are independent and you typically
+# pick one.
+#
+# Rendered ONLY when `serviceMonitor.enabled: true` AND
+# `config.metricsPort > 0` (no metrics listener → nothing to scrape).
+# Requires the monitoring.coreos.com CRDs to be installed in the
+# cluster; `helm template`/`helm install` will emit the manifest
+# regardless, but `kubectl apply` fails if the CRD is absent — leave
+# disabled unless you run Prometheus Operator.
+serviceMonitor:
+  enabled: false
+  # Scrape cadence + per-scrape timeout. Defaults match the app's
+  # cheap `/metrics` endpoint; tighten only if you need finer
+  # resolution and have the Prometheus storage budget for it.
+  interval: 30s
+  scrapeTimeout: 10s
+  # Extra labels on the ServiceMonitor object. Many Prometheus
+  # Operator installs use a `release: <name>` label selector to
+  # decide which ServiceMonitors to honour — set that here, e.g.
+  #   labels:
+  #     release: kube-prometheus-stack
+  labels: {}
+  # Optional: pin the ServiceMonitor into a specific namespace (e.g.
+  # the namespace your Prometheus Operator watches). Empty → the
+  # release namespace.
+  namespace: ''
+  # Relabeling applied to scraped metrics before ingestion. Empty
+  # default; add entries if you need to drop or rewrite labels.
+  metricRelabelings: []
+  relabelings: []
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
