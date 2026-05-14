@@ -304,6 +304,37 @@ For each active SIMD proposal:
 
 **Status: scoring math + endpoint live; GitHub Discussions ingest job not yet wired.**
 
+#### Documented final shape
+
+```
+OAI = 0.50 × WalletActivity  +  0.50 × Governance
+
+WalletActivity:
+  0.70 × log10(daily_fees_lamports) percentile vs cohort   [PLANNED]
+  0.30 × active_days / 90                                  [LIVE]
+
+Governance:
+  0.40 × on-chain SIMD vote rate         [PLANNED]
+  0.35 × GitHub Discussions comment count [LIVE — column live, ingest not yet wired]
+  0.15 × peer-validator reactions count   [LIVE — column live, ingest not yet wired]
+  0.10 × Realms major-DAO votes          [PLANNED]
+```
+
+#### Currently live
+
+- Wallet half uses `100 × saturate(activeDaysLast90, 30)` —
+  active-days only, no fee percentile yet (Phase 4 fee backfill
+  not shipped).
+- Governance half uses the comment-count + reactions-count
+  saturating composite (70/30 within the live half because the
+  remaining 0.40 + 0.10 = 0.50 governance weight is reserved for
+  on-chain votes + Realms). `active_window` weights at 1.5× of
+  stale-window comments when classified — but the classifier is
+  not wired yet, so today every row reads `active_window=false`.
+- Endpoint is gated on (a) validator is claimed, (b) not opted
+  out of public scoring, (c) registrations are not expired.
+- Composite is `null` when neither half has any signal.
+
 #### Live now
 
 - `simd_discussion_comments` mirror table (one row per

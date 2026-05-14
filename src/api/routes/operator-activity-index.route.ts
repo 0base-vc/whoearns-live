@@ -1,7 +1,9 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
 import { computeOperatorActivityIndex } from '../../services/operator-activity-index.js';
+import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
 import type { OperatorWalletsRepository } from '../../storage/repositories/operator-wallets.repo.js';
+import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
 import type { SimdDiscussionsRepository } from '../../storage/repositories/simd-discussions.repo.js';
 import type { ValidatorGithubRepository } from '../../storage/repositories/validator-github.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
@@ -10,9 +12,11 @@ import { VoteOrIdentityParamSchema } from '../schemas/requests.js';
 
 export interface OaiRoutesDeps {
   validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>;
-  validatorGithubRepo: Pick<ValidatorGithubRepository, 'findByVote'>;
-  operatorWalletsRepo: Pick<OperatorWalletsRepository, 'listByVote'>;
-  walletActivityRepo: Pick<WalletActivityRepository, 'listRecent'>;
+  claimsRepo: Pick<ClaimsRepository, 'findByVote'>;
+  profilesRepo: Pick<ProfilesRepository, 'findOptedOutVotes'>;
+  validatorGithubRepo: Pick<ValidatorGithubRepository, 'findActiveByVote'>;
+  operatorWalletsRepo: Pick<OperatorWalletsRepository, 'listActiveByVote'>;
+  walletActivityRepo: Pick<WalletActivityRepository, 'listRecentForWallets'>;
   simdDiscussionsRepo: Pick<SimdDiscussionsRepository, 'statsByUsername'>;
 }
 
@@ -29,15 +33,6 @@ interface OaiResponse {
       activeWindowCount: number;
     };
   };
-  /**
-   * Surface the unmeasured-half flags so a UI can grey-out the
-   * composite when one signal is missing entirely (e.g. operator
-   * hasn't linked GitHub, or hasn't registered a wallet).
-   */
-  signalsAvailable: {
-    github: boolean;
-    wallet: boolean;
-  };
 }
 
 const OAI_CACHE_MAX_AGE_SEC = 300;
@@ -46,20 +41,20 @@ const OAI_CACHE_S_MAXAGE_SEC = 1800;
 /**
  * Operator Activity Index — Phase 6+7 partial release.
  *
- * Currently composes the GOVERNANCE half (GitHub Discussions comment
- * count + reactions received) with the WALLET half (active days in
- * the last 90 — Phase 4 fee data is still null until the backfill
- * pass ships). On-chain SIMD vote rate + Realms votes are PLANNED
- * components — when they ship, the governance subscore gets the
- * remaining 0.50 weight share.
+ * Gates (all must clear before computation):
+ *   1. Validator is known to the indexer (404 otherwise).
+ *   2. Validator is CLAIMED (404 — no claim, no public OAI).
+ *   3. Validator has NOT opted out of public scoring (404 mirror of
+ *      the existing leaderboard / history opt-out semantics).
  *
- * Cold-start semantics:
- *   - Validator not claimed → 404 (no claim, no OAI to publish).
- *   - Validator claimed but no GitHub link → governance half = 0,
- *     composite computed from wallet half only.
- *   - Validator claimed but no operator wallet → wallet half = 0,
- *     composite from governance only.
- *   - Both missing → composite is null (genuinely unmeasured).
+ * Reads only ACTIVE registrations (`expires_at > NOW()`) from
+ * `validator_github` and `operator_wallets`. Lapsed attestations stop
+ * contributing scoring signal — matches the "re-attest quarterly"
+ * promise in `docs/scoring.md`. `signalsAvailable` (linkage flags)
+ * is intentionally omitted from the response to avoid leaking the
+ * linked-GitHub / registered-wallet set as a public enumeration
+ * oracle; clients can read `composite === null` for the cold-start
+ * case where no half has data.
  */
 const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
   app: FastifyInstance,
@@ -82,12 +77,38 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
         throw new NotFoundError('validator', params.data.idOrVote);
       }
 
+      // Claim gate — no claim, no public scoring surface.
+      const claim = await opts.claimsRepo.findByVote(validator.votePubkey);
+      if (claim === null) {
+        throw new NotFoundError('validator claim', params.data.idOrVote);
+      }
+
+      // Opt-out gate — mirrors validators-history / leaderboard
+      // suppression so a validator can self-remove from scoring
+      // surfaces with one switch.
+      const optedOut = await opts.profilesRepo.findOptedOutVotes();
+      if (optedOut.has(validator.votePubkey)) {
+        throw new NotFoundError('validator', params.data.idOrVote);
+      }
+
+      // HEAD short-circuit AFTER the existence checks (so HEAD still
+      // returns the right 404 for unclaimed/opted-out) but BEFORE
+      // the multi-query scoring work.
+      if (request.method === 'HEAD') {
+        return reply
+          .code(200)
+          .header(
+            'cache-control',
+            `public, max-age=${OAI_CACHE_MAX_AGE_SEC}, s-maxage=${OAI_CACHE_S_MAXAGE_SEC}`,
+          )
+          .send('') as unknown as OaiResponse;
+      }
+
       // Governance — only counts comments from the validator's
-      // linked GitHub username. No link → no governance signal.
-      const githubLink = await opts.validatorGithubRepo.findByVote(validator.votePubkey);
-      const hasGithub = githubLink !== null;
+      // ACTIVE-linked GitHub username (expired attestations excluded).
+      const githubLink = await opts.validatorGithubRepo.findActiveByVote(validator.votePubkey);
       let governanceInput = { commentCount: 0, reactionsReceived: 0, activeWindowCount: 0 };
-      if (hasGithub) {
+      if (githubLink !== null) {
         const stats = await opts.simdDiscussionsRepo.statsByUsername([githubLink.githubUsername]);
         const row = stats[0];
         if (row !== undefined) {
@@ -99,18 +120,18 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
         }
       }
 
-      // Wallet — sum active days across all registered wallets
-      // (operators with multi-wallet setups get full credit). Phase
-      // 4 ingester populates wallet_daily_activity.
-      const wallets = await opts.operatorWalletsRepo.listByVote(validator.votePubkey);
-      const hasWallet = wallets.length > 0;
-      let activeDaysSet = new Set<string>();
-      for (const w of wallets) {
-        const rows = await opts.walletActivityRepo.listRecent(w.walletPubkey, 90);
-        for (const r of rows) {
-          if (r.txCount > 0) {
-            activeDaysSet.add(r.activityDate.toISOString().slice(0, 10));
-          }
+      // Wallet — sum active days across all ACTIVE registered wallets
+      // in a single batched query.
+      const wallets = await opts.operatorWalletsRepo.listActiveByVote(validator.votePubkey);
+      const walletPubkeys = wallets.map((w) => w.walletPubkey);
+      const activityRows =
+        walletPubkeys.length === 0
+          ? []
+          : await opts.walletActivityRepo.listRecentForWallets(walletPubkeys, 90);
+      const activeDaysSet = new Set<string>();
+      for (const r of activityRows) {
+        if (r.txCount > 0) {
+          activeDaysSet.add(r.activityDate.toISOString().slice(0, 10));
         }
       }
       const activeDaysLast90 = activeDaysSet.size;
@@ -136,10 +157,6 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
             reactionsReceived: oai.governance.components.reactionsReceived,
             activeWindowCount: oai.governance.components.activeWindowCount,
           },
-        },
-        signalsAvailable: {
-          github: hasGithub,
-          wallet: hasWallet,
         },
       };
     },

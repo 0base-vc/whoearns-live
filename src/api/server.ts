@@ -352,6 +352,8 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     ) {
       await scope.register(oaiRoutes, {
         validatorsRepo: deps.repos.validators,
+        claimsRepo: deps.repos.claims,
+        profilesRepo: deps.repos.profiles,
         validatorGithubRepo: deps.repos.validatorGithub,
         operatorWalletsRepo: deps.repos.operatorWallets,
         walletActivityRepo: deps.repos.walletActivity,

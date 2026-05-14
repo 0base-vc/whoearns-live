@@ -67,6 +67,21 @@ export class ValidatorGithubRepository {
   }
 
   /**
+   * Like `findByVote` but only returns rows whose attestation hasn't
+   * lapsed. Used by the OAI route — expired registrations should
+   * stop contributing scoring signal as documented in scoring.md.
+   */
+  async findActiveByVote(vote: VotePubkey): Promise<ValidatorGithubLink | null> {
+    const { rows } = await this.pool.query<ValidatorGithubRow>(
+      `SELECT ${COLS} FROM validator_github
+        WHERE vote_pubkey = $1
+          AND expires_at > NOW()`,
+      [vote],
+    );
+    return rows[0] ? rowToLink(rows[0]) : null;
+  }
+
+  /**
    * Reverse lookup: given a GitHub username, which (if any) validator
    * has it currently linked? Used by the simd.watch governance
    * ingest to attribute Discussion comments back to validators.

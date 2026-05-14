@@ -61,6 +61,29 @@ export class WalletActivityRepository {
   }
 
   /**
+   * Batched variant — fetch the last `days` activity rows for MANY
+   * wallets in a single query. Used by the OAI route which would
+   * otherwise N+1 across 1-3 wallets per validator. Returns rows
+   * grouped only by wallet+date; callers regroup in JS if needed.
+   */
+  async listRecentForWallets(
+    wallets: ReadonlyArray<string>,
+    days: number,
+  ): Promise<WalletDailyActivity[]> {
+    if (wallets.length === 0) return [];
+    const safeDays = Math.max(1, Math.min(days, 365));
+    const { rows } = await this.pool.query<WalletDailyActivityRow>(
+      `SELECT wallet_pubkey, activity_date, tx_count, tx_fees_lamports, indexed_at
+         FROM wallet_daily_activity
+        WHERE wallet_pubkey = ANY($1::text[])
+          AND activity_date >= (CURRENT_DATE - ($2 || ' days')::interval)
+        ORDER BY wallet_pubkey, activity_date DESC`,
+      [wallets as string[], safeDays],
+    );
+    return rows.map(rowToActivity);
+  }
+
+  /**
    * Return the last `days` calendar days for one wallet, newest first.
    * The route layer pads missing days with zeros at render time.
    */

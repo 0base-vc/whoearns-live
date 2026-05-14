@@ -64,6 +64,21 @@ export class OperatorWalletsRepository {
     return rows.map(rowToWallet);
   }
 
+  /**
+   * Active (not-expired) wallets only. Used by scoring routes that
+   * must drop lapsed registrations from contributing signal.
+   */
+  async listActiveByVote(vote: VotePubkey): Promise<OperatorWallet[]> {
+    const { rows } = await this.pool.query<OperatorWalletRow>(
+      `SELECT ${COLS} FROM operator_wallets
+        WHERE vote_pubkey = $1
+          AND expires_at > NOW()
+        ORDER BY registered_at ASC`,
+      [vote],
+    );
+    return rows.map(rowToWallet);
+  }
+
   /** Count for the per-validator cap check at the route layer. */
   async countByVote(vote: VotePubkey): Promise<number> {
     const { rows } = await this.pool.query<{ count: string }>(
