@@ -43,7 +43,12 @@ export function createClusterNodesIngesterJob(deps: ClusterNodesIngesterJobDeps)
     intervalMs: deps.intervalMs,
     async tick(signal: AbortSignal): Promise<void> {
       try {
-        const nodes = await deps.rpc.getClusterNodes();
+        // OPS-L2 — thread the per-tick abort signal into the RPC call
+        // so a SIGTERM during the slow ~500 KB `getClusterNodes` fetch
+        // aborts it immediately. The post-fetch `signal.aborted` guard
+        // below still covers the (now narrow) window between the fetch
+        // resolving and the DB write starting.
+        const nodes = await deps.rpc.getClusterNodes(signal);
         if (signal.aborted) return;
 
         // Dedup on identity in case the upstream RPC ever returns

@@ -16,7 +16,9 @@ import type {
   ValidatorGithubRepository,
   ValidatorGithubUpsertResult,
 } from '../../../src/storage/repositories/validator-github.repo.js';
+import type { ValidatorsRepository } from '../../../src/storage/repositories/validators.repo.js';
 import type {
+  Validator,
   ValidatorClaim,
   ValidatorGithubLink,
   OperatorWallet,
@@ -26,7 +28,8 @@ import { IDENTITY_1, makeTestApp, VOTE_1 } from './_fakes.js';
 const silent = pino({ level: 'silent' });
 
 // 88-char base58 string — satisfies the wallet route's signature
-// length bounds (min 64 / max 128 for sigs, 64–96 for the anchor tx).
+// length bounds (min 64 / max 128 for sigs, min 86 / max 88 for the
+// anchor tx — SEC-L1 tightened the anchor bound to match the service).
 const SIG_B58 = 'z'.repeat(88);
 const ANCHOR_B58 = 'z'.repeat(88);
 const WALLET_1 = 'WALL111111111111111111111111111111111111111';
@@ -88,6 +91,12 @@ function buildDeps(
     walletVerify?: Awaited<ReturnType<OperatorWalletVerificationService['verify']>>;
     walletCount?: number;
     walletInsert?: OperatorWalletInsertResult;
+    /**
+     * SEC-L4 — when set, `validatorsRepo.findByIdentity` resolves to a
+     * validator (i.e. the submitted `walletPubkey` collides with some
+     * OTHER validator's identity pubkey). Default `null` = no collision.
+     */
+    walletPubkeyIsValidatorIdentity?: boolean;
   } = {},
 ): { deps: ClaimV2RoutesDeps; appended: unknown[] } {
   const claim = overrides.claim === undefined ? makeClaim() : overrides.claim;
@@ -112,6 +121,14 @@ function buildDeps(
     claimsRepo: {
       findByVote: async (v: string) => (v === VOTE_1 ? claim : null),
     } as unknown as ClaimsRepository,
+    // SEC-L4 — `findByIdentity` resolves only when the test opts into
+    // the cross-validator collision case; otherwise `null` (no match).
+    validatorsRepo: {
+      findByIdentity: async () =>
+        overrides.walletPubkeyIsValidatorIdentity === true
+          ? ({ votePubkey: 'OtherVote', identityPubkey: WALLET_1 } as unknown as Validator)
+          : null,
+    } as unknown as ValidatorsRepository,
     validatorGithubRepo: githubRepo as unknown as ValidatorGithubRepository,
     operatorWalletsRepo: {
       countByVote: async () => overrides.walletCount ?? 0,
@@ -308,6 +325,25 @@ describe('POST /v1/claim/wallet/verify', () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('pubkey_role_collision');
+    await app.close();
+  });
+
+  it("returns 400 pubkey_role_collision when the wallet is another validator's identity (SEC-L4)", async () => {
+    // `walletPubkey` differs from THIS validator's vote/identity (so it
+    // clears the self-collision gate) but resolves via `findByIdentity`
+    // to some other validator's identity pubkey — a sibling-node
+    // mis-registration that would pollute wallet-activity analytics.
+    const { deps, appended } = buildDeps({ walletPubkeyIsValidatorIdentity: true });
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/claim/wallet/verify',
+      payload: walletBody(),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('pubkey_role_collision');
+    // Rejected before the verify/insert path — no audit event emitted.
+    expect(appended).toHaveLength(0);
     await app.close();
   });
 

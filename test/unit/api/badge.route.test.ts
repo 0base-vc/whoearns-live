@@ -338,6 +338,59 @@ describe('GET /badge/:vote.svg', () => {
     expect(res.body).not.toContain('\u202E');
   });
 
+  it('strips exotic line-break codepoints (NEL / LS / PS)', async () => {
+    // SEC-L2 — U+0085 (NEL), U+2028 (LINE SEPARATOR), U+2029
+    // (PARAGRAPH SEPARATOR) are not XML control chars, so the
+    // entity-escape pass leaves them intact — but a moniker
+    // containing U+2028 would render as a literal line break inside
+    // the SVG <title>/<desc>. The XML_FORBIDDEN strip set must remove
+    // them before escaping.
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    await ctx.validators.upsertInfo([
+      {
+        identityPubkey: IDENTITY_1,
+        name: 'Line Sep ParaNel',
+        details: null,
+        website: null,
+        keybaseUsername: null,
+        iconUrl: null,
+      },
+    ]);
+    ctx.stats.rows.set(
+      `499:${VOTE_1}`,
+      makeStats(499, VOTE_1, IDENTITY_1, {
+        slotsAssigned: 1,
+        slotsProduced: 1,
+        slotsSkipped: 0,
+        blockFeesTotalLamports: 0n,
+        blockTipsTotalLamports: 0n,
+      }),
+    );
+    ctx.stats.rows.set(
+      `500:${VOTE_1}`,
+      makeStats(500, VOTE_1, IDENTITY_1, {
+        slotsAssigned: 1,
+        slotsProduced: 1,
+        slotsSkipped: 0,
+        blockFeesTotalLamports: 0n,
+        blockTipsTotalLamports: 0n,
+      }),
+    );
+    const res = await ctx.app.inject({ method: 'GET', url: `/badge/${VOTE_1}.svg` });
+    if (res.statusCode === 503) return;
+    expect(res.statusCode).toBe(200);
+    // The visible glyphs survive; the separators are gone.
+    expect(res.body).toContain('LineSepParaNel');
+    expect(res.body).not.toContain(' ');
+    expect(res.body).not.toContain(' ');
+    expect(res.body).not.toContain('');
+  });
+
   it('coalesces concurrent same-key renders into one (single-flight)', async () => {
     await seed(ctx, VOTE_1, IDENTITY_1);
     // Fire two requests for the same key in parallel. With single-

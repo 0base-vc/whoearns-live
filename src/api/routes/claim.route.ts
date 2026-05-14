@@ -144,6 +144,14 @@ const ClaimVerifyBodySchema = SignedEnvelopeSchema;
  * code below) so the column distinguishes "operator chose to remove
  * the override" from "operator never set one" — both render the auto
  * fallback, but DB queries can use `IS NULL` cleanly.
+ *
+ * SEC-L3 — the `.refine()` character filter forbids more than just
+ * `<>`: the narrative renders into JSON-LD on the income page, so it
+ * also rejects backticks, braces `{}`, and the Unicode
+ * text-direction-override codepoints (U+202A-U+202E, U+2066-U+2069)
+ * — the same stricter posture the SVG badge already takes. Migration
+ * `0035_widen_profile_narrative_charset.sql` widens the matching DB
+ * CHECK constraint so the storage layer enforces the identical set.
  */
 const NARRATIVE_OVERRIDE_MAX = 280;
 const NarrativeOverrideSchema = z
@@ -151,9 +159,14 @@ const NarrativeOverrideSchema = z
   .max(NARRATIVE_OVERRIDE_MAX, { message: `narrativeOverride > ${NARRATIVE_OVERRIDE_MAX} chars` })
   .nullable()
   .optional()
-  .refine((value) => value === undefined || value === null || !/[<>]/.test(value), {
-    message: 'narrativeOverride must not contain angle brackets',
-  });
+  .refine(
+    (value) =>
+      value === undefined || value === null || !/[<>`{}\u202A-\u202E\u2066-\u2069]/.test(value),
+    {
+      message:
+        'narrativeOverride must not contain angle brackets, backticks, braces, or text-direction-override characters',
+    },
+  );
 
 const ProfileUpdateBodySchema = SignedEnvelopeSchema.extend({
   profile: z.object({

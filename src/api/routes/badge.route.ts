@@ -106,10 +106,17 @@ function buildBadgeTree(content: BadgeContent): unknown {
 // moniker has no legitimate reason to flip text direction.
 const XML_FORBIDDEN =
   // eslint-disable-next-line no-control-regex -- intentional: stripping illegal XML chars
-  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u202A-\u202E\u2066-\u2069]/g;
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0085\u2028\u2029\u202A-\u202E\u2066-\u2069]/g;
+// Lone (unpaired) UTF-16 surrogates are illegal in XML. We strip only
+// UNPAIRED ones — a high surrogate not followed by a low surrogate, or
+// a low surrogate not preceded by a high surrogate — so legitimate
+// supplementary-plane glyphs (emoji etc.) in a moniker survive intact.
+const XML_LONE_SURROGATE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 function escapeXmlText(value: string): string {
   return value
     .replace(XML_FORBIDDEN, '')
+    .replace(XML_LONE_SURROGATE, '')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')

@@ -208,8 +208,19 @@ export class SolanaRpcClient {
    *   4. Exhausted a 5xx / fetch failure → `UpstreamError`.
    *   5. Non-retryable HTTP error → `UpstreamError` immediately.
    *   6. JSON body `error` field → `UpstreamError`.
+   *
+   * `callerSignal` (OPS-L2) is an OPTIONAL abort signal owned by the
+   * caller — e.g. a job's per-tick `AbortSignal` that fires on
+   * SIGTERM. When supplied it is combined with the per-attempt
+   * `AbortSignal.timeout` via `AbortSignal.any`, so a graceful
+   * shutdown aborts the in-flight `fetch` immediately instead of
+   * waiting out the full RPC timeout.
    */
-  private async request<T>(method: string, params?: unknown[]): Promise<T> {
+  private async request<T>(
+    method: string,
+    params?: unknown[],
+    callerSignal?: AbortSignal,
+  ): Promise<T> {
     const id = this.nextRequestId();
     const body: JsonRpcRequest =
       params === undefined
@@ -232,13 +243,22 @@ export class SolanaRpcClient {
         await this.rateLimiter.acquire(creditCost);
       }
 
+      // Per-attempt timeout signal. When the caller passed its own
+      // signal (OPS-L2), combine the two so EITHER the timeout firing
+      // OR the caller aborting (SIGTERM-driven shutdown) tears down
+      // the `fetch`. A fresh timeout signal is minted per attempt so
+      // a retry gets the full timeout budget again.
+      const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
+      const attemptSignal =
+        callerSignal === undefined ? timeoutSignal : AbortSignal.any([timeoutSignal, callerSignal]);
+
       let response: Response;
       try {
         response = await fetch(this.url, {
           method: 'POST',
           headers: { 'content-type': 'application/json', accept: 'application/json' },
           body: payload,
-          signal: AbortSignal.timeout(this.timeoutMs),
+          signal: attemptSignal,
         });
       } catch (err) {
         // AbortError (timeout) and generic network errors both land here.
@@ -379,9 +399,14 @@ export class SolanaRpcClient {
   /**
    * Wrap a request in the shared concurrency limiter. Every public method
    * funnels through this so the `concurrency` ceiling is respected globally.
+   *
+   * `callerSignal` (OPS-L2) is forwarded to `request` so a caller-owned
+   * abort signal reaches the underlying `fetch`. Most methods don't
+   * pass one — the existing per-attempt timeout is unchanged when it's
+   * `undefined`.
    */
-  private enqueue<T>(method: string, params?: unknown[]): Promise<T> {
-    return this.limit(() => this.request<T>(method, params));
+  private enqueue<T>(method: string, params?: unknown[], callerSignal?: AbortSignal): Promise<T> {
+    return this.limit(() => this.request<T>(method, params, callerSignal));
   }
 
   async getSlot(commitment?: Commitment): Promise<number> {
@@ -580,11 +605,18 @@ export class SolanaRpcClient {
    * `{pubkey, version}` shape via the response type so downstream
    * code can't accidentally depend on fields we haven't audited for
    * stability.
+   *
+   * `signal` (OPS-L2) is an optional caller-owned abort signal. The
+   * cluster-nodes ingester passes its per-tick shutdown signal so a
+   * SIGTERM during a slow ~500 KB fetch aborts the request promptly
+   * rather than waiting out the 30 s RPC timeout and risking a
+   * SIGKILL mid-write.
    */
-  async getClusterNodes(): Promise<RpcClusterNode[]> {
+  async getClusterNodes(signal?: AbortSignal): Promise<RpcClusterNode[]> {
     const raw = await this.enqueue<Array<RpcClusterNode & Record<string, unknown>>>(
       'getClusterNodes',
       undefined,
+      signal,
     );
     // Upstream sanity caps. Solana mainnet has ~2000 gossip-active
     // nodes; 8000 is a comfortable upper bound that catches a

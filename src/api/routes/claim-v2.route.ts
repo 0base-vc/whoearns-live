@@ -26,6 +26,7 @@ import type {
   ValidatorClaimEventsRepository,
 } from '../../storage/repositories/validator-claim-events.repo.js';
 import type { ValidatorGithubRepository } from '../../storage/repositories/validator-github.repo.js';
+import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import { sendError } from '../error-handler.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
 
@@ -150,6 +151,15 @@ function humanMessageForWalletFailure(reason: WalletFailureReason): string {
 export interface ClaimV2RoutesDeps {
   config: AppConfig;
   claimsRepo: Pick<ClaimsRepository, 'findByVote'>;
+  /**
+   * SEC-L4 — used by `wallet/verify` to reject a `walletPubkey` that
+   * is some OTHER validator's identity pubkey. The route already
+   * rejects collision with THIS validator's vote/identity; this
+   * `findByIdentity` lookup widens that to a soft cross-validator
+   * check so a multi-validator operator can't accidentally register
+   * a sibling node's identity key as an "operator wallet".
+   */
+  validatorsRepo: Pick<ValidatorsRepository, 'findByIdentity'>;
   validatorGithubRepo: ValidatorGithubRepository;
   operatorWalletsRepo: OperatorWalletsRepository;
   githubGistService: GithubGistVerificationService;
@@ -389,7 +399,12 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     timestampMs: z.number().int().positive(),
     identitySignatureB58: z.string().min(64).max(128),
     walletSignatureB58: z.string().min(64).max(128),
-    anchorTxSignature: z.string().min(64).max(96),
+    // SEC-L1 — base58 of a 64-byte Solana tx signature is 86-88 chars.
+    // The service (`operator-wallet-verification.service.ts`) already
+    // base58-decodes and asserts the 64-byte length inside [86,88];
+    // the schema bound is tightened to match so a future
+    // refactor-by-schema can't silently re-widen this surface.
+    anchorTxSignature: z.string().min(86).max(88),
   });
 
   app.post('/v1/claim/wallet/verify', async (request, reply) => {
@@ -428,6 +443,24 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
         code: 'pubkey_role_collision',
         statusCode: 400,
         message: 'walletPubkey must differ from identity and vote pubkeys',
+        requestId: request.id,
+      });
+    }
+    // SEC-L4 — soft cross-validator collision check. The self-check
+    // above only catches THIS validator's own vote/identity. A
+    // multi-validator operator could still register a SIBLING node's
+    // identity key as an "operator wallet" — the co-signature
+    // requirement blocks the real attack, but the mis-registration
+    // would pollute the wallet-activity analytics with a key that is
+    // actually a validator identity. If `walletPubkey` resolves to a
+    // known validator's identity, reject with the same
+    // `pubkey_role_collision` shape.
+    const collidingValidator = await opts.validatorsRepo.findByIdentity(body.walletPubkey);
+    if (collidingValidator !== null) {
+      return sendError(reply, {
+        code: 'pubkey_role_collision',
+        statusCode: 400,
+        message: "walletPubkey is another validator's identity pubkey",
         requestId: request.id,
       });
     }

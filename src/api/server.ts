@@ -328,6 +328,9 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     await scope.register(claimV2Routes, {
       config: deps.config,
       claimsRepo: deps.repos.claims,
+      // SEC-L4 — `wallet/verify` rejects a walletPubkey that is some
+      // other validator's identity pubkey via `findByIdentity`.
+      validatorsRepo: deps.repos.validators,
       validatorGithubRepo: deps.repos.validatorGithub,
       operatorWalletsRepo: deps.repos.operatorWallets,
       githubGistService: deps.services.githubGist,
