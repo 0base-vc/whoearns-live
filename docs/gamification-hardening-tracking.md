@@ -40,9 +40,12 @@ were not duplicated here to avoid drift between two sources of truth.
    rate limiting, RPC budget vs ANTHROPIC quota interactions.
 
 A cross-cutting integration pass on top of those seven produced the
-six BLOCKER-class findings below (B1-B6). Fixing B1-B6 is the bar
-for "ship-ready"; the HIGH list closes the rest of the must-fix
-gap; MED/LOW items follow in a second hardening pass.
+six BLOCKER-class findings below (B1-B6). B1-B6 and all 22 per-report
+HIGH items are now closed (see the HIGH scorecard); the MED (~52) and
+LOW (~42) backlogs remain. The Blockers section below is kept as the
+historical record of the B1-B6 framing — where a B-item's original
+scope note turned out to be wrong (e.g. B3's claim about llms.txt),
+it is corrected inline.
 
 ---
 
@@ -105,11 +108,18 @@ spec:
 - [x] `GET /v1/simd-proposals` (Phase 5)
 - [x] `GET /v1/validators/{idOrVote}/operator-activity-index` (Phase 6)
 
-`llms.txt` / `robots.txt` are not file-resident in this repo (they
-are emitted dynamically by routes that read SITE_URL — see Helm
-configmap commentary), so the only artefact to update is OpenAPI.
-The dynamic emitters will pick up the new path tags automatically
-where they reflect the OpenAPI document at request time.
+> **⚠ Correction.** B3's original scope note (preserved below struck
+> through) claimed `llms.txt` / `robots.txt` auto-track OpenAPI. That
+> is **false** — `seo.route.ts` emits both as hand-written static
+> strings. B3 therefore only closed the OpenAPI half (REST-H1); the
+> `llms.txt` / `robots.txt` drift was tracked as REST-H2 / REST-H3 and
+> closed separately in `4cf711b`.
+>
+> ~~`llms.txt` / `robots.txt` are not file-resident in this repo (they
+> are emitted dynamically by routes that read SITE_URL — see Helm
+> configmap commentary), so the only artefact to update is OpenAPI.
+> The dynamic emitters will pick up the new path tags automatically
+> where they reflect the OpenAPI document at request time.~~
 
 ### B4 — AI curation pipeline gaps
 
@@ -260,7 +270,7 @@ said 21 — it under-counted TypeScript by one).
 - [x] **REST-H4**: inline `reply.code().send({error})` payloads omit
       the `details` field the central `error-handler.ts` supports.
       → `4cf711b`: added an exported `sendError(reply, {code,
-    statusCode, message, requestId, details?})` helper routing
+  statusCode, message, requestId, details?})` helper routing
       through the same `makePayload` the central handler uses;
       converted 19 inline sites across claim / claim-v2 / badge / og.
       (`operator-activity-index.route.ts` had none — it throws
@@ -399,7 +409,7 @@ by the three hardening commits; **most are open.**
 - [ ] **REST-M1**: `robots.txt` allow-list stale (see REST-H3).
 - [ ] **REST-M2**: Gist/wallet failure responses set `code` = `message`
       = the machine reason string (`{code:"fetch_failed",
-  message:"fetch_failed"}`) — needs a `humanMessageFor...` lookup.
+message:"fetch_failed"}`) — needs a `humanMessageFor...` lookup.
 - [ ] **REST-M3**: `/v1/simd-proposals` + `/v1/operator-wallets/:wallet/activity` + `/v1/validators/:idOrVote/tier` lack HEAD short-circuits — HEAD
       pays the full DB cost.
 - [ ] **REST-M4**: OAI runs 5-7 queries inside the 60/min/IP budget —
