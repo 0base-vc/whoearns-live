@@ -20,6 +20,7 @@ import type {
   LeaderboardWindowSort,
   WindowedLeaderboardStats,
 } from '../../../src/storage/repositories/stats.repo.js';
+import type { DailyActivityUpsert } from '../../../src/storage/repositories/wallet-activity.repo.js';
 import type {
   Epoch,
   EpochAggregate,
@@ -28,11 +29,13 @@ import type {
   EpochValidatorStats,
   IdentityPubkey,
   ProcessedBlock,
+  SimdProposal,
   Slot,
   Validator,
   ValidatorUpsertInput,
   ValidatorEpochSlotStats,
   VotePubkey,
+  WalletDailyActivity,
 } from '../../../src/types/domain.js';
 
 /** Fake ValidatorsRepository. */
@@ -1423,4 +1426,93 @@ export function makeStats(
     medianTotalUpdatedAt: null,
     ...overrides,
   };
+}
+
+/**
+ * Fake WalletActivityRepository — in-memory mirror of the Phase 4
+ * wallet daily-activity table. `upsertBatch` records each call's row
+ * batch so the indexer-service tests can assert on what was written;
+ * keyed reads (`listRecentForWallets`) materialise from the same
+ * store so a single fake serves both the indexer (write) and the OAI
+ * route (read) test surfaces.
+ */
+export class FakeWalletActivityRepo {
+  /** One entry per `upsertBatch` call, in call order. */
+  readonly writes: DailyActivityUpsert[][] = [];
+  // Materialised rows keyed by `${wallet}:${activityDate}`.
+  readonly rows = new Map<string, WalletDailyActivity>();
+
+  private key(wallet: string, activityDate: string): string {
+    return `${wallet}:${activityDate}`;
+  }
+
+  async upsertBatch(rows: ReadonlyArray<DailyActivityUpsert>): Promise<{ written: number }> {
+    this.writes.push([...rows]);
+    for (const r of rows) {
+      // Last-writer-wins, matching the real repo's ON CONFLICT clause.
+      this.rows.set(this.key(r.walletPubkey, r.activityDate), {
+        walletPubkey: r.walletPubkey,
+        activityDate: new Date(`${r.activityDate}T00:00:00.000Z`),
+        txCount: r.txCount,
+        txFeesLamports: r.txFeesLamports,
+        indexedAt: new Date(),
+      });
+    }
+    return { written: rows.length };
+  }
+
+  async listRecentForWallets(
+    wallets: ReadonlyArray<string>,
+    _days: number,
+  ): Promise<WalletDailyActivity[]> {
+    if (wallets.length === 0) return [];
+    const set = new Set(wallets);
+    return [...this.rows.values()]
+      .filter((r) => set.has(r.walletPubkey))
+      .sort(
+        (a, b) =>
+          a.walletPubkey.localeCompare(b.walletPubkey) ||
+          b.activityDate.getTime() - a.activityDate.getTime(),
+      );
+  }
+
+  async listRecent(wallet: string, _days: number): Promise<WalletDailyActivity[]> {
+    return [...this.rows.values()]
+      .filter((r) => r.walletPubkey === wallet)
+      .sort((a, b) => b.activityDate.getTime() - a.activityDate.getTime());
+  }
+}
+
+/**
+ * Fake SimdProposalsRepository — in-memory mirror of the Phase 5 SIMD
+ * proposal table. `pending` is the queue `listNeedingCuration`
+ * returns; `curationsApplied` records every `setAiCuration` write so
+ * the curation-service tests can assert on the AI summary/questions
+ * that landed.
+ */
+export class FakeSimdProposalsRepo {
+  /** Rows the curation pass should pick up. Set per-test. */
+  pending: SimdProposal[] = [];
+  /** One entry per `setAiCuration` call, in call order. */
+  readonly curationsApplied: Array<{
+    simdNumber: number;
+    aiSummary: string;
+    aiQuestions: string[];
+  }> = [];
+
+  async listNeedingCuration(_limit = 10): Promise<SimdProposal[]> {
+    return this.pending;
+  }
+
+  async setAiCuration(args: {
+    simdNumber: number;
+    aiSummary: string;
+    aiQuestions: readonly string[];
+  }): Promise<void> {
+    this.curationsApplied.push({
+      simdNumber: args.simdNumber,
+      aiSummary: args.aiSummary,
+      aiQuestions: [...args.aiQuestions],
+    });
+  }
 }

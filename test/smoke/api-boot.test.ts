@@ -11,15 +11,22 @@ import {
 } from '../../src/api/cache-headers.js';
 import { buildServer } from '../../src/api/server.js';
 import type { AppConfig } from '../../src/core/config.js';
+import type { GithubGistVerificationService } from '../../src/services/github-gist-verification.service.js';
+import type { OperatorWalletVerificationService } from '../../src/services/operator-wallet-verification.service.js';
 import type { ValidatorService } from '../../src/services/validator.service.js';
 import type { AggregatesRepository } from '../../src/storage/repositories/aggregates.repo.js';
 import type { ClaimService } from '../../src/services/claim.service.js';
 import type { ClaimsRepository } from '../../src/storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../src/storage/repositories/epochs.repo.js';
+import type { OperatorWalletsRepository } from '../../src/storage/repositories/operator-wallets.repo.js';
 import type { ProfilesRepository } from '../../src/storage/repositories/profiles.repo.js';
 import type { ProcessedBlocksRepository } from '../../src/storage/repositories/processed-blocks.repo.js';
+import type { SimdDiscussionsRepository } from '../../src/storage/repositories/simd-discussions.repo.js';
+import type { SimdProposalsRepository } from '../../src/storage/repositories/simd-proposals.repo.js';
 import type { StatsRepository } from '../../src/storage/repositories/stats.repo.js';
+import type { ValidatorGithubRepository } from '../../src/storage/repositories/validator-github.repo.js';
 import type { ValidatorsRepository } from '../../src/storage/repositories/validators.repo.js';
+import type { WalletActivityRepository } from '../../src/storage/repositories/wallet-activity.repo.js';
 import type { WatchedDynamicRepository } from '../../src/storage/repositories/watched-dynamic.repo.js';
 import {
   FakeAggregatesRepo,
@@ -110,6 +117,18 @@ function makeDeps(): Parameters<typeof buildServer>[0] {
         upsert: async () => {},
         bumpNonce: async () => {},
       } as unknown as ClaimsRepository,
+      // Stubs: the Phase 3-6 repos (Claim v2, wallet-activity,
+      // SIMD proposals/discussions) are wired into `buildServer`
+      // unconditionally. The smoke test never hits the routes that
+      // read them — it boots the server and probes /healthz, the SEO
+      // surfaces, and /mcp — so empty objects satisfy the DI
+      // signature without modelling any behaviour, same as the
+      // `profiles` / `claims` / `claim` stubs above.
+      validatorGithub: {} as unknown as ValidatorGithubRepository,
+      operatorWallets: {} as unknown as OperatorWalletsRepository,
+      walletActivity: {} as unknown as WalletActivityRepository,
+      simdProposals: {} as unknown as SimdProposalsRepository,
+      simdDiscussions: {} as unknown as SimdDiscussionsRepository,
     },
     services: {
       validator: new FakeValidatorService() as unknown as ValidatorService,
@@ -118,6 +137,11 @@ function makeDeps(): Parameters<typeof buildServer>[0] {
       // so nothing reaches claimService in practice. The empty object
       // satisfies the TypeScript constructor signature.
       claim: {} as unknown as ClaimService,
+      // Stubs: Claim v2 verification services — only invoked by the
+      // POST /v1/claim/{github,wallet}/verify endpoints, which the
+      // smoke test never reaches.
+      githubGist: {} as unknown as GithubGistVerificationService,
+      operatorWallet: {} as unknown as OperatorWalletVerificationService,
     },
   };
 }

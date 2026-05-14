@@ -31,6 +31,7 @@ import { setErrorHandler } from './error-handler.js';
 import { registerRequestId } from './request-id.js';
 import badgeRoutes from './routes/badge.route.js';
 import claimRoutes from './routes/claim.route.js';
+import claimV2Routes from './routes/claim-v2.route.js';
 import oaiRoutes from './routes/operator-activity-index.route.js';
 import operatorWalletsRoutes from './routes/operator-wallets.route.js';
 import simdProposalsRoutes from './routes/simd-proposals.route.js';
@@ -84,17 +85,16 @@ export interface BuildServerDeps {
     claims: ClaimsRepository;
     /**
      * Phase 3 Claim v2 — GitHub Gist link + operator wallet
-     * registration. Optional so the API entrypoint can omit them
-     * when the gamification feature flag is off.
+     * registration.
      */
-    validatorGithub?: ValidatorGithubRepository;
-    operatorWallets?: OperatorWalletsRepository;
+    validatorGithub: ValidatorGithubRepository;
+    operatorWallets: OperatorWalletsRepository;
     /** Phase 4 — wallet daily activity (read surface). */
-    walletActivity?: WalletActivityRepository;
+    walletActivity: WalletActivityRepository;
     /** Phase 5 — SIMD proposals + AI curation. */
-    simdProposals?: SimdProposalsRepository;
+    simdProposals: SimdProposalsRepository;
     /** Phase 6 — GitHub Discussions comments mirror. */
-    simdDiscussions?: SimdDiscussionsRepository;
+    simdDiscussions: SimdDiscussionsRepository;
   };
   services: {
     validator: ValidatorService;
@@ -105,8 +105,8 @@ export interface BuildServerDeps {
      */
     claim: ClaimService;
     /** Phase 3 Claim v2 helpers — see repos.{validatorGithub,operatorWallets}. */
-    githubGist?: GithubGistVerificationService;
-    operatorWallet?: OperatorWalletVerificationService;
+    githubGist: GithubGistVerificationService;
+    operatorWallet: OperatorWalletVerificationService;
   };
   /**
    * Override path to the SvelteKit build. When undefined we try a few
@@ -305,61 +305,42 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     await scope.register(claimRoutes, {
       config: deps.config,
       claimService: deps.services.claim,
-      // Phase 3 — Claim v2 deps are wired in when the gamification
-      // feature flag is on. The route returns 503 with code
-      // `feature_disabled` when these are absent, so the rest of
-      // the claim surface still works unconditionally.
-      ...(deps.repos.validatorGithub !== undefined
-        ? { validatorGithubRepo: deps.repos.validatorGithub }
-        : {}),
-      ...(deps.repos.operatorWallets !== undefined
-        ? { operatorWalletsRepo: deps.repos.operatorWallets }
-        : {}),
-      claimsRepo: deps.repos.claims,
-      ...(deps.services.githubGist !== undefined
-        ? { githubGistService: deps.services.githubGist }
-        : {}),
-      ...(deps.services.operatorWallet !== undefined
-        ? { operatorWalletService: deps.services.operatorWallet }
-        : {}),
     });
-    // Phase 4 — wallet activity read endpoint. Registered conditionally
-    // so the API can run without P4 wiring (the worker writes the
-    // table; the API just reads).
-    if (deps.repos.walletActivity !== undefined && deps.repos.operatorWallets !== undefined) {
-      await scope.register(operatorWalletsRoutes, {
-        walletActivityRepo: deps.repos.walletActivity,
-        operatorWalletsRepo: deps.repos.operatorWallets,
-      });
-    }
-    // Phase 5 — Pending SIMD widget read endpoint. Conditional like
-    // operator-wallets above; the curation pipeline is worker-owned.
-    if (deps.repos.simdProposals !== undefined) {
-      await scope.register(simdProposalsRoutes, {
-        repo: deps.repos.simdProposals,
-      });
-    }
-    // Phase 6 — Operator Activity Index. Requires the validator
-    // repo (always present), plus the github-link, operator-wallet,
-    // wallet-activity, and simd-discussions repos (all P3+P4+P6
-    // optional). When any required dep is missing the route is
-    // not registered at all.
-    if (
-      deps.repos.validatorGithub !== undefined &&
-      deps.repos.operatorWallets !== undefined &&
-      deps.repos.walletActivity !== undefined &&
-      deps.repos.simdDiscussions !== undefined
-    ) {
-      await scope.register(oaiRoutes, {
-        validatorsRepo: deps.repos.validators,
-        claimsRepo: deps.repos.claims,
-        profilesRepo: deps.repos.profiles,
-        validatorGithubRepo: deps.repos.validatorGithub,
-        operatorWalletsRepo: deps.repos.operatorWallets,
-        walletActivityRepo: deps.repos.walletActivity,
-        simdDiscussionsRepo: deps.repos.simdDiscussions,
-      });
-    }
+    // Phase 3 — Claim v2: GitHub Gist link + operator wallet
+    // registration. Split into its own plugin from the v1 claim
+    // surface (see claim-v2.route.ts) — the two share only the
+    // `/v1/claim/*` prefix, not behaviour.
+    await scope.register(claimV2Routes, {
+      config: deps.config,
+      claimsRepo: deps.repos.claims,
+      validatorGithubRepo: deps.repos.validatorGithub,
+      operatorWalletsRepo: deps.repos.operatorWallets,
+      githubGistService: deps.services.githubGist,
+      operatorWalletService: deps.services.operatorWallet,
+    });
+    // Phase 4 — wallet activity read endpoint. The worker writes the
+    // table; the API just reads.
+    await scope.register(operatorWalletsRoutes, {
+      walletActivityRepo: deps.repos.walletActivity,
+      operatorWalletsRepo: deps.repos.operatorWallets,
+    });
+    // Phase 5 — Pending SIMD widget read endpoint. The curation
+    // pipeline is worker-owned.
+    await scope.register(simdProposalsRoutes, {
+      repo: deps.repos.simdProposals,
+    });
+    // Phase 6 — Operator Activity Index. Reads the validator,
+    // github-link, operator-wallet, wallet-activity, and
+    // simd-discussions repos.
+    await scope.register(oaiRoutes, {
+      validatorsRepo: deps.repos.validators,
+      claimsRepo: deps.repos.claims,
+      profilesRepo: deps.repos.profiles,
+      validatorGithubRepo: deps.repos.validatorGithub,
+      operatorWalletsRepo: deps.repos.operatorWallets,
+      walletActivityRepo: deps.repos.walletActivity,
+      simdDiscussionsRepo: deps.repos.simdDiscussions,
+    });
     // SEO + AI-discovery surfaces. Registered BEFORE `fastifyStatic`
     // (below, outside this register scope) so dynamic /sitemap.xml,
     // /robots.txt, /llms.txt, /openapi.yaml, /og/*.png, etc. win

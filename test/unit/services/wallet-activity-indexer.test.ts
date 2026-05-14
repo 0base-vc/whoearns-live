@@ -3,10 +3,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { SolanaRpcClient } from '../../../src/clients/solana-rpc.js';
 import type { RpcSignatureInfo } from '../../../src/clients/types.js';
 import { WalletActivityIndexerService } from '../../../src/services/wallet-activity-indexer.service.js';
-import type {
-  DailyActivityUpsert,
-  WalletActivityRepository,
-} from '../../../src/storage/repositories/wallet-activity.repo.js';
+import type { WalletActivityRepository } from '../../../src/storage/repositories/wallet-activity.repo.js';
+import { FakeWalletActivityRepo } from './_fakes.js';
 
 const silent = pino({ level: 'silent' });
 
@@ -20,14 +18,6 @@ class FakeRpc {
       throw err;
     }
     return this.signatures;
-  }
-}
-
-class FakeRepo {
-  writes: DailyActivityUpsert[][] = [];
-  async upsertBatch(rows: ReadonlyArray<DailyActivityUpsert>): Promise<{ written: number }> {
-    this.writes.push([...rows]);
-    return { written: rows.length };
   }
 }
 
@@ -48,12 +38,12 @@ function utcEpochSec(year: number, month1Based: number, day: number, hour = 12):
 
 describe('WalletActivityIndexerService.indexWallet', () => {
   let rpc: FakeRpc;
-  let repo: FakeRepo;
+  let repo: FakeWalletActivityRepo;
   let svc: WalletActivityIndexerService;
 
   beforeEach(() => {
     rpc = new FakeRpc();
-    repo = new FakeRepo();
+    repo = new FakeWalletActivityRepo();
     svc = new WalletActivityIndexerService({
       rpc: rpc as unknown as SolanaRpcClient,
       repo: repo as unknown as WalletActivityRepository,

@@ -14,6 +14,7 @@ import {
 } from '../../../src/services/simd-curation.service.js';
 import type { SimdProposalsRepository } from '../../../src/storage/repositories/simd-proposals.repo.js';
 import type { SimdProposal } from '../../../src/types/domain.js';
+import { FakeSimdProposalsRepo } from './_fakes.js';
 
 const silent = pino({ level: 'silent' });
 
@@ -308,33 +309,14 @@ class FakeAnthropic {
   }
 }
 
-class FakeRepo {
-  pending: SimdProposal[] = [];
-  curationsApplied: Array<{ simdNumber: number; aiSummary: string; aiQuestions: string[] }> = [];
-  async listNeedingCuration(): Promise<SimdProposal[]> {
-    return this.pending;
-  }
-  async setAiCuration(args: {
-    simdNumber: number;
-    aiSummary: string;
-    aiQuestions: readonly string[];
-  }): Promise<void> {
-    this.curationsApplied.push({
-      simdNumber: args.simdNumber,
-      aiSummary: args.aiSummary,
-      aiQuestions: [...args.aiQuestions],
-    });
-  }
-}
-
 describe('SimdCurationService.runOnce', () => {
   let anthropic: FakeAnthropic;
-  let repo: FakeRepo;
+  let repo: FakeSimdProposalsRepo;
   let svc: SimdCurationService;
 
   beforeEach(() => {
     anthropic = new FakeAnthropic();
-    repo = new FakeRepo();
+    repo = new FakeSimdProposalsRepo();
     svc = new SimdCurationService({
       anthropic: anthropic as unknown as AnthropicClient,
       repo: repo as unknown as SimdProposalsRepository,

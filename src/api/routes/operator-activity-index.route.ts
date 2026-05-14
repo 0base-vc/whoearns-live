@@ -63,9 +63,14 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
   app: FastifyInstance,
   opts: OaiRoutesDeps,
 ) => {
+  // Return type is `OaiResponse | void`: the GET path resolves the
+  // structured body, the HEAD short-circuit calls `reply.send('')` and
+  // resolves `void`. The union keeps the HEAD path honest — no
+  // `as unknown as OaiResponse` cast claiming an empty string is a
+  // typed object.
   app.get<{ Params: { idOrVote: string } }>(
     '/v1/validators/:idOrVote/operator-activity-index',
-    async (request, reply): Promise<OaiResponse> => {
+    async (request, reply): Promise<OaiResponse | void> => {
       const params = VoteOrIdentityParamSchema.safeParse(request.params);
       if (!params.success) {
         throw new ValidationError('idOrVote path parameter failed validation', {
@@ -96,12 +101,13 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
 
       // HEAD short-circuit AFTER the existence checks (so HEAD still
       // returns the right 404 for unclaimed/opted-out) but BEFORE
-      // the multi-query scoring work.
+      // the multi-query scoring work. The handler resolves `void`
+      // here (the reply is already sent) — the
+      // `Promise<OaiResponse | void>` return type makes that honest
+      // without an `as unknown as OaiResponse` cast.
       if (request.method === 'HEAD') {
-        return reply
-          .code(200)
-          .header('cache-control', OAI_CACHE_CONTROL)
-          .send('') as unknown as OaiResponse;
+        void reply.code(200).header('cache-control', OAI_CACHE_CONTROL).send('');
+        return;
       }
 
       // Governance — only counts comments from the validator's

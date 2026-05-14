@@ -370,74 +370,86 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
    * visitor — but not so long that a fresh claim / client upgrade
    * stalls invisibly.
    */
-  app.get('/v1/validators/:idOrVote/badges', async (request, reply): Promise<BadgesResponse> => {
-    const params = unwrap(VoteOrIdentityParamSchema.safeParse(request.params), 'path parameters');
-    const validator = await findValidatorByVoteOrIdentity(validatorsRepo, params.idOrVote);
-    if (validator === null) {
-      throw new NotFoundError('validator', params.idOrVote);
-    }
+  // Return type is `BadgesResponse | void`: the GET path resolves the
+  // structured body, the HEAD short-circuit calls `reply.send('')` and
+  // resolves `void`. Declaring the union keeps the HEAD path honest —
+  // no `as unknown as BadgesResponse` cast claiming an empty string is
+  // a typed object.
+  app.get(
+    '/v1/validators/:idOrVote/badges',
+    async (request, reply): Promise<BadgesResponse | void> => {
+      const params = unwrap(VoteOrIdentityParamSchema.safeParse(request.params), 'path parameters');
+      const validator = await findValidatorByVoteOrIdentity(validatorsRepo, params.idOrVote);
+      if (validator === null) {
+        throw new NotFoundError('validator', params.idOrVote);
+      }
 
-    const [history, currentEpoch] = await Promise.all([
-      statsRepo.findHistoryByVote(validator.votePubkey, WINDOW_FETCH_ROWS),
-      epochsRepo.findCurrent(),
-    ]);
-    const closedRows =
-      currentEpoch !== null
-        ? history.filter((r) => r.epoch < currentEpoch.epoch).slice(0, WINDOW_CLOSED_EPOCHS)
-        : history.slice(0, WINDOW_CLOSED_EPOCHS);
-    const tierInput = tierInputFromHistory(validator.votePubkey, closedRows);
-    const tierResult = computeTier(tierInput);
+      const [history, currentEpoch] = await Promise.all([
+        statsRepo.findHistoryByVote(validator.votePubkey, WINDOW_FETCH_ROWS),
+        epochsRepo.findCurrent(),
+      ]);
+      const closedRows =
+        currentEpoch !== null
+          ? history.filter((r) => r.epoch < currentEpoch.epoch).slice(0, WINDOW_CLOSED_EPOCHS)
+          : history.slice(0, WINDOW_CLOSED_EPOCHS);
+      const tierInput = tierInputFromHistory(validator.votePubkey, closedRows);
+      const tierResult = computeTier(tierInput);
 
-    const tenure = summariseTenure(
-      validator.firstSeenEpoch,
-      currentEpoch !== null ? currentEpoch.epoch : validator.lastSeenEpoch,
-    );
+      const tenure = summariseTenure(
+        validator.firstSeenEpoch,
+        currentEpoch !== null ? currentEpoch.epoch : validator.lastSeenEpoch,
+      );
 
-    // Re-narrow the stored client kind to the documented enum at the
-    // public boundary. The DB column is intentionally wide so a
-    // future-extended classifier writes without a migration, but the
-    // OpenAPI contract is the closed enum — any other value would
-    // break strictly-typed SDK consumers.
-    const clientKind = narrowToDocumentedKind(validator.clientKind);
+      // Re-narrow the stored client kind to the documented enum at the
+      // public boundary. The DB column is intentionally wide so a
+      // future-extended classifier writes without a migration, but the
+      // OpenAPI contract is the closed enum — any other value would
+      // break strictly-typed SDK consumers.
+      const clientKind = narrowToDocumentedKind(validator.clientKind);
 
-    // HEAD short-circuit: after the existence check the route is
-    // semantically valid, so return headers without paying the
-    // serialisation cost a HEAD response will throw away.
-    if (request.method === 'HEAD') {
-      return reply
-        .code(200)
-        .header(
-          'cache-control',
-          `public, max-age=${BADGES_CACHE_MAX_AGE_SEC}, s-maxage=${BADGES_CACHE_S_MAXAGE_SEC}`,
-        )
-        .send('') as unknown as BadgesResponse;
-    }
+      // HEAD short-circuit: after the existence check the route is
+      // semantically valid, so return headers without paying the
+      // serialisation cost a HEAD response will throw away. The
+      // handler resolves `void` here (the reply is already sent) —
+      // the `Promise<BadgesResponse | void>` return type makes that
+      // honest without an `as unknown as BadgesResponse` cast.
+      if (request.method === 'HEAD') {
+        void reply
+          .code(200)
+          .header(
+            'cache-control',
+            `public, max-age=${BADGES_CACHE_MAX_AGE_SEC}, s-maxage=${BADGES_CACHE_S_MAXAGE_SEC}`,
+          )
+          .send('');
+        return;
+      }
 
-    void reply.header(
-      'cache-control',
-      `public, max-age=${BADGES_CACHE_MAX_AGE_SEC}, s-maxage=${BADGES_CACHE_S_MAXAGE_SEC}`,
-    );
-    return {
-      vote: validator.votePubkey,
-      identity: validator.identityPubkey,
-      tenure: {
-        firstSeenEpoch: tenure.firstSeenEpoch,
-        activeEpochs: tenure.activeEpochs,
-        landmark: tenure.landmark,
-        badge: tenure.badge,
-      },
-      client: {
-        kind: clientKind,
-        version: validator.clientVersion,
-        updatedAt: validator.clientUpdatedAt?.toISOString() ?? null,
-      },
-      tier: {
-        tier: tierResult.tier,
-        composite: tierResult.composite,
-        windowEpochs: closedRows.length,
-      },
-    };
-  });
+      void reply.header(
+        'cache-control',
+        `public, max-age=${BADGES_CACHE_MAX_AGE_SEC}, s-maxage=${BADGES_CACHE_S_MAXAGE_SEC}`,
+      );
+      return {
+        vote: validator.votePubkey,
+        identity: validator.identityPubkey,
+        tenure: {
+          firstSeenEpoch: tenure.firstSeenEpoch,
+          activeEpochs: tenure.activeEpochs,
+          landmark: tenure.landmark,
+          badge: tenure.badge,
+        },
+        client: {
+          kind: clientKind,
+          version: validator.clientVersion,
+          updatedAt: validator.clientUpdatedAt?.toISOString() ?? null,
+        },
+        tier: {
+          tier: tierResult.tier,
+          composite: tierResult.composite,
+          windowEpochs: closedRows.length,
+        },
+      };
+    },
+  );
 };
 
 const BADGES_CACHE_MAX_AGE_SEC = 300;
