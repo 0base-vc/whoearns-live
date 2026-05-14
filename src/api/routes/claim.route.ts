@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AppConfig } from '../../core/config.js';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
 import type { ClaimService, ClaimVerifyFailure } from '../../services/claim.service.js';
+import { sendError } from '../error-handler.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
 
 /**
@@ -220,12 +221,11 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
 
     if (!result.ok) {
       const status = statusForFailure(result.reason);
-      return reply.code(status).send({
-        error: {
-          code: result.reason,
-          message: result.detail ?? humanMessageFor(result.reason),
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: result.reason,
+        statusCode: status,
+        message: result.detail ?? humanMessageFor(result.reason),
+        requestId: request.id,
       });
     }
 
@@ -283,12 +283,11 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
 
     if (!result.ok) {
       const status = statusForFailure(result.reason);
-      return reply.code(status).send({
-        error: {
-          code: result.reason,
-          message: result.detail ?? humanMessageFor(result.reason),
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: result.reason,
+        statusCode: status,
+        message: result.detail ?? humanMessageFor(result.reason),
+        requestId: request.id,
       });
     }
 

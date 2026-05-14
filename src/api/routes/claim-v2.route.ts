@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppConfig } from '../../core/config.js';
+import { ValidationError } from '../../core/errors.js';
 import {
   DEFAULT_NONCE_TTL_MS,
   isValidGithubUsername,
@@ -17,7 +18,26 @@ import {
   type OperatorWalletsRepository,
 } from '../../storage/repositories/operator-wallets.repo.js';
 import type { ValidatorGithubRepository } from '../../storage/repositories/validator-github.repo.js';
+import { sendError } from '../error-handler.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
+
+/**
+ * Local Zod-safeParse unwrap, matching the pattern used in
+ * `claim.route.ts` / `leaderboard.route.ts`. Kept inline (each route
+ * file carries its own copy) so a `.safeParse` failure surfaces as a
+ * `ValidationError` — picked up by the central error handler with a
+ * consistent `validation_error` code + context message — rather than
+ * a raw `ZodError`.
+ */
+function unwrap<T>(
+  result: { success: true; data: T } | { success: false; error: unknown },
+  context: string,
+): T {
+  if (result.success) return result.data;
+  throw new ValidationError(`${context} failed validation`, {
+    issues: (result.error as { issues?: unknown[] }).issues ?? [result.error],
+  });
+}
 
 /**
  * Claim v2 API routes — Phase 3 GitHub identity + operator wallet
@@ -98,33 +118,30 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
   });
 
   app.post('/v1/claim/github/verify', async (request, reply) => {
-    const body = GithubVerifyBodySchema.parse(request.body);
+    const body = unwrap(GithubVerifyBodySchema.safeParse(request.body), 'body');
     if (!freshnessOk(body.timestampMs)) {
-      return reply.code(403).send({
-        error: {
-          code: 'stale_timestamp',
-          message: 'timestampMs is outside the freshness window',
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: 'stale_timestamp',
+        statusCode: 403,
+        message: 'timestampMs is outside the freshness window',
+        requestId: request.id,
       });
     }
     const existingClaim = await opts.claimsRepo.findByVote(body.votePubkey);
     if (existingClaim === null) {
-      return reply.code(403).send({
-        error: {
-          code: 'not_claimed',
-          message: 'validator must be claimed before linking GitHub',
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: 'not_claimed',
+        statusCode: 403,
+        message: 'validator must be claimed before linking GitHub',
+        requestId: request.id,
       });
     }
     if (existingClaim.identityPubkey !== body.identityPubkey) {
-      return reply.code(403).send({
-        error: {
-          code: 'identity_mismatch',
-          message: 'identity pubkey does not match claim',
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: 'identity_mismatch',
+        statusCode: 403,
+        message: 'identity pubkey does not match claim',
+        requestId: request.id,
       });
     }
     const issuedNonce: GithubLinkNonce = {
@@ -142,8 +159,11 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     if (!result.ok) {
       const status =
         result.reason === 'fetch_failed' || result.reason === 'gist_too_large' ? 502 : 403;
-      return reply.code(status).send({
-        error: { code: result.reason, message: result.reason, requestId: request.id },
+      return sendError(reply, {
+        code: result.reason,
+        statusCode: status,
+        message: result.reason,
+        requestId: request.id,
       });
     }
     // Route-level replay defense for same-vote replays: the DB
@@ -155,12 +175,11 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     // verified_at + expires_at — so we explicitly reject them.
     const priorLink = await opts.validatorGithubRepo.findByVote(body.votePubkey);
     if (priorLink !== null && priorLink.signedNonce === result.link.signedNonce) {
-      return reply.code(403).send({
-        error: {
-          code: 'nonce_replay',
-          message: 'this nonce has already been used',
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: 'nonce_replay',
+        statusCode: 403,
+        message: 'this nonce has already been used',
+        requestId: request.id,
       });
     }
     try {
@@ -168,12 +187,11 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     } catch (err) {
       const pgErr = err as { code?: string };
       if (pgErr.code === '23505') {
-        return reply.code(403).send({
-          error: {
-            code: 'nonce_replay',
-            message: 'this nonce has already been used',
-            requestId: request.id,
-          },
+        return sendError(reply, {
+          code: 'nonce_replay',
+          statusCode: 403,
+          message: 'this nonce has already been used',
+          requestId: request.id,
         });
       }
       throw err;
@@ -211,33 +229,30 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
   });
 
   app.post('/v1/claim/wallet/verify', async (request, reply) => {
-    const body = WalletVerifyBodySchema.parse(request.body);
+    const body = unwrap(WalletVerifyBodySchema.safeParse(request.body), 'body');
     if (!freshnessOk(body.timestampMs)) {
-      return reply.code(403).send({
-        error: {
-          code: 'stale_timestamp',
-          message: 'timestampMs is outside the freshness window',
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: 'stale_timestamp',
+        statusCode: 403,
+        message: 'timestampMs is outside the freshness window',
+        requestId: request.id,
       });
     }
     const existingClaim = await opts.claimsRepo.findByVote(body.votePubkey);
     if (existingClaim === null) {
-      return reply.code(403).send({
-        error: {
-          code: 'not_claimed',
-          message: 'validator must be claimed before registering a wallet',
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: 'not_claimed',
+        statusCode: 403,
+        message: 'validator must be claimed before registering a wallet',
+        requestId: request.id,
       });
     }
     if (existingClaim.identityPubkey !== body.identityPubkey) {
-      return reply.code(403).send({
-        error: {
-          code: 'identity_mismatch',
-          message: 'identity pubkey does not match claim',
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: 'identity_mismatch',
+        statusCode: 403,
+        message: 'identity pubkey does not match claim',
+        requestId: request.id,
       });
     }
     // Reject self-registration: registering the validator's own
@@ -245,22 +260,20 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     // downstream analytics (e.g. Phase 4 wallet-activity grid) and
     // defeats the cold/warm separation the feature exists for.
     if (body.walletPubkey === body.identityPubkey || body.walletPubkey === body.votePubkey) {
-      return reply.code(400).send({
-        error: {
-          code: 'pubkey_role_collision',
-          message: 'walletPubkey must differ from identity and vote pubkeys',
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: 'pubkey_role_collision',
+        statusCode: 400,
+        message: 'walletPubkey must differ from identity and vote pubkeys',
+        requestId: request.id,
       });
     }
     const count = await opts.operatorWalletsRepo.countByVote(body.votePubkey);
     if (count >= OPERATOR_WALLET_CAP_PER_VALIDATOR) {
-      return reply.code(409).send({
-        error: {
-          code: 'wallet_cap_reached',
-          message: `validator has the maximum ${OPERATOR_WALLET_CAP_PER_VALIDATOR} wallets`,
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: 'wallet_cap_reached',
+        statusCode: 409,
+        message: `validator has the maximum ${OPERATOR_WALLET_CAP_PER_VALIDATOR} wallets`,
+        requestId: request.id,
       });
     }
     const issuedNonce: OperatorWalletNonce = {
@@ -279,8 +292,11 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
       anchorTxSignature: body.anchorTxSignature,
     });
     if (!result.ok) {
-      return reply.code(403).send({
-        error: { code: result.reason, message: result.reason, requestId: request.id },
+      return sendError(reply, {
+        code: result.reason,
+        statusCode: 403,
+        message: result.reason,
+        requestId: request.id,
       });
     }
     try {
@@ -291,24 +307,22 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
       // ERRCODE = 'check_violation' for the cap. Matching by code
       // (not message text) is robust to migration reword.
       if (pgErr.code === '23514') {
-        return reply.code(409).send({
-          error: {
-            code: 'wallet_cap_reached',
-            message: 'wallet cap exceeded (race)',
-            requestId: request.id,
-          },
+        return sendError(reply, {
+          code: 'wallet_cap_reached',
+          statusCode: 409,
+          message: 'wallet cap exceeded (race)',
+          requestId: request.id,
         });
       }
       // SQLSTATE 23505 = unique_violation; the only UNIQUE on this
       // table is `signed_nonce` (added by migration 0025), so this
       // means a replay of an already-accepted nonce.
       if (pgErr.code === '23505') {
-        return reply.code(403).send({
-          error: {
-            code: 'nonce_replay',
-            message: 'this nonce has already been used',
-            requestId: request.id,
-          },
+        return sendError(reply, {
+          code: 'nonce_replay',
+          statusCode: 403,
+          message: 'this nonce has already been used',
+          requestId: request.id,
         });
       }
       throw err;

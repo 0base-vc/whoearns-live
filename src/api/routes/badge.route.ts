@@ -6,6 +6,7 @@ import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import type { IdentityPubkey, VotePubkey } from '../../types/domain.js';
 import { cacheControl } from '../cache-control.js';
+import { sendError } from '../error-handler.js';
 import { imageRenderTotal } from '../metrics.js';
 import { loadInterFontOnce } from '../satori-font.js';
 import { BRAND_TOKENS, createImageLruCache, shortenPubkey } from '../satori-render.js';
@@ -349,12 +350,11 @@ const badgeRoutes: FastifyPluginAsync<BadgeRoutesDeps> = async (
 
       const svg = await renderOrFail(validator.votePubkey, content);
       if (svg === null) {
-        return reply.code(503).send({
-          error: {
-            code: 'badge_unavailable',
-            message: 'badge renderer unavailable',
-            requestId: request.id,
-          },
+        return sendError(reply, {
+          code: 'badge_unavailable',
+          statusCode: 503,
+          message: 'badge renderer unavailable',
+          requestId: request.id,
         });
       }
       return sendSvg(reply, svg);

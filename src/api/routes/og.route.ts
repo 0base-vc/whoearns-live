@@ -7,6 +7,7 @@ import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import type { IdentityPubkey, VotePubkey } from '../../types/domain.js';
 import { cacheControl } from '../cache-control.js';
+import { sendError } from '../error-handler.js';
 import { imageRenderTotal } from '../metrics.js';
 import { _resetFontCacheForTesting, loadInterFontOnce } from '../satori-font.js';
 import { BRAND_TOKENS, createImageLruCache, shortenPubkey } from '../satori-render.js';
@@ -315,12 +316,11 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
       subtitle: "Who's earning on Solana right now?",
     });
     if (buf === null) {
-      return reply.code(503).send({
-        error: {
-          code: 'og_unavailable',
-          message: 'OG renderer unavailable',
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: 'og_unavailable',
+        statusCode: 503,
+        message: 'OG renderer unavailable',
+        requestId: request.id,
       });
     }
     return sendPng(reply, buf);
@@ -392,12 +392,11 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
 
     const buf = await renderOrFail(validator.votePubkey, content);
     if (buf === null) {
-      return reply.code(503).send({
-        error: {
-          code: 'og_unavailable',
-          message: 'OG renderer unavailable',
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: 'og_unavailable',
+        statusCode: 503,
+        message: 'OG renderer unavailable',
+        requestId: request.id,
       });
     }
     return sendPng(reply, buf);

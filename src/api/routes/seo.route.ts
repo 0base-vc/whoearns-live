@@ -152,9 +152,14 @@ ${urls.join('\n')}
   });
 
   app.get('/robots.txt', async (_request, reply) => {
-    // Whitelist the major AI crawlers to modest public endpoints that
-    // satisfy citation needs without inviting a 2000-validator history
-    // scrape. `*` keeps the existing disallow on /v1/* for unknown agents.
+    // Whitelist the major AI crawlers to the public GET read surface
+    // that satisfies citation needs. `Allow:` directives are prefix
+    // matches, so `/v1/validators/` covers search, history, current-
+    // epoch, leader-slots, tier, badges, and operator-activity-index
+    // in one line — every path under it is a public crawlable GET.
+    // `/badge/` is the embeddable SVG. The POST /v1/claim/* mutations
+    // are intentionally NOT listed — they're not crawlable. `*` keeps
+    // the existing disallow on /v1/* for unknown agents.
     const body = `User-agent: *
 Allow: /
 Allow: /llms.txt
@@ -167,23 +172,35 @@ Disallow: /v1/
 Disallow: /healthz
 
 User-agent: GPTBot
+Allow: /badge/
 Allow: /v1/leaderboard
 Allow: /v1/epoch/current
-Allow: /v1/validators/search
+Allow: /v1/validators/
+Allow: /v1/operator-wallets/
+Allow: /v1/simd-proposals
 
 User-agent: ClaudeBot
+Allow: /badge/
 Allow: /v1/leaderboard
 Allow: /v1/epoch/current
-Allow: /v1/validators/search
+Allow: /v1/validators/
+Allow: /v1/operator-wallets/
+Allow: /v1/simd-proposals
 
 User-agent: PerplexityBot
+Allow: /badge/
 Allow: /v1/leaderboard
 Allow: /v1/epoch/current
-Allow: /v1/validators/search
+Allow: /v1/validators/
+Allow: /v1/operator-wallets/
+Allow: /v1/simd-proposals
 
 User-agent: Googlebot
+Allow: /badge/
 Allow: /v1/leaderboard
-Allow: /v1/validators/search
+Allow: /v1/validators/
+Allow: /v1/operator-wallets/
+Allow: /v1/simd-proposals
 
 Sitemap: ${SITE_URL}/sitemap.xml
 `;
@@ -220,6 +237,26 @@ Sitemap: ${SITE_URL}/sitemap.xml
 - ${SITE_URL}/llms-full.txt: Full reference for AI agents (extended doc)
 - ${SITE_URL}/.well-known/ai-plugin.json: Agent plugin manifest
 - ${SITE_URL}/mcp: Model Context Protocol server (Streamable HTTP)
+
+## API endpoints
+
+GET unless noted. Full descriptions + query params in /llms-full.txt.
+
+- ${SITE_URL}/v1/epoch/current: Running epoch metadata
+- ${SITE_URL}/v1/leaderboard: Validators ranked by income window
+- ${SITE_URL}/v1/validators/search: DB-only validator name/pubkey search
+- ${SITE_URL}/v1/validators/{idOrVote}/history: Per-epoch income history
+- ${SITE_URL}/v1/validators/{idOrVote}/current-epoch: Single running-epoch record
+- ${SITE_URL}/v1/validators/{idOrVote}/epochs/{epoch}/leader-slots: Leader-slot facts for one epoch
+- ${SITE_URL}/v1/validators/{idOrVote}/tier: Node Tier composite (5-epoch window)
+- ${SITE_URL}/v1/validators/{idOrVote}/badges: Tenure + client + tier badge bundle
+- ${SITE_URL}/v1/validators/{idOrVote}/operator-activity-index: Operator Activity Index (governance + wallet)
+- ${SITE_URL}/v1/operator-wallets/{wallet}/activity: Daily on-chain activity for a registered operator wallet
+- ${SITE_URL}/v1/simd-proposals: Human-reviewed AI-curated SIMD proposal feed
+- ${SITE_URL}/badge/{vote}.svg: Embeddable SVG performance badge
+- ${SITE_URL}/v1/validators/current-epoch/batch: POST — bulk current-epoch lookup
+- ${SITE_URL}/v1/claim/github/verify: POST — link a GitHub identity via a signed Gist
+- ${SITE_URL}/v1/claim/wallet/verify: POST — register an operator wallet via dual-signature proof
 
 ## AI-assisted operations
 
@@ -339,16 +376,99 @@ unit totals, provider cost-unit totals, ComputeBudget request aggregates,
 per-block/per-transaction CU averages, income per 1M CU, and best block.
 Use closed epochs before deriving public claims from these facts.
 
+### GET /v1/validators/{idOrVote}/tier
+Node Tier — a 2-signal composite (vote-credit ratio + Wilson-scored
+skip rate) over the most recent 5 closed epochs. Accepts a vote OR
+identity pubkey; no query params. Returns { vote, identity, window,
+tier, composite, components }. tier is forge | anvil | hearth |
+kindling | unrated; composite is null when tier is unrated (fewer
+than 10 leader slots in the window, or no credit-bearing rows) so a
+UI never shows a half-computed score. Closed-epoch data only — no
+live RPC.
+
+### GET /v1/validators/{idOrVote}/badges
+Composite profile badges in one round-trip: { vote, identity,
+tenure, client, tier }. tenure carries firstSeenEpoch, activeEpochs,
+and the oldest landmark the validator predates (MAINNET_BETA_LAUNCH,
+CYCLE_1_OG, etc.). client carries the node-software kind (agave,
+jito_solana, firedancer, frankendancer, paladin, sig, unknown) and
+version from getClusterNodes. tier mirrors GET /tier. Accepts a vote
+OR identity pubkey; no query params.
+
+### GET /v1/validators/{idOrVote}/operator-activity-index
+Operator Activity Index (OAI) — a 0-100 composite blending
+governance participation (50%) with operator-wallet liveness (50%).
+Accepts a vote OR identity pubkey; no query params. Gated: the
+validator must be known, CLAIMED, and not opted out of public
+scoring — all three failures return 404 (the cases are collapsed so
+the endpoint does not leak claim/opt-out state). Returns { vote,
+identity, composite, components }. composite is null in the
+cold-start case where neither half has signal. Only ACTIVE (non-
+expired) Phase 3 GitHub links / operator wallets contribute. HEAD is
+supported and short-circuits before the scoring queries.
+
 ### POST /v1/validators/current-epoch/batch
 Body: { "votes": ["Vote111...", ...] }. Bulk lookup; returns
 { results: [...], missing: [...] }.
 
+### GET /v1/operator-wallets/{wallet}/activity
+Daily on-chain activity for a registered operator wallet. Query
+param: days (1-365, default 365) — the UTC-date window to return.
+Returns { wallet, days, entries }; each entry is { date, txCount,
+txFeesLamports }. Days with zero activity are omitted (clients
+zero-fill at render time); newest-first. txFeesLamports is null
+today — Phase 4 ships counts only, fee backfill lands in a later
+indexer pass. Gated on registered-wallet membership: probes for
+unregistered or expired-registration wallets return 404, so the
+route is not a public existence oracle for arbitrary pubkeys.
+
+### GET /v1/simd-proposals
+Human-reviewed, AI-curated feed of SIMD (Solana Improvement
+Document) proposals for the Pending SIMD widget. Query param: limit
+(1-25, default 20). Returns { proposals }; each proposal is
+{ simdNumber, title, status, sourceUrl, aiSummary, aiQuestions,
+reviewedAt }. Only proposals a human reviewer has signed off on
+surface — unreviewed AI curation stays hidden. Newest-reviewed
+first. The internal reviewer_note audit field is not exposed.
+
+### GET /badge/{vote}.svg
+Embeddable 440×76 SVG performance badge for operator websites and
+GitHub READMEs. Accepts a vote OR identity pubkey. Renders the
+LATEST CLOSED epoch only — never running-epoch numbers — so a
+CDN-cached badge cannot be caught lying mid-epoch. Ships <title> +
+<desc> accessibility metadata with the validator name + closed-epoch
+summary. Cache-Control: public, max-age=3600, s-maxage=86400.
+
+### POST /v1/claim/github/verify
+Links a GitHub identity to a CLAIMED validator via a Keybase-style
+public Gist; no OAuth token is retained. Body: { votePubkey,
+identityPubkey, githubUsername, gistUrl, timestampMs }. The Gist must
+contain the canonical WhoEarns nonce plus the operator's Ed25519
+signature over it. 200 on success, 403 for nonce/sig/policy
+failures, 502 for upstream Gist fetch errors, 503 when the feature
+deps are not wired in. Replayed nonces return 403 nonce_replay.
+
+### POST /v1/claim/wallet/verify
+Registers an operator day-to-day wallet, co-signed by the validator
+identity AND wallet keys and anchored by a Solana memo transaction.
+Body: { votePubkey, identityPubkey, walletPubkey, label, timestampMs,
+identitySignatureB58, walletSignatureB58, anchorTxSignature }. Cap of
+3 wallets per validator (409 wallet_cap_reached). The validator must
+already be CLAIMED. anchorTxSignature is currently shape-validated
+(base58, 64 bytes) — full on-chain verification is a planned
+hardening pass. Replayed nonces return 403 nonce_replay; future-
+dated timestamps return 403 stale_timestamp.
+
 ## Rate limit
 
 Default 60 requests / minute / IP. AI crawlers (GPTBot, ClaudeBot,
-PerplexityBot) are whitelisted to /v1/leaderboard, /v1/epoch/current,
-and /v1/validators/search via robots.txt. MCP calls use the same public
-per-IP budget. Higher-volume queries should run a self-hosted indexer.
+PerplexityBot) are whitelisted via robots.txt to the public GET read
+surface: /v1/leaderboard, /v1/epoch/current, everything under
+/v1/validators/ (search, history, current-epoch, leader-slots, tier,
+badges, operator-activity-index), /v1/operator-wallets/, /v1/simd-proposals,
+and /badge/. The POST /v1/claim/* mutations are not crawlable. MCP calls
+use the same public per-IP budget. Higher-volume queries should run a
+self-hosted indexer.
 
 ## Error envelope
 
