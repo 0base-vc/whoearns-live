@@ -290,16 +290,20 @@ const badgeRoutes: FastifyPluginAsync<BadgeRoutesDeps> = async (
     '/badge/:vote.svg',
     async (request: FastifyRequest<{ Params: { vote: string } }>, reply: FastifyReply) => {
       const rawParam = request.params.vote;
-      // Fastify keeps the .svg suffix on the route param.
-      const param = rawParam.endsWith('.svg') ? rawParam.slice(0, -4) : rawParam;
-      if (param.length === 0) {
-        throw new ValidationError('vote required');
-      }
-      // Pubkey shape guard: base58 is 32-44 chars, no slashes / dots.
-      // Rejects path-traversal-style probes early without touching the DB.
-      if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(param)) {
+      // The `/badge/:vote.svg` route pattern makes Fastify consume the
+      // trailing `.svg` itself — for a well-formed request `:vote` is
+      // the bare base58 pubkey with NO extension left on it. A layered
+      // request like `/badge/Foo.svg.svg` matches the route's literal
+      // `.svg` and leaves `:vote` = `Foo.svg` — the dot fails base58,
+      // so a single `^<base58>$` capture-group match rejects it. This
+      // is the layered-defense the old `endsWith('.svg')` + `slice`
+      // dropped: that form silently peeled one `.svg` and leaned on
+      // the base58 guard alone. No match ⇒ 400.
+      const extMatch = /^([1-9A-HJ-NP-Za-km-z]{32,44})$/.exec(rawParam);
+      if (extMatch === null) {
         throw new ValidationError('invalid pubkey format');
       }
+      const param = extMatch[1] as string;
 
       let validator = await opts.validatorsRepo.findByVote(param as VotePubkey);
       if (validator === null) {

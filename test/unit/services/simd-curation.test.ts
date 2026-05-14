@@ -63,9 +63,20 @@ describe('parseCurationOutput', () => {
     expect(parseCurationOutput('just questions\nQ: x\nQ: y\nQ: z')).toBeNull();
   });
 
-  it('rejects responses with too few questions', () => {
+  it('rejects responses with too few questions (fewer than 2)', () => {
+    // AI-L2 lowered the floor to 2 — a single question is still too
+    // few (a discussion needs at least a pair of trade-offs).
     const bad = `SUMMARY:\nfoo\n\nQUESTIONS:\nQ: only one`;
     expect(parseCurationOutput(bad)).toBeNull();
+  });
+
+  it('accepts exactly 2 questions (AI-L2 floor)', () => {
+    // AI-L2: a trivial SIMD with only two genuine operator-facing
+    // trade-offs should pass rather than force a padded third.
+    const ok = `SUMMARY:\nThe SIMD flips one constant.\n\nQUESTIONS:\nQ: a\nQ: b`;
+    const out = parseCurationOutput(ok);
+    expect(out).not.toBeNull();
+    expect(out!.questions.length).toBe(2);
   });
 
   it('rejects responses with too many questions', () => {
@@ -78,7 +89,9 @@ describe('parseCurationOutput', () => {
     expect(parseCurationOutput(crlf)).not.toBeNull();
   });
 
-  it('rejects an oversized summary (>600 chars)', () => {
+  it('rejects an oversized summary (past the ~450-char / ~65-word cap)', () => {
+    // AI-L1 tightened the caps to 450 chars / 65 words — well under
+    // this 200-word (1000-char) fixture, which is rejected on both.
     const longSummary = 'word '.repeat(200);
     const bad = `SUMMARY:\n${longSummary}\n\nQUESTIONS:\nQ: a\nQ: b\nQ: c`;
     expect(parseCurationOutput(bad)).toBeNull();
@@ -175,9 +188,11 @@ describe('SIMD_CURATION_SYSTEM_PROMPT', () => {
   it('forbids vote framing', () => {
     expect(SIMD_CURATION_SYSTEM_PROMPT).toMatch(/NEVER tell operators how to vote/);
   });
-  it('requires Q: prefix and 3-5 questions', () => {
-    expect(SIMD_CURATION_SYSTEM_PROMPT).toMatch(/3 to 5 DISCUSSION QUESTIONS/);
+  it('requires Q: prefix and 2-5 questions', () => {
+    expect(SIMD_CURATION_SYSTEM_PROMPT).toMatch(/2 to 5 DISCUSSION QUESTIONS/);
     expect(SIMD_CURATION_SYSTEM_PROMPT).toMatch(/starting with "Q: "/);
+    // AI-L2: the prompt nudges away from filler now that the floor is 2.
+    expect(SIMD_CURATION_SYSTEM_PROMPT).toMatch(/Prefer fewer high-quality questions over filler/);
   });
   it('declares the untrusted-body delimiter rule referenced by the service', () => {
     expect(SIMD_CURATION_SYSTEM_PROMPT).toContain(BODY_DELIM_BEGIN);

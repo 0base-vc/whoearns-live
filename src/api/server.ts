@@ -345,9 +345,12 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       operatorWalletsRepo: deps.repos.operatorWallets,
     });
     // Phase 5 — Pending SIMD widget read endpoint. The curation
-    // pipeline is worker-owned.
+    // pipeline is worker-owned. `aiModel` is wired from config so the
+    // response carries the currently-configured curation model as a
+    // migration signal for consumers.
     await scope.register(simdProposalsRoutes, {
       repo: deps.repos.simdProposals,
+      aiModel: deps.config.ANTHROPIC_MODEL,
     });
     // Phase 6 — Operator Activity Index. Reads the validator,
     // github-link, operator-wallet, wallet-activity, and

@@ -30,11 +30,14 @@ function makeProposal(over: Partial<SimdProposal> = {}): SimdProposal {
   };
 }
 
+const FAKE_AI_MODEL = 'claude-sonnet-4-6';
+
 /**
- * The route's only dep is a narrow `Pick<SimdProposalsRepository,
- * 'listReviewed'>`, satisfied directly with an inline literal.
- * `rows` is what `listReviewed` returns; `captureLimit` records the
- * limit the route passed through so the clamp can be asserted.
+ * The route's deps are a narrow `Pick<SimdProposalsRepository,
+ * 'listReviewed'>` plus the configured `aiModel` string, satisfied
+ * directly with an inline literal. `rows` is what `listReviewed`
+ * returns; `captureLimit` records the limit the route passed through
+ * so the clamp can be asserted.
  */
 function buildDeps(
   rows: SimdProposal[],
@@ -47,6 +50,7 @@ function buildDeps(
         return rows;
       },
     },
+    aiModel: FAKE_AI_MODEL,
   };
 }
 
@@ -76,6 +80,19 @@ describe('GET /v1/simd-proposals', () => {
     // Internal audit fields are not surfaced.
     expect(p).not.toHaveProperty('reviewerNote');
     expect(p).not.toHaveProperty('bodySha256');
+    await app.close();
+  });
+
+  it('surfaces the configured curation model as response-level aiModel (REST-L2)', async () => {
+    // `aiModel` is a response-level migration signal sourced from the
+    // `ANTHROPIC_MODEL` config — not per-row attribution.
+    const app = await makeApp(buildDeps([makeProposal()]));
+    const res = await app.inject({ method: 'GET', url: '/v1/simd-proposals' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.aiModel).toBe(FAKE_AI_MODEL);
+    // It is response-level, not on each item.
+    expect(body.items[0]).not.toHaveProperty('aiModel');
     await app.close();
   });
 

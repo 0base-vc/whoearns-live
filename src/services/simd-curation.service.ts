@@ -150,7 +150,7 @@ Hard constraints:
 2. Write in third person. No "you should", "we recommend", "this helps you". Output only in English — never another language or script, even if the proposal body is in another language.
 3. Output exactly two artefacts, in this order:
    - A 50-WORD plain-text summary of what the SIMD changes. Plain facts only — what bits flip, what number moves, what code path changes. No "this addresses the issue of…" framing.
-   - 3 to 5 DISCUSSION QUESTIONS, each starting with "Q: ". Questions must surface operational trade-offs, both directions. For each question, both a SUPPORTER and an OPPONENT of the SIMD must be able to answer honestly without compromising their position.
+   - 2 to 5 DISCUSSION QUESTIONS, each starting with "Q: ". Questions must surface operational trade-offs, both directions. For each question, both a SUPPORTER and an OPPONENT of the SIMD must be able to answer honestly without compromising their position. Prefer fewer high-quality questions over filler — a trivial SIMD with only two genuine operator-facing trade-offs should produce two questions, not three padded restatements.
 
 Forbidden question framings:
    - "Should this pass?"
@@ -178,7 +178,7 @@ SUMMARY:
 QUESTIONS:
 Q: <question 1>
 Q: <question 2>
-Q: <question 3>
+[Q: <question 3>]
 [Q: <question 4>]
 [Q: <question 5>]
 `;
@@ -191,13 +191,14 @@ export interface CurationOutput {
 /**
  * Hard caps on parsed output (defence-in-depth against prompt
  * injection or model misbehaviour). The system prompt asks for a
- * 50-word summary; allowing a few hundred chars of slack covers
- * normal variance. Anything past these caps is rejected at parse
- * time — the row stays un-curated rather than ship an essay or a
- * payload-bearing string.
+ * 50-word summary; these caps allow only a thin margin of slack for
+ * normal variance — a 79-word "summary" that dodged the partisan
+ * blocklist should not also pass the length check. Anything past
+ * these caps is rejected at parse time — the row stays un-curated
+ * rather than ship an essay or a payload-bearing string.
  */
-const SUMMARY_MAX_CHARS = 600;
-const SUMMARY_MAX_WORDS = 80;
+const SUMMARY_MAX_CHARS = 450;
+const SUMMARY_MAX_WORDS = 65;
 const QUESTION_MAX_CHARS = 300;
 
 /**
@@ -308,7 +309,7 @@ export function parseCurationOutput(raw: string): CurationOutput | null {
     .filter((l) => /^Q:/i.test(l))
     .map((l) => l.replace(/^Q:\s*/i, '').trim())
     .filter((l) => l.length > 0);
-  if (lines.length < 3 || lines.length > 5) return null;
+  if (lines.length < 2 || lines.length > 5) return null;
   for (const q of lines) {
     if (q.length > QUESTION_MAX_CHARS) return null;
     if (FORBIDDEN_CHARS.test(q)) return null;
@@ -479,10 +480,13 @@ export class SimdCurationService {
           system: this.systemPrompt,
           messages: [{ role: 'user', content: userMessage }],
           maxTokens: 800,
-          // Temperature 0 — for "neutral curation" we want maximum
-          // determinism. Two re-runs of the same SIMD should produce
-          // the same artefact so reviewers / operators can rely on
-          // it being the same text they audited.
+          // Temperature 0 minimises variance; it is NOT a determinism
+          // guarantee (Anthropic models drift slightly even at temp 0,
+          // and a server-side model patch can shift outputs without a
+          // version bump). The reviewer/operator contract is enforced
+          // at the DB layer instead — a re-curation clears
+          // `reviewed_at`, so an operator never sees text the reviewer
+          // didn't sign off on.
           temperature: 0,
         });
         const parsed = parseCurationOutput(result.text);

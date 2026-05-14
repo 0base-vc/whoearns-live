@@ -735,7 +735,7 @@ paths:
       description: |
         Phase 5 — returns AI-curated SIMD proposals that a human
         reviewer has spot-checked (`reviewed_at IS NOT NULL`). Each
-        entry ships a neutral 50-word summary and 3-5 discussion
+        entry ships a neutral 50-word summary and 2-5 discussion
         questions designed to surface trade-offs without telling
         operators how to vote.
 
@@ -2082,24 +2082,27 @@ components:
         sourceUrl: { type: string, format: uri }
         aiSummary:
           type: string
-          maxLength: 600
+          maxLength: 450
           description: |
             Neutral plain-text summary, ~50 words, produced by the
-            curation pipeline at temperature 0. Always non-empty when
-            this entry surfaces (the pipeline rejects empty/malformed
-            output before the row reaches `reviewed`).
+            curation pipeline at temperature 0 (temp 0 minimises
+            variance — it is not a determinism guarantee). Always
+            non-empty when this entry surfaces (the pipeline rejects
+            empty/malformed output before the row reaches `reviewed`).
         aiQuestions:
           type: array
-          minItems: 3
+          minItems: 2
           maxItems: 5
           items:
             type: string
             maxLength: 300
           description: |
-            3-5 discussion questions designed to surface trade-offs.
+            2-5 discussion questions designed to surface trade-offs.
             Each question is answerable honestly by both a supporter
             and an opponent of the SIMD without compromising their
-            position. No "should this pass?" framings.
+            position. No "should this pass?" framings. A trivial SIMD
+            may yield only two genuine questions rather than padded
+            filler.
         reviewedAt:
           type: string
           format: date-time
@@ -2109,12 +2112,23 @@ components:
 
     SimdProposalListResponse:
       type: object
-      required: [count, items]
+      required: [count, aiModel, items]
       properties:
         count:
           type: integer
           minimum: 0
           description: Number of entries in `items` (envelope parity with the other list endpoints).
+        aiModel:
+          type: string
+          example: claude-sonnet-4-6
+          description: |
+            The Anthropic model the curation pipeline is *currently
+            configured* to use (`ANTHROPIC_MODEL`). Lets a consumer
+            pinning expected curation behaviour detect a model
+            migration. Response-level, not per-row: this is the model
+            configured right now, not the model each individual row
+            was curated by. True per-row attribution would need an
+            `ai_model` column on the proposals table.
         items:
           type: array
           items: { $ref: '#/components/schemas/SimdProposalItem' }

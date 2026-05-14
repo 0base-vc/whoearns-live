@@ -331,17 +331,20 @@ const ogRoutes: FastifyPluginAsync<OgRoutesDeps> = async (
 
   app.get<{ Params: { vote: string } }>('/og/:vote.png', async (request, reply) => {
     const rawParam = request.params.vote;
-    // Strip the .png suffix the route param keeps on it. Fastify's
-    // wildcard matcher includes the extension.
-    const param = rawParam.endsWith('.png') ? rawParam.slice(0, -4) : rawParam;
-    if (param.length === 0) {
-      throw new ValidationError('vote required');
-    }
-    // Pubkey shape guard — same as the badge route. Rejects path-
-    // traversal probes early without touching the DB.
-    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(param)) {
+    // The `/og/:vote.png` route pattern makes Fastify consume the
+    // trailing `.png` itself — for a well-formed request `:vote` is
+    // the bare base58 pubkey with NO extension left on it. A layered
+    // request like `/og/Foo.png.png` matches the route's literal
+    // `.png` and leaves `:vote` = `Foo.png` — the dot fails base58,
+    // so a single `^<base58>$` capture-group match rejects it. This
+    // is the layered-defense the old `endsWith('.png')` + `slice`
+    // dropped: that form silently peeled one `.png` and leaned on the
+    // base58 guard alone. No match ⇒ 400. Same shape as the badge route.
+    const extMatch = /^([1-9A-HJ-NP-Za-km-z]{32,44})$/.exec(rawParam);
+    if (extMatch === null) {
       throw new ValidationError('invalid pubkey format');
     }
+    const param = extMatch[1] as string;
 
     // Try vote first, then identity — same dual-lookup as the income page.
     let validator = await opts.validatorsRepo.findByVote(param as VotePubkey);

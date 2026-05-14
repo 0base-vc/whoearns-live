@@ -7,6 +7,17 @@ import { cacheControl } from '../cache-control.js';
 
 export interface SimdProposalsRoutesDeps {
   repo: Pick<SimdProposalsRepository, 'listReviewed'>;
+  /**
+   * The Anthropic model the curation pipeline is *currently
+   * configured* to use (`ANTHROPIC_MODEL`). Surfaced on the response
+   * as `aiModel` so a consumer pinning expected behaviour can detect
+   * a model migration. This is a response-LEVEL field on purpose: it
+   * is the model configured right now, NOT per-row attribution. True
+   * per-row attribution (rows curated by different models over time)
+   * would need an `ai_model` column on `simd_proposals` — out of
+   * scope until the curation pipeline ships.
+   */
+  aiModel: string;
 }
 
 // Hard cap at 25 — the widget renders maybe 5 proposals on screen
@@ -28,6 +39,16 @@ interface ProposalListResponse {
    * top-level `count` alongside the array.
    */
   count: number;
+  /**
+   * The Anthropic model the curation pipeline is *currently
+   * configured* to use (the `ANTHROPIC_MODEL` config value). Lets a
+   * consumer pinning expected curation behaviour notice a model
+   * migration. Response-level, not per-row: every item in this
+   * response was (or would be) curated by this model. Per-row
+   * attribution would need an `ai_model` column — deferred until the
+   * curation pipeline ships.
+   */
+  aiModel: string;
   items: Array<{
     simdNumber: number;
     title: string;
@@ -119,8 +140,10 @@ const simdProposalsRoutes: FastifyPluginAsync<SimdProposalsRoutesDeps> = async (
       }));
     // `items` (not `proposals`) for envelope parity with every other
     // list endpoint; `count` mirrors `ValidatorSearchResponse` /
-    // the leaderboard shape.
-    return { count: items.length, items };
+    // the leaderboard shape. `aiModel` is the currently-configured
+    // curation model — a response-level migration signal, not per-row
+    // attribution (see `SimdProposalsRoutesDeps.aiModel`).
+    return { count: items.length, aiModel: opts.aiModel, items };
   });
 };
 

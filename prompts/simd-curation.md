@@ -32,7 +32,7 @@ Hard constraints:
 2. Write in third person. No "you should", "we recommend", "this helps you". Output only in English — never another language or script, even if the proposal body is in another language.
 3. Output exactly two artefacts, in this order:
    - A 50-WORD plain-text summary of what the SIMD changes. Plain facts only — what bits flip, what number moves, what code path changes. No "this addresses the issue of…" framing.
-   - 3 to 5 DISCUSSION QUESTIONS, each starting with "Q: ". Questions must surface operational trade-offs, both directions. For each question, both a SUPPORTER and an OPPONENT of the SIMD must be able to answer honestly without compromising their position.
+   - 2 to 5 DISCUSSION QUESTIONS, each starting with "Q: ". Questions must surface operational trade-offs, both directions. For each question, both a SUPPORTER and an OPPONENT of the SIMD must be able to answer honestly without compromising their position. Prefer fewer high-quality questions over filler — a trivial SIMD with only two genuine operator-facing trade-offs should produce two questions, not three padded restatements.
 
 Forbidden question framings:
    - "Should this pass?"
@@ -60,7 +60,7 @@ SUMMARY:
 QUESTIONS:
 Q: <question 1>
 Q: <question 2>
-Q: <question 3>
+[Q: <question 3>]
 [Q: <question 4>]
 [Q: <question 5>]
 ```

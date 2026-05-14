@@ -138,6 +138,16 @@ describe('GET /badge/:vote.svg', () => {
     expect([400, 404]).toContain(res.statusCode);
   });
 
+  it('rejects a layered .svg.svg suffix (REST-L1)', async () => {
+    // The extension strip is a single `^<base58>\.svg$` capture-group
+    // match, not `endsWith` + `slice` — so `<pubkey>.svg.svg` does not
+    // half-strip to a still-valid pubkey. No match ⇒ 400.
+    await seed(ctx, VOTE_1, IDENTITY_1);
+    const res = await ctx.app.inject({ method: 'GET', url: `/badge/${VOTE_1}.svg.svg` });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: { code: 'validation_error' } });
+  });
+
   it('serves cached SVG on a second request without re-rendering', async () => {
     await seed(ctx, VOTE_1, IDENTITY_1);
     const first = await ctx.app.inject({ method: 'GET', url: `/badge/${VOTE_1}.svg` });

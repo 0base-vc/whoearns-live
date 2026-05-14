@@ -878,6 +878,7 @@ Response:
 ```json
 {
   "count": 1,
+  "aiModel": "claude-sonnet-4-6",
   "items": [
     {
       "simdNumber": 228,
@@ -904,6 +905,19 @@ Newest-reviewed first. The curation system prompt is published
 verbatim at `prompts/simd-curation.md` (byte-equality enforced
 against the runtime constant by a unit test). The internal
 `reviewer_note` audit field is **not** included in the response.
+
+`aiModel` is the Anthropic model the curation pipeline is _currently
+configured_ to use (the `ANTHROPIC_MODEL` config value) — a
+response-level field so a consumer pinning expected curation
+behaviour can detect a model migration. It is **not** per-row
+attribution: it reflects the model configured right now, not the
+model each individual row was curated by. True per-row attribution
+would need an `ai_model` column on the proposals table and is
+deferred until the curation pipeline ships. `aiSummary` is capped at
+~50 words (temperature 0 minimises variance but is not a determinism
+guarantee — Anthropic models drift slightly even at temp 0);
+`aiQuestions` carries 2-5 questions — a trivial SIMD may yield only
+two genuine operator-facing trade-offs rather than padded filler.
 
 `HEAD` is supported and short-circuits after `limit` validation but
 before the DB read.
