@@ -234,7 +234,15 @@
     return row.isCurrentEpoch && !row.isFinal;
   }
 
-  function displayedSlotDenominator(row: ValidatorEpochRecord): number | null {
+  /**
+   * Skip rate uses elapsed slots as its denominator on the live row so the
+   * percentage reflects production health right now. Dividing by full
+   * `slotsAssigned` mid-epoch would understate skips until every leader
+   * slot had passed. The slots column ("produced / assigned") instead
+   * uses `slotsAssigned` directly — readers expect a stable "progress
+   * toward the epoch's full leader-slot allocation" denominator.
+   */
+  function skipRateDenominator(row: ValidatorEpochRecord): number | null {
     return isLiveRow(row) ? (row.slotsElapsedAssigned ?? row.slotsAssigned) : row.slotsAssigned;
   }
 </script>
@@ -579,7 +587,7 @@
               Number(row.blockPriorityFeesTotalSol) +
               Number(row.blockTipsTotalSol)
             : null}
-        {@const slotDenominator = displayedSlotDenominator(row)}
+        {@const skipDenominator = skipRateDenominator(row)}
         <li>
           <Card>
             <div class="flex items-baseline justify-between gap-3">
@@ -619,7 +627,7 @@
                   />
                 </dt>
                 <dd class="font-mono tabular-nums">
-                  {formatNumberOrDash(row.slotsProduced)} / {formatNumberOrDash(slotDenominator)}
+                  {formatNumberOrDash(row.slotsProduced)} / {formatNumberOrDash(row.slotsAssigned)}
                 </dd>
               </div>
               <div>
@@ -631,7 +639,7 @@
                   />
                 </dt>
                 <dd class="font-mono tabular-nums">
-                  {formatSkipRate(row.slotsSkipped, slotDenominator)}
+                  {formatSkipRate(row.slotsSkipped, skipDenominator)}
                 </dd>
               </div>
               <div>
@@ -770,7 +778,7 @@
         <tbody class="divide-y divide-[color:var(--color-border-default)]">
           {#each history.items as row (row.epoch)}
             {@const mev = unifiedMevFor(row)}
-            {@const slotDenominator = displayedSlotDenominator(row)}
+            {@const skipDenominator = skipRateDenominator(row)}
             <tr
               class="bg-[color:var(--color-surface)] transition-colors hover:bg-[color:var(--color-surface-muted)]"
             >
@@ -787,10 +795,10 @@
                 </span>
               </th>
               <td class="px-4 py-3 text-right tabular-nums">
-                {formatNumberOrDash(row.slotsProduced)} / {formatNumberOrDash(slotDenominator)}
+                {formatNumberOrDash(row.slotsProduced)} / {formatNumberOrDash(row.slotsAssigned)}
               </td>
               <td class="px-4 py-3 text-right tabular-nums">
-                {formatSkipRate(row.slotsSkipped, slotDenominator)}
+                {formatSkipRate(row.slotsSkipped, skipDenominator)}
               </td>
               <td class="px-4 py-3 text-right tabular-nums">
                 {#if row.blockBaseFeesTotalSol !== null}
