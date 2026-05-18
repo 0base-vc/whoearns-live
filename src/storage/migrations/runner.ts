@@ -26,7 +26,14 @@ const CREATE_SCHEMA_MIGRATIONS_SQL = `
     applied_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )
 `;
-const NO_TRANSACTION_DIRECTIVE = '-- migrate: no-transaction';
+// The opt-out directive must appear as its own SQL comment line — `^`
+// + `\s*$` + the `m` flag — so a documentation comment that mentions
+// the directive verbatim (e.g. a header explaining "this file does NOT
+// have a `-- migrate: no-transaction` directive") doesn't accidentally
+// trip the non-transactional code path. A naive `sql.includes(...)`
+// previously did exactly that on 0035, which sent the runner down the
+// `splitSqlStatements` path and broke its `DO $$ ... END $$;` block.
+const NO_TRANSACTION_DIRECTIVE_RE = /^-- migrate: no-transaction\s*$/m;
 
 /**
  * Locate all `*.sql` files in the migrations directory.
@@ -79,7 +86,7 @@ export async function runMigrations(pool: pg.Pool, logger?: Logger): Promise<voi
     const sqlPath = path.join(MIGRATIONS_DIR, file);
     const sql = await readFile(sqlPath, 'utf8');
 
-    const noTransaction = sql.includes(NO_TRANSACTION_DIRECTIVE);
+    const noTransaction = NO_TRANSACTION_DIRECTIVE_RE.test(sql);
     if (noTransaction) {
       for (const statement of splitSqlStatements(sql)) {
         await pool.query(statement);

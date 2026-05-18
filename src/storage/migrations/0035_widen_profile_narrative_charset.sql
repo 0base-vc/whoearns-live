@@ -31,9 +31,9 @@
 -- run finds nothing matching the wider class). The constraint
 -- drop + re-add is guarded: `DROP CONSTRAINT IF EXISTS` plus a
 -- `pg_constraint` existence check around the `ADD` so a replay after
--- a successful run is a clean no-op. Transactional (no
--- `-- migrate: no-transaction` directive) so the whole file applies
--- atomically.
+-- a successful run is a clean no-op. The file does NOT carry the
+-- runner's non-transactional opt-out directive, so the whole file
+-- applies atomically.
 
 -- Pre-clean any pre-existing rows that the widened class would
 -- reject, so the constraint add below is unconditional.
