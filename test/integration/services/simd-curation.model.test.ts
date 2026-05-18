@@ -112,7 +112,6 @@ describe.skipIf(!HAS_KEY)('SIMD curation — live model behaviour (AI-M5)', () =
       expect(parsed!.questions.length).toBeGreaterThanOrEqual(3);
       expect(parsed!.questions.length).toBeLessThanOrEqual(5);
       expect(parsed!.summary.length).toBeGreaterThan(0);
-    }, // Live model calls are slow — generous per-case timeout.
-    60_000);
+    }, 60_000); // Live model calls are slow — generous per-case timeout.
   }
 });
