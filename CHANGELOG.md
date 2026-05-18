@@ -34,16 +34,18 @@ and this project follows [Semantic Versioning](https://semver.org/).
     `PUT /v1/claims/:vote/profile`, `PUT /v1/claims/:vote/github`,
     `POST /v1/claims/:vote/wallets`, plus an append-only forensic audit
     log at `GET /v1/claims/:vote/audit`.
-  - **Wallet daily activity** for registered operator wallets — heatmap
-    - 365-day series at `GET /v1/operator-wallets/:wallet/activity`
-      and the parent resource at `GET /v1/operator-wallets/:wallet`.
+  - **Wallet daily activity** for registered operator wallets — a
+    heatmap and 365-day series at
+    `GET /v1/operator-wallets/:wallet/activity`, with the parent
+    resource at `GET /v1/operator-wallets/:wallet`.
   - **AI-curated SIMD proposals feed** with reviewer attestation at
     `GET /v1/simd-proposals`.
   - **Operator Activity Index** (governance + wallet half blended 50/50)
     at `GET /v1/validators/:idOrVote/operator-activity-index`.
   - **Aggregate scoring bundle** at `GET /v1/validators/:idOrVote/scoring`
-    — the profile-page one round-trip returning tier + tenure + client
-    - OAI together. Additive; the granular routes above remain available.
+    — the profile-page one round-trip returning tier, tenure, client,
+    and OAI together. Additive; the granular routes above remain
+    available.
 - MCP tools `get_validator_tier` and `get_validator_badges` mirroring
   the public HTTP surface.
 
