@@ -373,9 +373,9 @@ export const USER_MESSAGE_TITLE_MAX_CHARS = 400;
  * If any check fails the reviewer either edits the row directly (out
  * of scope for the public API today; happens in the DB or admin
  * console) OR leaves `reviewed_at` NULL so the row stays hidden. A
- * row that has been reviewed-and-rejected does not currently leave
- * an audit trail beyond not being approved — adding a reviewer-note
- * field is tracked as AI-4 in `docs/gamification-hardening-tracking.md`.
+ * reviewer can also attach a `reviewer_note` (added in migration
+ * `0030`) recording WHY a row was rejected — short free text, 280
+ * char cap, optional.
  */
 export const REVIEWER_WORKFLOW_VERSION = '1.0.0';
 

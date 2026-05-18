@@ -85,8 +85,7 @@ and this project follows [Semantic Versioning](https://semver.org/).
   self-documents the partial state.
 - Closed a seven-expert adversarial review of the gamification surface:
   6 BLOCKER-class items, 22 HIGH, ~52 MED, and the LOW backlog are all
-  resolved. Full per-item tracker at
-  `docs/gamification-hardening-tracking.md`.
+  resolved across the hardening commits on this branch.
 
 ## [0.3.0] - 2026-04-29
 

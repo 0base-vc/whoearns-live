@@ -317,11 +317,10 @@ Storage:
 - **Curation scheduler** — `SimdCurationService.runOnce()` is
   callable but no worker tick triggers it.
 - **Admin review endpoint** — `markReviewed()` exists as a repo
-  method but no HTTP route exposes it (tracked as SEC-2 in
-  `docs/gamification-hardening-tracking.md` — it needs an
-  admin-auth boundary that doesn't exist yet). Until the GitHub
-  mirror + curation scheduler + this endpoint all ship, the public
-  endpoint returns `{ "proposals": [] }` on every call.
+  method but no HTTP route exposes it; it needs an admin-auth
+  boundary that doesn't exist yet. Until the GitHub mirror +
+  curation scheduler + this endpoint all ship, the public endpoint
+  returns `{ "proposals": [] }` on every call.
 
 Operators reading scoring.md should treat Phase 5 as "the
 plumbing exists, the water isn't running yet." What DID land in the
@@ -330,8 +329,7 @@ prompt and the runtime constant, an untrusted-body delimiter rule
 
 - body-injection path, body-drift re-curation, and the Helm Secret
   wiring for `ANTHROPIC_API_KEY` (so a helm deploy _can_ enable
-  curation once the missing jobs ship — see
-  `docs/gamification-hardening-tracking.md`).
+  curation once the missing jobs ship).
 
 Curation contract, for reference: each curated SIMD gets a Claude
 Sonnet–generated 50-word _neutral_ summary plus 3-5 discussion

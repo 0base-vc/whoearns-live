@@ -1,9 +1,9 @@
 -- 0030_simd_curation_drift_and_review_note.sql
 --
--- Two small additive columns on `simd_proposals` closing the AI-3 and
--- AI-4 items from docs/gamification-hardening-tracking.md.
+-- Two small additive columns on `simd_proposals` — a body-drift
+-- re-curation signal and a reviewer-note audit field.
 --
--- AI-3 — body-drift re-curation.
+-- Body-drift re-curation.
 --   `ai_body_sha256` records WHICH proposal body the current AI
 --   curation was generated against. The sync job already maintains
 --   `body_sha256` (the live fingerprint of the upstream proposal
@@ -13,7 +13,7 @@
 --   `ai_generated_at IS NULL` — a never-curated filter — so an edited
 --   SIMD kept its stale summary forever.
 --
--- AI-4 — reviewer note.
+-- Reviewer note.
 --   `reviewer_note` is a short free-text field the human reviewer can
 --   populate when approving a curation: why they accepted it, a known
 --   minor imprecision they tolerated, or "re-reviewed after body
