@@ -2,33 +2,65 @@ import type { EpochValidatorStats } from '../types/domain.js';
 
 /**
  * Per-vote inputs for tier classification, derived from
- * `epoch_validator_stats` rows. Pure function — no DB / RPC access,
- * no mutation of the inputs.
+ * `epoch_validator_stats` rows plus a cohort-percentile lookup. Pure
+ * function — no DB / RPC access, no mutation of the inputs.
+ *
+ * **Design intent.** Vote credits (SIMD-0033 TVC) are deliberately
+ * EXCLUDED from this composite. Credit accrual is operator-controlled
+ * — through client choice (Firedancer vs Agave), vote-tx-send timing
+ * patches, and infrastructure proximity — and therefore reflects
+ * capital + engineering investment more than service quality to
+ * delegators. We surface ONLY signals that cannot be inflated by
+ * client mods:
+ *
+ *   - **Block-production reliability** — leader slots are assigned
+ *     deterministically by stake-weighted RNG, and a produced block
+ *     is a signed on-chain fact. A client mod cannot fake having
+ *     produced a block.
+ *   - **Economic productivity** — block fees + priority fees + on-
+ *     chain Jito tips are all signed transactions on chain. A client
+ *     mod cannot mint income from nothing.
+ *
+ * The full rationale + comparison to the original TVC-anchored
+ * formula lives in `docs/scoring.md` (Phase 1 section, "Why no vote
+ * credits").
  */
 export interface TierInput {
   votePubkey: string;
-  /** Sum of vote credits over the considered window. */
-  voteCredits: bigint;
-  /**
-   * Cluster-relative max for the timely-vote-credits ratio.
-   *
-   * Under SIMD-0033 a validator earns up to 16 credits per timely
-   * vote (latency-1 bonus = 16, decaying by 1 each slot to a floor
-   * of 1). They can cast at most one vote per cluster slot. The
-   * per-window upper bound is therefore
-   *   `measuredEpochs × SOLANA_SLOTS_PER_EPOCH × 16`
-   * — NOT `slotsAssigned × 16`, because vote credits accrue on every
-   * vote, not just on the validator's own leader slots. The earlier
-   * per-leader-slot denominator was off by a factor of ~clusterSize
-   * (≈1500×) which saturated every measured validator at 1.0.
-   *
-   * When zero, the validator has no measurable activity in the
-   * window and ends up in the unrated bucket.
-   */
-  maxCredits: bigint;
   /** Window-aggregate slot counters (NOT per-epoch — pre-summed). */
   slotsAssigned: number;
   slotsSkipped: number;
+  /**
+   * Economic-productivity percentile rank in [0, 1], or `null` when
+   * unmeasurable. Computed upstream as:
+   *
+   *   1. For each closed epoch in the window: per-validator income
+   *      per leader slot = `(blockFees + priorityFees + onChainJitoTips)
+   *      / slotsAssigned`.
+   *   2. Median that per-epoch value across the window per validator
+   *      (median, not mean — defends against a single lucky-MEV epoch
+   *      dominating the score).
+   *   3. Rank the target validator's median against every other
+   *      indexed, non-opted-out validator's median in the SAME window.
+   *
+   * `null` when this validator has too few measured epochs in the
+   * window (`< MIN_MEASURED_EPOCHS_FOR_ECONOMIC`) OR the cohort itself
+   * is too small to make percentile meaningful (`< MIN_COHORT_FOR_PERCENTILE`).
+   * A `null` here forces `tier === 'unrated'` — we never half-classify.
+   */
+  economicPercentile: number | null;
+  /**
+   * The cohort size used for the percentile rank. Surfaced on the
+   * response so the public payload can self-document "ranked against
+   * N peers." Zero when the percentile is `null` for cohort reasons.
+   */
+  economicCohortSize: number;
+  /**
+   * How many closed epochs in the window had measurable income for
+   * THIS validator. Min for inclusion is `MIN_MEASURED_EPOCHS_FOR_ECONOMIC`
+   * — below that the median is too noisy and the percentile is `null`.
+   */
+  economicMeasuredEpochs: number;
 }
 
 /**
@@ -36,9 +68,9 @@ export interface TierInput {
  * language ("Diamond"/"Titanium") to soften the arms-race incentive
  * — they describe craft, not gear.
  *
- *   Forge    — top ~5%   (sustained near-perfect across all signals)
- *   Anvil    — top ~20%  (Anza recommended baseline behaviorally proven)
- *   Hearth   — top ~60%  (Anza minimum baseline behaviorally proven)
+ *   Forge    — top ~5%   (top economic + clean block production)
+ *   Anvil    — top ~25%  (strong on both signals)
+ *   Hearth   — top ~60%  (mid-pack, no red flags)
  *   Kindling — bottom    (everyone else)
  *   Unrated  — insufficient sample to classify (confidence floor)
  */
@@ -55,16 +87,22 @@ export interface TierResult {
   composite: number | null;
   /** Per-component sub-scores for breakdown rendering. */
   components: {
-    tvcRatio: number; // 0-1, voteCredits / clusterMaxCredits (SIMD-33)
     /**
-     * 0-1, **UPPER** Wilson 95% bound of skip rate. This is the worst
-     * plausible skip rate given the sample — small-sample validators
-     * with 0 measured skips still report a meaningfully non-zero
-     * value here, preventing reliability inflation. Reliability used
-     * in the composite is `1 - wilsonSkipRate` (= lower bound of
-     * success rate, i.e. pessimistic).
+     * 0-1, pessimistic block-production reliability. Equals
+     * `1 - wilsonInterval(skipped, assigned).upper` — using the
+     * UPPER bound of the skip rate (worst plausible given the
+     * sample) as the lower bound of success rate. Small-sample
+     * validators with 0 measured skips report a meaningfully
+     * sub-1.0 value here, preventing inflation.
      */
-    wilsonSkipRate: number;
+    reliability: number;
+    /**
+     * 0-1, economic-productivity percentile rank vs the indexed
+     * cohort in the window. `null` when unmeasurable. Mirrors
+     * `TierInput.economicPercentile` — surfaced unchanged so a
+     * consumer can read the same number that drove the tier.
+     */
+    economicPercentile: number | null;
   };
 }
 
@@ -132,50 +170,93 @@ export function wilsonLowerBound(successes: number, trials: number): number {
 export const WINDOW_CLOSED_EPOCHS = 5;
 export const WINDOW_FETCH_ROWS = WINDOW_CLOSED_EPOCHS + 1;
 
+/**
+ * Below these floors we refuse to classify rather than risk a
+ * false-positive tier on a thin sample.
+ */
 const MIN_LEADER_SLOTS_FOR_TIER = 10;
-const MIN_CREDITS_DENOMINATOR_FOR_TIER = 1n;
+/**
+ * Min closed epochs (within the 5-epoch window) the target validator
+ * must have measured income on. Three of five = a clear majority of
+ * the window has data; below this the median is too noisy.
+ */
+export const MIN_MEASURED_EPOCHS_FOR_ECONOMIC = 3;
+/**
+ * Min peer cohort size for a percentile to be meaningful. With fewer
+ * than this many measured peers in the window, ranking is mostly
+ * stake-cohort accident rather than signal.
+ */
+export const MIN_COHORT_FOR_PERCENTILE = 10;
+
+/**
+ * Composite weights. Higher weight on economic productivity by
+ * design: it's the unfakeable signal that captures both MEV
+ * efficiency and operational sophistication, and it's what delegators
+ * actually receive. Reliability is a hygiene check — necessary but
+ * not sufficient. See `docs/scoring.md` Phase 1 for rationale.
+ */
+const WEIGHT_RELIABILITY = 0.3;
+const WEIGHT_ECONOMIC = 0.7;
 
 /**
  * Compute the composite score and tier for one validator. Returns
  * `tier: 'unrated'` when the sample is below the confidence floor —
  * never falsely classifies a tiny-stake validator as 'forge'.
  *
- * Weights are documented in `docs/scoring.md` (Phase 1 section):
- *   60% TVC ratio
- *   40% (1 − Wilson lower bound of skip rate)
+ * Composite (documented in `docs/scoring.md` Phase 1 section):
  *
- * P99 vote latency and congestion-conditioned CU per slot are
- * intentionally omitted from the P1 release — landing them depends
- * on per-block vote-tx parsing which is not yet indexed. The two-
- * signal start is a deliberate minimum-viable Node Tier, not the
- * full four-signal composite from `docs/scoring.md` Phase 1.
+ *   composite = 0.3 × reliability + 0.7 × economicPercentile
+ *
+ * where:
+ *
+ *   reliability         = 1 − Wilson(skipped, assigned).upper
+ *                         (pessimistic block-production rate)
+ *   economicPercentile  = cohort percentile rank of median per-slot
+ *                         income across the window (0-1)
+ *
+ * The economic weight intentionally dominates — it's the on-chain-
+ * signed signal that cannot be inflated by client mods or
+ * networking-stack patches, and it's the dimension that translates
+ * directly to delegator returns. Reliability is a hygiene check that
+ * demotes a top-economic validator who can't keep their node up.
+ *
+ * Tier cutoffs: forge ≥ 95, anvil ≥ 80, hearth ≥ 40, kindling < 40.
+ * Validators failing the sample floor (insufficient leader slots OR
+ * insufficient measured economic epochs OR cohort too small) get
+ * `tier: 'unrated'` and `composite: null`.
  */
 export function computeTier(input: TierInput): TierResult {
   const insufficientSlots = input.slotsAssigned < MIN_LEADER_SLOTS_FOR_TIER;
-  const insufficientCredits = input.maxCredits < MIN_CREDITS_DENOMINATOR_FOR_TIER;
-
-  // TVC ratio: clamp to [0, 1] in case stale data over-reports credits.
-  // Operate on the ratio rather than each operand so a future
-  // denominator scheme that exceeds 2^53 (e.g. cluster cumulative
-  // credits) still degrades safely.
-  let tvcRatio = 0;
-  if (input.maxCredits > 0n) {
-    const ratio = Number(input.voteCredits) / Number(input.maxCredits);
-    tvcRatio = Number.isFinite(ratio) ? Math.max(0, Math.min(1, ratio)) : 0;
-  }
+  // Economic side is unrateable when EITHER the cohort is too small
+  // OR this validator has too few measured epochs OR the percentile
+  // came back null from the repo (no measurable income at all).
+  const insufficientEconomic =
+    input.economicPercentile === null ||
+    input.economicCohortSize < MIN_COHORT_FOR_PERCENTILE ||
+    input.economicMeasuredEpochs < MIN_MEASURED_EPOCHS_FOR_ECONOMIC;
 
   // Direction note: we want the worst plausible skip rate, not the
   // best. Using `upper` of the Wilson interval here means a
   // small-sample validator with 0 measured skips still surfaces a
-  // meaningfully non-zero `wilsonSkipRate` (the docstring on this
-  // function spells out why this prevents the small-sample
-  // inflation that the older `lower`-bound implementation caused).
-  const wilsonSkipRate = wilsonInterval(input.slotsSkipped, input.slotsAssigned).upper;
-  const reliability = 1 - wilsonSkipRate; // higher = more reliable (pessimistic)
-  const rawComposite = Math.round((0.6 * tvcRatio + 0.4 * reliability) * 100);
+  // meaningfully non-zero skip rate, so reliability does not inflate
+  // to 1.0 on thin samples.
+  const wilsonSkipUpper = wilsonInterval(input.slotsSkipped, input.slotsAssigned).upper;
+  const reliability = 1 - wilsonSkipUpper;
+
+  // When the economic side is unrateable we never publish a
+  // composite — better to mark `unrated` than to fall back on
+  // reliability alone, which would let a single-signal score sneak
+  // into the leaderboard and contradict the "no half-shown scores"
+  // promise in docs/scoring.md.
+  let rawComposite: number | null = null;
+  if (!insufficientEconomic && input.economicPercentile !== null) {
+    rawComposite = Math.round(
+      (WEIGHT_RELIABILITY * reliability + WEIGHT_ECONOMIC * input.economicPercentile) * 100,
+    );
+  }
 
   let tier: NodeTier = 'unrated';
-  if (!insufficientSlots && !insufficientCredits) {
+  if (!insufficientSlots && !insufficientEconomic && rawComposite !== null) {
     if (rawComposite >= 95) tier = 'forge';
     else if (rawComposite >= 80) tier = 'anvil';
     else if (rawComposite >= 40) tier = 'hearth';
@@ -185,127 +266,58 @@ export function computeTier(input: TierInput): TierResult {
   return {
     votePubkey: input.votePubkey,
     tier,
-    // Suppress composite when we declined to classify — preserves the
-    // "no half-shown scores" promise from docs/scoring.md.
+    // Suppress composite when we declined to classify — preserves
+    // the "no half-shown scores" promise from docs/scoring.md.
     composite: tier === 'unrated' ? null : rawComposite,
     components: {
-      tvcRatio,
-      wilsonSkipRate,
+      reliability,
+      economicPercentile: input.economicPercentile,
     },
   };
 }
 
 /**
- * Compute the Effective Latency percentile for one validator against
- * a cohort. Returns a value in [0, 100] where 100 = fastest. Returns
- * null when the cohort is too small (≤2 samples) or when the
- * validator's TVC ratio is unknown.
+ * Build the slot-counter half of a TierInput by summing across the
+ * window. The economic-percentile half is fetched separately via the
+ * repo (it's a cross-validator query, not a per-row aggregate) and
+ * passed into `computeTier` by the caller; this helper is kept narrow
+ * so its responsibility is just "fold rows → sums".
  *
- * "Effective Latency" here means *outcome-measured* latency: how
- * close to the 1-2-slot bonus window did the validator's votes land?
- * Reading TVC ratio as a latency proxy works once SIMD-0033 is in
- * effect on the cluster — until then the ratio still correlates with
- * landing within max-credit windows and the relative ordering holds.
+ * Assumes the rows are all for the same validator.
  */
-export interface CohortMember {
-  votePubkey: string;
-  tvcRatio: number;
-}
-
-export function effectiveLatencyPercentile(
-  target: CohortMember,
-  cohort: ReadonlyArray<CohortMember>,
-): number | null {
-  if (cohort.length < 3) return null;
-  let below = 0;
-  let equal = 0;
-  for (const m of cohort) {
-    if (m.tvcRatio < target.tvcRatio) below++;
-    else if (m.tvcRatio === target.tvcRatio) equal++;
-  }
-  // Use the "average rank" definition (matches scipy.stats.percentileofscore
-  // with kind='mean'): a tie contributes half to the percentile.
-  const score = (below + equal / 2) / cohort.length;
-  return Math.round(score * 1000) / 10; // 1 decimal place
-}
-
-/**
- * Slots per epoch on Solana mainnet-beta and testnet. Devnet matches
- * too. Local-cluster / custom genesis can differ — pass a different
- * value via `tierInputFromHistory(..., { slotsPerEpoch })` rather
- * than editing this constant. 432_000 = 64 slots/leader-schedule ×
- * 6750 schedules/epoch.
- */
-export const SOLANA_SLOTS_PER_EPOCH = 432_000n;
-
-/**
- * SIMD-0033 maximum vote-credit award for a single timely vote.
- * The credit decays linearly with landed latency (latency 1 → 16,
- * latency 2 → 15, …, latency 16+ → 1). 16 is the absolute upper
- * bound; a validator landing every vote at latency 1 across a full
- * epoch hits `SOLANA_SLOTS_PER_EPOCH × 16` total credits.
- */
-export const SIMD33_MAX_CREDITS_PER_VOTE = 16n;
-
-export interface TierInputFromHistoryOptions {
-  /**
-   * Override `SOLANA_SLOTS_PER_EPOCH` for non-mainnet clusters.
-   * Local-cluster harnesses sometimes ship a non-default epoch
-   * schedule; the constant default is correct for mainnet/testnet/
-   * devnet.
-   */
-  slotsPerEpoch?: bigint;
-}
-
-/**
- * Build a TierInput by summing the relevant counters across a window
- * of `EpochValidatorStats` rows. Assumes the rows are all for the
- * same validator. Pre-summing in this helper keeps the route layer
- * thin and the tier math here pure.
- *
- * **Unmeasured-credits handling.** A row with
- * `voteCreditsUpdatedAt === null` means the vote-credit indexer has
- * not written this epoch's credits yet — the `0n` default isn't
- * "zero earned" but "we don't know." Such rows contribute to
- * slots/skip counters (reliability is still measurable from
- * leader-schedule + processed_blocks data) but are excluded from the
- * credits numerator AND from the maxCredits denominator (one
- * measured epoch dropping out drops one epoch's worth of cluster
- * slots from the max). This prevents an ingest-lag period from
- * silently inflating OR deflating the apparent TVC ratio.
- *
- * Denominator semantics: each measured epoch contributes
- * `SOLANA_SLOTS_PER_EPOCH × 16` to the maxCredits — i.e. the
- * SIMD-0033 absolute upper bound (vote on every cluster slot at
- * latency 1). The earlier per-leader-slot denominator
- * (`slotsAssigned × 8`) was wrong on TWO axes: the constant should
- * be 16 not 8, AND vote credits accrue per cluster vote not per
- * own-leader-slot, so the scale was off by ≈clusterSize. Documented
- * fully in `docs/scoring.md` Phase 1 section.
- */
-export function tierInputFromHistory(
-  votePubkey: string,
-  rows: ReadonlyArray<EpochValidatorStats>,
-  options: TierInputFromHistoryOptions = {},
-): TierInput {
-  const slotsPerEpoch = options.slotsPerEpoch ?? SOLANA_SLOTS_PER_EPOCH;
-  let voteCredits = 0n;
+export function slotCountersFromHistory(rows: ReadonlyArray<EpochValidatorStats>): {
+  slotsAssigned: number;
+  slotsSkipped: number;
+} {
   let slotsAssigned = 0;
   let slotsSkipped = 0;
-  let measuredEpochs = 0n;
   for (const r of rows) {
     slotsAssigned += r.slotsAssigned;
     slotsSkipped += r.slotsSkipped;
-    if (r.voteCreditsUpdatedAt !== null) {
-      voteCredits += r.voteCredits;
-      measuredEpochs += 1n;
-    }
   }
-  return {
-    votePubkey,
-    voteCredits,
-    maxCredits: measuredEpochs * slotsPerEpoch * SIMD33_MAX_CREDITS_PER_VOTE,
-    slotsAssigned,
-    slotsSkipped,
-  };
+  return { slotsAssigned, slotsSkipped };
+}
+
+/**
+ * Find the oldest income-freshness timestamp across the window rows.
+ * Returns `null` when no row has BOTH `feesUpdatedAt` AND
+ * `tipsUpdatedAt` populated — i.e. nothing in the window has
+ * complete income data. Surfaced on the route's `window` block so a
+ * UI can grey out the tier when the income ingester has stalled.
+ *
+ * "Oldest" rather than "newest" so a single fresh row doesn't mask a
+ * stalled neighbour — the visible timestamp is "how stale could the
+ * window's oldest data be."
+ */
+export function oldestIncomeFreshness(rows: ReadonlyArray<EpochValidatorStats>): Date | null {
+  let oldest: Date | null = null;
+  for (const r of rows) {
+    // For income freshness we care about the WORST of the two ingest
+    // paths — if tips landed but fees didn't, the row is incomplete.
+    const candidates = [r.feesUpdatedAt, r.tipsUpdatedAt].filter((d): d is Date => d !== null);
+    if (candidates.length === 0) continue;
+    const rowFreshness = candidates.reduce<Date>((a, b) => (a < b ? a : b), candidates[0] as Date);
+    if (oldest === null || rowFreshness < oldest) oldest = rowFreshness;
+  }
+  return oldest;
 }

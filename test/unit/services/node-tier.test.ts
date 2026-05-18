@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
-  SIMD33_MAX_CREDITS_PER_VOTE,
-  SOLANA_SLOTS_PER_EPOCH,
   computeTier,
-  effectiveLatencyPercentile,
-  tierInputFromHistory,
+  MIN_COHORT_FOR_PERCENTILE,
+  MIN_MEASURED_EPOCHS_FOR_ECONOMIC,
+  oldestIncomeFreshness,
+  slotCountersFromHistory,
   wilsonInterval,
   wilsonLowerBound,
 } from '../../../src/services/node-tier.js';
@@ -57,209 +57,241 @@ describe('wilsonLowerBound (back-compat wrapper)', () => {
 });
 
 describe('computeTier', () => {
-  it('returns unrated for insufficient samples even when composite is high', () => {
+  it('returns unrated for insufficient leader slots even when economic is top', () => {
     const result = computeTier({
       votePubkey: VOTE,
-      voteCredits: 100n,
-      maxCredits: 100n,
       slotsAssigned: 3, // below MIN_LEADER_SLOTS_FOR_TIER (10)
       slotsSkipped: 0,
+      economicPercentile: 0.99,
+      economicCohortSize: 500,
+      economicMeasuredEpochs: 5,
     });
     expect(result.tier).toBe('unrated');
+    expect(result.composite).toBeNull();
   });
 
-  it('classifies a near-perfect validator with adequate sample as forge', () => {
+  it('returns unrated when the cohort is too small', () => {
+    // Cohort of 5 peers — below MIN_COHORT_FOR_PERCENTILE (10).
+    // Percentile may exist but is statistically meaningless against
+    // such a thin field; we must refuse to classify.
     const result = computeTier({
       votePubkey: VOTE,
-      voteCredits: 99_500n,
-      maxCredits: 100_000n,
-      slotsAssigned: 1000,
-      slotsSkipped: 0,
+      slotsAssigned: 500,
+      slotsSkipped: 5,
+      economicPercentile: 0.85,
+      economicCohortSize: MIN_COHORT_FOR_PERCENTILE - 1,
+      economicMeasuredEpochs: 5,
+    });
+    expect(result.tier).toBe('unrated');
+    expect(result.composite).toBeNull();
+  });
+
+  it('returns unrated when this validator has too few measured epochs', () => {
+    // The cohort is fine but this validator only had measurable
+    // income in 2 of 5 epochs — below MIN_MEASURED_EPOCHS_FOR_ECONOMIC.
+    // The percentile is noise; refuse to classify.
+    const result = computeTier({
+      votePubkey: VOTE,
+      slotsAssigned: 500,
+      slotsSkipped: 5,
+      economicPercentile: 0.85,
+      economicCohortSize: 500,
+      economicMeasuredEpochs: MIN_MEASURED_EPOCHS_FOR_ECONOMIC - 1,
+    });
+    expect(result.tier).toBe('unrated');
+    expect(result.composite).toBeNull();
+  });
+
+  it('returns unrated when the economic percentile is null', () => {
+    const result = computeTier({
+      votePubkey: VOTE,
+      slotsAssigned: 500,
+      slotsSkipped: 5,
+      economicPercentile: null,
+      economicCohortSize: 500,
+      economicMeasuredEpochs: 5,
+    });
+    expect(result.tier).toBe('unrated');
+    expect(result.composite).toBeNull();
+  });
+
+  it('classifies top economic + clean block production as forge', () => {
+    // economicPercentile = 1.0 (top of cohort), skip rate ~0% with
+    // a healthy sample. Composite = 0.3 × 0.97 + 0.7 × 1.0 ≈ 0.99 → 99 → forge.
+    const result = computeTier({
+      votePubkey: VOTE,
+      slotsAssigned: 2000,
+      slotsSkipped: 5,
+      economicPercentile: 1.0,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 5,
     });
     expect(result.tier).toBe('forge');
-    expect(result.composite).toBeGreaterThanOrEqual(95);
-    expect(result.components.tvcRatio).toBeCloseTo(0.995, 2);
+    expect(result.composite).not.toBeNull();
+    expect(result.composite!).toBeGreaterThanOrEqual(95);
+    expect(result.components.reliability).toBeGreaterThan(0.98);
+    expect(result.components.economicPercentile).toBe(1.0);
   });
 
-  it('classifies a mid-tier validator as hearth', () => {
-    // TVC ratio 0.6, skip rate ~2%. Expected: hearth or low anvil.
+  it('classifies mid-pack as hearth', () => {
+    // economicPercentile = 0.5 (median), good reliability.
+    // Composite = 0.3 × 0.97 + 0.7 × 0.5 ≈ 0.64 → 64 → hearth.
     const result = computeTier({
       votePubkey: VOTE,
-      voteCredits: 60_000n,
-      maxCredits: 100_000n,
-      slotsAssigned: 1000,
-      slotsSkipped: 20,
+      slotsAssigned: 2000,
+      slotsSkipped: 5,
+      economicPercentile: 0.5,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 5,
     });
-    expect(['hearth', 'anvil']).toContain(result.tier);
+    expect(result.tier).toBe('hearth');
+    expect(result.composite).not.toBeNull();
+    expect(result.composite!).toBeGreaterThanOrEqual(40);
+    expect(result.composite!).toBeLessThan(80);
   });
 
-  it('classifies a delinquent validator as kindling', () => {
+  it('classifies near-bottom economic as kindling', () => {
+    // economicPercentile = 0.05 (bottom 5%), reliability still
+    // healthy. Composite = 0.3 × 0.97 + 0.7 × 0.05 ≈ 0.33 → 33 → kindling.
     const result = computeTier({
       votePubkey: VOTE,
-      voteCredits: 10_000n,
-      maxCredits: 100_000n,
-      slotsAssigned: 500,
-      slotsSkipped: 200,
+      slotsAssigned: 2000,
+      slotsSkipped: 5,
+      economicPercentile: 0.05,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 5,
     });
     expect(result.tier).toBe('kindling');
+    expect(result.composite).not.toBeNull();
+    expect(result.composite!).toBeLessThan(40);
   });
 
-  it('clamps the TVC ratio at 1.0 when stale data over-reports credits', () => {
-    const result = computeTier({
+  it('demotes a top-economic validator with high skip rate', () => {
+    // Top economic (1.0) but skip rate ~10% pushes reliability down
+    // to ~0.88. Composite = 0.3 × 0.88 + 0.7 × 1.0 = 0.964 → 96 →
+    // still forge but only just. With heavier skips it would slip.
+    const goodResult = computeTier({
       votePubkey: VOTE,
-      voteCredits: 200_000n,
-      maxCredits: 100_000n,
-      slotsAssigned: 500,
-      slotsSkipped: 0,
+      slotsAssigned: 1000,
+      slotsSkipped: 100,
+      economicPercentile: 1.0,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 5,
     });
-    expect(result.components.tvcRatio).toBe(1);
-  });
+    // Reliability bites but doesn't capsize a top earner. Document
+    // the actual behaviour rather than aspire to "drop a tier":
+    // the design gives reliability 30% weight so it's a hygiene
+    // factor, not a veto.
+    expect(['forge', 'anvil']).toContain(goodResult.tier);
+    expect(goodResult.components.reliability).toBeLessThan(0.93);
 
-  it('returns unrated when there are no credits to ratio against', () => {
-    const result = computeTier({
+    // Same economic + a catastrophically high skip rate — reliability
+    // collapses far enough to bite into the tier.
+    const badResult = computeTier({
       votePubkey: VOTE,
-      voteCredits: 0n,
-      maxCredits: 0n,
-      slotsAssigned: 100,
-      slotsSkipped: 0,
+      slotsAssigned: 1000,
+      slotsSkipped: 500,
+      economicPercentile: 1.0,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 5,
     });
-    expect(result.tier).toBe('unrated');
+    expect(badResult.tier).not.toBe('forge');
+    expect(badResult.components.reliability).toBeLessThan(0.6);
   });
 
   it('does NOT inflate reliability for small samples with zero skips', () => {
     // Regression for the inverted-Wilson-direction bug: previously
     // `1 - lowerBound(skip)` returned 1.0 for any (0, N) input so a
     // validator with 11 leader slots and 0 skips appeared 100%
-    // reliable. The upper-bound direction must surface meaningful
+    // reliable. The UPPER-bound direction must surface meaningful
     // uncertainty — at N=11, the upper bound on skip rate is ~25%,
     // so reliability should be ≤ 0.8.
     const result = computeTier({
       votePubkey: VOTE,
-      voteCredits: 1_000n,
-      maxCredits: 1_000n,
       slotsAssigned: 11,
       slotsSkipped: 0,
+      economicPercentile: 1.0,
+      economicCohortSize: 500,
+      economicMeasuredEpochs: 5,
     });
-    // 1 - upper_bound(0/11) ≈ 0.75. Composite = 0.6*1 + 0.4*0.75 ≈ 90.
-    expect(result.components.wilsonSkipRate).toBeGreaterThan(0.1);
-    expect(result.components.wilsonSkipRate).toBeLessThan(0.4);
-    // And it should NOT be 100 — the small sample carries cost.
-    expect(result.composite).toBeLessThan(95);
+    // 1 - upper_bound(0/11) is well below 1.0 — small sample carries cost.
+    expect(result.components.reliability).toBeLessThan(0.8);
+    expect(result.components.reliability).toBeGreaterThan(0.6);
+  });
+
+  it('surfaces the percentile unchanged in components', () => {
+    const result = computeTier({
+      votePubkey: VOTE,
+      slotsAssigned: 1000,
+      slotsSkipped: 5,
+      economicPercentile: 0.7321,
+      economicCohortSize: 200,
+      economicMeasuredEpochs: 5,
+    });
+    expect(result.components.economicPercentile).toBe(0.7321);
   });
 });
 
-describe('effectiveLatencyPercentile', () => {
-  it('returns null for a tiny cohort', () => {
-    const cohort = [
-      { votePubkey: 'A', tvcRatio: 0.9 },
-      { votePubkey: 'B', tvcRatio: 0.8 },
+describe('slotCountersFromHistory', () => {
+  it('sums slot counters across rows', () => {
+    const rows = [
+      makeStats(500, VOTE, IDENTITY, { slotsAssigned: 100, slotsSkipped: 1 }),
+      makeStats(501, VOTE, IDENTITY, { slotsAssigned: 200, slotsSkipped: 4 }),
     ];
-    const result = effectiveLatencyPercentile({ votePubkey: 'A', tvcRatio: 0.9 }, cohort);
-    expect(result).toBeNull();
+    expect(slotCountersFromHistory(rows)).toEqual({ slotsAssigned: 300, slotsSkipped: 5 });
   });
 
-  it('returns 100 for the top of the cohort', () => {
-    const cohort = [
-      { votePubkey: 'A', tvcRatio: 0.99 },
-      { votePubkey: 'B', tvcRatio: 0.8 },
-      { votePubkey: 'C', tvcRatio: 0.7 },
-      { votePubkey: 'D', tvcRatio: 0.5 },
+  it('returns zeros for empty history', () => {
+    expect(slotCountersFromHistory([])).toEqual({ slotsAssigned: 0, slotsSkipped: 0 });
+  });
+});
+
+describe('oldestIncomeFreshness', () => {
+  it('returns the oldest of feesUpdatedAt / tipsUpdatedAt across rows', () => {
+    const rows = [
+      makeStats(500, VOTE, IDENTITY, {
+        feesUpdatedAt: new Date('2026-04-01T00:00:00Z'),
+        tipsUpdatedAt: new Date('2026-04-02T00:00:00Z'),
+      }),
+      makeStats(501, VOTE, IDENTITY, {
+        feesUpdatedAt: new Date('2026-04-05T00:00:00Z'),
+        tipsUpdatedAt: new Date('2026-03-30T00:00:00Z'), // oldest overall
+      }),
     ];
-    const result = effectiveLatencyPercentile({ votePubkey: 'A', tvcRatio: 0.99 }, cohort);
+    const result = oldestIncomeFreshness(rows);
     expect(result).not.toBeNull();
-    expect(result!).toBeGreaterThan(80);
+    expect(result!.toISOString()).toBe('2026-03-30T00:00:00.000Z');
   });
 
-  it('returns ~50 for the median', () => {
-    const cohort = [
-      { votePubkey: 'A', tvcRatio: 0.99 },
-      { votePubkey: 'B', tvcRatio: 0.8 },
-      { votePubkey: 'C', tvcRatio: 0.7 }, // median
-      { votePubkey: 'D', tvcRatio: 0.5 },
-      { votePubkey: 'E', tvcRatio: 0.3 },
-    ];
-    const result = effectiveLatencyPercentile({ votePubkey: 'C', tvcRatio: 0.7 }, cohort);
-    expect(result).toBeGreaterThan(40);
-    expect(result).toBeLessThan(60);
-  });
-});
-
-describe('tierInputFromHistory', () => {
-  it('sums vote credits and slot counters across rows', () => {
+  it('takes the WORST (oldest) of the two paths within a single row', () => {
+    // The row has feesUpdatedAt very recent but tipsUpdatedAt very
+    // old — we report the older as the row's effective freshness so
+    // a half-ingested row is not painted as "fresh".
     const rows = [
       makeStats(500, VOTE, IDENTITY, {
-        slotsAssigned: 100,
-        slotsSkipped: 1,
-        voteCredits: 50_000n,
-        voteCreditsUpdatedAt: new Date('2026-04-01T00:00:00Z'),
-      }),
-      makeStats(501, VOTE, IDENTITY, {
-        slotsAssigned: 200,
-        slotsSkipped: 4,
-        voteCredits: 100_000n,
-        voteCreditsUpdatedAt: new Date('2026-04-03T00:00:00Z'),
+        feesUpdatedAt: new Date('2026-04-10T00:00:00Z'),
+        tipsUpdatedAt: new Date('2026-04-01T00:00:00Z'),
       }),
     ];
-    const input = tierInputFromHistory(VOTE, rows);
-    expect(input.slotsAssigned).toBe(300);
-    expect(input.slotsSkipped).toBe(5);
-    expect(input.voteCredits).toBe(150_000n);
-    // maxCredits = measuredEpochs × SOLANA_SLOTS_PER_EPOCH × SIMD33_MAX_CREDITS_PER_VOTE.
-    // Both rows are measured (voteCreditsUpdatedAt non-null) so the
-    // denominator is 2 × 432_000 × 16 = 13_824_000. NOTE: this is the
-    // cluster-wide SIMD-0033 upper bound, NOT a per-leader-slot count.
-    expect(input.maxCredits).toBe(2n * SOLANA_SLOTS_PER_EPOCH * SIMD33_MAX_CREDITS_PER_VOTE);
-    expect(input.maxCredits).toBe(13_824_000n);
+    expect(oldestIncomeFreshness(rows)?.toISOString()).toBe('2026-04-01T00:00:00.000Z');
   });
 
-  it('excludes credits but keeps slot counters when voteCreditsUpdatedAt is null', () => {
-    // Row with unmeasured credits (slot ingester ran but vote-credits
-    // indexer hasn't yet for this epoch) — slots still measurable
-    // for reliability, credits intentionally skipped to avoid
-    // inflating the TVC ratio against a missing denominator. One
-    // unmeasured epoch drops one epoch's worth of cluster slots from
-    // the denominator too, keeping numerator and denominator aligned.
+  it('returns null when no row has any income freshness stamp', () => {
+    const rows = [makeStats(500, VOTE, IDENTITY, { feesUpdatedAt: null, tipsUpdatedAt: null })];
+    expect(oldestIncomeFreshness(rows)).toBeNull();
+  });
+
+  it('returns null for empty rows', () => {
+    expect(oldestIncomeFreshness([])).toBeNull();
+  });
+
+  it('uses whichever path is populated when one is null', () => {
     const rows = [
       makeStats(500, VOTE, IDENTITY, {
-        slotsAssigned: 100,
-        slotsSkipped: 1,
-        voteCredits: 0n,
-        voteCreditsUpdatedAt: null,
-      }),
-      makeStats(501, VOTE, IDENTITY, {
-        slotsAssigned: 200,
-        slotsSkipped: 4,
-        voteCredits: 100_000n,
-        voteCreditsUpdatedAt: new Date('2026-04-03T00:00:00Z'),
+        feesUpdatedAt: new Date('2026-04-05T00:00:00Z'),
+        tipsUpdatedAt: null,
       }),
     ];
-    const input = tierInputFromHistory(VOTE, rows);
-    expect(input.slotsAssigned).toBe(300);
-    expect(input.slotsSkipped).toBe(5);
-    // Only the measured-credits row counts toward credits/maxCredits.
-    expect(input.voteCredits).toBe(100_000n);
-    expect(input.maxCredits).toBe(SOLANA_SLOTS_PER_EPOCH * SIMD33_MAX_CREDITS_PER_VOTE);
-    expect(input.maxCredits).toBe(6_912_000n);
-  });
-
-  it('returns zeroed input for empty history', () => {
-    const input = tierInputFromHistory(VOTE, []);
-    expect(input.slotsAssigned).toBe(0);
-    expect(input.voteCredits).toBe(0n);
-    expect(input.maxCredits).toBe(0n);
-  });
-
-  it('honours the slotsPerEpoch override for non-mainnet clusters', () => {
-    const rows = [
-      makeStats(0, VOTE, IDENTITY, {
-        slotsAssigned: 10,
-        slotsSkipped: 0,
-        voteCredits: 1_000n,
-        voteCreditsUpdatedAt: new Date('2026-04-01T00:00:00Z'),
-      }),
-    ];
-    const input = tierInputFromHistory(VOTE, rows, { slotsPerEpoch: 8_192n });
-    // 1 measured epoch × 8_192 × 16 = 131_072
-    expect(input.maxCredits).toBe(131_072n);
+    expect(oldestIncomeFreshness(rows)?.toISOString()).toBe('2026-04-05T00:00:00.000Z');
   });
 });

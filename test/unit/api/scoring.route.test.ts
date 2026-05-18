@@ -48,9 +48,11 @@ function makeGithubLink(): ValidatorGithubLink {
 }
 
 /**
- * Six closed-epoch history rows that resolve to a `forge` tier — the
- * same seeding shape the `/tier` route test uses (`voteCredits`
- * tuned to tvcRatio ≈ 0.995, zero skips). `resolveTierForValidator`
+ * Six closed-epoch history rows with healthy block-production
+ * counters (zero skips). The economic-percentile component is
+ * supplied separately via the `findEconomicPercentile` stub below;
+ * the seed here only needs to populate the reliability half of the
+ * composite plus the window numerics. `resolveTierForValidator`
  * windows these to the 5 most recent CLOSED epochs; the fake epochs
  * repo below reports a current epoch of 600, so all 6 rows count as
  * closed.
@@ -63,8 +65,8 @@ function makeTierHistory(): EpochValidatorStats[] {
         slotsAssigned: 100,
         slotsProduced: 100,
         slotsSkipped: 0,
-        voteCredits: 6_877_440n,
-        voteCreditsUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
+        feesUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
+        tipsUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
       }),
     );
   }
@@ -100,6 +102,15 @@ function buildDeps(
     },
     statsRepo: {
       findHistoryByVote: async () => makeTierHistory(),
+      // Top economic + large cohort + full window coverage → forge
+      // on the happy path. `unknownValidator` cases never reach this
+      // stub (the route 404s on the validators lookup).
+      findEconomicPercentile: async () => ({
+        percentile: 1.0,
+        cohortSize: 200,
+        measuredEpochs: 5,
+        medianIncomePerSlotLamports: '50000000',
+      }),
     },
     epochsRepo: {
       // Current epoch 600 → all six seeded history rows (500-505)
@@ -168,8 +179,13 @@ describe('GET /v1/validators/:idOrVote/scoring', () => {
       tier: {
         tier: string;
         composite: number | null;
-        window: { epochs: number; slotsAssigned: number };
-        components: { tvcRatio: number; wilsonSkipRate: number };
+        window: {
+          epochs: number;
+          slotsAssigned: number;
+          economicCohortSize: number;
+          economicMeasuredEpochs: number;
+        };
+        components: { reliability: number; economicPercentile: number | null };
       };
       tenure: { firstSeenEpoch: number; landmark: string; badge: string };
       client: { kind: string; version: string | null };
@@ -188,8 +204,11 @@ describe('GET /v1/validators/:idOrVote/scoring', () => {
     expect(body.tier.tier).toBe('forge');
     expect(body.tier.window.epochs).toBe(5);
     expect(body.tier.window.slotsAssigned).toBe(500);
+    expect(body.tier.window.economicCohortSize).toBe(200);
+    expect(body.tier.window.economicMeasuredEpochs).toBe(5);
     expect(body.tier.composite).toBeGreaterThanOrEqual(95);
-    expect(typeof body.tier.components.tvcRatio).toBe('number');
+    expect(body.tier.components.economicPercentile).toBe(1.0);
+    expect(typeof body.tier.components.reliability).toBe('number');
 
     // tenure + client blocks from /badges (NOT the badges tier).
     expect(body.tenure.firstSeenEpoch).toBe(100);

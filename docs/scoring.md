@@ -14,8 +14,9 @@ truth and the docs need a PR**.
 > totals, skip rate, on-chain median fee benchmarks, the `performance`
 > sort, OG image cards, the public `/badge/:vote.svg` SVG badge, the
 > **two-signal Node Tier** at `/v1/validators/:idOrVote/tier`
-> (Phase 1 partial — TVC ratio + Wilson skip **upper**-bound; the
-> remaining two signals are planned), the **tenure + client
+> (Phase 1 — pessimistic block-production reliability + economic
+> percentile vs the indexed cohort; vote credits intentionally
+> excluded — see Phase 1 section for the rationale), the **tenure + client
 > badges** at `/v1/validators/:idOrVote/badges` (Phase 2 partial —
 > category leaderboards still planned), **Claim v2** (Phase 3 — GitHub
 > Gist + co-signed operator-wallet verification), the **wallet
@@ -124,69 +125,117 @@ and through `/v1/validators/:id/current-epoch`.
 > delegation decisions until the matching phase ships. Each subsection
 > is gated by an explicit phase status._
 
-### Phase 1 — Effective Latency + Node Tier
+### Phase 1 — Node Tier (on-chain-anchored composite)
 
-**Status:** partial — 2 of 4 tier signals live (TVC ratio + Wilson skip); vote-latency p99 + congestion CU not yet indexed.
+**Status:** live. Two-signal composite over the most recent 5 closed
+epochs, deliberately constructed from signals that cannot be inflated
+by client mods or networking-stack patches.
 
-#### What's actually computed today (live now)
+#### Why no vote credits
 
-`GET /v1/validators/:idOrVote/tier` ships a **two-signal composite**
-over the most recent 5 closed epochs:
+A previous release of this tier used **Timely Vote Credits (SIMD-0033)
+ratio** as the dominant signal (60% weight). That was retired because
+vote-credit accrual is operator-controlled along three independent
+axes — none of which a delegator can audit:
+
+1. **Client choice.** Firedancer ships measurably faster vote
+   transmission than stock Agave. The credit gap is legitimate
+   engineering work; it's also not a service-quality dimension
+   delegators care about, and it puts smaller operators at a
+   structural disadvantage they can't close.
+2. **Networking proximity.** A validator with closer peering or
+   partnered RPC infrastructure lands votes at lower latency.
+   Again — legitimate, but reflects capital, not stewardship.
+3. **Vote-tx send-side patches.** Custom Agave forks can pre-time
+   vote signatures, adjust send cadence, or shave milliseconds off
+   the send path. These don't violate consensus and aren't
+   slashable, but they're also not observable from outside the
+   validator.
+
+Under the old formula a top-decile TVC ratio earned a forge tier
+even when the operator's actual delegator-facing economics were
+unexceptional. We treat that as a class of false positive worth
+designing away from rather than tuning around.
+
+#### What we use instead
 
 ```
-composite = 0.60 × tvcRatio + 0.40 × (1 − wilsonSkipRate)
-tier      = forge  if composite ≥ 95
-            anvil  if composite ≥ 80
-            hearth if composite ≥ 40
+composite = 0.30 × reliability + 0.70 × economicPercentile
+tier      = forge    if composite ≥ 95
+            anvil    if composite ≥ 80
+            hearth   if composite ≥ 40
             kindling otherwise
-unrated   = slotsAssigned < 10 OR maxCredits < 1 OR all rows unmeasured
+unrated   = slotsAssigned < 10
+         OR economic cohort < MIN_COHORT_FOR_PERCENTILE
+         OR this validator measured in < MIN_MEASURED_EPOCHS_FOR_ECONOMIC closed epochs
+         OR economicPercentile is null
 ```
 
-Where:
+Both signals are on-chain-signed facts the validator can neither
+inflate nor fake:
 
-- `tvcRatio` = `voteCredits / (measuredEpochs × 432_000 × 16)`,
-  clamped to [0, 1]. Denominator is the SIMD-0033 cluster-relative
-  upper bound (16 max credits/vote × one vote per cluster slot ×
-  432_000 mainnet/testnet slots per epoch). The earlier denominator
-  used a per-leader-slot count which off-by-≈clusterSize'd the
-  scale and saturated every measured validator at 1.0 — see commit
-  history if you're auditing the change. Rows with
-  `voteCreditsUpdatedAt = NULL` (vote-credit indexer hasn't written
-  this row yet) contribute slots **only** to the reliability signal
-  — neither voteCredits nor the denominator — so ingestion lag
-  cannot inflate **or** deflate the apparent ratio.
-- `wilsonSkipRate` = 95% Wilson **upper** bound of `slotsSkipped /
-slotsAssigned`. z = 1.959963984540054 (qnorm(0.975)). A tiny
-  sample with 0 skips does NOT register as 0% skip — the upper bound
-  on (0, 11) is ~25%, so a small-sample validator earns ~75%
-  reliability, not 100%. The leader-slot floor of 10 still forces
-  an `unrated` tier when the sample is too small to classify at all.
-- `composite` is `null` when `tier === 'unrated'` (no half-shown
-  scores).
+- **`reliability`** = `1 − wilsonInterval(skipsSkipped, slotsAssigned).upper`.
+  A leader slot is assigned by stake-weighted RNG before the epoch
+  starts; a produced block is signed by the leader's identity key
+  and lives on chain. The validator cannot retroactively "produce"
+  a block they missed. The Wilson **upper** bound on skip rate
+  (worst-plausible-given-sample) is consumed so a small-sample
+  validator with 0 measured skips does NOT register as 100%
+  reliable — at N=11 the upper bound is ~25%, yielding ~75%
+  reliability. The leader-slot floor of 10 still forces `unrated`
+  when the sample is too small to classify at all.
 
-The window response also surfaces `voteCreditsUpdatedAt` (oldest
-credit timestamp in the window) so clients can tell when ingestion
-has stalled.
+- **`economicPercentile`** = cohort percentile rank, in [0, 1], of
+  this validator's median per-leader-slot income across the window.
+  For each epoch we compute
+  `incomePerSlot = (blockFeesTotalLamports + blockTipsTotalLamports) / slotsAssigned`
+  (the `blockFeesTotalLamports` field aggregates the leader's
+  post-burn share of base + priority fees; tips are on-chain Jito
+  tips deposited in the eight public tip accounts). We take the
+  **median** of those per-epoch values per validator — median, not
+  mean, so a single lucky-MEV epoch can't dominate. We then
+  `PERCENT_RANK()` the medians across every indexed, non-opted-out
+  validator in the same window. Income is signed, on-chain, and
+  cannot be minted by a client mod.
 
-#### Planned to add next (NOT live yet)
+The weighting is intentionally economic-heavy: reliability is the
+hygiene check (necessary for stewardship but ceilinged at "doesn't
+miss blocks"), while economic productivity is the dimension that
+translates directly into delegator returns and is the harder
+signal to optimise for at the validator level. A top-economic
+validator who's also flaking out on block production gets demoted —
+but only by the reliability weight, not by a synthetic
+"vote-quality" axis they can game.
 
-Once vote-tx parsing and congestion-conditioned CU/slot indexing
-ship, the composite expands to the full four-signal formula:
+Floors:
 
-- **Effective Latency percentile.** `median(landed_slot − voted_slot)`
-  per validator per epoch, then ranked as a percentile against the
-  eligible cohort. This is the outcome DoubleZero is engineered to
-  improve and is deliberately provider-agnostic — a non-DZ validator
-  with great peering scores as well as a DZ member.
-- **Node Tier (final four-signal formula)** — replaces the live
-  two-signal composite once the missing signals land:
-  - 40% Timely-Vote-Credits ratio
-  - 25% Vote-latency p99
-  - 20% CU per leader slot conditioned on congestion
-  - 15% Wilson-upper-bound skip rate (pessimistic reliability)
-    10-epoch recency-weighted window (the live release uses a flat 5-
-    closed-epoch window — extending to recency-weighted 10 ships with
-    the new signals so all four are exercised on the same axis).
+- **`MIN_LEADER_SLOTS_FOR_TIER = 10`** — below this the sample is
+  too thin for reliability to mean anything.
+- **`MIN_MEASURED_EPOCHS_FOR_ECONOMIC = 3`** of the 5-epoch window
+  — below this the per-validator median is noisy.
+- **`MIN_COHORT_FOR_PERCENTILE = 10`** — below this the rank is
+  drawn against too few peers to be meaningful (a `PERCENT_RANK` of
+  0.8 against 4 peers is not the same signal as against 1,500).
+
+`composite` is `null` when `tier === 'unrated'` — no half-shown
+scores. The window response surfaces `economicCohortSize`,
+`economicMeasuredEpochs`, `economicMedianLamportsPerSlot`, and
+`incomeFreshness` (oldest of `feesUpdatedAt` / `tipsUpdatedAt`
+across the window) so a client can tell exactly which gate fired
+and how stale the underlying income data is.
+
+#### Vote credits in the rest of the API
+
+Vote credits are still persisted (`epoch_validator_stats.voteCredits`)
+because they remain a protocol-level quantity — inflation rewards
+distribution, SFDP delegation tier eligibility, and stake-pool
+selection algorithms all read them. We just don't surface them on
+the public _tier_ because we don't trust them as a delegation
+signal for the reasons above. A future `/v1/validators/:id/anza-grade`
+or similar endpoint could expose the raw TVC ratio against the
+SIMD-0033 upper bound for operators who want to see where they
+stand on Anza's published reward axis; that surface would be
+deliberately separate from the tier.
 
 ### Phase 2 — Tenure, Client, Categories
 

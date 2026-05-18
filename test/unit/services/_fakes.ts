@@ -14,6 +14,7 @@ import type {
   AddFeeAndTipDeltaArgs,
   AddFeeDeltaArgs,
   AddIncomeDeltaArgs,
+  EconomicPercentileLookup,
   EnsureSlotStatsRowArgs,
   IndexedIncomePerSlotBenchmarkRequest,
   LeaderboardWindowEpoch,
@@ -928,6 +929,36 @@ export class FakeStatsRepo {
     return requested
       .map((item) => this.peerBenchmarks.get(item.epoch) ?? null)
       .filter((item): item is EpochPeerBenchmark => item !== null);
+  }
+
+  /**
+   * Stubbed economic-percentile lookup. Tests that exercise the Node
+   * Tier route call `setEconomicLookup(vote, lookup)` to inject the
+   * cohort context they want — the production query is a cross-
+   * validator window aggregate that we don't reimplement in-memory.
+   * When no override is set, returns an empty result so the tier
+   * falls to `unrated` (the same behaviour as a fresh DB with no
+   * indexed cohort yet).
+   */
+  private economicLookups = new Map<VotePubkey, EconomicPercentileLookup>();
+
+  setEconomicLookup(vote: VotePubkey, lookup: EconomicPercentileLookup): void {
+    this.economicLookups.set(vote, lookup);
+  }
+
+  async findEconomicPercentile(
+    vote: VotePubkey,
+    _fromEpoch: Epoch,
+    _toEpoch: Epoch,
+  ): Promise<EconomicPercentileLookup> {
+    return (
+      this.economicLookups.get(vote) ?? {
+        percentile: null,
+        cohortSize: 0,
+        measuredEpochs: 0,
+        medianIncomePerSlotLamports: null,
+      }
+    );
   }
 }
 

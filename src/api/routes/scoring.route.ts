@@ -35,7 +35,7 @@ import { type OaiComponents, resolveOaiForValidator } from './operator-activity-
  */
 export interface ScoringRoutesDeps {
   validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>;
-  statsRepo: Pick<StatsRepository, 'findHistoryByVote'>;
+  statsRepo: Pick<StatsRepository, 'findHistoryByVote' | 'findEconomicPercentile'>;
   epochsRepo: Pick<EpochsRepository, 'findCurrent'>;
   claimsRepo: Pick<ClaimsRepository, 'findByVote'>;
   profilesRepo: Pick<ProfilesRepository, 'findOptedOutVotes'>;

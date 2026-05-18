@@ -327,16 +327,19 @@ paths:
 
   /v1/validators/{idOrVote}/tier:
     get:
-      summary: Node Tier (Phase 1 — 2-signal composite)
+      summary: Node Tier (block-production reliability + economic percentile)
       description: |
         Returns the validator's Node Tier (Forge / Anvil / Hearth /
         Kindling / Unrated) derived from the most recent 5 closed
-        epochs. See `docs/scoring.md` for the public formula.
+        epochs. Composite is `0.3 × reliability + 0.7 ×
+        economicPercentile`, scaled to 0-100. See `docs/scoring.md`
+        Phase 1 for the public formula and the rationale for excluding
+        vote credits (SIMD-0033 TVC) from the public tier.
 
         `composite` is `null` when `tier === "unrated"` — no
-        half-shown scores. `voteCreditsUpdatedAt` surfaces the oldest
-        credit-row freshness in the window so clients can detect
-        ingestion staleness.
+        half-shown scores. `incomeFreshness` on the `window` block
+        surfaces the worst-case staleness of the underlying income
+        data so clients can detect ingestion lag.
       parameters:
         - $ref: '#/components/parameters/IdOrVotePath'
       responses:
@@ -1112,27 +1115,73 @@ components:
     NodeTierBody:
       type: object
       required: [window, tier, composite, components]
+      description: |
+        Node Tier composite. Built from two on-chain-anchored signals
+        only — block-production reliability and economic productivity
+        percentile vs the indexed cohort. Vote credits (SIMD-0033 TVC)
+        are deliberately EXCLUDED from this surface because credit
+        accrual is operator-controlled (client mods, vote-tx send-side
+        patches, networking proximity) and therefore reflects capital
+        and engineering investment more than service quality to
+        delegators. See `docs/scoring.md` Phase 1 for the full rationale.
       properties:
         window:
           type: object
           required:
-            [epochs, slotsAssigned, slotsSkipped, voteCredits, maxCredits, voteCreditsUpdatedAt]
+            [
+              epochs,
+              slotsAssigned,
+              slotsSkipped,
+              economicCohortSize,
+              economicMeasuredEpochs,
+              economicMedianLamportsPerSlot,
+              incomeFreshness,
+            ]
           properties:
             epochs: { type: integer, minimum: 0 }
             slotsAssigned: { type: integer, minimum: 0 }
             slotsSkipped: { type: integer, minimum: 0 }
-            voteCredits:
-              { type: string, description: 'NUMERIC(30,0) decimal string. Treat as bigint.' }
-            maxCredits:
-              {
-                type: string,
-                description: 'Per-validator ceiling = slotsAssigned × 8 (SIMD-0033 max credit per timely vote). May saturate the ratio at 1.0.',
-              }
-            voteCreditsUpdatedAt:
+            economicCohortSize:
+              type: integer
+              minimum: 0
+              description: |
+                Number of indexed, non-opted-out validators that had
+                measurable income in the window — the cohort the
+                economic percentile was ranked against. Zero when no
+                cohort could be assembled (fresh DB, full ingest
+                outage). Below `10` the percentile is treated as
+                null and the tier falls to `unrated`.
+            economicMeasuredEpochs:
+              type: integer
+              minimum: 0
+              maximum: 5
+              description: |
+                How many closed epochs in the 5-epoch window had
+                measurable income for THIS validator. Below `3` the
+                per-validator median is too noisy and the tier falls
+                to `unrated`.
+            economicMedianLamportsPerSlot:
+              type: string
+              nullable: true
+              description: |
+                This validator's median income per leader slot across
+                the window, in lamports as a decimal string. Income
+                here is `blockFeesTotalLamports + blockTipsTotalLamports`
+                (post-burn fee share + on-chain Jito tips). Stringified
+                because lamport-scale numbers exceed JSON safe-integer
+                range. `null` when this validator has no measurable
+                income in the window.
+            incomeFreshness:
               type: string
               format: date-time
               nullable: true
-              description: 'Oldest credit-row update timestamp in the window; null when no credit-bearing rows present.'
+              description: |
+                Oldest of `feesUpdatedAt` / `tipsUpdatedAt` across the
+                window's closed-epoch rows — the worst-case staleness
+                of the underlying income data. `null` when no row in
+                the window has both fees and tips ingested. Lets a UI
+                grey out the tier when the income ingester has
+                stalled, without polling a separate health surface.
         tier:
           type: string
           enum: [forge, anvil, hearth, kindling, unrated]
@@ -1141,13 +1190,40 @@ components:
           nullable: true
           minimum: 0
           maximum: 100
-          description: 'null when tier === "unrated" — no half-shown scores.'
+          description: |
+            `0.3 × reliability + 0.7 × economicPercentile`, scaled to
+            0-100. `null` when `tier === "unrated"` — no half-shown
+            scores. Cutoffs: forge ≥ 95, anvil ≥ 80, hearth ≥ 40,
+            kindling < 40.
         components:
           type: object
-          required: [tvcRatio, wilsonSkipRate]
+          required: [reliability, economicPercentile]
           properties:
-            tvcRatio: { type: number, minimum: 0, maximum: 1 }
-            wilsonSkipRate: { type: number, minimum: 0, maximum: 1 }
+            reliability:
+              type: number
+              minimum: 0
+              maximum: 1
+              description: |
+                Pessimistic block-production reliability =
+                `1 − wilsonInterval(slotsSkipped, slotsAssigned).upper`.
+                Small-sample validators with 0 measured skips get a
+                meaningfully sub-1.0 value here (e.g. ~0.75 at 11
+                leader slots), preventing reliability inflation.
+            economicPercentile:
+              type: number
+              nullable: true
+              minimum: 0
+              maximum: 1
+              description: |
+                Percentile rank of this validator's median income per
+                leader slot vs the indexed cohort in the same window.
+                `null` when the cohort is too small
+                (`< economicCohortSize`) or this validator had too
+                few measured epochs (`< economicMeasuredEpochs`),
+                in which case `tier === "unrated"`. Income medians
+                are computed across the closed-epoch window per
+                validator, then ranked with PostgreSQL's
+                `PERCENT_RANK()` — 0 = lowest in cohort, 1 = highest.
 
     Badges:
       type: object

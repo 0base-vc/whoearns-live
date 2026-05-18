@@ -33,10 +33,12 @@ import {
 import { PubkeySchema } from '../schemas/pubkey.js';
 import {
   computeTier,
-  tierInputFromHistory,
+  oldestIncomeFreshness,
+  slotCountersFromHistory,
   WINDOW_CLOSED_EPOCHS,
   WINDOW_FETCH_ROWS,
 } from '../../services/node-tier.js';
+import type { TierInput } from '../../services/node-tier.js';
 import { narrowToDocumentedKind } from '../../services/client-kind.js';
 import { summariseTenure } from '../../services/tenure.js';
 
@@ -54,7 +56,10 @@ export interface McpRoutesDeps {
     EpochsRepository,
     'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs' | 'findLatestCompleteClosedEpochBlock'
   >;
-  statsRepo: Pick<StatsRepository, 'findHistoryByVote' | 'findTopNByWindow' | 'findByVoteEpoch'>;
+  statsRepo: Pick<
+    StatsRepository,
+    'findHistoryByVote' | 'findTopNByWindow' | 'findByVoteEpoch' | 'findEconomicPercentile'
+  >;
   processedBlocksRepo: Pick<ProcessedBlocksRepository, 'getValidatorEpochSlotStats'>;
   aggregatesRepo: Pick<AggregatesRepository, 'findByEpochTopN'>;
   profilesRepo: Pick<ProfilesRepository, 'findOptedOutVotes' | 'findByVote'>;
@@ -952,13 +957,14 @@ async function buildValidatorTierPayload(
         epochs: number;
         slotsAssigned: number;
         slotsSkipped: number;
-        voteCredits: string;
-        maxCredits: string;
-        voteCreditsUpdatedAt: string | null;
+        economicCohortSize: number;
+        economicMeasuredEpochs: number;
+        economicMedianLamportsPerSlot: string | null;
+        incomeFreshness: string | null;
       };
       tier: 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
       composite: number | null;
-      components: { tvcRatio: number; wilsonSkipRate: number };
+      components: { reliability: number; economicPercentile: number | null };
     }
 > {
   const validator = await resolveValidator(opts, voteOrIdentity);
@@ -971,12 +977,37 @@ async function buildValidatorTierPayload(
   }
 
   const { closedRows } = await mcpResolveTierWindow(opts, validator.votePubkey);
-  const input = tierInputFromHistory(validator.votePubkey, closedRows);
+  // Mirror `resolveTierForValidator` (validators.route.ts) — fetch the
+  // economic-percentile lookup against the window's bounds and feed it
+  // into `computeTier` alongside the slot counters. Synthesise an
+  // empty lookup when the window is empty so we still produce a
+  // well-formed `unrated` payload.
+  const newest = closedRows[0];
+  const oldest = closedRows[closedRows.length - 1];
+  const economicLookup =
+    newest !== undefined && oldest !== undefined
+      ? await opts.statsRepo.findEconomicPercentile(
+          validator.votePubkey,
+          oldest.epoch,
+          newest.epoch,
+        )
+      : {
+          percentile: null,
+          cohortSize: 0,
+          measuredEpochs: 0,
+          medianIncomePerSlotLamports: null,
+        };
+  const slotCounters = slotCountersFromHistory(closedRows);
+  const input: TierInput = {
+    votePubkey: validator.votePubkey,
+    slotsAssigned: slotCounters.slotsAssigned,
+    slotsSkipped: slotCounters.slotsSkipped,
+    economicPercentile: economicLookup.percentile,
+    economicCohortSize: economicLookup.cohortSize,
+    economicMeasuredEpochs: economicLookup.measuredEpochs,
+  };
   const result = computeTier(input);
-  const voteCreditsUpdatedAt = closedRows
-    .map((r) => r.voteCreditsUpdatedAt)
-    .filter((d): d is Date => d !== null)
-    .reduce<Date | null>((oldest, cur) => (oldest === null || cur < oldest ? cur : oldest), null);
+  const incomeFreshness = oldestIncomeFreshness(closedRows);
 
   return {
     found: true,
@@ -986,15 +1017,16 @@ async function buildValidatorTierPayload(
       epochs: closedRows.length,
       slotsAssigned: input.slotsAssigned,
       slotsSkipped: input.slotsSkipped,
-      voteCredits: input.voteCredits.toString(),
-      maxCredits: input.maxCredits.toString(),
-      voteCreditsUpdatedAt: voteCreditsUpdatedAt?.toISOString() ?? null,
+      economicCohortSize: input.economicCohortSize,
+      economicMeasuredEpochs: input.economicMeasuredEpochs,
+      economicMedianLamportsPerSlot: economicLookup.medianIncomePerSlotLamports,
+      incomeFreshness: incomeFreshness?.toISOString() ?? null,
     },
     tier: result.tier,
     composite: result.composite,
     components: {
-      tvcRatio: result.components.tvcRatio,
-      wilsonSkipRate: result.components.wilsonSkipRate,
+      reliability: result.components.reliability,
+      economicPercentile: result.components.economicPercentile,
     },
   };
 }
@@ -1032,7 +1064,34 @@ async function buildValidatorBadgesPayload(
   }
 
   const { closedRows, currentEpoch } = await mcpResolveTierWindow(opts, validator.votePubkey);
-  const tierResult = computeTier(tierInputFromHistory(validator.votePubkey, closedRows));
+  // Mirror `resolveTierForValidator` — fetch the economic-percentile
+  // lookup over the window bounds and feed it into `computeTier`
+  // alongside the slot counters. Empty window → synthesised empty
+  // lookup so `computeTier` returns a well-formed `unrated`.
+  const newest = closedRows[0];
+  const oldest = closedRows[closedRows.length - 1];
+  const economicLookup =
+    newest !== undefined && oldest !== undefined
+      ? await opts.statsRepo.findEconomicPercentile(
+          validator.votePubkey,
+          oldest.epoch,
+          newest.epoch,
+        )
+      : {
+          percentile: null,
+          cohortSize: 0,
+          measuredEpochs: 0,
+          medianIncomePerSlotLamports: null,
+        };
+  const slotCounters = slotCountersFromHistory(closedRows);
+  const tierResult = computeTier({
+    votePubkey: validator.votePubkey,
+    slotsAssigned: slotCounters.slotsAssigned,
+    slotsSkipped: slotCounters.slotsSkipped,
+    economicPercentile: economicLookup.percentile,
+    economicCohortSize: economicLookup.cohortSize,
+    economicMeasuredEpochs: economicLookup.measuredEpochs,
+  });
   const tenure = summariseTenure(
     validator.firstSeenEpoch,
     currentEpoch !== null ? currentEpoch.epoch : validator.lastSeenEpoch,

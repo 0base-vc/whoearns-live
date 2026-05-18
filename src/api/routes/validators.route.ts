@@ -27,18 +27,24 @@ import { cacheControl } from '../cache-control.js';
 import { unwrap } from '../zod-helpers.js';
 import {
   computeTier,
-  tierInputFromHistory,
+  oldestIncomeFreshness,
+  slotCountersFromHistory,
   WINDOW_CLOSED_EPOCHS,
   WINDOW_FETCH_ROWS,
 } from '../../services/node-tier.js';
 import type { TierInput, TierResult } from '../../services/node-tier.js';
+import type { EconomicPercentileLookup } from '../../storage/repositories/stats.repo.js';
 import { narrowToDocumentedKind } from '../../services/client-kind.js';
 import { summariseTenure } from '../../services/tenure.js';
 
 export interface ValidatorsRoutesDeps {
   statsRepo: Pick<
     StatsRepository,
-    'findByVoteEpoch' | 'findManyByVotesCurrentEpoch' | 'findManyByVotesEpoch' | 'findHistoryByVote'
+    | 'findByVoteEpoch'
+    | 'findManyByVotesCurrentEpoch'
+    | 'findManyByVotesEpoch'
+    | 'findHistoryByVote'
+    | 'findEconomicPercentile'
   >;
   validatorsRepo: Pick<
     ValidatorsRepository,
@@ -111,29 +117,40 @@ export async function findValidatorByVoteOrIdentity(
 
 /**
  * Shape returned by `resolveTierForValidator` — the computed tier plus
- * the closed-epoch rows it was derived from, so a caller can also
- * surface the window size / oldest-credit freshness without re-reading.
+ * the closed-epoch rows it was derived from + the cohort context, so
+ * a caller can also surface the window size and the income-freshness
+ * timestamp without re-reading.
  */
 export interface ResolvedTier {
   result: TierResult;
   input: TierInput;
   closedRows: EpochValidatorStats[];
+  economicLookup: EconomicPercentileLookup;
 }
 
 /**
  * Fetch the validator's recent history, window it to the most recent
- * CLOSED epochs, and compute the Node Tier. Shared by `/tier` and
- * `/badges` so the window logic + composite live in exactly one place
- * — a future fifth tier signal only needs touching here.
+ * CLOSED epochs, look up its economic-productivity percentile against
+ * the indexed cohort, and compute the Node Tier. Shared by `/tier` and
+ * `/badges` and `/scoring` so the window logic + composite live in
+ * exactly one place — a future fifth tier signal only needs touching
+ * here.
  *
  * Closed rows are identified explicitly (`epoch < currentEpoch.epoch`)
  * rather than assuming `history[0]` is the running epoch: a validator
  * outside the current leader schedule may have its newest history row
  * pointing at a CLOSED epoch, which the old "skip row 0" rule silently
  * discarded from the window.
+ *
+ * The economic-percentile lookup is a separate cohort query (it ranks
+ * THIS validator against every other indexed validator's median per-
+ * slot income in the same window) so we run it concurrently with the
+ * per-validator history fetch. When the window has zero closed rows
+ * we skip the lookup entirely — there's no window to rank against —
+ * and synthesise an empty cohort result that forces `unrated`.
  */
 export async function resolveTierForValidator(
-  statsRepo: Pick<StatsRepository, 'findHistoryByVote'>,
+  statsRepo: Pick<StatsRepository, 'findHistoryByVote' | 'findEconomicPercentile'>,
   epochsRepo: Pick<EpochsRepository, 'findCurrent'>,
   votePubkey: VotePubkey,
 ): Promise<ResolvedTier> {
@@ -145,9 +162,37 @@ export async function resolveTierForValidator(
     currentEpoch !== null
       ? history.filter((r) => r.epoch < currentEpoch.epoch).slice(0, WINDOW_CLOSED_EPOCHS)
       : history.slice(0, WINDOW_CLOSED_EPOCHS);
-  const input = tierInputFromHistory(votePubkey, closedRows);
+
+  // Determine the closed-epoch window bounds for the cohort query.
+  // `closedRows` is sorted newest-first by the repo so [0] is the most
+  // recent closed epoch and [last] is the oldest in the window.
+  // When the validator has no closed history we synthesise an empty
+  // lookup — `computeTier` then drops to `unrated` cleanly.
+  let economicLookup: EconomicPercentileLookup;
+  if (closedRows.length === 0) {
+    economicLookup = {
+      percentile: null,
+      cohortSize: 0,
+      measuredEpochs: 0,
+      medianIncomePerSlotLamports: null,
+    };
+  } else {
+    const newest = closedRows[0] as EpochValidatorStats;
+    const oldest = closedRows[closedRows.length - 1] as EpochValidatorStats;
+    economicLookup = await statsRepo.findEconomicPercentile(votePubkey, oldest.epoch, newest.epoch);
+  }
+
+  const slotCounters = slotCountersFromHistory(closedRows);
+  const input: TierInput = {
+    votePubkey,
+    slotsAssigned: slotCounters.slotsAssigned,
+    slotsSkipped: slotCounters.slotsSkipped,
+    economicPercentile: economicLookup.percentile,
+    economicCohortSize: economicLookup.cohortSize,
+    economicMeasuredEpochs: economicLookup.measuredEpochs,
+  };
   const result = computeTier(input);
-  return { result, input, closedRows };
+  return { result, input, closedRows, economicLookup };
 }
 
 /**
@@ -161,33 +206,33 @@ export async function resolveTierForValidator(
 export type TierBody = Omit<NodeTierResponse, 'vote' | 'identity'>;
 
 /**
- * Assemble the `/tier` body block from a resolved tier. The oldest-
- * credit-freshness reduce + the window numerics live here so the two
- * routes serving this object can't drift.
+ * Assemble the `/tier` body block from a resolved tier. The income-
+ * freshness reduce + the window numerics live here so the two routes
+ * serving this object can't drift.
+ *
+ * `economicMedianLamportsPerSlot` is surfaced as a stringified decimal
+ * (lamports per slot) for the same reason the income endpoints
+ * stringify lamport totals — JSON numeric precision is unsafe past
+ * 2^53. Consumers that want SOL/slot can divide by 10^9 themselves.
  */
 export function tierBodyFromResolved(resolved: ResolvedTier): TierBody {
-  const { result, input, closedRows } = resolved;
-  // Surface the staleness of the oldest credit timestamp so a UI
-  // can grey out the tier when ingestion has stalled. `null` when
-  // the window has no credit-bearing rows.
-  const voteCreditsUpdatedAt = closedRows
-    .map((r) => r.voteCreditsUpdatedAt)
-    .filter((d): d is Date => d !== null)
-    .reduce<Date | null>((oldest, cur) => (oldest === null || cur < oldest ? cur : oldest), null);
+  const { result, input, closedRows, economicLookup } = resolved;
+  const incomeFreshness = oldestIncomeFreshness(closedRows);
   return {
     window: {
       epochs: closedRows.length,
       slotsAssigned: input.slotsAssigned,
       slotsSkipped: input.slotsSkipped,
-      voteCredits: input.voteCredits.toString(),
-      maxCredits: input.maxCredits.toString(),
-      voteCreditsUpdatedAt: voteCreditsUpdatedAt?.toISOString() ?? null,
+      economicCohortSize: input.economicCohortSize,
+      economicMeasuredEpochs: input.economicMeasuredEpochs,
+      economicMedianLamportsPerSlot: economicLookup.medianIncomePerSlotLamports,
+      incomeFreshness: incomeFreshness?.toISOString() ?? null,
     },
     tier: result.tier,
     composite: result.composite,
     components: {
-      tvcRatio: result.components.tvcRatio,
-      wilsonSkipRate: result.components.wilsonSkipRate,
+      reliability: result.components.reliability,
+      economicPercentile: result.components.economicPercentile,
     },
   };
 }
@@ -573,16 +618,36 @@ export interface NodeTierResponse {
     epochs: number;
     slotsAssigned: number;
     slotsSkipped: number;
-    voteCredits: string;
-    maxCredits: string;
     /**
-     * ISO-8601 timestamp of the OLDEST credit-row update in the
-     * window. `null` when no credit-bearing rows are present (e.g.
-     * the vote-credit indexer hasn't run yet for any closed epoch).
-     * Lets UI detect ingestion staleness without polling a separate
-     * health surface.
+     * Size of the indexed-validator cohort the economic percentile
+     * was computed against, in this window. Zero when no cohort
+     * could be assembled (e.g. fresh DB with no income data yet).
      */
-    voteCreditsUpdatedAt: string | null;
+    economicCohortSize: number;
+    /**
+     * How many closed epochs in the window had measurable income
+     * for THIS validator. Below
+     * `MIN_MEASURED_EPOCHS_FOR_ECONOMIC` (3 of 5 by default) the
+     * percentile is treated as null and the tier falls to
+     * `unrated`.
+     */
+    economicMeasuredEpochs: number;
+    /**
+     * This validator's median income per leader slot across the
+     * window, in lamports as a decimal-precision string. `null`
+     * when no measurable income data exists for this validator in
+     * the window. Stringified for the same reason income totals
+     * are: lamport-scale numbers exceed JSON safe-integer range.
+     */
+    economicMedianLamportsPerSlot: string | null;
+    /**
+     * ISO-8601 timestamp of the OLDEST income-row update across
+     * the window's closed epochs. `null` when no row in the window
+     * has BOTH fees and tips ingested. Lets a UI grey out the tier
+     * when the income ingester has stalled, without polling a
+     * separate health surface.
+     */
+    incomeFreshness: string | null;
   };
   tier: 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
   /**
@@ -592,8 +657,21 @@ export interface NodeTierResponse {
    */
   composite: number | null;
   components: {
-    tvcRatio: number;
-    wilsonSkipRate: number;
+    /**
+     * 0-1, pessimistic block-production reliability — equals
+     * `1 − Wilson(skipped, assigned).upper`. Always populated
+     * (never null) because we always have slot counters; small-
+     * sample validators get a sub-1.0 value rather than an
+     * inflated 1.0.
+     */
+    reliability: number;
+    /**
+     * 0-1, percentile rank of this validator's median income per
+     * leader slot vs the indexed cohort. **`null`** when the
+     * cohort is too small or this validator had too few measured
+     * epochs — and in that case `tier === 'unrated'`.
+     */
+    economicPercentile: number | null;
   };
 }
 

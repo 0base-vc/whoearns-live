@@ -86,6 +86,25 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - Closed a seven-expert adversarial review of the gamification surface:
   6 BLOCKER-class items, 22 HIGH, ~52 MED, and the LOW backlog are all
   resolved across the hardening commits on this branch.
+- **BREAKING** — Node Tier (`/v1/validators/:idOrVote/tier` and the
+  `tier` block of `/v1/validators/:idOrVote/scoring`) drops the
+  vote-credits half of the composite entirely. Vote-credit accrual
+  is operator-controlled (client mods, vote-tx send-side patches,
+  networking proximity) and therefore reflects capital + engineering
+  investment more than service quality to delegators, so it is no
+  longer a public delegation signal. The new composite is
+  `0.3 × reliability + 0.7 × economicPercentile`, where
+  `economicPercentile` is the cohort rank of this validator's median
+  per-leader-slot income across the 5-epoch window — both halves are
+  on-chain-signed facts the validator cannot inflate. Response shape
+  changes: `window.voteCredits` / `window.maxCredits` /
+  `window.voteCreditsUpdatedAt` are gone, replaced by
+  `window.economicCohortSize` / `window.economicMeasuredEpochs` /
+  `window.economicMedianLamportsPerSlot` / `window.incomeFreshness`.
+  `components.tvcRatio` / `components.wilsonSkipRate` are replaced
+  by `components.reliability` / `components.economicPercentile`.
+  Tier cutoffs (95 / 80 / 40) are unchanged. Full rationale in
+  `docs/scoring.md` Phase 1, "Why no vote credits".
 
 ## [0.3.0] - 2026-04-29
 

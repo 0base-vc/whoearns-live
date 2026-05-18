@@ -646,9 +646,8 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
     await seedValidator(ctx, VOTE_1, IDENTITY_1, 505);
     // Seed 6 epochs. The tier endpoint resolves the running epoch
     // from `epochsRepo.findCurrent()` and excludes any row whose
-    // `epoch >= current.epoch`. The test FakeEpochsRepo defaults to
-    // a current epoch of 500, so all 6 rows are treated as closed
-    // and the window picks the 5 oldest.
+    // `epoch >= current.epoch`. We bump the current epoch to 600 so
+    // all 6 rows are treated as closed and the window picks 5.
     for (let e = 500; e <= 505; e++) {
       ctx.stats.rows.set(
         `${e}:${VOTE_1}`,
@@ -656,13 +655,8 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
           slotsAssigned: 100,
           slotsProduced: 100,
           slotsSkipped: 0,
-          // voteCredits accrue per cluster slot (≈432_000/epoch on
-          // mainnet) at up to 16 credits/vote under SIMD-0033. A
-          // "near-perfect" validator earns ~99.5% of the upper bound;
-          // seed 6_877_440 = 0.995 × 432_000 × 16 per epoch so the
-          // 5-epoch window resolves to tvcRatio ≈ 0.995 → forge.
-          voteCredits: 6_877_440n,
-          voteCreditsUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
+          feesUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
+          tipsUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
         }),
       );
     }
@@ -676,16 +670,36 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
       slotCount: 100,
       isClosed: false,
     });
+    // Inject the economic-percentile lookup the production query
+    // would compute from a real cohort. Forge requires: top economic
+    // (1.0 percentile = highest in cohort), a cohort large enough to
+    // matter (≥ MIN_COHORT_FOR_PERCENTILE), and full window
+    // coverage (≥ MIN_MEASURED_EPOCHS_FOR_ECONOMIC measured epochs).
+    ctx.stats.setEconomicLookup(VOTE_1, {
+      percentile: 1.0,
+      cohortSize: 200,
+      measuredEpochs: 5,
+      medianIncomePerSlotLamports: '50000000',
+    });
     const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
     expect(res.statusCode).toBe(200);
     const body = res.json() as {
       tier: string;
       composite: number;
-      window: { epochs: number; slotsAssigned: number };
+      window: {
+        epochs: number;
+        slotsAssigned: number;
+        economicCohortSize: number;
+        economicMeasuredEpochs: number;
+      };
+      components: { reliability: number; economicPercentile: number };
     };
     expect(body.tier).toBe('forge');
     expect(body.window.epochs).toBe(5);
     expect(body.window.slotsAssigned).toBe(500);
+    expect(body.window.economicCohortSize).toBe(200);
+    expect(body.window.economicMeasuredEpochs).toBe(5);
+    expect(body.components.economicPercentile).toBe(1.0);
     expect(body.composite).toBeGreaterThanOrEqual(95);
   });
 
