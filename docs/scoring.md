@@ -40,14 +40,14 @@ are not the same axis and the numbers do **not** line up. When a
 reader cites "Phase 3", use this table to disambiguate which axis
 they mean:
 
-| scoring.md phase                                   | roadmap.md phase that ships it                |
-| -------------------------------------------------- | --------------------------------------------- |
-| Phase 1 — Effective Latency + Node Tier            | Roadmap Phase 3 (Validator engagement) onward |
-| Phase 2 — Tenure, Client, Categories               | Roadmap Phase 3 (Validator engagement)        |
-| Phase 3 — Claim v2 (GitHub identity + wallet)      | Roadmap Phase 3 (Validator engagement)        |
-| Phase 4 — Wallet Activity (365-day grid)           | Roadmap Phase 4 (Ecosystem distribution)      |
-| Phase 5 — Pending SIMD widget + AI curation        | Roadmap Phase 4 (Ecosystem distribution)      |
-| Phase 6 + 7 — Governance + Operator Activity Index | Roadmap Phase 4 (Ecosystem distribution)      |
+| scoring.md phase                                        | roadmap.md phase that ships it                |
+| ------------------------------------------------------- | --------------------------------------------- |
+| Phase 1 — Node Tier (reliability + economic percentile) | Roadmap Phase 3 (Validator engagement) onward |
+| Phase 2 — Tenure, Client, Categories                    | Roadmap Phase 3 (Validator engagement)        |
+| Phase 3 — Claim v2 (GitHub identity + wallet)           | Roadmap Phase 3 (Validator engagement)        |
+| Phase 4 — Wallet Activity (365-day grid)                | Roadmap Phase 4 (Ecosystem distribution)      |
+| Phase 5 — Pending SIMD widget + AI curation             | Roadmap Phase 4 (Ecosystem distribution)      |
+| Phase 6 + 7 — Governance + Operator Activity Index      | Roadmap Phase 4 (Ecosystem distribution)      |
 
 Rule of thumb: a bare "Phase N" **in this document** is always a
 scoring-feature phase (the numbered `### Phase N` sections below). A
@@ -62,11 +62,12 @@ is the bridge.
    self-declaration. Self-declaration channels are restricted to facts
    the chain cannot reveal (GitHub identity, day-to-day wallet) and
    are always cryptographically anchored.
-2. **Behavior reveals hardware.** We do not ask operators what their
-   hardware is. Vote-latency tail, congestion-conditioned CU/slot,
-   skip rate with a confidence floor, and timely vote credits jointly
-   make low-quality hardware impossible to disguise as high-quality
-   over a multi-epoch window.
+2. **Behavior reveals operator skill.** Block-production reliability
+   over a long window and economic productivity per leader slot
+   jointly make low-quality operations impossible to disguise — both
+   are on-chain-signed facts the validator cannot fake. We do not
+   ask operators what their hardware is; we let multi-epoch behavior
+   reveal it.
 3. **No single global leaderboard.** Total earnings are stake-weighted
    by definition — a single global ranking would mean the largest
    operators win every time and small-validator engagement dies.
@@ -211,7 +212,7 @@ Floors:
 
 - **`MIN_LEADER_SLOTS_FOR_TIER = 10`** — below this the sample is
   too thin for reliability to mean anything.
-- **`MIN_MEASURED_EPOCHS_FOR_ECONOMIC = 3`** of the 5-epoch window
+- **`MIN_MEASURED_EPOCHS_FOR_ECONOMIC = 4`** of the 5-epoch window
   — below this the per-validator median is noisy.
 - **`MIN_COHORT_FOR_PERCENTILE = 10`** — below this the rank is
   drawn against too few peers to be meaningful (a `PERCENT_RANK` of
@@ -219,10 +220,80 @@ Floors:
 
 `composite` is `null` when `tier === 'unrated'` — no half-shown
 scores. The window response surfaces `economicCohortSize`,
-`economicMeasuredEpochs`, `economicMedianLamportsPerSlot`, and
+`economicMeasuredEpochs`, `economicMedianLamportsPerSlot`,
 `incomeFreshness` (oldest of `feesUpdatedAt` / `tipsUpdatedAt`
-across the window) so a client can tell exactly which gate fired
-and how stale the underlying income data is.
+across the window), and `cohortAsOfEpoch` (the `{fromEpoch, toEpoch}`
+range the cohort percentile was sampled over, or `null` when the
+window had no closed-epoch data) so a client can tell exactly which
+gate fired, how stale the underlying income data is, and which
+closed-epoch range the percentile reflects.
+
+#### Reliability floor
+
+Regardless of how high `economicPercentile` is, **a validator with
+`skip_rate > 0.20` (Wilson-point estimate, `slotsSkipped /
+slotsAssigned`) is hard-capped at the `kindling` tier**. This is a
+hygiene check, not a bypassable signal: a top earner who lets a
+fifth of their assigned blocks drop is not a top-tier operator
+regardless of how much fee + tip income they bank when they DO
+land a block. The floor is a tier cap, not a composite cap — the
+0.3 × reliability weight in the composite already pushes
+high-skip-rate validators down, but the cap ensures they cannot
+cross the 40 `hearth` threshold by economic mass alone.
+
+#### Cohort scope
+
+The `economicPercentile` cohort is **the INDEXED-VALIDATOR set**,
+not the full Solana cluster. WhoEarns indexes a watched set
+controlled by the deployment's `WatchMode` — `top:N` (the
+default, e.g. `top:1000`), an explicit list of validators, or
+`*` (every active validator in the leader schedule). The
+response's `window.economicCohortSize` lets a consumer see the
+pool size the percentile was drawn against; `cohortAsOfEpoch`
+identifies the exact closed-epoch range it was sampled over.
+
+This is a deliberate choice. A percentile against the full cluster
+would mask `WatchMode=top:N` deployments — a validator that's
+median-of-top-N looks middling here, but is in the top decile
+globally; a delegator reading our tier should know that the
+ranking is "vs the cohort we measure," not "vs all of Solana."
+Operators reading their tier on a `top:500` deployment should
+also know that a `forge` tier means top of the watched-500, not
+top of all 2,000+ active validators.
+
+#### Known limitations
+
+- **Self-priority-fee inflation.** A validator can pay themselves
+  priority fees on their own blocks to inflate their per-slot
+  income. Today's income aggregation does NOT filter
+  self-directed priority fees out of `blockFeesTotalLamports`.
+  Flagged for future work — the on-chain fee-payer address is
+  available, so a tx-level filter is feasible but expensive.
+- **Stake fragmentation Sybil.** A large operator splitting their
+  stake across many small identities can over-represent in the
+  cohort and shift everyone else's percentile. Mitigation
+  (Sybil-resistance cohort definitions) is flagged for future
+  work; the current design assumes the indexed-validator set is
+  honestly distinct identities.
+- **Commission is NOT part of the tier.** A validator's
+  commission percentage is invisible to this composite. A `forge`
+  tier with 100% commission earns the operator a lot and earns
+  the delegator nothing. Delegators must check commission
+  separately — surfaced on the validator profile but never
+  composed into the tier (commission has its own gameability
+  problems: see "Anti-patterns" below for why "lowest
+  commission" is not a leaderboard).
+- **Cohort scope depends on `WatchMode`.** A validator's
+  percentile against `top:500` and against `*` are different
+  numbers. The cohort size is reported in every response;
+  consumers comparing tiers across deployments should anchor on
+  `cohortAsOfEpoch` + `economicCohortSize` rather than the raw
+  percentile.
+- **Opt-out as cohort manipulator.** A validator opting out
+  shrinks the cohort by 1, shifting every remaining validator's
+  percentile slightly. At cohort sizes of 1000+ the effect is
+  small (≤0.1%); coordinated opt-outs could nudge percentile
+  ranks near a cutoff. Mitigation flagged for future work.
 
 #### Vote credits in the rest of the API
 
@@ -507,11 +578,13 @@ global leaderboard.
 - **"Lowest commission" leaderboard.** Encourages bottom-of-stack
   pricing that centralises to the deepest-pocketed operators.
 - **Geographic-diversity penalty on a latency-centric L1.** Solana
-  rewards co-located low-latency operation. We use **Effective Latency**
-  (an outcome measurement) rather than a geographic-spread penalty —
-  but never publish a hard "closer-is-better" ranking that would
-  encourage Frankfurt-piling. Regional leaderboards keep being best
-  in-region a separate, valid flex.
+  rewards co-located low-latency operation. We measure operator
+  performance through on-chain outcomes (block-production reliability
+  and per-leader-slot income — see Phase 1) rather than a
+  geographic-spread penalty, and we never publish a hard
+  "closer-is-better" ranking that would encourage Frankfurt-piling.
+  Regional leaderboards keep being best-in-region a separate, valid
+  flex.
 
 ## See also
 

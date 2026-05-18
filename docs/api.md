@@ -443,41 +443,76 @@ Body validation:
 
 Returns the validator's **Node Tier** (Phase 1 release: 2-signal composite
 over the most recent 5 closed epochs). See [`scoring.md`](./scoring.md)
-for the full formula.
+for the full formula and rationale on why vote credits are excluded.
 
 Response shape:
 
 ```json
 {
-  "vote": "VOTE_PUBKEY",
+  "vote": "5BAi9YGCipHq4ZcXuen5vagRQqRTVTRszXNqBZC6uBPZ",
   "identity": "IDENTITY_PUBKEY",
   "window": {
     "epochs": 5,
     "slotsAssigned": 432,
     "slotsSkipped": 3,
-    "voteCredits": "3400000",
-    "maxCredits": "3456000",
-    "voteCreditsUpdatedAt": "2026-05-12T08:00:00.000Z"
+    "economicCohortSize": 1247,
+    "economicMeasuredEpochs": 5,
+    "economicMedianLamportsPerSlot": "8421337",
+    "incomeFreshness": "2026-05-12T08:00:00.000Z",
+    "cohortAsOfEpoch": { "fromEpoch": 820, "toEpoch": 824 }
   },
   "tier": "forge | anvil | hearth | kindling | unrated",
   "composite": 96,
   "components": {
-    "tvcRatio": 0.985,
-    "wilsonSkipRate": 0.012
+    "reliability": 0.988,
+    "economicPercentile": 0.97
   }
 }
 ```
 
-`tier === "unrated"` when the validator has fewer than 10 leader slots
-across the window OR no credit-bearing rows in the window — the
-confidence floor prevents tiny-sample validators from being mis-
-classified as Forge. **`composite === null` when tier is `unrated`**
-so a UI cannot accidentally display a half-shown score.
+The composite is `0.3 × reliability + 0.7 × economicPercentile`,
+scaled to 0-100. `reliability` is the pessimistic block-production
+success rate (`1 − wilsonInterval(slotsSkipped, slotsAssigned).upper`);
+`economicPercentile` is the cohort rank of this validator's median
+per-leader-slot income (`(blockFeesTotalLamports +
+blockTipsTotalLamports) / slotsAssigned`) across the 5-epoch window,
+computed against the **indexed-validator cohort** (the deployment's
+`WatchMode` set — `top:N`, an explicit list, or `*` for every active
+validator). Tier cutoffs: `forge ≥ 95`, `anvil ≥ 80`, `hearth ≥ 40`,
+`kindling < 40`.
 
-`window.voteCreditsUpdatedAt` is the OLDEST credit-row freshness in
-the window; `null` when no credit-bearing rows exist. Clients can
-detect stalled vote-credit ingestion by comparing this timestamp to
-the current epoch's expected start.
+`tier === "unrated"` when the validator has fewer than 10 leader slots
+across the window, OR the cohort had fewer than 10 indexed peers with
+measurable income, OR this validator had measurable income in fewer
+than 4 of the 5 closed epochs in the window, OR
+`economicPercentile === null` — the confidence floors prevent
+tiny-sample validators from being mis-classified. **`composite === null`
+when tier is `unrated`** so a UI cannot accidentally display a
+half-shown score.
+
+**Reliability floor (hard cap).** A validator with `skip_rate > 0.20`
+(`slotsSkipped / slotsAssigned` over the window) is **tier-capped at
+`kindling`** regardless of `economicPercentile`. This is a hygiene
+check, not a bypassable signal — a top earner who flakes out on a
+fifth of their assigned blocks does not earn a higher tier on the
+strength of their economics alone.
+
+**Cohort scope.** `window.economicCohortSize` is the number of indexed,
+non-opted-out validators the percentile was computed against, NOT the
+full Solana cluster. `window.cohortAsOfEpoch` is the
+`{fromEpoch, toEpoch}` closed-epoch range the cohort was sampled over,
+or `null` when the window had no closed-epoch data (fresh DB or full
+ingest outage). Together these let a consumer detect when a cached
+tier is out of step with a freshly-fetched leaderboard, and ensure
+percentiles from a `top:500` deployment aren't read as percentiles
+"vs all of Solana." See [`scoring.md`](./scoring.md) Phase 1 for the
+full cohort-scope rationale.
+
+`window.incomeFreshness` is the OLDEST of `feesUpdatedAt` /
+`tipsUpdatedAt` across the window's closed-epoch rows; `null` when
+no row in the window has both fees and tips ingested. Lets a UI grey
+out the tier when the income ingester has stalled, without polling a
+separate health surface.
 
 The endpoint draws from `epoch_validator_stats` only — no live RPC.
 `HEAD` is supported and short-circuits after the validator existence
@@ -1051,13 +1086,15 @@ duplication**:
       "epochs": 5,
       "slotsAssigned": 432,
       "slotsSkipped": 3,
-      "voteCredits": "3400000",
-      "maxCredits": "3456000",
-      "voteCreditsUpdatedAt": "2026-05-12T08:00:00.000Z"
+      "economicCohortSize": 1247,
+      "economicMeasuredEpochs": 5,
+      "economicMedianLamportsPerSlot": "8421337",
+      "incomeFreshness": "2026-05-12T08:00:00.000Z",
+      "cohortAsOfEpoch": { "fromEpoch": 820, "toEpoch": 824 }
     },
     "tier": "forge",
     "composite": 96,
-    "components": { "tvcRatio": 0.985, "wilsonSkipRate": 0.012 }
+    "components": { "reliability": 0.988, "economicPercentile": 0.97 }
   },
   "tenure": {
     "firstSeenEpoch": 100,

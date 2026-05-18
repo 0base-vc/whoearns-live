@@ -3,6 +3,7 @@ import {
   computeTier,
   MIN_COHORT_FOR_PERCENTILE,
   MIN_MEASURED_EPOCHS_FOR_ECONOMIC,
+  SKIP_RATE_FLOOR,
   oldestIncomeFreshness,
   slotCountersFromHistory,
   wilsonInterval,
@@ -229,6 +230,69 @@ describe('computeTier', () => {
       economicMeasuredEpochs: 5,
     });
     expect(result.components.economicPercentile).toBe(0.7321);
+  });
+
+  it('reliability floor: skip rate > 20% caps tier at kindling even with top economic percentile', () => {
+    // 250 / 1000 skipped = 25% point-estimate, Wilson upper sits well
+    // above SKIP_RATE_FLOOR (0.20). Economic side is top-of-cohort
+    // (1.0 percentile, large cohort, full window coverage), so the
+    // raw composite would compute to ~0.3 × low_reliability + 0.7 ×
+    // 1.0 ≈ 0.74 → 74 → `hearth`, OR if reliability collapses far
+    // enough it lands in `kindling` anyway. Either way the FLOOR is
+    // what we're testing: the OUTPUT tier MUST be `kindling`, and the
+    // composite MUST remain populated so a consumer can see why.
+    const result = computeTier({
+      votePubkey: VOTE,
+      slotsAssigned: 1000,
+      slotsSkipped: 250,
+      economicPercentile: 1.0,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 5,
+    });
+    expect(result.tier).toBe('kindling');
+    expect(result.composite).not.toBeNull();
+    // Sanity: the underlying skip rate IS over the floor. Anchor on
+    // the exported constant so a future tightening updates here too.
+    const wilsonUpper = 1 - result.components.reliability;
+    expect(wilsonUpper).toBeGreaterThan(SKIP_RATE_FLOOR);
+  });
+
+  it('reliability floor: floor does NOT trigger just under the threshold', () => {
+    // Tune the inputs so the Wilson upper sits below SKIP_RATE_FLOOR
+    // — at 1000 slots / 100 skipped (10% point estimate) the upper
+    // bound is ~12%, well below the 20% floor. With top economic the
+    // tier remains forge/anvil per the underlying composite, not
+    // forced down to kindling.
+    const result = computeTier({
+      votePubkey: VOTE,
+      slotsAssigned: 1000,
+      slotsSkipped: 100,
+      economicPercentile: 1.0,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 5,
+    });
+    expect(['forge', 'anvil']).toContain(result.tier);
+    // Sanity: the Wilson upper IS below the floor.
+    expect(1 - result.components.reliability).toBeLessThanOrEqual(SKIP_RATE_FLOOR);
+  });
+
+  it('MIN_MEASURED_EPOCHS_FOR_ECONOMIC = 4 — three measured epochs is now insufficient', () => {
+    // Three of five measured epochs used to suffice, but the median
+    // at n=3 has 1-in-3 sensitivity to an anomalous epoch. We require
+    // four to reduce that to a 2-in-4 (50%) signal-to-noise. A
+    // validator with three measured epochs must drop to `unrated`,
+    // even with otherwise-perfect inputs.
+    expect(MIN_MEASURED_EPOCHS_FOR_ECONOMIC).toBe(4);
+    const result = computeTier({
+      votePubkey: VOTE,
+      slotsAssigned: 1000,
+      slotsSkipped: 5,
+      economicPercentile: 1.0,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 3,
+    });
+    expect(result.tier).toBe('unrated');
+    expect(result.composite).toBeNull();
   });
 });
 

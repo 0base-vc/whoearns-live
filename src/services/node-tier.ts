@@ -177,16 +177,43 @@ export const WINDOW_FETCH_ROWS = WINDOW_CLOSED_EPOCHS + 1;
 const MIN_LEADER_SLOTS_FOR_TIER = 10;
 /**
  * Min closed epochs (within the 5-epoch window) the target validator
- * must have measured income on. Three of five = a clear majority of
- * the window has data; below this the median is too noisy.
+ * must have measured income on. Four of five = a strong majority of
+ * the window has data. We raised this from 3 to 4 because at n=3 the
+ * median has 1-in-3 sensitivity to a single anomalous epoch (one
+ * lucky-MEV or one bad-uptime epoch can swing the rank significantly);
+ * at n=4 a shift requires a 2-in-4 (50%) signal to move the median.
+ * The cost is one extra epoch of `unrated` on cold starts and after
+ * any per-validator outage that drops an income row from the window.
  */
-export const MIN_MEASURED_EPOCHS_FOR_ECONOMIC = 3;
+export const MIN_MEASURED_EPOCHS_FOR_ECONOMIC = 4;
 /**
  * Min peer cohort size for a percentile to be meaningful. With fewer
  * than this many measured peers in the window, ranking is mostly
  * stake-cohort accident rather than signal.
  */
 export const MIN_COHORT_FOR_PERCENTILE = 10;
+/**
+ * Hard skip-rate floor applied AFTER the composite. A validator whose
+ * Wilson UPPER bound on skip rate exceeds this can never be classified
+ * above `kindling`, even if their economic percentile is top of the
+ * cohort. Two reasons:
+ *
+ *   1. Delegator-facing intuition. The 30/70 reliability/economic
+ *      weighting was tuned for the common case where reliability is
+ *      a hygiene check, not the dominant signal. Without this floor,
+ *      a validator with a 25%+ skip rate (Wilson upper) can still ride
+ *      a top-decile economic percentile into `anvil`/`forge`, which
+ *      contradicts how a delegator reads a tier label — uptime first,
+ *      yield second.
+ *   2. Composite is honest, tier is honest. The floor caps the tier
+ *      but does NOT null the composite — a consumer can still see the
+ *      raw number to understand WHY the tier was capped. Mirrors the
+ *      "no half-shown scores" rule from docs/scoring.md.
+ *
+ * Tuned at 0.20 (20% Wilson upper). Anything sustained above that is
+ * structurally broken, not transient bad luck.
+ */
+export const SKIP_RATE_FLOOR = 0.2;
 
 /**
  * Composite weights. Higher weight on economic productivity by
@@ -243,6 +270,17 @@ export function computeTier(input: TierInput): TierResult {
   const wilsonSkipUpper = wilsonInterval(input.slotsSkipped, input.slotsAssigned).upper;
   const reliability = 1 - wilsonSkipUpper;
 
+  // Hard reliability floor — independent of the economic-percentile
+  // half. A validator whose Wilson UPPER bound on skip rate exceeds
+  // `SKIP_RATE_FLOOR` cannot be classified above `kindling`, even with
+  // a top-decile economic percentile. See the constant docstring for
+  // why this exists alongside the 30/70 weighting: the weighting alone
+  // would let a 25%-skip validator stay in `forge`/`anvil` purely on
+  // economic strength, which contradicts how delegators actually read
+  // a tier label. Composite is left populated so the consumer can see
+  // the underlying number that triggered the cap.
+  const tooManySkips = wilsonSkipUpper > SKIP_RATE_FLOOR;
+
   // When the economic side is unrateable we never publish a
   // composite — better to mark `unrated` than to fall back on
   // reliability alone, which would let a single-signal score sneak
@@ -257,7 +295,12 @@ export function computeTier(input: TierInput): TierResult {
 
   let tier: NodeTier = 'unrated';
   if (!insufficientSlots && !insufficientEconomic && rawComposite !== null) {
-    if (rawComposite >= 95) tier = 'forge';
+    if (tooManySkips) {
+      // Hard floor: the underlying composite may say `forge`, but the
+      // skip rate makes that misleading. Honest tier is `kindling`;
+      // the composite is preserved so the consumer can audit why.
+      tier = 'kindling';
+    } else if (rawComposite >= 95) tier = 'forge';
     else if (rawComposite >= 80) tier = 'anvil';
     else if (rawComposite >= 40) tier = 'hearth';
     else tier = 'kindling';

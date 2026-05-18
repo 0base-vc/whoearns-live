@@ -31,14 +31,9 @@ import {
   type ValidatorEpochSlotStatsResponse,
 } from '../serializers/leader-slots-response.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
-import {
-  computeTier,
-  oldestIncomeFreshness,
-  slotCountersFromHistory,
-  WINDOW_CLOSED_EPOCHS,
-  WINDOW_FETCH_ROWS,
-} from '../../services/node-tier.js';
-import type { TierInput } from '../../services/node-tier.js';
+import { oldestIncomeFreshness } from '../../services/node-tier.js';
+import type { NodeTier } from '../../services/node-tier.js';
+import { resolveTierForValidator, type CohortAsOfEpoch } from './validators.route.js';
 import { narrowToDocumentedKind } from '../../services/client-kind.js';
 import { summariseTenure } from '../../services/tenure.js';
 
@@ -376,8 +371,8 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
         title: 'Get validator Node Tier',
         description:
           'Returns the Node Tier (forge / anvil / hearth / kindling / unrated) for ONE validator. Pass either a vote pubkey OR an identity pubkey. ' +
-          'The tier is a two-signal composite (0.6 × timely-vote-credit ratio + 0.4 × Wilson lower bound on success rate) computed over the most recent 5 CLOSED epochs — the running epoch is excluded so the tier never rides mid-epoch counters. ' +
-          'tier is "unrated" (and composite is null) when the closed-epoch window has too few leader slots to classify confidently. The response carries the window aggregates and per-component sub-scores so the classification is auditable. Same data as GET /v1/validators/{idOrVote}/tier. ' +
+          "Node Tier composite — `0.3 × reliability + 0.7 × economicPercentile`. Reliability is the pessimistic Wilson upper bound on skip rate (so small samples cannot inflate to 1.0). Economic percentile is the cohort rank of this validator's median per-leader-slot income across 5 CLOSED epochs, computed against the INDEXED-VALIDATOR cohort (not the full Solana cluster) — the running epoch is excluded so the tier never rides mid-epoch counters. " +
+          'Tier is "unrated" when the sample is too thin (slotsAssigned < 10, cohort < 10, or measuredEpochs < 4) and capped at "kindling" when skip_rate > 20% regardless of economic percentile. The response carries the window aggregates and per-component sub-scores so the classification is auditable. Vote credits are deliberately excluded — see docs/scoring.md Phase 1 for the rationale. Same data as GET /v1/validators/{idOrVote}/tier. ' +
           SHARED_TOOL_PROVENANCE_NOTE,
         inputSchema: {
           voteOrIdentity: z
@@ -406,7 +401,7 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
         title: 'Get validator badge row',
         description:
           'Returns the profile-level badge row for ONE validator: tenure (first-seen epoch, active-epoch count, landmark badge), client kind + version (from gossip ingestion), and Node Tier. Pass either a vote pubkey OR an identity pubkey. ' +
-          'This is the single-call equivalent of the badge strip on a validator profile page — use it when you need the "who is this operator" summary rather than per-epoch income. The tier sub-object is the same closed-epoch computation as get_validator_tier. Same data as GET /v1/validators/{idOrVote}/badges. ' +
+          'This is the single-call equivalent of the badge strip on a validator profile page — use it when you need the "who is this operator" summary rather than per-epoch income. The tier sub-object mirrors get_validator_tier: composite is `0.3 × reliability + 0.7 × economicPercentile` over 5 closed epochs, "unrated" for thin samples (slotsAssigned < 10, cohort < 10, or measuredEpochs < 4), and capped at "kindling" when skip_rate > 20%. Vote credits are deliberately excluded — see docs/scoring.md Phase 1. Same data as GET /v1/validators/{idOrVote}/badges. ' +
           SHARED_TOOL_PROVENANCE_NOTE,
         inputSchema: {
           voteOrIdentity: z
@@ -914,35 +909,11 @@ async function buildValidatorLeaderSlotsPayload(
 }
 
 /**
- * Resolve the most-recent CLOSED-epoch history window for the tier
- * computation. Mirrors the `/v1/validators/:idOrVote/tier` +
- * `/badges` route logic exactly: fetch `WINDOW_FETCH_ROWS` rows, drop
- * any whose epoch is >= the running epoch (so the running epoch's
- * mid-flight counters never enter the tier), then take the newest
- * `WINDOW_CLOSED_EPOCHS`. Returned alongside `currentEpoch` because
- * the badges builder also needs it for the tenure cap.
- */
-async function mcpResolveTierWindow(
-  opts: McpRoutesDeps,
-  vote: VotePubkey,
-): Promise<{ closedRows: EpochValidatorStats[]; currentEpoch: EpochInfo | null }> {
-  const [history, currentEpoch] = await Promise.all([
-    opts.statsRepo.findHistoryByVote(vote, WINDOW_FETCH_ROWS),
-    opts.epochsRepo.findCurrent(),
-  ]);
-  const closedRows =
-    currentEpoch !== null
-      ? history.filter((r) => r.epoch < currentEpoch.epoch).slice(0, WINDOW_CLOSED_EPOCHS)
-      : history.slice(0, WINDOW_CLOSED_EPOCHS);
-  return { closedRows, currentEpoch };
-}
-
-/**
  * `get_validator_tier` payload. Same shape + computation as the
- * `/v1/validators/:idOrVote/tier` route — the response is small
- * (one tier classification + a handful of window aggregates), so no
- * size discipline beyond the closed-epoch window the route already
- * bounds. Opt-out is respected, mirroring `buildValidatorPayload`.
+ * `/v1/validators/:idOrVote/tier` route — delegates to the SHARED
+ * `resolveTierForValidator` helper so the MCP tool and the REST
+ * route cannot drift. Opt-out is respected, mirroring
+ * `buildValidatorPayload`.
  */
 async function buildValidatorTierPayload(
   opts: McpRoutesDeps,
@@ -961,8 +932,9 @@ async function buildValidatorTierPayload(
         economicMeasuredEpochs: number;
         economicMedianLamportsPerSlot: string | null;
         incomeFreshness: string | null;
+        cohortAsOfEpoch: CohortAsOfEpoch | null;
       };
-      tier: 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
+      tier: NodeTier;
       composite: number | null;
       components: { reliability: number; economicPercentile: number | null };
     }
@@ -976,37 +948,15 @@ async function buildValidatorTierPayload(
     return { found: false, reason: `validator not found or opted out: ${voteOrIdentity}` };
   }
 
-  const { closedRows } = await mcpResolveTierWindow(opts, validator.votePubkey);
-  // Mirror `resolveTierForValidator` (validators.route.ts) — fetch the
-  // economic-percentile lookup against the window's bounds and feed it
-  // into `computeTier` alongside the slot counters. Synthesise an
-  // empty lookup when the window is empty so we still produce a
-  // well-formed `unrated` payload.
-  const newest = closedRows[0];
-  const oldest = closedRows[closedRows.length - 1];
-  const economicLookup =
-    newest !== undefined && oldest !== undefined
-      ? await opts.statsRepo.findEconomicPercentile(
-          validator.votePubkey,
-          oldest.epoch,
-          newest.epoch,
-        )
-      : {
-          percentile: null,
-          cohortSize: 0,
-          measuredEpochs: 0,
-          medianIncomePerSlotLamports: null,
-        };
-  const slotCounters = slotCountersFromHistory(closedRows);
-  const input: TierInput = {
-    votePubkey: validator.votePubkey,
-    slotsAssigned: slotCounters.slotsAssigned,
-    slotsSkipped: slotCounters.slotsSkipped,
-    economicPercentile: economicLookup.percentile,
-    economicCohortSize: economicLookup.cohortSize,
-    economicMeasuredEpochs: economicLookup.measuredEpochs,
-  };
-  const result = computeTier(input);
+  // SHARED resolver — same code path as /v1/validators/:idOrVote/tier.
+  // Window logic + cohort lookup + composite all live in one place; we
+  // map the result into the MCP-specific shape below. No duplication.
+  const resolved = await resolveTierForValidator(
+    opts.statsRepo,
+    opts.epochsRepo,
+    validator.votePubkey,
+  );
+  const { result, input, closedRows, economicLookup, cohortAsOfEpoch } = resolved;
   const incomeFreshness = oldestIncomeFreshness(closedRows);
 
   return {
@@ -1021,6 +971,7 @@ async function buildValidatorTierPayload(
       economicMeasuredEpochs: input.economicMeasuredEpochs,
       economicMedianLamportsPerSlot: economicLookup.medianIncomePerSlotLamports,
       incomeFreshness: incomeFreshness?.toISOString() ?? null,
+      cohortAsOfEpoch,
     },
     tier: result.tier,
     composite: result.composite,
@@ -1033,8 +984,10 @@ async function buildValidatorTierPayload(
 
 /**
  * `get_validator_badges` payload. Same shape + computation as the
- * `/v1/validators/:idOrVote/badges` route: tenure + client + tier in
- * one round-trip. Small fixed-size response; opt-out respected.
+ * `/v1/validators/:idOrVote/badges` route — delegates to the SHARED
+ * `resolveTierForValidator` helper for the tier sub-object so the MCP
+ * tool can't drift from the REST route. Small fixed-size response;
+ * opt-out respected.
  */
 async function buildValidatorBadgesPayload(
   opts: McpRoutesDeps,
@@ -1048,7 +1001,7 @@ async function buildValidatorBadgesPayload(
       tenure: { firstSeenEpoch: number; activeEpochs: number; landmark: string; badge: string };
       client: { kind: string; version: string | null; updatedAt: string | null };
       tier: {
-        tier: 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
+        tier: NodeTier;
         composite: number | null;
         windowEpochs: number;
       };
@@ -1063,35 +1016,16 @@ async function buildValidatorBadgesPayload(
     return { found: false, reason: `validator not found or opted out: ${voteOrIdentity}` };
   }
 
-  const { closedRows, currentEpoch } = await mcpResolveTierWindow(opts, validator.votePubkey);
-  // Mirror `resolveTierForValidator` — fetch the economic-percentile
-  // lookup over the window bounds and feed it into `computeTier`
-  // alongside the slot counters. Empty window → synthesised empty
-  // lookup so `computeTier` returns a well-formed `unrated`.
-  const newest = closedRows[0];
-  const oldest = closedRows[closedRows.length - 1];
-  const economicLookup =
-    newest !== undefined && oldest !== undefined
-      ? await opts.statsRepo.findEconomicPercentile(
-          validator.votePubkey,
-          oldest.epoch,
-          newest.epoch,
-        )
-      : {
-          percentile: null,
-          cohortSize: 0,
-          measuredEpochs: 0,
-          medianIncomePerSlotLamports: null,
-        };
-  const slotCounters = slotCountersFromHistory(closedRows);
-  const tierResult = computeTier({
-    votePubkey: validator.votePubkey,
-    slotsAssigned: slotCounters.slotsAssigned,
-    slotsSkipped: slotCounters.slotsSkipped,
-    economicPercentile: economicLookup.percentile,
-    economicCohortSize: economicLookup.cohortSize,
-    economicMeasuredEpochs: economicLookup.measuredEpochs,
-  });
+  // SHARED resolver + a parallel `findCurrent` for the tenure cap.
+  // `resolveTierForValidator` internally fetches `findCurrent` too;
+  // accepting the one extra read keeps the helper boundary clean (the
+  // resolver does not leak its internal epoch fetch up to callers).
+  const [resolved, currentEpoch] = await Promise.all([
+    resolveTierForValidator(opts.statsRepo, opts.epochsRepo, validator.votePubkey),
+    opts.epochsRepo.findCurrent(),
+  ]);
+  const { result: tierResult, closedRows } = resolved;
+
   const tenure = summariseTenure(
     validator.firstSeenEpoch,
     currentEpoch !== null ? currentEpoch.epoch : validator.lastSeenEpoch,

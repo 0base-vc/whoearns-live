@@ -32,8 +32,12 @@ import {
   WINDOW_CLOSED_EPOCHS,
   WINDOW_FETCH_ROWS,
 } from '../../services/node-tier.js';
-import type { TierInput, TierResult } from '../../services/node-tier.js';
-import type { EconomicPercentileLookup } from '../../storage/repositories/stats.repo.js';
+import type { NodeTier, TierInput, TierResult } from '../../services/node-tier.js';
+import {
+  EMPTY_ECONOMIC_LOOKUP,
+  type EconomicPercentileLookup,
+} from '../../storage/repositories/stats.repo.js';
+import { findEconomicPercentileCached } from '../tier-cache.js';
 import { narrowToDocumentedKind } from '../../services/client-kind.js';
 import { summariseTenure } from '../../services/tenure.js';
 
@@ -116,6 +120,20 @@ export async function findValidatorByVoteOrIdentity(
 }
 
 /**
+ * Closed-epoch window bounds the economic-percentile cohort was
+ * evaluated against. Surfaced on the response so a consumer can
+ * cross-reference the tier with the leaderboard's current epoch and
+ * detect drift between a CDN-cached tier and a fresh leaderboard.
+ * `null` when the window had zero closed rows (no cohort to evaluate).
+ */
+export interface CohortAsOfEpoch {
+  /** Oldest closed epoch in the window (inclusive). */
+  fromEpoch: number;
+  /** Newest closed epoch in the window (inclusive). */
+  toEpoch: number;
+}
+
+/**
  * Shape returned by `resolveTierForValidator` — the computed tier plus
  * the closed-epoch rows it was derived from + the cohort context, so
  * a caller can also surface the window size and the income-freshness
@@ -126,6 +144,12 @@ export interface ResolvedTier {
   input: TierInput;
   closedRows: EpochValidatorStats[];
   economicLookup: EconomicPercentileLookup;
+  /**
+   * Window bounds the percentile cohort was evaluated over. `null`
+   * when `closedRows` was empty (no window to evaluate) — mirrors the
+   * empty-lookup branch.
+   */
+  cohortAsOfEpoch: CohortAsOfEpoch | null;
 }
 
 /**
@@ -166,20 +190,29 @@ export async function resolveTierForValidator(
   // Determine the closed-epoch window bounds for the cohort query.
   // `closedRows` is sorted newest-first by the repo so [0] is the most
   // recent closed epoch and [last] is the oldest in the window.
-  // When the validator has no closed history we synthesise an empty
-  // lookup — `computeTier` then drops to `unrated` cleanly.
+  // When the validator has no closed history we use the canonical
+  // empty lookup — `computeTier` then drops to `unrated` cleanly with
+  // no DB round-trip.
   let economicLookup: EconomicPercentileLookup;
+  let cohortAsOfEpoch: CohortAsOfEpoch | null;
   if (closedRows.length === 0) {
-    economicLookup = {
-      percentile: null,
-      cohortSize: 0,
-      measuredEpochs: 0,
-      medianIncomePerSlotLamports: null,
-    };
+    economicLookup = EMPTY_ECONOMIC_LOOKUP;
+    cohortAsOfEpoch = null;
   } else {
     const newest = closedRows[0] as EpochValidatorStats;
     const oldest = closedRows[closedRows.length - 1] as EpochValidatorStats;
-    economicLookup = await statsRepo.findEconomicPercentile(votePubkey, oldest.epoch, newest.epoch);
+    // In-process LRU memoization: the cohort CTE behind
+    // `findEconomicPercentile` is identical for every validator in the
+    // same window, so a 60s TTL deduplicates the hot-page burst (e.g.
+    // a profile page + a leaderboard hover prefetch firing within a
+    // second of each other against the same closed-epoch window).
+    economicLookup = await findEconomicPercentileCached(
+      statsRepo,
+      votePubkey,
+      oldest.epoch,
+      newest.epoch,
+    );
+    cohortAsOfEpoch = { fromEpoch: oldest.epoch, toEpoch: newest.epoch };
   }
 
   const slotCounters = slotCountersFromHistory(closedRows);
@@ -192,7 +225,7 @@ export async function resolveTierForValidator(
     economicMeasuredEpochs: economicLookup.measuredEpochs,
   };
   const result = computeTier(input);
-  return { result, input, closedRows, economicLookup };
+  return { result, input, closedRows, economicLookup, cohortAsOfEpoch };
 }
 
 /**
@@ -216,7 +249,7 @@ export type TierBody = Omit<NodeTierResponse, 'vote' | 'identity'>;
  * 2^53. Consumers that want SOL/slot can divide by 10^9 themselves.
  */
 export function tierBodyFromResolved(resolved: ResolvedTier): TierBody {
-  const { result, input, closedRows, economicLookup } = resolved;
+  const { result, input, closedRows, economicLookup, cohortAsOfEpoch } = resolved;
   const incomeFreshness = oldestIncomeFreshness(closedRows);
   return {
     window: {
@@ -227,6 +260,12 @@ export function tierBodyFromResolved(resolved: ResolvedTier): TierBody {
       economicMeasuredEpochs: input.economicMeasuredEpochs,
       economicMedianLamportsPerSlot: economicLookup.medianIncomePerSlotLamports,
       incomeFreshness: incomeFreshness?.toISOString() ?? null,
+      // Closed-epoch window bounds the cohort was evaluated over. A
+      // consumer can compare these against the leaderboard's current
+      // epoch to detect drift between a CDN-cached tier and a fresh
+      // leaderboard. `null` when the window was empty (no closed
+      // rows) and `computeTier` already produced `unrated`.
+      cohortAsOfEpoch,
     },
     tier: result.tier,
     composite: result.composite,
@@ -459,19 +498,24 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
    *
    * Returns the validator's Node Tier (forge / anvil / hearth /
    * kindling / unrated) derived from the most recent 5 CLOSED
-   * epochs — the running epoch is skipped because its slot/credit
+   * epochs — the running epoch is skipped because its slot/income
    * counters grow during the response cache window and would make
    * a tier ride the running-epoch values.
    *
-   * Two-signal P1 composite: 0.6 × TVC ratio + 0.4 × (1 − Wilson
-   * lower bound on skip rate). Full four-signal composite (with vote-
-   * latency p99 + congestion CU) is documented in `docs/scoring.md`
-   * and shipping in a later phase once the underlying signals are
-   * indexed.
+   * P1 composite: `0.3 × reliability + 0.7 × economicPercentile`.
+   * `reliability` = `1 − wilsonInterval(slotsSkipped, slotsAssigned).upper`
+   * (pessimistic block-production rate). `economicPercentile` =
+   * `PERCENT_RANK()` of this validator's median per-leader-slot
+   * income across the window, against the indexed-validator cohort.
+   * Vote credits are deliberately excluded — see `docs/scoring.md`
+   * Phase 1, "Why no vote credits."
    *
-   * Confidence floor: returns `tier: "unrated"` when the validator
-   * has < 10 leader slots in the window, irrespective of the
-   * computed composite.
+   * Confidence floors → `tier: "unrated"`: `slotsAssigned < 10`,
+   * cohort size < 10, this validator measured in < 4 closed epochs,
+   * or `economicPercentile === null`.
+   *
+   * Reliability floor: when `skip_rate > 0.20` the tier is hard-
+   * capped at `kindling` regardless of economic percentile.
    */
   // Return type is `NodeTierResponse | void`: the GET path resolves
   // the structured body, the HEAD short-circuit calls `reply.send('')`
@@ -605,7 +649,7 @@ export interface BadgesResponse {
     updatedAt: string | null;
   };
   tier: {
-    tier: 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
+    tier: NodeTier;
     composite: number | null;
     windowEpochs: number;
   };
@@ -627,7 +671,7 @@ export interface NodeTierResponse {
     /**
      * How many closed epochs in the window had measurable income
      * for THIS validator. Below
-     * `MIN_MEASURED_EPOCHS_FOR_ECONOMIC` (3 of 5 by default) the
+     * `MIN_MEASURED_EPOCHS_FOR_ECONOMIC` (4 of 5 by default) the
      * percentile is treated as null and the tier falls to
      * `unrated`.
      */
@@ -648,8 +692,17 @@ export interface NodeTierResponse {
      * separate health surface.
      */
     incomeFreshness: string | null;
+    /**
+     * Closed-epoch window bounds the percentile cohort was evaluated
+     * over (`fromEpoch` = oldest closed epoch in the window,
+     * `toEpoch` = newest). `null` when the window has zero closed
+     * rows (and the tier is `unrated`). Lets a consumer cross-
+     * reference the response with the leaderboard's current epoch to
+     * detect drift between a CDN-cached tier and a fresh leaderboard.
+     */
+    cohortAsOfEpoch: CohortAsOfEpoch | null;
   };
-  tier: 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
+  tier: NodeTier;
   /**
    * 0-100 composite. **`null` when `tier === 'unrated'`** so a UI
    * cannot accidentally display "composite: 87" alongside an

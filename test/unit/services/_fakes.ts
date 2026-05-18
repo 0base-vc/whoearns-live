@@ -9,17 +9,18 @@
  * via the service's constructor dependency shape is enough.
  */
 
-import type {
-  UpsertSlotStatsArgs,
-  AddFeeAndTipDeltaArgs,
-  AddFeeDeltaArgs,
-  AddIncomeDeltaArgs,
-  EconomicPercentileLookup,
-  EnsureSlotStatsRowArgs,
-  IndexedIncomePerSlotBenchmarkRequest,
-  LeaderboardWindowEpoch,
-  LeaderboardWindowSort,
-  WindowedLeaderboardStats,
+import {
+  EMPTY_ECONOMIC_LOOKUP,
+  type UpsertSlotStatsArgs,
+  type AddFeeAndTipDeltaArgs,
+  type AddFeeDeltaArgs,
+  type AddIncomeDeltaArgs,
+  type EconomicPercentileLookup,
+  type EnsureSlotStatsRowArgs,
+  type IndexedIncomePerSlotBenchmarkRequest,
+  type LeaderboardWindowEpoch,
+  type LeaderboardWindowSort,
+  type WindowedLeaderboardStats,
 } from '../../../src/storage/repositories/stats.repo.js';
 import type { DailyActivityUpsert } from '../../../src/storage/repositories/wallet-activity.repo.js';
 import type {
@@ -936,9 +937,17 @@ export class FakeStatsRepo {
    * Tier route call `setEconomicLookup(vote, lookup)` to inject the
    * cohort context they want — the production query is a cross-
    * validator window aggregate that we don't reimplement in-memory.
-   * When no override is set, returns an empty result so the tier
-   * falls to `unrated` (the same behaviour as a fresh DB with no
-   * indexed cohort yet).
+   *
+   * When no override is set, this mirrors the production fallback
+   * shape: the target validator is absent from the cohort, so
+   * `percentile` and `medianIncomePerSlotLamports` are `null`, but the
+   * cohort size is computed from the in-memory rows (counting
+   * other-validator rows in the window with a positive
+   * `block_fees_total_lamports`). That matches the real repo's
+   * second-pass cohort-size query — without it, every fake test
+   * silently saw `cohortSize: 0` regardless of seeded peers, which
+   * masked the real-world case where a fresh validator's NULL
+   * percentile sits inside a healthy cohort.
    */
   private economicLookups = new Map<VotePubkey, EconomicPercentileLookup>();
 
@@ -948,17 +957,33 @@ export class FakeStatsRepo {
 
   async findEconomicPercentile(
     vote: VotePubkey,
-    _fromEpoch: Epoch,
-    _toEpoch: Epoch,
+    fromEpoch: Epoch,
+    toEpoch: Epoch,
   ): Promise<EconomicPercentileLookup> {
-    return (
-      this.economicLookups.get(vote) ?? {
-        percentile: null,
-        cohortSize: 0,
-        measuredEpochs: 0,
-        medianIncomePerSlotLamports: null,
+    const override = this.economicLookups.get(vote);
+    if (override !== undefined) return override;
+
+    // Production fallback semantic: when the target vote is absent
+    // from the cohort, return `null` percentile / null median, but
+    // report the SIZE of the cohort the validator was compared
+    // against (i.e. how many OTHER validators in the same window had
+    // measurable income). This is the same second-query shape the
+    // real repo uses on the empty-target-row branch.
+    const peerVotes = new Set<VotePubkey>();
+    for (const row of this.rows.values()) {
+      if (row.votePubkey === vote) continue;
+      if (row.epoch < fromEpoch || row.epoch > toEpoch) continue;
+      if (row.blockFeesTotalLamports > 0n || row.blockTipsTotalLamports > 0n) {
+        peerVotes.add(row.votePubkey);
       }
-    );
+    }
+    if (peerVotes.size === 0) return EMPTY_ECONOMIC_LOOKUP;
+    return {
+      percentile: null,
+      cohortSize: peerVotes.size,
+      measuredEpochs: 0,
+      medianIncomePerSlotLamports: null,
+    };
   }
 }
 

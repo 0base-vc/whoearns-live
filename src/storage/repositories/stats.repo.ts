@@ -329,15 +329,33 @@ export interface EconomicPercentileLookup {
   medianIncomePerSlotLamports: string | null;
 }
 
-interface EconomicPercentileRow {
-  pct: string;
-  cohort_size: number;
-  measured_epochs: number;
-  median_income_per_slot: string;
-}
+/**
+ * Canonical "no measurable cohort" lookup result. Used by the route
+ * layer (validators.route.ts + mcp.route.ts) when the closed-epoch
+ * window for a validator is empty so we skip the cohort query entirely
+ * — `computeTier` receives a well-formed input that correctly drops to
+ * `unrated` without a second DB round-trip. Exported here (rather than
+ * synthesised at each call site) so the shape stays a single source of
+ * truth: if `EconomicPercentileLookup` ever gains a field, the empty
+ * literal updates with it, not three.
+ */
+export const EMPTY_ECONOMIC_LOOKUP: EconomicPercentileLookup = {
+  percentile: null,
+  cohortSize: 0,
+  measuredEpochs: 0,
+  medianIncomePerSlotLamports: null,
+};
 
-interface EconomicCohortSizeRow {
-  cohort_size: number;
+interface EconomicPercentileRow {
+  // `pct` and `median_income_per_slot` are NULL when the target vote
+  // is absent from the cohort (LEFT JOIN target_row ON TRUE in the
+  // consolidated query). `cohort_size` is a `::bigint`-cast count
+  // that pg emits as a decimal string, parsed via `Number(...)` on
+  // the TS side. Cohort size is always populated.
+  pct: string | null;
+  cohort_size: string;
+  measured_epochs: number;
+  median_income_per_slot: string | null;
 }
 
 export interface WindowedLeaderboardStats {
@@ -992,7 +1010,7 @@ export class StatsRepository {
    * fees/tips ingested, opt-out respected. Per-validator inclusion
    * also requires at least one epoch with measured income — the
    * caller checks `measuredEpochs >= MIN_MEASURED_EPOCHS_FOR_ECONOMIC`
-   * (3 of 5 by default) before trusting the percentile.
+   * (4 of 5 by default) before trusting the percentile.
    *
    * @param vote          Target validator's vote pubkey.
    * @param fromEpoch     Inclusive lower bound of the epoch window.
@@ -1005,25 +1023,32 @@ export class StatsRepository {
     toEpoch: Epoch,
   ): Promise<EconomicPercentileLookup> {
     // Single query: window the relevant rows, compute per-validator
-    // median, then `PERCENT_RANK()` across the cohort. The target
-    // vote's row (or its absence) is read out in the final filter.
+    // median, `PERCENT_RANK()` across the cohort, then LEFT JOIN the
+    // target so we always emit exactly one row — cohort metadata
+    // plus optional target columns (NULL when the target is absent).
+    // `block_fees_total_lamports` and `block_tips_total_lamports` are
+    // NOT NULL DEFAULT 0 (migrations 0001 / 0009), so the bare
+    // addition below is safe — no COALESCE needed.
+    //
+    // We require BOTH `fees_updated_at` AND `tips_updated_at` to be
+    // present: a row with only one timestamp means partial ingest,
+    // which would undercount `(fees + tips)` by exactly the missing
+    // half and bias the percentile.
     const sql = `
       WITH per_validator_per_epoch AS (
         SELECT
           evs.vote_pubkey,
           evs.epoch,
           (
-            COALESCE(evs.block_fees_total_lamports, 0)
-            + COALESCE(evs.block_tips_total_lamports, 0)
+            evs.block_fees_total_lamports
+            + evs.block_tips_total_lamports
           )::numeric / evs.slots_assigned::numeric AS income_per_slot
         FROM epoch_validator_stats evs
         WHERE evs.epoch BETWEEN $1::bigint AND $2::bigint
           AND evs.slots_assigned > 0
           AND evs.slots_updated_at IS NOT NULL
-          AND (
-            evs.fees_updated_at IS NOT NULL
-            OR evs.tips_updated_at IS NOT NULL
-          )
+          AND evs.fees_updated_at IS NOT NULL
+          AND evs.tips_updated_at IS NOT NULL
           AND NOT EXISTS (
             SELECT 1
               FROM validator_profiles vp
@@ -1045,68 +1070,54 @@ export class StatsRepository {
           median_income_per_slot,
           measured_epochs,
           PERCENT_RANK() OVER (ORDER BY median_income_per_slot) AS pct,
-          COUNT(*) OVER ()::int AS cohort_size
+          COUNT(*) OVER ()::bigint AS cohort_size
         FROM median_per_validator
+      ),
+      target_row AS (
+        SELECT pct, median_income_per_slot, measured_epochs
+        FROM ranked
+        WHERE vote_pubkey = $3
+      ),
+      cohort AS (
+        SELECT COUNT(*)::bigint AS cohort_size FROM median_per_validator
       )
+      -- LEFT JOIN ON TRUE: emit cohort metadata once, attach the
+      -- optional target columns (NULL when the target vote is not in
+      -- the cohort). Always returns exactly one row.
       SELECT
-        pct::text                                  AS pct,
-        cohort_size::int                           AS cohort_size,
-        measured_epochs::int                       AS measured_epochs,
-        median_income_per_slot::text               AS median_income_per_slot
-      FROM ranked
-      WHERE vote_pubkey = $3
+        cohort.cohort_size::text                       AS cohort_size,
+        COALESCE(target_row.measured_epochs, 0)::int   AS measured_epochs,
+        target_row.pct::text                           AS pct,
+        target_row.median_income_per_slot::text        AS median_income_per_slot
+      FROM cohort
+      LEFT JOIN target_row ON TRUE
     `;
 
     const { rows } = await this.pool.query<EconomicPercentileRow>(sql, [fromEpoch, toEpoch, vote]);
 
-    if (rows.length === 0) {
-      // Vote is not in the cohort — either never indexed in this
-      // window or has no measurable income. We still want to report
-      // the COHORT size so a caller can distinguish "no cohort yet"
-      // from "you're not in the indexed set." Issue a second cheap
-      // query for the cohort size.
-      const cohortSizeSql = `
-        WITH per_validator_per_epoch AS (
-          SELECT
-            evs.vote_pubkey
-          FROM epoch_validator_stats evs
-          WHERE evs.epoch BETWEEN $1::bigint AND $2::bigint
-            AND evs.slots_assigned > 0
-            AND evs.slots_updated_at IS NOT NULL
-            AND (
-              evs.fees_updated_at IS NOT NULL
-              OR evs.tips_updated_at IS NOT NULL
-            )
-            AND NOT EXISTS (
-              SELECT 1
-                FROM validator_profiles vp
-               WHERE vp.vote_pubkey = evs.vote_pubkey
-                 AND vp.opted_out = TRUE
-            )
-          GROUP BY evs.vote_pubkey
-        )
-        SELECT COUNT(*)::int AS cohort_size FROM per_validator_per_epoch
-      `;
-      const { rows: cohortRows } = await this.pool.query<EconomicCohortSizeRow>(cohortSizeSql, [
-        fromEpoch,
-        toEpoch,
-      ]);
+    // `cohort_size` arrives as a decimal string from the `::bigint`
+    // cast. Cohort size is bounded by the indexed validator set
+    // (~thousands), well within safe-int range.
+    const row = rows[0] as EconomicPercentileRow;
+    const cohortSize = Number(row.cohort_size);
+
+    // Target absent from the cohort: pct and median are both NULL.
+    if (row.pct === null && row.median_income_per_slot === null) {
       return {
         percentile: null,
-        cohortSize: cohortRows[0]?.cohort_size ?? 0,
+        cohortSize,
         measuredEpochs: 0,
         medianIncomePerSlotLamports: null,
       };
     }
 
-    const row = rows[0] as EconomicPercentileRow;
-    const pct = Number(row.pct);
+    const pct = row.pct === null ? Number.NaN : Number(row.pct);
     return {
       // `PERCENT_RANK` returns 0 for a cohort of size 1 (no other
       // peers to rank against). We still pass that through — the
       // caller's `MIN_COHORT_FOR_PERCENTILE` guard catches it.
       percentile: Number.isFinite(pct) ? pct : null,
-      cohortSize: row.cohort_size,
+      cohortSize,
       measuredEpochs: row.measured_epochs,
       medianIncomePerSlotLamports: row.median_income_per_slot,
     };

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import validatorsRoutes from '../../../src/api/routes/validators.route.js';
+import { resetTierPercentileCache } from '../../../src/api/tier-cache.js';
 import type { ClaimsRepository } from '../../../src/storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
 import type { ProfilesRepository } from '../../../src/storage/repositories/profiles.repo.js';
@@ -627,6 +628,11 @@ describe('POST /v1/validators/current-epoch/batch', () => {
 describe('GET /v1/validators/:idOrVote/tier', () => {
   let ctx: Ctx;
   beforeEach(async () => {
+    // The in-process percentile cache is module-local and TTLed at
+    // 60s; across tests we want a deterministic miss every time so a
+    // stub override seeded in test B isn't shadowed by a cached
+    // result from test A.
+    resetTierPercentileCache();
     ctx = await makeCtx();
   });
 
@@ -691,6 +697,7 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
         slotsAssigned: number;
         economicCohortSize: number;
         economicMeasuredEpochs: number;
+        cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
       };
       components: { reliability: number; economicPercentile: number };
     };
@@ -701,6 +708,32 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
     expect(body.window.economicMeasuredEpochs).toBe(5);
     expect(body.components.economicPercentile).toBe(1.0);
     expect(body.composite).toBeGreaterThanOrEqual(95);
+    // cohortAsOfEpoch reflects the closed-epoch window the percentile
+    // was evaluated against: oldest closed epoch in [500..505] and
+    // newest, with current epoch 600 bumping all six into the closed
+    // set and the route picking the 5 newest (501..505).
+    expect(body.window.cohortAsOfEpoch).toEqual({ fromEpoch: 501, toEpoch: 505 });
+  });
+
+  it('cohortAsOfEpoch is null when the validator has no closed history', async () => {
+    // Validator is known but has zero history rows seeded — same
+    // path as the existing "returns unrated" case but asserting the
+    // null-cohort branch surfaces on the response so a consumer can
+    // distinguish "tier unrated because no window" from "tier unrated
+    // because thin sample within a window".
+    await seedValidator(ctx, VOTE_1, IDENTITY_1);
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      tier: string;
+      window: {
+        epochs: number;
+        cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
+      };
+    };
+    expect(body.tier).toBe('unrated');
+    expect(body.window.epochs).toBe(0);
+    expect(body.window.cohortAsOfEpoch).toBeNull();
   });
 
   it('returns 404 for unknown validators', async () => {
@@ -712,6 +745,7 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
 describe('GET /v1/validators/:idOrVote/badges', () => {
   let ctx: Ctx;
   beforeEach(async () => {
+    resetTierPercentileCache();
     ctx = await makeCtx();
   });
 

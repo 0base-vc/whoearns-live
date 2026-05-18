@@ -1124,6 +1124,19 @@ components:
         patches, networking proximity) and therefore reflects capital
         and engineering investment more than service quality to
         delegators. See `docs/scoring.md` Phase 1 for the full rationale.
+
+        **Reliability floor.** A validator with `skip_rate > 0.20`
+        across the window is tier-capped at `kindling` regardless of
+        `economicPercentile`. A top earner who lets a fifth of their
+        assigned blocks drop is not a top-tier operator.
+
+        **Cohort scope.** The `economicPercentile` cohort is the
+        INDEXED-VALIDATOR set (the deployment's `WatchMode` — `top:N`,
+        an explicit list, or `*`), NOT the full Solana cluster. The
+        `window.economicCohortSize` field carries the cohort size; the
+        `window.cohortAsOfEpoch` field carries the closed-epoch range
+        the cohort was sampled over. Percentiles from a `top:500`
+        deployment should NOT be read as percentiles "vs all of Solana."
       properties:
         window:
           type: object
@@ -1136,6 +1149,7 @@ components:
               economicMeasuredEpochs,
               economicMedianLamportsPerSlot,
               incomeFreshness,
+              cohortAsOfEpoch,
             ]
           properties:
             epochs: { type: integer, minimum: 0 }
@@ -1157,7 +1171,7 @@ components:
               maximum: 5
               description: |
                 How many closed epochs in the 5-epoch window had
-                measurable income for THIS validator. Below `3` the
+                measurable income for THIS validator. Below `4` the
                 per-validator median is too noisy and the tier falls
                 to `unrated`.
             economicMedianLamportsPerSlot:
@@ -1182,6 +1196,19 @@ components:
                 the window has both fees and tips ingested. Lets a UI
                 grey out the tier when the income ingester has
                 stalled, without polling a separate health surface.
+            cohortAsOfEpoch:
+              type: object
+              nullable: true
+              required: [fromEpoch, toEpoch]
+              properties:
+                fromEpoch: { type: integer, minimum: 0 }
+                toEpoch: { type: integer, minimum: 0 }
+              description: |
+                The closed-epoch range the cohort percentile was
+                computed against. `null` when the window had no
+                closed-epoch data (fresh DB or full outage). Lets a
+                consumer detect when a cached tier may be out of step
+                with a freshly-fetched leaderboard.
         tier:
           type: string
           enum: [forge, anvil, hearth, kindling, unrated]
@@ -1194,7 +1221,10 @@ components:
             `0.3 × reliability + 0.7 × economicPercentile`, scaled to
             0-100. `null` when `tier === "unrated"` — no half-shown
             scores. Cutoffs: forge ≥ 95, anvil ≥ 80, hearth ≥ 40,
-            kindling < 40.
+            kindling < 40. **Tier-capped at `kindling` when
+            `skip_rate > 0.20`** regardless of `economicPercentile` —
+            see the schema-level description for the reliability-floor
+            rationale.
         components:
           type: object
           required: [reliability, economicPercentile]

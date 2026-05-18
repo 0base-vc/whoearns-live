@@ -20,10 +20,13 @@ and this project follows [Semantic Versioning](https://semver.org/).
   `GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots` for AI/X analysis.
 - Validator profile gamification (Phases 0-6, see `docs/scoring.md`):
   - **Node Tier** composite — `forge` / `anvil` / `hearth` / `kindling` /
-    `unrated` — from a closed-epoch TVC ratio + Wilson-pessimistic
-    reliability blend, served at
+    `unrated` — from pessimistic block-production reliability (Wilson
+    upper bound on skip rate) blended with an economic-percentile rank
+    against the indexed cohort (`PERCENT_RANK()` of median per-leader-
+    slot income across a 5-closed-epoch window), served at
     `GET /v1/validators/:idOrVote/tier` and bundled with the tenure /
-    client badges at `GET /v1/validators/:idOrVote/badges`.
+    client badges at `GET /v1/validators/:idOrVote/badges`. Capped at
+    `kindling` when `skip_rate > 0.20` regardless of economic percentile.
   - **Tenure landmarks** (Mainnet-beta launch, Cycle 1 OG, Cross-chain era,
     DeFi 2, Pre-FTX, Jito v2, Firedancer launch) and **client kind**
     classification (Agave / Jito-Solana / Firedancer / Frankendancer /
@@ -105,6 +108,28 @@ and this project follows [Semantic Versioning](https://semver.org/).
   by `components.reliability` / `components.economicPercentile`.
   Tier cutoffs (95 / 80 / 40) are unchanged. Full rationale in
   `docs/scoring.md` Phase 1, "Why no vote credits".
+- **BREAKING** — MCP tools `get_validator_tier` and
+  `get_validator_badges` shape changed in lockstep with the HTTP
+  tier; the MCP `tier` payload now carries the same
+  `window.economicCohortSize` / `economicMeasuredEpochs` /
+  `economicMedianLamportsPerSlot` / `incomeFreshness` /
+  `cohortAsOfEpoch` fields and the same
+  `components.reliability` / `components.economicPercentile` shape
+  as the HTTP route.
+- **BREAKING** — New cohort floors: validators with fewer than 4
+  measured closed epochs (was 3), or in a cohort of fewer than 10
+  peers, drop to `unrated` until the cohort matures. Production
+  validators that were previously classified may temporarily appear
+  unrated after the deploy until the income ingester has run for at
+  least 4 closed epochs across ≥10 indexed peers. A new hard
+  reliability floor caps the tier at `kindling` when
+  `skip_rate > 0.20` regardless of economic percentile.
+- **BREAKING** — New `window.cohortAsOfEpoch` field on the `/tier`
+  response (and the embedded `tier` block of `/scoring`) surfaces
+  the `{fromEpoch, toEpoch}` closed-epoch range the cohort was
+  sampled over (`null` when the window had no closed-epoch data),
+  so a consumer can detect when a cached tier may be out of step
+  with a freshly-fetched leaderboard.
 
 ## [0.3.0] - 2026-04-29
 

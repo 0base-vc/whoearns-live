@@ -378,14 +378,19 @@ per-block/per-transaction CU averages, income per 1M CU, and best block.
 Use closed epochs before deriving public claims from these facts.
 
 ### GET /v1/validators/{idOrVote}/tier
-Node Tier — a 2-signal composite (vote-credit ratio + Wilson-scored
-skip rate) over the most recent 5 closed epochs. Accepts a vote OR
-identity pubkey; no query params. Returns { vote, identity, window,
-tier, composite, components }. tier is forge | anvil | hearth |
-kindling | unrated; composite is null when tier is unrated (fewer
-than 10 leader slots in the window, or no credit-bearing rows) so a
-UI never shows a half-computed score. Closed-epoch data only — no
-live RPC.
+Node Tier composite — pessimistic block-production reliability
+(Wilson upper bound on skip rate) + economic-productivity percentile
+(cohort rank of median per-leader-slot income across 5 closed epochs).
+Formula: 0.3 × reliability + 0.7 × economicPercentile. The cohort is
+the INDEXED-VALIDATOR set (the deployment's WatchMode), not the full
+Solana cluster. Accepts a vote OR identity pubkey; no query params.
+Returns { vote, identity, window, tier, composite, components }. tier
+is forge | anvil | hearth | kindling | unrated; composite is null
+when tier is unrated (thin samples — slotsAssigned < 10, cohort < 10,
+or measuredEpochs < 4). Tier is hard-capped at kindling when skip
+rate exceeds 20%, regardless of economic percentile. See
+docs/scoring.md Phase 1 for the rationale on excluding vote credits.
+Closed-epoch data only — no live RPC.
 
 ### GET /v1/validators/{idOrVote}/badges
 Composite profile badges in one round-trip: { vote, identity,

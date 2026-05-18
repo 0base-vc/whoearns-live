@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { pino } from 'pino';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import scoringRoutes, { type ScoringRoutesDeps } from '../../../src/api/routes/scoring.route.js';
+import { resetTierPercentileCache } from '../../../src/api/tier-cache.js';
 import type {
   EpochValidatorStats,
   Validator,
@@ -166,6 +167,12 @@ async function makeApp(deps: ScoringRoutesDeps): Promise<FastifyInstance> {
 }
 
 describe('GET /v1/validators/:idOrVote/scoring', () => {
+  beforeEach(() => {
+    // Process-local percentile cache survives across tests; reset to
+    // keep stub overrides deterministic.
+    resetTierPercentileCache();
+  });
+
   it('returns tier + tenure + client + oai all populated for a claimed validator', async () => {
     const app = await makeApp(buildDeps({ claimed: true }));
     const res = await app.inject({
@@ -184,6 +191,7 @@ describe('GET /v1/validators/:idOrVote/scoring', () => {
           slotsAssigned: number;
           economicCohortSize: number;
           economicMeasuredEpochs: number;
+          cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
         };
         components: { reliability: number; economicPercentile: number | null };
       };
@@ -206,6 +214,9 @@ describe('GET /v1/validators/:idOrVote/scoring', () => {
     expect(body.tier.window.slotsAssigned).toBe(500);
     expect(body.tier.window.economicCohortSize).toBe(200);
     expect(body.tier.window.economicMeasuredEpochs).toBe(5);
+    // Fixture seeds epochs 500..505 + current epoch 600 → all six
+    // count as closed, window picks the 5 newest (501..505).
+    expect(body.tier.window.cohortAsOfEpoch).toEqual({ fromEpoch: 501, toEpoch: 505 });
     expect(body.tier.composite).toBeGreaterThanOrEqual(95);
     expect(body.tier.components.economicPercentile).toBe(1.0);
     expect(typeof body.tier.components.reliability).toBe('number');
