@@ -18,6 +18,34 @@ and this project follows [Semantic Versioning](https://semver.org/).
   Solana block data, not AI-written summaries.
 - Block-level slot facts for watched validator leader slots and
   `GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots` for AI/X analysis.
+- Validator profile gamification (Phases 0-6, see `docs/scoring.md`):
+  - **Node Tier** composite — `forge` / `anvil` / `hearth` / `kindling` /
+    `unrated` — from a closed-epoch TVC ratio + Wilson-pessimistic
+    reliability blend, served at
+    `GET /v1/validators/:idOrVote/tier` and bundled with the tenure /
+    client badges at `GET /v1/validators/:idOrVote/badges`.
+  - **Tenure landmarks** (Mainnet-beta launch, Cycle 1 OG, Cross-chain era,
+    DeFi 2, Pre-FTX, Jito v2, Firedancer launch) and **client kind**
+    classification (Agave / Jito-Solana / Firedancer / Frankendancer /
+    Paladin / Sig / Unknown) on the badges payload.
+  - **Operator claim flow** (Ed25519 sign-over-nonce + Keybase-style
+    GitHub Gist verification + operator-wallet registration), exposed
+    as `GET /v1/claims/:vote`, `PUT /v1/claims/:vote/verify`,
+    `PUT /v1/claims/:vote/profile`, `PUT /v1/claims/:vote/github`,
+    `POST /v1/claims/:vote/wallets`, plus an append-only forensic audit
+    log at `GET /v1/claims/:vote/audit`.
+  - **Wallet daily activity** for registered operator wallets — heatmap
+    - 365-day series at `GET /v1/operator-wallets/:wallet/activity`
+      and the parent resource at `GET /v1/operator-wallets/:wallet`.
+  - **AI-curated SIMD proposals feed** with reviewer attestation at
+    `GET /v1/simd-proposals`.
+  - **Operator Activity Index** (governance + wallet half blended 50/50)
+    at `GET /v1/validators/:idOrVote/operator-activity-index`.
+  - **Aggregate scoring bundle** at `GET /v1/validators/:idOrVote/scoring`
+    — the profile-page one round-trip returning tier + tenure + client
+    - OAI together. Additive; the granular routes above remain available.
+- MCP tools `get_validator_tier` and `get_validator_badges` mirroring
+  the public HTTP surface.
 
 ### Changed
 
@@ -34,6 +62,29 @@ and this project follows [Semantic Versioning](https://semver.org/).
   `docs/migrations/`, removed the Korean deployment-era API note, and
   aligned architecture/roadmap/OpenAPI wording with the current ingestion
   model.
+- **BREAKING** — `/v1/claim/*` (Phase 3) restructured to RESTful
+  `/v1/claims/*`: paths AND methods changed (`PUT` for the idempotent
+  verify / profile / GitHub-link mutations, `POST /v1/claims/:vote/wallets`
+  for the wallet append). No back-compat aliases. The first-party
+  SvelteKit UI is the only consumer and ships in the same deployment
+  image, so the rename is atomic.
+- Node Tier math corrected (`docs/scoring.md`): the SIMD-0033 max-credit
+  constant is now `16` (was `8`); the TVC denominator is cluster-relative
+  (`slotsAssigned × SOLANA_SLOTS_PER_EPOCH × 16`), not own-leader-slot
+  count, so the ratio no longer saturates to 1.0 cluster-wide; the
+  Wilson interval is consumed at its _upper_ skip-rate bound so
+  reliability is the _pessimistic_ lower bound (small samples no longer
+  inflate to 1.0).
+- Operator Activity Index partial-release honesty: while the GitHub
+  Discussions ingest is inactive `governance.score` and `composite`
+  return `null` ("unknown"), not `0`, with sub-component counts and
+  `walletScore` still populated. A top-level
+  `ingestStatus.{governanceIngestActive, walletFeesIngestActive}` block
+  self-documents the partial state.
+- Closed a seven-expert adversarial review of the gamification surface:
+  6 BLOCKER-class items, 22 HIGH, ~52 MED, and the LOW backlog are all
+  resolved. Full per-item tracker at
+  `docs/gamification-hardening-tracking.md`.
 
 ## [0.3.0] - 2026-04-29
 
