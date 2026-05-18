@@ -1,0 +1,136 @@
+# Dependabot configuration.
+#
+# This repo has two independent pnpm projects:
+#   - `/`   — the backend + indexer + worker (Node 22+, pnpm@10.15.1).
+#   - `/ui` — the SvelteKit frontend (also pnpm).
+# They share no workspace and each has its own `pnpm-lock.yaml`, so
+# Dependabot is configured per-directory so updates land in the right
+# lockfile.
+#
+# Grouping policy. Dependabot's default (one PR per package) generates
+# noise at our scale. We split into THREE groups per directory:
+#   - `security`  — anything triggered by a GHSA / CVE advisory.
+#                   Highest signal, never grouped with cosmetic bumps,
+#                   updated immediately rather than on the weekly tick.
+#   - `prod`      — runtime `dependencies` only. One PR per week so the
+#                   review window is predictable.
+#   - `dev`       — `devDependencies` (lint, test, types, build tools).
+#                   Same weekly cadence but separate from prod so a
+#                   lint-config bump can't sit behind a runtime PR.
+#
+# Pinned-version policy. We additionally pin a handful of transitive
+# packages via `pnpm.overrides` in the root `package.json`
+# (`@protobufjs/utf8`, `dockerode`, `express-rate-limit`, `fast-uri`,
+# `hono`, `ip-address`, `protobufjs`). Those overrides are the
+# canonical fix path when a transitive dep has an open advisory but
+# pnpm refuses to bump the resolved chain on its own — Dependabot
+# proposes the bump against the override entry rather than against an
+# unreachable transitive specifier.
+
+version: 2
+updates:
+  # ---------------------------------------------------------------
+  # Backend / indexer / worker (root pnpm project)
+  # ---------------------------------------------------------------
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+      time: '02:00'
+      timezone: 'Asia/Seoul'
+    open-pull-requests-limit: 8
+    labels:
+      - 'dependencies'
+      - 'backend'
+    commit-message:
+      prefix: 'chore(deps)'
+      prefix-development: 'chore(deps-dev)'
+      include: 'scope'
+    groups:
+      backend-security:
+        applies-to: security-updates
+        patterns:
+          - '*'
+      backend-prod:
+        applies-to: version-updates
+        dependency-type: 'production'
+        update-types:
+          - 'minor'
+          - 'patch'
+      backend-dev:
+        applies-to: version-updates
+        dependency-type: 'development'
+        update-types:
+          - 'minor'
+          - 'patch'
+    ignore:
+      # Major-version bumps are reviewed by hand — they typically
+      # come with breaking changes and benefit from a deliberate PR
+      # rather than an auto-generated one. Dependabot will still
+      # surface them in the security advisory feed when relevant.
+      - dependency-name: '*'
+        update-types:
+          - 'version-update:semver-major'
+
+  # ---------------------------------------------------------------
+  # SvelteKit UI (separate pnpm project under /ui)
+  # ---------------------------------------------------------------
+  - package-ecosystem: 'npm'
+    directory: '/ui'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+      time: '02:00'
+      timezone: 'Asia/Seoul'
+    open-pull-requests-limit: 8
+    labels:
+      - 'dependencies'
+      - 'ui'
+    commit-message:
+      prefix: 'chore(deps)'
+      prefix-development: 'chore(deps-dev)'
+      include: 'scope'
+    groups:
+      ui-security:
+        applies-to: security-updates
+        patterns:
+          - '*'
+      ui-prod:
+        applies-to: version-updates
+        dependency-type: 'production'
+        update-types:
+          - 'minor'
+          - 'patch'
+      ui-dev:
+        applies-to: version-updates
+        dependency-type: 'development'
+        update-types:
+          - 'minor'
+          - 'patch'
+    ignore:
+      - dependency-name: '*'
+        update-types:
+          - 'version-update:semver-major'
+
+  # ---------------------------------------------------------------
+  # GitHub Actions workflow files
+  # ---------------------------------------------------------------
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+      time: '02:00'
+      timezone: 'Asia/Seoul'
+    open-pull-requests-limit: 4
+    labels:
+      - 'dependencies'
+      - 'ci'
+    commit-message:
+      prefix: 'chore(ci)'
+      include: 'scope'
+    groups:
+      actions:
+        patterns:
+          - '*'
