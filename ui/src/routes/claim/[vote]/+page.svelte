@@ -206,6 +206,12 @@
             narrativeOverride: null,
             updatedAt: '',
           },
+          // The gamification-surface fields (githubLink + wallets)
+          // are populated by their own claim subflows; on first
+          // claim they're both empty. Mirrors the `ClaimStatus`
+          // shape returned by `GET /v1/claims/:vote`.
+          githubLink: null,
+          wallets: { count: 0, capReached: false, oldestExpiresAt: null },
         };
       } else {
         // Mirror the backend's normalisation: empty/whitespace =
@@ -228,7 +234,19 @@
           },
         });
         successMessage = 'Profile updated.';
-        status = { claimed: true, profile: result.profile };
+        status = {
+          claimed: true,
+          profile: result.profile,
+          // Preserve any previously-fetched githubLink / wallets
+          // state across a profile edit (they're owned by separate
+          // subflows; a profile update doesn't touch them). When
+          // the page was loaded into edit-mode they came from the
+          // initial `fetchClaimStatus` call.
+          githubLink: status.claimed ? status.githubLink : null,
+          wallets: status.claimed
+            ? status.wallets
+            : { count: 0, capReached: false, oldestExpiresAt: null },
+        };
       }
       // Invalidate the single-use envelope so the UI makes the
       // operator regenerate before another submit.

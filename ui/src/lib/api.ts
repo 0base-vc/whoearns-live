@@ -1,10 +1,15 @@
 import type {
+  ClaimAuditResponse,
   ClaimChallenge,
   ClaimStatus,
   CurrentEpoch,
   Leaderboard,
   LeaderboardSort,
   LeaderboardWindow,
+  OperatorWalletActivityResponse,
+  OperatorWalletResponse,
+  ScoringResponse,
+  SimdProposalListResponse,
   ValidatorEpochRecord,
   ValidatorEpochLeaderSlots,
   ValidatorHistory,
@@ -282,4 +287,85 @@ function putJson<TResponse>(
   fetchFn: typeof fetch = fetch,
 ): Promise<TResponse> {
   return sendJson<TResponse>('PUT', path, body, fetchFn);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Gamification surface — tier, badges, OAI, /scoring, wallet activity,
+// SIMD feed, audit log. All read-only. Same `ApiError` semantics as
+// the other read endpoints.
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * REST-M8 aggregate: tier + tenure + client + OAI in one round-trip.
+ * Primary fetch for the `/v/:idOrVote` hub. `oai` is `null` when the
+ * validator is known but gated out of the OAI surface (unclaimed /
+ * opted-out / identity-drift); the rest stays populated.
+ */
+export function fetchScoring(
+  idOrVote: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<ScoringResponse> {
+  const safe = encodeURIComponent(idOrVote);
+  return call<ScoringResponse>(`/v1/validators/${safe}/scoring`, fetchFn);
+}
+
+/**
+ * Parent-resource metadata for a registered operator wallet. 404s
+ * when no active registration exists (expired attestations are
+ * filtered server-side).
+ */
+export function fetchOperatorWallet(
+  wallet: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<OperatorWalletResponse> {
+  const safe = encodeURIComponent(wallet);
+  return call<OperatorWalletResponse>(`/v1/operator-wallets/${safe}`, fetchFn);
+}
+
+/**
+ * Per-day tx activity for a registered operator wallet. The response
+ * is sparse — days with zero activity are omitted; clients zero-fill
+ * at draw time. `txFeesLamports` is `null` everywhere today (Phase 4
+ * ships tx counts only; fee anchoring planned).
+ *
+ * `days` is clamped server-side to 1-365.
+ */
+export function fetchOperatorWalletActivity(
+  wallet: string,
+  days = 365,
+  fetchFn: typeof fetch = fetch,
+): Promise<OperatorWalletActivityResponse> {
+  const safe = encodeURIComponent(wallet);
+  const safeDays = Math.max(1, Math.min(Math.floor(days), 365));
+  return call<OperatorWalletActivityResponse>(
+    `/v1/operator-wallets/${safe}/activity?days=${safeDays}`,
+    fetchFn,
+  );
+}
+
+/**
+ * AI-curated SIMD proposals (Phase 5 — only `reviewed_at IS NOT NULL`
+ * rows surface). Empty list today in every deployment until the
+ * GitHub-Discussions mirror job ships.
+ */
+export function fetchSimdProposals(
+  opts: { limit?: number } = {},
+  fetchFn: typeof fetch = fetch,
+): Promise<SimdProposalListResponse> {
+  const qs = opts.limit !== undefined ? `?limit=${opts.limit}` : '';
+  return call<SimdProposalListResponse>(`/v1/simd-proposals${qs}`, fetchFn);
+}
+
+/**
+ * Append-only forensic audit log for a validator's claim surface.
+ * Used by the hub's Audit panel to surface identity-rotation events
+ * (when `priorIdentityPubkey` is non-null on a `reclaim` event, the
+ * operator should investigate).
+ */
+export function fetchClaimAudit(
+  vote: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<ClaimAuditResponse> {
+  const safe = encodeURIComponent(vote);
+  return call<ClaimAuditResponse>(`/v1/claims/${safe}/audit`, fetchFn);
 }

@@ -60,6 +60,31 @@
   --color-status-info-fg: var(--color-sky-900);
   --color-status-neutral-bg: var(--color-zinc-200);
   --color-status-neutral-fg: var(--color-zinc-700);
+
+  /*
+   * Node Tier tokens. One family per tier name; `-50` for soft bg
+   * fills, `-500` for the primary mark colour, `-900` for ink-on-light.
+   * The visual narrative ladders from `forge` (the brand violet — top
+   * of the craft) through industrial greys (`anvil`) and a warmer
+   * hearth tone, down to a muted `kindling` / `unrated`. The names
+   * are intentional ("craft over gear", not "Diamond/Titanium") —
+   * see docs/scoring.md.
+   */
+  --color-tier-forge-50: var(--color-brand-50);
+  --color-tier-forge-500: var(--color-brand-500);
+  --color-tier-forge-900: var(--color-brand-900);
+  --color-tier-anvil-50: var(--color-zinc-100);
+  --color-tier-anvil-500: var(--color-zinc-600);
+  --color-tier-anvil-900: var(--color-zinc-900);
+  --color-tier-hearth-50: var(--color-amber-50);
+  --color-tier-hearth-500: var(--color-amber-600);
+  --color-tier-hearth-900: var(--color-amber-900);
+  --color-tier-kindling-50: var(--color-zinc-50);
+  --color-tier-kindling-500: var(--color-zinc-500);
+  --color-tier-kindling-900: var(--color-zinc-700);
+  --color-tier-unrated-50: var(--color-zinc-50);
+  --color-tier-unrated-500: var(--color-zinc-400);
+  --color-tier-unrated-900: var(--color-zinc-600);
 }
 
 /*
@@ -85,6 +110,27 @@
   --color-status-info-fg: var(--color-sky-100);
   --color-status-neutral-bg: var(--color-zinc-800);
   --color-status-neutral-fg: var(--color-zinc-300);
+
+  /* Tier tokens dark variants — `-50` becomes a muted dark fill, `-500`
+     keeps its identity (chart marks stay legible), `-900` becomes a
+     light ink. Mirror the light layout: forge keeps brand violet,
+     anvil/kindling/unrated land in the zinc family at dark-appropriate
+     levels, hearth uses a deepened amber. */
+  --color-tier-forge-50: color-mix(in oklab, var(--color-brand-900) 30%, transparent);
+  --color-tier-forge-500: var(--color-brand-400);
+  --color-tier-forge-900: var(--color-brand-100);
+  --color-tier-anvil-50: color-mix(in oklab, var(--color-zinc-700) 35%, transparent);
+  --color-tier-anvil-500: var(--color-zinc-400);
+  --color-tier-anvil-900: var(--color-zinc-100);
+  --color-tier-hearth-50: color-mix(in oklab, var(--color-amber-900) 30%, transparent);
+  --color-tier-hearth-500: var(--color-amber-400);
+  --color-tier-hearth-900: var(--color-amber-100);
+  --color-tier-kindling-50: color-mix(in oklab, var(--color-zinc-800) 30%, transparent);
+  --color-tier-kindling-500: var(--color-zinc-400);
+  --color-tier-kindling-900: var(--color-zinc-200);
+  --color-tier-unrated-50: color-mix(in oklab, var(--color-zinc-800) 25%, transparent);
+  --color-tier-unrated-500: var(--color-zinc-500);
+  --color-tier-unrated-900: var(--color-zinc-300);
 }
 
 :root {
