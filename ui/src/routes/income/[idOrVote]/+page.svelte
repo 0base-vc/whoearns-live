@@ -151,7 +151,11 @@
             '@type': 'ListItem',
             position: 2,
             name: history.name ?? shortenPubkey(history.vote, 6, 6),
-            item: `${SITE_URL}/income/${history.vote}`,
+            // Canonical surface (PR3 flip) — point the breadcrumb at
+            // the hub so the structured-data URL matches the page's
+            // `<link rel="canonical">` and Google's structured-data
+            // linter doesn't flag a URL/canonical mismatch.
+            item: `${SITE_URL}/v/${history.vote}`,
           },
         ],
       },
@@ -160,7 +164,8 @@
         name: `${history.name ?? shortenPubkey(history.vote, 6, 6)} — Solana validator income | ${SITE_NAME}`,
         inLanguage: 'en',
         description: operatorNarrative ?? pageDescription,
-        url: `${SITE_URL}/income/${history.vote}`,
+        // Same canonical-alignment: Dataset URL points at the hub.
+        url: `${SITE_URL}/v/${history.vote}`,
         creator: { '@type': 'Organization', name: '0base.vc' },
         license: 'https://creativecommons.org/publicdomain/zero/1.0/',
         keywords: ['Solana', 'validator', 'MEV', 'Jito', 'block fees', history.vote],
@@ -293,20 +298,26 @@
 </svelte:head>
 
 <!--
-  Breadcrumb back to the validator hub. The income page is the
+  Breadcrumb back to the validator overview. The income page is the
   drill-down for operators who want the per-epoch receipts; for a
-  delegator who landed here from an external link, the hub is the
-  more useful overview. Cross-link lets either audience flip
-  context without a full search.
+  delegator who landed here from an external link, the overview is
+  the more useful page. Single-link breadcrumb uses the WAI-ARIA
+  Breadcrumb pattern (`<nav>` + `<ol>` + `<li>`) so screen readers
+  announce the landmark consistently. Link gets a 44×44 tap target
+  via min-h/inline-flex so mobile/keyboard users can hit it.
 -->
 <nav aria-label="Breadcrumb" class="mb-3">
-  <a
-    href={`/v/${history.vote}`}
-    class="inline-flex items-center gap-1 text-xs text-[color:var(--color-text-muted)] hover:text-[color:var(--color-brand-500)] hover:underline"
-  >
-    <span aria-hidden="true">←</span>
-    Validator hub
-  </a>
+  <ol class="flex list-none flex-wrap gap-2 p-0">
+    <li>
+      <a
+        href={`/v/${history.vote}`}
+        class="inline-flex min-h-11 items-center gap-1 text-xs text-[color:var(--color-text-muted)] hover:text-[color:var(--color-brand-500)] hover:underline"
+      >
+        <span aria-hidden="true">←</span>
+        Validator overview
+      </a>
+    </li>
+  </ol>
 </nav>
 
 <!-- ─────────── 1. Validator hero (identity + recent income) ─────────── -->

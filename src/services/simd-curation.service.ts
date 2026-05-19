@@ -252,10 +252,15 @@ const FORBIDDEN_VOTING_PHRASES = [
  *     deliberately EXCLUDED: they're legitimate whitespace in a
  *     multi-line summary, and `parseCurationOutput` keeps the
  *     summary's internal newlines.
+ *   - Unicode text-direction-override codepoints (U+202A-U+202E,
+ *     U+2066-U+2069). Without rejecting these a malicious upstream
+ *     SIMD title or curator output can right-to-left-flip the
+ *     surrounding hub card chrome — same posture migration 0035
+ *     applies to `narrativeOverride`.
  */
 const FORBIDDEN_CHARS =
   // eslint-disable-next-line no-control-regex -- intentional C0/C1 rejection
-  /[<>{}`]|javascript:|data:|\]\(|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/i;
+  /[<>{}`]|javascript:|data:|\]\(|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202A-\u202E\u2066-\u2069]/i;
 
 /**
  * Minimum share of a summary's characters that must be Latin-1
@@ -314,6 +319,11 @@ export function parseCurationOutput(raw: string): CurationOutput | null {
     if (q.length > QUESTION_MAX_CHARS) return null;
     if (FORBIDDEN_CHARS.test(q)) return null;
     if (FORBIDDEN_VOTING_PHRASES.some((re) => re.test(q))) return null;
+    // The English-only `FORBIDDEN_VOTING_PHRASES` set can't see
+    // partisan questions written in another script. Require each
+    // question be predominantly Latin-1 — same posture the summary
+    // check applies, just per-question.
+    if (!summaryIsPredominantlyLatin(q)) return null;
   }
   return { summary, questions: lines };
 }

@@ -32,7 +32,13 @@ export const load: PageLoad = async ({ params, fetch: fetchFn }) => {
       fetchScoring(idOrVote, fetchFn),
       // History is allowed to fail / be empty (new validator). The
       // identity hero can fall back to vote-pubkey-only rendering.
-      fetchValidatorHistory(idOrVote, 15, fetchFn).catch(() => null),
+      //
+      // Limit 30 (≈ 60 mainnet days) so the IncomeSummaryStrip's
+      // "Last 60 days" tile has real data to sum. Earlier the limit
+      // was 15 which only covered ~30 days; the strip's "Lifetime"
+      // tile (since renamed to "Last 60 days") was capped by the
+      // limit, producing an honesty failure.
+      fetchValidatorHistory(idOrVote, 30, fetchFn).catch(() => null),
     ]);
 
     // Aggregate last-30-day income from the history rows. Each row
@@ -74,15 +80,21 @@ export const load: PageLoad = async ({ params, fetch: fetchFn }) => {
 
 /**
  * Sum leader-receipt fees + on-chain Jito tips across the most recent
- * CLOSED epochs in `history`. Returns a decimal-string lamports
- * total (compatible with the bigint formatting helpers in
- * `lib/format.ts`). Returns `null` when no closed-epoch rows are
- * available (brand-new validator).
+ * CLOSED epochs in `history`. Returns a decimal-string LAMPORTS total
+ * — callers do the lamports→SOL conversion via
+ * `lamportsStringToSolNumber` from `$lib/format`. Returns `null`
+ * when no closed-epoch rows are available (brand-new validator).
  *
  * "Last 30 days" is approximated as "the 15 most recent closed
  * epochs" since mainnet epochs are ~2 days. We deliberately don't
  * filter by an absolute date — that would silently shrink the
  * window for validators with intermittent leader slots.
+ *
+ * Earlier revision returned this string and let the caller pass it
+ * to `formatSolFixed`, which expects a SOL string. The mismatch
+ * inflated the trust-summary income line by 10⁹×. The function
+ * still returns lamports (the precise source); the caller now
+ * converts via `lamportsStringToSolNumber` before formatting.
  */
 function aggregateLast30dIncome(
   history: Awaited<ReturnType<typeof fetchValidatorHistory>> | null,

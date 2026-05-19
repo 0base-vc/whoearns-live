@@ -124,7 +124,10 @@
         url: SITE_URL,
         potentialAction: {
           '@type': 'SearchAction',
-          target: `${SITE_URL}/income/{idOrVote}`,
+          // Hub `/v/<idOrVote>` is the canonical per-validator
+          // surface (PR3 canonical flip). Google sitelinks
+          // search-box routes here.
+          target: `${SITE_URL}/v/{idOrVote}`,
           'query-input': 'required name=idOrVote',
         },
       },

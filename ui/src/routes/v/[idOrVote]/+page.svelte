@@ -70,7 +70,7 @@
     trustSummary,
     unratedReason,
   } from '$lib/tier';
-  import { formatSolFixed, formatTimestamp } from '$lib/format';
+  import { formatTimestamp, lamportsStringToSolNumber } from '$lib/format';
   import { SITE_URL } from '$lib/site';
   import {
     fetchClaimAudit,
@@ -90,6 +90,19 @@
 
   const scoring = $derived(data.scoring);
   const history = $derived(data.history);
+
+  // Operator narrative — short note authored by the validator's
+  // operator (claim flow stores it on `profile.narrativeOverride`).
+  // The income page already renders this; the hub now mirrors it
+  // because PR3's canonical flip moved the SEO surface here. A
+  // missing narrative leaves the section absent — no placeholder.
+  const operatorNarrative = $derived.by<string | null>(() => {
+    const override = history?.profile?.narrativeOverride;
+    if (override !== null && override !== undefined && override.trim().length > 0) {
+      return override.trim();
+    }
+    return null;
+  });
 
   // Identity rendering — falls back to a truncated vote pubkey when
   // the validator hasn't published a moniker via validator-info.
@@ -175,6 +188,12 @@
   // wave. Without this the previous validator's wallet activity
   // could land AFTER the new validator's, poisoning the panel.
   let fanOutCtrl: AbortController | null = null;
+  // The vote pubkey the current fan-out was kicked off for. Used
+  // by `afterNavigate` to skip needless re-fans when the user
+  // anchor-jumps inside the same `/v/[vote]` page (every same-page
+  // nav re-fired the entire wave previously — 6-15 wasted requests
+  // per leaderboard-browse churn).
+  let lastFanOutVote: string | null = null;
 
   /** Reset every CSR-deferred state slot — used on first mount AND every param-only nav. */
   function resetCsrState(): void {
@@ -310,6 +329,7 @@
   onMount(() => {
     refreshOwnerHint(scoring.vote);
     fanOutCtrl = new AbortController();
+    lastFanOutVote = scoring.vote;
     void loadCsrPanels(scoring.vote, fanOutCtrl.signal);
   });
 
@@ -319,15 +339,22 @@
   // pubkeys + audit timeline would persist on the new page. The
   // `afterNavigate` callback runs after every successful nav AND
   // skips the first-mount case (delivered by `onMount` above).
+  //
+  // The same-vote guard skips a same-page anchor click (e.g. share
+  // widget's URL replace, browser back to the same vote) — `nav`
+  // fires on every successful navigation regardless of param
+  // change, so without the equality check we re-fired the entire
+  // fan-out for every in-page anchor jump.
   afterNavigate((nav) => {
     // Skip first mount — onMount already kicked things off.
     if (nav.from === null) return;
-    // Skip navs that didn't actually change the vote (e.g. anchor
-    // scroll, identical URL). `scoring.vote` is the param the SSR
-    // load resolved, so it stays canonical across vote↔identity
-    // route lookups.
+    // Skip same-vote navs (anchor jumps, identical URL). The
+    // `scoring.vote` is the param the SSR load resolved; it stays
+    // canonical across vote↔identity route lookups.
+    if (lastFanOutVote === scoring.vote) return;
     fanOutCtrl?.abort();
     fanOutCtrl = new AbortController();
+    lastFanOutVote = scoring.vote;
     resetCsrState();
     refreshOwnerHint(scoring.vote);
     void loadCsrPanels(scoring.vote, fanOutCtrl.signal);
@@ -362,9 +389,17 @@
   // pessimistic floor that drives the tier).
   const skipRateValue = $derived(skipRate(tierWindow));
 
-  // Income last 30d — SSR-aggregated lamports total. Format as 3-decimal
-  // SOL (matches the income page hero convention).
-  const incomeLast30dSol = $derived(formatSolFixed(data.incomeLast30dLamports, 3));
+  // Income last 30d — SSR-aggregated LAMPORTS total. Convert to SOL
+  // via `lamportsStringToSolNumber` before formatting. Earlier
+  // revision passed the lamports string directly to `formatSolFixed`
+  // (which assumes SOL input) — that inflated the trust-summary
+  // line by 10⁹×. The bug was latent since PR1 because the hub
+  // wasn't the canonical surface; PR3's canonical flip surfaced it.
+  const incomeLast30dSol = $derived.by(() => {
+    if (data.incomeLast30dLamports === null) return null;
+    const sol = lamportsStringToSolNumber(data.incomeLast30dLamports);
+    return sol === null ? null : sol.toFixed(3);
+  });
 
   // Trust summary one-liner under the hero title. When fields are
   // missing the resolver renders em-dashes — never fake values.
@@ -375,7 +410,7 @@
       clientKind: scoring.client.kind,
       clientVersion: scoring.client.version,
       skipRate: skipRateValue,
-      incomeLast30dSol: data.incomeLast30dLamports === null ? null : incomeLast30dSol,
+      incomeLast30dSol: incomeLast30dSol,
     }),
   );
 
@@ -573,6 +608,20 @@
   {isOwnerHint}
   sentinel={heroSentinel}
 />
+
+<!--
+  Operator narrative — short note authored by the operator via the
+  claim flow. The income page already surfaces this; mirroring on
+  the hub keeps the trust signal on the now-canonical surface.
+  Hidden when no narrative is set.
+-->
+{#if operatorNarrative !== null}
+  <Card tone="panel" class="mt-6">
+    <p class="text-sm leading-relaxed text-[color:var(--color-text-default)]">
+      {operatorNarrative}
+    </p>
+  </Card>
+{/if}
 
 <!-- ─────────── 2. Tier card + Tenure/Client stack ─────────── -->
 <div class="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-12">
@@ -840,14 +889,25 @@
   response, render up to 6 cards in a 2-column grid on desktop.
 -->
 {#if !simdLoading && simdItems.length > 0}
-  <section class="mt-6 flex flex-col gap-4" aria-labelledby="simd-curations-heading">
+  <!--
+    Live region so AT users get told when the SIMD cards land. The
+    section is conditionally mounted (no skeleton — the empty case
+    is far more common than the loaded one), so a screen reader
+    scanning past this point during the fetch needs a status
+    announcement when content appears.
+  -->
+  <section
+    class="mt-6 flex flex-col gap-4"
+    aria-labelledby="simd-curations-heading"
+    aria-live="polite"
+  >
     <header class="px-1">
       <h2 id="simd-curations-heading" class="text-base font-semibold tracking-tight">
-        Governance — recent SIMDs
+        Recent SIMD proposals
       </h2>
       <p class="mt-1 text-xs text-[color:var(--color-text-muted)]">
-        AI-summarised proposals from the SIMD repository so operators can vote informed. The summary
-        + key questions are curated; the source link is canonical.
+        AI-summarised governance proposals — read the key questions a thoughtful operator should
+        answer before voting. Status pills mirror the upstream proposal state.
       </p>
     </header>
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">

@@ -1,6 +1,27 @@
 import type pg from 'pg';
 import type { SimdProposal } from '../../types/domain.js';
 
+/**
+ * Strip the same unsafe codepoints the curation-output parser rejects:
+ * C0/C1 control characters (except TAB/LF/CR, which are legitimate)
+ * and the Unicode text-direction-override block (U+202A-U+202E,
+ * U+2066-U+2069). Applied to `title` + `status` on `upsertSource`
+ * because those flow straight from a third-party SIMD PR into the
+ * hub `SimdProposalCard` — the only filter previously was a 400-char
+ * trim, which left BiDi-override smuggling open.
+ *
+ * Trims surrounding whitespace as a courtesy; the caller still
+ * clamps length downstream.
+ */
+/* eslint-disable no-control-regex -- intentional C0/C1 + BiDi-override strip */
+const UNSAFE_CHARS_RE =
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202A-\u202E\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
+
+function stripUnsafeChars(raw: string): string {
+  return raw.replace(UNSAFE_CHARS_RE, '').trim();
+}
+
 interface SimdProposalRow {
   simd_number: number;
   title: string;
@@ -133,13 +154,19 @@ export class SimdProposalsRepository {
    * the review state are LEFT UNTOUCHED — they're owned by separate
    * write paths (curation pipeline + manual review).
    *
-   * `title` is trimmed + clamped to `SIMD_TITLE_MAX_CHARS` before the
-   * write (SEC-M3): it comes from a third-party SIMD PR and feeds the
-   * Anthropic curation prompt, so an over-length / instruction-shaped
-   * title is bounded here as well as by the DB CHECK.
+   * `title` and `status` come from a third-party SIMD PR and render
+   * into the hub `SimdProposalCard`. Two stripping passes apply:
+   *   - clamp to `SIMD_TITLE_MAX_CHARS` (DB CHECK + curation-prompt
+   *     bound)
+   *   - strip Unicode text-direction-override + C0/C1 control
+   *     codepoints. Without this filter a malicious PR title with
+   *     embedded U+202E can right-to-left-flip surrounding hub
+   *     card chrome in a phishing-friendly way — same posture
+   *     migration 0035 takes for `narrativeOverride`.
    */
   async upsertSource(input: SimdProposalUpsert): Promise<void> {
-    const safeTitle = input.title.trim().slice(0, SIMD_TITLE_MAX_CHARS);
+    const safeTitle = stripUnsafeChars(input.title).slice(0, SIMD_TITLE_MAX_CHARS);
+    const safeStatus = stripUnsafeChars(input.status).slice(0, 64);
     await this.pool.query(
       `INSERT INTO simd_proposals (simd_number, title, status, source_url, body_sha256)
        VALUES ($1, $2, $3, $4, $5)
@@ -149,7 +176,7 @@ export class SimdProposalsRepository {
              source_url  = EXCLUDED.source_url,
              body_sha256 = EXCLUDED.body_sha256,
              updated_at  = NOW()`,
-      [input.simdNumber, safeTitle, input.status, input.sourceUrl, input.bodySha256],
+      [input.simdNumber, safeTitle, safeStatus, input.sourceUrl, input.bodySha256],
     );
   }
 

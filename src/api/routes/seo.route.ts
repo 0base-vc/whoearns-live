@@ -135,8 +135,13 @@ const seoRoutes: FastifyPluginAsync<SeoRoutesDeps> = async (
       );
     }
     for (const vote of votes) {
+      // The validator hub at `/v/<vote>` is the canonical surface
+      // (see PR3's canonical-flip on the income page). Sitemap
+      // emits the hub URL so crawlers index the right page; the
+      // `/income/<vote>` route still resolves for older inbound
+      // links but is no longer advertised here.
       urls.push(
-        `  <url><loc>${SITE_URL}/income/${vote}</loc><changefreq>daily</changefreq><priority>0.6</priority></url>`,
+        `  <url><loc>${SITE_URL}/v/${vote}</loc><changefreq>daily</changefreq><priority>0.7</priority></url>`,
       );
     }
 
@@ -224,7 +229,8 @@ Sitemap: ${SITE_URL}/sitemap.xml
 ## Core pages
 
 - ${SITE_URL}/: Leaderboard — top validators by live-trend income per slot
-- ${SITE_URL}/income/{vote}: Per-validator history (vote OR identity pubkey)
+- ${SITE_URL}/v/{vote}: Validator hub — tier, income summary, wallet activity, claim audit, governance, OAI (vote OR identity pubkey)
+- ${SITE_URL}/income/{vote}: Per-epoch history table — the operator-facing drill-down for the hub (kept for older inbound links)
 - ${SITE_URL}/compare: Side-by-side comparison of two validators
 - ${SITE_URL}/glossary: Plain-language definitions of Solana validator terms
 - ${SITE_URL}/faq: Frequently asked questions

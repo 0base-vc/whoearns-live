@@ -2,38 +2,47 @@
   IncomeSummaryStrip — at-a-glance income context for the hub.
 
   Two halves on desktop, stacked on mobile:
-    - Three KpiStat tiles — lifetime / last 30 days / last 7 days
-      total income (fees + tips). All driven by the SSR-loaded
-      history rows; no extra fetch.
+    - Three KpiStat tiles — "Last 60 days" / "Last 30 days" / "Last 7
+      days" total income (fees + tips), driven by the SSR-loaded
+      history rows. NOT lifetime — earlier copy claimed "Lifetime"
+      but the SSR loader caps history at 30 closed epochs, so the
+      tile honestly reports a recent window instead.
     - A 16-epoch mini sparkline of total income per closed epoch,
-      with a deep-link to `/income/:vote` for the full table.
+      with a deep-link to `/income/:vote` for the full table (gated
+      so we don't surface the link when there's nothing to drill
+      into).
 
   Cold-start ("brand-new validator, no closed rows") collapses to a
-  single muted line — "Income data starts populating once this
-  validator finalizes its first epoch." The hub keeps the section
-  visible (shorter, not sadder) but skips the KPIs + sparkline so a
-  visitor isn't misled by ◎0.000 placeholders.
+  single muted line — "This validator hasn't earned its first epoch
+  of fees yet." The hub keeps the section visible (shorter, not
+  sadder) but skips the KPIs + sparkline so a visitor isn't misled
+  by ◎0.000 placeholders.
 
-  Honesty in the sums: every row that wasn't yet `isFinal=true` is
-  excluded (the running epoch's partial total would inflate "last
-  N days"). If a final row's fee+tip fields are null (rare — only
-  during a backfill window) it's treated as zero, but a row with
-  ZERO actual income is preserved (legitimately a quiet epoch is
-  different from a missing one).
+  Lamports/SOL conversion: every numeric tile and the sparkline pass
+  through `lamportsStringToSolNumber` (`$lib/format`) before
+  formatting. Earlier revision fed the lamports bigint directly to
+  `formatSolFixed`, which expects an already-converted SOL string —
+  result was a 10⁹× inflation on every claimed validator. Pinned by
+  the unit tests for this component's helpers.
+
+  Honesty in the sums: rows that are not `isFinal=true` are excluded
+  (the running epoch's partial total would inflate every window).
+  Fee/tip fields that are `null` (rare — backfill window) are skipped
+  but a row with literally zero income is preserved (a legitimately
+  quiet epoch is different from missing data).
 
   Props:
     - `vote`: vote pubkey, used to build the `/income/:vote` deep
       link to the full epoch table.
     - `items`: history items (newest-first by API contract). May be
       empty for never-finalized validators.
-    - `epochDurationDaysApprox`: rough days per epoch (mainnet ≈ 2)
-      used to convert "last N rows" into the human window. Allowed
-      to be passed by the caller for testability.
+    - `epochDurationDaysApprox`: rough days per epoch (mainnet ≈ 2,
+      devnet ≈ 0.4) — surfaces the right window labels per cluster.
 -->
 <script lang="ts">
   import type { ValidatorEpochRecord } from '$lib/types';
   import KpiStat from './KpiStat.svelte';
-  import { formatSolFixed } from '$lib/format';
+  import { lamportsStringToSolNumber } from '$lib/format';
 
   interface Props {
     vote: string;
@@ -76,28 +85,31 @@
     return { sum, hasAny };
   }
 
-  // Approximate "last 30 days" = 15 closed epochs (mainnet epochs ≈ 2 days).
-  // Approximate "last 7 days"  = 4 closed epochs. `$derived` so a
-  // parent that re-passes `epochDurationDaysApprox` (e.g. a
-  // future devnet variant) updates the window without remount.
+  // Window sizes (in closed-epoch rows) for the three tiles. `$derived`
+  // so a parent that re-passes `epochDurationDaysApprox` (e.g. a
+  // devnet variant) updates the windows without remount.
+  const rows60d = $derived(Math.max(1, Math.round(60 / epochDurationDaysApprox)));
   const rows30d = $derived(Math.max(1, Math.round(30 / epochDurationDaysApprox)));
   const rows7d = $derived(Math.max(1, Math.round(7 / epochDurationDaysApprox)));
 
-  const lifetime = $derived(sumIncomeLamports(finalRows));
+  const last60d = $derived(sumIncomeLamports(lastNRows(rows60d)));
   const last30d = $derived(sumIncomeLamports(lastNRows(rows30d)));
   const last7d = $derived(sumIncomeLamports(lastNRows(rows7d)));
 
   /**
    * Format a lamports bigint as a 3-decimal SOL string, or `—` when
-   * we have no income data for the window. Matches the income page
-   * hero's same convention.
+   * we have no income data for the window. `lamportsStringToSolNumber`
+   * does the lossy ÷ 1e9 conversion (acceptable here — humans don't
+   * need precision past 6 decimals, and SOL totals stay well within
+   * Number.MAX_SAFE_INTEGER for realistic per-validator income).
    */
   function formatLamports(state: { sum: bigint; hasAny: boolean }): string {
     if (!state.hasAny) return '—';
-    return formatSolFixed(state.sum.toString(), 3);
+    const sol = lamportsStringToSolNumber(state.sum.toString());
+    return sol === null ? '—' : sol.toFixed(3);
   }
 
-  const lifetimeLabel = $derived(formatLamports(lifetime));
+  const last60dLabel = $derived(formatLamports(last60d));
   const last30dLabel = $derived(formatLamports(last30d));
   const last7dLabel = $derived(formatLamports(last7d));
 
@@ -111,15 +123,23 @@
   const sparkRows = $derived(lastNRows(SPARK_ROWS).slice().reverse());
 
   /**
-   * Per-epoch SOL totals for the sparkline. Pure numbers (not strings)
-   * because we need to map to polyline points; we use the SOL string
-   * from the API (already lamports / 1e9) and parse it once.
+   * Per-epoch SOL totals for the sparkline. Computed from lamports
+   * (the precise source of truth) and narrowed to Number only for
+   * the viewBox pixel math. The API also ships `blockFeesTotalSol`
+   * strings but parsing those introduces precision drift; staying
+   * in bigint until the last step keeps the tile sums + sparkline
+   * heights consistent.
    */
   const sparkPoints = $derived(
     sparkRows.map((row) => {
-      const fees = row.blockFeesTotalSol === null ? 0 : Number(row.blockFeesTotalSol);
-      const tips = row.blockTipsTotalSol === null ? 0 : Number(row.blockTipsTotalSol);
-      const total = (Number.isFinite(fees) ? fees : 0) + (Number.isFinite(tips) ? tips : 0);
+      let lamports = 0n;
+      try {
+        if (row.blockFeesTotalLamports !== null) lamports += BigInt(row.blockFeesTotalLamports);
+        if (row.blockTipsTotalLamports !== null) lamports += BigInt(row.blockTipsTotalLamports);
+      } catch {
+        // Malformed lamports string → treat as zero rather than NaN.
+      }
+      const total = lamportsStringToSolNumber(lamports.toString()) ?? 0;
       return { epoch: row.epoch, total };
     }),
   );
@@ -145,7 +165,16 @@
   });
 
   /** True when no closed epoch has any income data — drives the cold-start state. */
-  const isColdStart = $derived(!lifetime.hasAny && !last30d.hasAny && !last7d.hasAny);
+  const isColdStart = $derived(!last60d.hasAny && !last30d.hasAny && !last7d.hasAny);
+
+  /** Epoch range label — `oldest–newest` for the sparkline. Hidden when only one epoch is in scope. */
+  const sparkRangeLabel = $derived.by(() => {
+    if (sparkPoints.length < 2) return null;
+    const first = sparkPoints[0]?.epoch;
+    const last = sparkPoints.at(-1)?.epoch;
+    if (first === undefined || last === undefined) return null;
+    return `${first}–${last}`;
+  });
 </script>
 
 <section
@@ -154,39 +183,57 @@
 >
   <header class="flex items-baseline justify-between gap-2 pb-3">
     <h2 id="income-summary-heading" class="text-base font-semibold tracking-tight">
-      Income summary
+      Block income — recent windows
     </h2>
-    <a href={`/income/${vote}`} class="text-xs text-[color:var(--color-brand-500)] hover:underline">
-      See full epoch history ›
-    </a>
+    {#if !isColdStart}
+      <a
+        href={`/income/${vote}`}
+        class="inline-flex min-h-11 items-center text-xs text-[color:var(--color-brand-500)] hover:underline"
+      >
+        Full epoch history ›
+      </a>
+    {/if}
   </header>
 
   {#if isColdStart}
     <p class="text-sm text-[color:var(--color-text-muted)]">
-      Income data starts populating once this validator finalizes its first epoch with leader slots.
+      This validator hasn't earned its first epoch of fees yet. The summary appears here once a
+      closed epoch with leader slots lands.
     </p>
   {:else}
     <div class="grid grid-cols-3 gap-3 sm:gap-4">
       <KpiStat
-        label="Lifetime"
+        label="Last 60 days"
         suffix="SOL"
-        title="Total block fees + Jito tips across every closed epoch."
+        title="Sum of fees + tips over the {rows60d} most-recent closed epochs (~60 days). Excludes the running epoch."
       >
-        {lifetimeLabel}
+        {#if last60dLabel === '—'}
+          <span aria-label="no data"><span aria-hidden="true">—</span></span>
+        {:else}
+          {last60dLabel}
+        {/if}
       </KpiStat>
       <KpiStat
-        label="Last 30d"
+        label="Last 30 days"
         suffix="SOL"
-        title="Sum of fees + tips over the {rows30d} most-recent closed epochs (~30 days)."
+        title="Sum of fees + tips over the {rows30d} most-recent closed epochs (~30 days). Excludes the running epoch."
       >
-        {last30dLabel}
+        {#if last30dLabel === '—'}
+          <span aria-label="no data"><span aria-hidden="true">—</span></span>
+        {:else}
+          {last30dLabel}
+        {/if}
       </KpiStat>
       <KpiStat
-        label="Last 7d"
+        label="Last 7 days"
         suffix="SOL"
-        title="Sum of fees + tips over the {rows7d} most-recent closed epochs (~7 days)."
+        title="Sum of fees + tips over the {rows7d} most-recent closed epochs (~7 days). Excludes the running epoch."
       >
-        {last7dLabel}
+        {#if last7dLabel === '—'}
+          <span aria-label="no data"><span aria-hidden="true">—</span></span>
+        {:else}
+          {last7dLabel}
+        {/if}
       </KpiStat>
     </div>
 
@@ -203,21 +250,23 @@
           preserveAspectRatio="none"
           class="h-10 flex-1 text-[color:var(--color-brand-500)]"
           role="img"
-          aria-label="Last {sparkPoints.length} closed epochs income trend"
+          aria-label="Income trend across the last {sparkPoints.length} closed epochs"
         >
           <polyline
             points={sparkPath}
             fill="none"
             stroke="currentColor"
-            stroke-width="1.5"
+            stroke-width="2"
             stroke-linejoin="round"
             stroke-linecap="round"
             vector-effect="non-scaling-stroke"
           />
         </svg>
-        <span class="text-xs tabular-nums text-[color:var(--color-text-muted)]">
-          {sparkPoints[0]?.epoch ?? ''}–{sparkPoints.at(-1)?.epoch ?? ''}
-        </span>
+        {#if sparkRangeLabel !== null}
+          <span class="text-xs tabular-nums text-[color:var(--color-text-muted)]">
+            {sparkRangeLabel}
+          </span>
+        {/if}
       </div>
       <!--
         sr-only data list mirrors the audit-list pattern — AT users
