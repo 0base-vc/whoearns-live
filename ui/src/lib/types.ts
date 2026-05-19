@@ -173,6 +173,19 @@ export interface ClaimStatus {
     count: number;
     capReached: boolean;
     oldestExpiresAt: string | null;
+    /**
+     * Per-wallet entries — full pubkey + operator-chosen label +
+     * registration/expiry windows. Surfaced on the response so the
+     * hub can fan-out `/v1/operator-wallets/:wallet/activity` calls
+     * per wallet without scraping the audit log. All fields here
+     * are public (operator-DECLARED affiliations).
+     */
+    entries: ReadonlyArray<{
+      wallet: string;
+      label: string;
+      registeredAt: string;
+      expiresAt: string;
+    }>;
   };
 }
 

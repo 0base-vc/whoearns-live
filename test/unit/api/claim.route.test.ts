@@ -165,7 +165,7 @@ describe('GET /v1/claims/:vote', () => {
       claimed: false,
       profile: null,
       githubLink: null,
-      wallets: { count: 0, capReached: false, oldestExpiresAt: null },
+      wallets: { count: 0, capReached: false, oldestExpiresAt: null, entries: [] },
     });
     await app.close();
   });
@@ -208,6 +208,15 @@ describe('GET /v1/claims/:vote', () => {
     expect(body.wallets.capReached).toBe(false);
     // MIN expiry across the active rows.
     expect(body.wallets.oldestExpiresAt).toBe('2026-05-15T00:00:00.000Z');
+    // Per-wallet entries surface the pubkey + label + windows so the
+    // hub page can fan-out activity heatmaps without scraping audits.
+    expect(body.wallets.entries).toHaveLength(2);
+    expect(body.wallets.entries[0]).toMatchObject({
+      wallet: expect.any(String),
+      label: expect.any(String),
+      registeredAt: expect.any(String),
+      expiresAt: expect.any(String),
+    });
     await app.close();
   });
 

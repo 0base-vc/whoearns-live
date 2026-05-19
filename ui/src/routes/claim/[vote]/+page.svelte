@@ -211,7 +211,7 @@
           // claim they're both empty. Mirrors the `ClaimStatus`
           // shape returned by `GET /v1/claims/:vote`.
           githubLink: null,
-          wallets: { count: 0, capReached: false, oldestExpiresAt: null },
+          wallets: { count: 0, capReached: false, oldestExpiresAt: null, entries: [] },
         };
       } else {
         // Mirror the backend's normalisation: empty/whitespace =
@@ -245,7 +245,7 @@
           githubLink: status.claimed ? status.githubLink : null,
           wallets: status.claimed
             ? status.wallets
-            : { count: 0, capReached: false, oldestExpiresAt: null },
+            : { count: 0, capReached: false, oldestExpiresAt: null, entries: [] },
         };
       }
       // Invalidate the single-use envelope so the UI makes the

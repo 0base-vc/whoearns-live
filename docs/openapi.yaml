@@ -1803,8 +1803,8 @@ components:
             - type: 'null'
         wallets:
           type: object
-          required: [count, capReached, oldestExpiresAt]
-          description: Summary of the validator's ACTIVE (not-expired) registered operator wallets.
+          required: [count, capReached, oldestExpiresAt, entries]
+          description: Summary + per-wallet list of the validator's ACTIVE (not-expired) registered operator wallets.
           properties:
             count:
               type: integer
@@ -1820,6 +1820,35 @@ components:
                 Soonest-expiring ACTIVE wallet attestation — lets a
                 dashboard nudge "re-attest" before a wallet drops out
                 of scoring. `null` when no wallets are registered.
+            entries:
+              type: array
+              description: |
+                Per-wallet entries surfacing the full pubkey + operator-
+                chosen label + registration window. Used by the hub
+                page to fan-out `/v1/operator-wallets/:wallet/activity`
+                calls per wallet without having to scrape the audit
+                log. All fields are public (operator-DECLARED
+                affiliations registered via the Ed25519 co-sign flow).
+              items:
+                type: object
+                required: [wallet, label, registeredAt, expiresAt]
+                properties:
+                  wallet:
+                    type: string
+                    description: Wallet pubkey (base58 ed25519).
+                  label:
+                    type: string
+                    description: Operator-chosen label (e.g. "Hot wallet", "Operations").
+                  registeredAt:
+                    type: string
+                    format: date-time
+                  expiresAt:
+                    type: string
+                    format: date-time
+                    description: |
+                      Attestation expiry — once past, the wallet
+                      drops out of `count` and `entries` until the
+                      operator re-attests.
 
     ValidatorClaimEvent:
       type: object

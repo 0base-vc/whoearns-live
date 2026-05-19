@@ -1,17 +1,24 @@
 <!--
-  Validator Hub `/v/[idOrVote]` — PR 1 (foundation).
+  Validator Hub `/v/[idOrVote]` — PR 1 (foundation) + PR 2 (panels).
 
-  This PR ships:
+  PR 1 shipped:
    - Identity hero with moniker / icon / verified+claim chip / share widget
    - Tier card with TierRing (composite radial + reliability/economic bars)
    - Tenure + Client badges stack
    - Freshness line ("Last refreshed N ago")
-   - Action footer (claim CTA OR soft "Manage profile" hint via `?owner=1` / local-storage)
+   - Action footer (claim CTA OR soft "Manage profile" hint via `?owner=1` / sessionStorage)
 
-  PRs 2 and 3 add the OAI panel, wallet-activity heatmap, audit timeline,
-  income summary strip, SIMD feed, sticky mobile header, and cross-link
-  swap from `/income/[id]` → `/v/[id]`. Plan reference:
-  `/Users/jjangg96/.claude/plans/adaptive-nibbling-ocean.md`.
+  PR 2 adds:
+   - OAI panel (governance + wallet score with ingest-status null branching)
+   - Wallet activity heatmap per registered operator wallet (53×7 grid,
+     log-bucketed intensity, brightest-day star, today outline)
+   - Claim audit timeline (latest 5 inline + `<details>` for older, with
+     ⚠ visual emphasis for identity-rotation re-claims)
+   - CSR `onMount` two-wave fetch (claim+audit, then per-wallet activity)
+
+  PR 3 still adds: income summary strip + sparkline, SIMD feed, sticky
+  mobile tier header, cross-link swap from `/income/[id]` → `/v/[id]`.
+  Plan reference: `/Users/jjangg96/.claude/plans/adaptive-nibbling-ocean.md`.
 
   Design principles honoured:
    - Per-component breakdown is mandatory: TierRing always shows the
@@ -37,6 +44,9 @@
   import TenureBadge from '$lib/components/TenureBadge.svelte';
   import ClientBadge from '$lib/components/ClientBadge.svelte';
   import ShareWidget from '$lib/components/ShareWidget.svelte';
+  import OaiPanel from '$lib/components/OaiPanel.svelte';
+  import ActivityHeatmap from '$lib/components/ActivityHeatmap.svelte';
+  import AuditLogList from '$lib/components/AuditLogList.svelte';
 
   import {
     TIER_LABEL,
@@ -48,6 +58,8 @@
   } from '$lib/tier';
   import { formatSolFixed, formatTimestamp } from '$lib/format';
   import { SITE_URL } from '$lib/site';
+  import { fetchClaimAudit, fetchClaimStatus, fetchOperatorWalletActivity } from '$lib/api';
+  import type { ClaimAuditEvent, ClaimStatus, OperatorWalletActivityResponse } from '$lib/types';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -94,22 +106,85 @@
   // misleading "Manage profile" CTA to a subsequent user just because
   // someone earlier completed the claim flow.
   let isOwnerHint = $state(false);
+
+  // CSR-deferred panel data — claim status + audit + per-wallet
+  // activity. None of these block the initial paint; the hero +
+  // tier card + tenure/client render from the SSR `/scoring`
+  // payload, then these fill in as their fetches resolve.
+  //
+  // All four can fail independently without breaking the page —
+  // the panels render their own loading / empty states from the
+  // `$state` shape. Errors are silently swallowed (the panel
+  // either stays in loading state or renders the empty fallback).
+  let claimStatus = $state<ClaimStatus | null>(null);
+  let claimStatusLoading = $state(true);
+  let auditEvents = $state<ClaimAuditEvent[]>([]);
+  let auditLoading = $state(true);
+  let walletActivity = $state<Map<string, OperatorWalletActivityResponse>>(new Map());
+  let walletActivityLoading = $state(true);
+
   onMount(() => {
+    // Soft owner hint — sessionStorage flag + ?owner=1 query.
     try {
       const url = new URL(page.url.href);
       if (url.searchParams.get('owner') === '1') {
         isOwnerHint = true;
-        return;
-      }
-      const key = `whoearns:owned:${scoring.vote}`;
-      if (sessionStorage.getItem(key) === '1') {
-        isOwnerHint = true;
+      } else {
+        const key = `whoearns:owned:${scoring.vote}`;
+        if (sessionStorage.getItem(key) === '1') {
+          isOwnerHint = true;
+        }
       }
     } catch {
       // Private mode / SSR — soft hint stays off. That's correct,
       // any consumer that needs an auth boundary should use the
       // claim flow's offline signing.
     }
+
+    // Fan-out CSR fetches. Two waves:
+    //   Wave 1: claim status + audit log (independent of each other)
+    //   Wave 2: wallet activity for every registered wallet (depends
+    //           on Wave 1's claim status for the wallet list)
+    //
+    // Audit + claim status run concurrently — both are cheap one-
+    // query lookups on the backend. Wallet activity is wave 2 because
+    // we need the wallet pubkey list from claim status first.
+    void (async () => {
+      const [claim, audit] = await Promise.allSettled([
+        fetchClaimStatus(scoring.vote),
+        fetchClaimAudit(scoring.vote),
+      ]);
+      if (claim.status === 'fulfilled') {
+        claimStatus = claim.value;
+      }
+      claimStatusLoading = false;
+
+      if (audit.status === 'fulfilled') {
+        auditEvents = audit.value.events;
+      }
+      auditLoading = false;
+
+      // Wave 2 — per-wallet activity. Skip entirely when there are
+      // no registered wallets (the heatmap section won't render).
+      const wallets = claim.status === 'fulfilled' ? claim.value.wallets.entries : [];
+      if (wallets.length === 0) {
+        walletActivityLoading = false;
+        return;
+      }
+      const results = await Promise.allSettled(
+        wallets.map((w) => fetchOperatorWalletActivity(w.wallet, 365)),
+      );
+      const next = new Map<string, OperatorWalletActivityResponse>();
+      results.forEach((r, i) => {
+        const wallet = wallets[i];
+        if (wallet === undefined) return;
+        if (r.status === 'fulfilled') {
+          next.set(wallet.wallet, r.value);
+        }
+      });
+      walletActivity = next;
+      walletActivityLoading = false;
+    })();
   });
 
   // Tier card — derive everything from the scoring response. The
@@ -441,7 +516,50 @@
   </div>
 </div>
 
-<!-- ─────────── 3. Action footer (claim CTA / soft owner hint) ─────────── -->
+<!-- ─────────── 3. OAI panel (Operator Activity Index) ─────────── -->
+<div class="mt-6">
+  <OaiPanel oai={scoring.oai} claimed={isClaimed} vote={scoring.vote} />
+</div>
+
+<!--
+  ─────────── 4. Wallet activity heatmaps ───────────
+
+  One panel per registered operator wallet. Section is hidden
+  entirely when the validator has no wallets registered (matches
+  the "shorter page, not sadder" cold-start principle). Loading
+  state shows a single muted line; the panels render as they
+  resolve. `walletActivity` is populated by the second wave of
+  CSR fetches in `onMount`.
+-->
+{#if claimStatus !== null && claimStatus.wallets.entries.length > 0}
+  <div class="mt-6 flex flex-col gap-4">
+    {#each claimStatus.wallets.entries as walletEntry (walletEntry.wallet)}
+      {@const activity = walletActivity.get(walletEntry.wallet)}
+      {#if activity !== undefined}
+        <ActivityHeatmap
+          wallet={walletEntry.wallet}
+          label={walletEntry.label}
+          entries={activity.entries}
+        />
+      {:else if walletActivityLoading}
+        <div
+          class="rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 text-sm text-[color:var(--color-text-muted)]"
+        >
+          Loading activity for {walletEntry.label}…
+        </div>
+      {/if}
+    {/each}
+  </div>
+{/if}
+
+<!-- ─────────── 5. Claim audit timeline ─────────── -->
+{#if isClaimed && !auditLoading}
+  <div class="mt-6">
+    <AuditLogList events={auditEvents} />
+  </div>
+{/if}
+
+<!-- ─────────── 6. Action footer (claim CTA / soft owner hint) ─────────── -->
 <Card tone="accent" class="mt-6">
   <div class="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
     <div class="min-w-0 flex-1">
@@ -450,8 +568,8 @@
       </h2>
       <p class="mt-1 text-sm text-[color:var(--color-text-muted)]">
         {#if isClaimed}
-          This validator's profile is claimed. Linked GitHub, registered operator wallets, and
-          forensic audit log are surfaced in upcoming sections.
+          This validator's profile is claimed. The audit timeline + registered-wallet heatmaps above
+          are pulled live from the public claim surface.
         {:else}
           Claim this validator with an offline Ed25519 signature to surface a public profile and
           register operator wallets.
@@ -486,11 +604,8 @@
 </Card>
 
 <!--
-  PR 2 + PR 3 land:
-    - OAI panel (governance + wallet score) — section 4
-    - Income summary strip + sparkline + deep-link to `/income/[id]` — section 5
-    - Wallet activity heatmaps per registered operator wallet — section 6
-    - Claim audit timeline (identity-rotation reclaim ⚠) — section 7
-    - SIMD curations (hidden until ingest ships) — section 8
-    - Sticky mobile tier header + cross-link swap from `/income/[id]` — section 9
+  PR 3 land:
+    - Income summary strip + sparkline + deep-link to `/income/[id]`
+    - SIMD curations (hidden until ingest ships)
+    - Sticky mobile tier header + cross-link swap from `/income/[id]`
 -->

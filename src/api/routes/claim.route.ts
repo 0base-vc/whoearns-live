@@ -321,6 +321,21 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
         count: activeWallets.length,
         capReached: activeWallets.length >= OPERATOR_WALLET_CAP_PER_VALIDATOR,
         oldestExpiresAt: oldestExpiresAt?.toISOString() ?? null,
+        // Per-wallet entries: pubkey + operator-chosen label +
+        // registration/expiry windows. Public — these are operator-
+        // DECLARED affiliations (registered via the Ed25519 co-sign
+        // flow), so nothing here is information disclosure. The hub
+        // needs the pubkey list to wire the per-wallet 365-day
+        // activity heatmap (`/v1/operator-wallets/:wallet/activity`);
+        // without `entries` the UI would have to scrape the audit
+        // log to discover registered wallets, which couples
+        // unrelated surfaces.
+        entries: activeWallets.map((w) => ({
+          wallet: w.walletPubkey,
+          label: w.label,
+          registeredAt: w.registeredAt.toISOString(),
+          expiresAt: w.expiresAt.toISOString(),
+        })),
       },
     };
   });
