@@ -459,9 +459,30 @@
 
   // SEO — concise title + description that pulls the tier into the
   // crawlable text without making it the whole page name. Matches
-  // the income page's `<svelte:head>` pattern.
-  const seoTitle = $derived(`${heroTitle} — ${tierLabel} tier · WhoEarns Live`);
-  const seoDescription = $derived(trustLine);
+  // the income page's `<svelte:head>` pattern. The bullet `•` here
+  // matches the in-page trust line typography (the legacy mid-dot
+  // `·` was a deliberate avoid because Korean treats it as a
+  // division mark — see `tier.ts`).
+  const seoTitle = $derived(`${heroTitle} • ${tierLabel} tier • WhoEarns Live`);
+  // Sentence-form description so the Google SERP snippet reads as
+  // prose rather than a cryptic bullet list. The hub trust line
+  // stays as the visible hero copy (compact for in-page reading);
+  // crawlers + accessibility tools get the wider context here.
+  const seoDescription = $derived.by(() => {
+    const tenure = scoring.tenure.badge;
+    const client =
+      scoring.client.version === null
+        ? scoring.client.kind
+        : `${scoring.client.kind} ${scoring.client.version}`;
+    const tier = isUnrated
+      ? 'currently rated unrated'
+      : `currently ranked ${tierLabel.toLowerCase()} tier`;
+    const skip =
+      skipRateValue === null ? '' : ` Recent skip rate: ${(skipRateValue * 100).toFixed(2)}%.`;
+    const income =
+      incomeLast30dSol === null ? '' : ` Block income last month: ◎${incomeLast30dSol} SOL.`;
+    return `${heroTitle} is a Solana validator ${tier} (${tenure} tenure, running ${client}).${skip}${income}`;
+  });
 </script>
 
 <svelte:head>
@@ -614,13 +635,22 @@
   claim flow. The income page already surfaces this; mirroring on
   the hub keeps the trust signal on the now-canonical surface.
   Hidden when no narrative is set.
+
+  `aria-label="Operator note"` so screen readers announce the
+  landmark with attribution (matches the income page's
+  `<section aria-label="Operator note">` pattern). The muted text
+  tone disambiguates it visually from system copy — operator
+  prose, not editorial.
 -->
 {#if operatorNarrative !== null}
-  <Card tone="panel" class="mt-6">
-    <p class="text-sm leading-relaxed text-[color:var(--color-text-default)]">
+  <section
+    class="mt-6 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
+    aria-label="Operator note"
+  >
+    <p class="text-sm leading-relaxed text-[color:var(--color-text-muted)]">
       {operatorNarrative}
     </p>
-  </Card>
+  </section>
 {/if}
 
 <!-- ─────────── 2. Tier card + Tenure/Client stack ─────────── -->
@@ -687,7 +717,7 @@
 
         <details class="text-xs">
           <summary
-            class="cursor-pointer text-[color:var(--color-text-subtle)] hover:text-[color:var(--color-text-default)]"
+            class="inline-flex min-h-11 cursor-pointer items-center text-[color:var(--color-text-muted)] hover:text-[color:var(--color-text-default)]"
           >
             Window detail
           </summary>
@@ -777,11 +807,11 @@
   <section class="mt-6 flex flex-col gap-4" aria-labelledby="wallet-activity-heading">
     <header class="px-1">
       <h2 id="wallet-activity-heading" class="text-base font-semibold tracking-tight">
-        Wallet activity — last 365 days
+        Wallet activity
       </h2>
       <p class="mt-1 text-xs text-[color:var(--color-text-muted)]">
-        Per-day transaction count across each registered operator wallet. Log-scaled — steady
-        activity outweighs single bursts.
+        Per-day transaction count across each registered operator wallet over the last 365 days.
+        Log-scaled so steady activity outweighs single bursts.
       </p>
     </header>
     {#each claimStatus.wallets.entries as walletEntry (walletEntry.wallet)}
@@ -841,11 +871,15 @@
     <AuditLogList events={auditEvents} failed={auditFailed} />
   </div>
 {:else if auditLoading && (isClaimed || claimStatusLoading)}
-  <!-- Audit skeleton — fixed height so the section below doesn't bounce. -->
+  <!--
+    Audit skeleton — `min-h-[320px]` reserves close to the actual
+    rendered height (5 events × ~52px row + 64px header). Earlier
+    180px under-reserved and caused a layout jump every claimed
+    validator's hub paint.
+  -->
   <div
-    class="mt-6 min-h-[180px] animate-pulse rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 text-sm text-[color:var(--color-text-muted)]"
+    class="mt-6 min-h-[320px] animate-pulse rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 text-sm text-[color:var(--color-text-muted)]"
     role="status"
-    aria-live="polite"
     aria-label="Loading claim audit timeline"
   >
     Loading audit timeline…
@@ -864,19 +898,20 @@
   changes.
 -->
 <div class="mt-6">
-  {#if claimStatusLoading}
-    <!-- OAI skeleton — matches the panel's two-tile resting height. -->
-    <div
-      class="min-h-[200px] animate-pulse rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 text-sm text-[color:var(--color-text-muted)]"
-      role="status"
-      aria-live="polite"
-      aria-label="Loading Operator Activity Index"
-    >
-      Loading Operator Activity Index…
-    </div>
-  {:else}
-    <OaiPanel oai={scoring.oai} claimed={isClaimed} vote={scoring.vote} />
-  {/if}
+  <!--
+    OAI renders directly from the SSR `scoring.oai` payload — no
+    CSR fetch required. Earlier revision gated render on
+    `claimStatusLoading`, but the OaiPanel's display state is
+    fully derivable from SSR data: `oai === null` collapses to
+    the unclaimed-or-pending branch; `oai !== null` renders the
+    full panel. Wave 1 only REFINES `isClaimed` (opted-out and
+    identity-drifted edge cases), which doesn't change what the
+    panel shows. The skeleton was masking a Promise.all that
+    blocked the whole panel on the slowest of three fan-out
+    requests (SIMD curator latency would delay OAI for no data
+    reason).
+  -->
+  <OaiPanel oai={scoring.oai} claimed={isClaimed} />
 </div>
 
 <!--
@@ -888,26 +923,30 @@
   worker ships separately from the API + UI). On a populated
   response, render up to 6 cards in a 2-column grid on desktop.
 -->
+<!--
+  Always-mounted `role="status"` region so AT users get a single
+  short announcement when SIMD cards arrive via Wave 1. Earlier
+  revision put `aria-live="polite"` on the conditionally-mounted
+  `<section>` itself — live regions only announce CHANGES to a
+  pre-existing region, so mounting the region simultaneously with
+  its content meant nothing fired. This decoupled status line is
+  the standard pattern.
+-->
+<p class="sr-only" role="status" aria-live="polite">
+  {#if !simdLoading && simdItems.length > 0}
+    Loaded {simdItems.length}
+    {simdItems.length === 1 ? 'recent SIMD proposal' : 'recent SIMD proposals'}.
+  {/if}
+</p>
 {#if !simdLoading && simdItems.length > 0}
-  <!--
-    Live region so AT users get told when the SIMD cards land. The
-    section is conditionally mounted (no skeleton — the empty case
-    is far more common than the loaded one), so a screen reader
-    scanning past this point during the fetch needs a status
-    announcement when content appears.
-  -->
-  <section
-    class="mt-6 flex flex-col gap-4"
-    aria-labelledby="simd-curations-heading"
-    aria-live="polite"
-  >
+  <section class="mt-6 flex flex-col gap-4" aria-labelledby="simd-curations-heading">
     <header class="px-1">
       <h2 id="simd-curations-heading" class="text-base font-semibold tracking-tight">
         Recent SIMD proposals
       </h2>
       <p class="mt-1 text-xs text-[color:var(--color-text-muted)]">
-        AI-summarised governance proposals — read the key questions a thoughtful operator should
-        answer before voting. Status pills mirror the upstream proposal state.
+        AI-curated summaries of recent SIMD proposals — read the key questions a thoughtful operator
+        should weigh before voting.
       </p>
     </header>
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -918,24 +957,35 @@
   </section>
 {/if}
 
-<!-- ─────────── 8. Action footer (claim CTA / soft owner hint) ─────────── -->
-<Card tone="accent" class="mt-6">
-  <div class="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
-    <div class="min-w-0 flex-1">
-      <h2 class="text-base font-semibold tracking-tight">
-        {#if isClaimed}Operator dashboard{:else}Are you the operator?{/if}
-      </h2>
-      <p class="mt-1 text-sm text-[color:var(--color-text-muted)]">
-        {#if isClaimed}
-          This validator's profile is claimed. The audit timeline and wallet activity above come
-          from the operator's signed claim.
-        {:else}
-          Claim this validator with an offline Ed25519 signature to surface a public profile and
-          register operator wallets.
-        {/if}
-      </p>
-    </div>
-    <!--
+<!--
+  ─────────── 8. Action footer (claim CTA / soft owner hint) ───────────
+
+  Suppressed entirely when the operator opted out of the footer CTA
+  (`profile.hideFooterCta === true`) AND the visitor isn't the owner.
+  The owner-hint exception keeps "Manage profile" reachable for the
+  operator themselves. Earlier revision loaded `data.hideFooterCta`
+  on the SSR path but never consumed it on the hub — a silent
+  regression of the operator's stored preference now that `/v/[id]`
+  is the canonical surface.
+-->
+{#if !data.hideFooterCta || isOwnerHint}
+  <Card tone="accent" class="mt-6">
+    <div class="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div class="min-w-0 flex-1">
+        <h2 class="text-base font-semibold tracking-tight">
+          {#if isClaimed}Operator dashboard{:else}Are you the operator?{/if}
+        </h2>
+        <p class="mt-1 text-sm text-[color:var(--color-text-muted)]">
+          {#if isClaimed}
+            This validator's profile is claimed. The audit timeline and wallet activity above come
+            from the operator's signed claim.
+          {:else}
+            Claim this validator with an offline Ed25519 signature to surface a public profile and
+            register operator wallets.
+          {/if}
+        </p>
+      </div>
+      <!--
       CTA copy ladder:
         - claimed + owner-hint: PRIMARY "Manage profile" (the operator
           is the only audience that can act on this)
@@ -946,25 +996,19 @@
         - claimed + no owner hint: GHOST "Operator? Manage profile"
           (same reasoning — the visitor probably isn't the operator)
     -->
-    <div class="flex shrink-0 items-center gap-2">
-      {#if isClaimed && isOwnerHint}
-        <Button href="/claim/{scoring.vote}" variant="primary" size="md">Manage profile</Button>
-      {:else if !isClaimed}
-        <Button href="/claim/{scoring.vote}" variant="ghost" size="md"
-          >Operator? Sign to claim</Button
-        >
-      {:else}
-        <Button href="/claim/{scoring.vote}" variant="ghost" size="md"
-          >Operator? Manage profile</Button
-        >
-      {/if}
+      <div class="flex shrink-0 items-center gap-2">
+        {#if isClaimed && isOwnerHint}
+          <Button href="/claim/{scoring.vote}" variant="primary" size="md">Manage profile</Button>
+        {:else if !isClaimed}
+          <Button href="/claim/{scoring.vote}" variant="ghost" size="md"
+            >Operator? Sign to claim</Button
+          >
+        {:else}
+          <Button href="/claim/{scoring.vote}" variant="ghost" size="md"
+            >Operator? Manage profile</Button
+          >
+        {/if}
+      </div>
     </div>
-  </div>
-</Card>
-
-<!--
-  PR 3 land:
-    - Income summary strip + sparkline + deep-link to `/income/[id]`
-    - SIMD curations (hidden until ingest ships)
-    - Sticky mobile tier header + cross-link swap from `/income/[id]`
--->
+  </Card>
+{/if}

@@ -435,7 +435,7 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     .string()
     .max(LABEL_MAX_LEN)
     .default('')
-    .refine((value) => !/[<>`{}\u202A-\u202E\u2066-\u2069]/.test(value), {
+    .refine((value) => !/[<>`{}\u200E\u200F\u202A-\u202E\u2066-\u2069]/.test(value), {
       message:
         'label must not contain angle brackets, backticks, braces, or text-direction-override characters',
     });

@@ -229,8 +229,8 @@ Sitemap: ${SITE_URL}/sitemap.xml
 ## Core pages
 
 - ${SITE_URL}/: Leaderboard — top validators by live-trend income per slot
-- ${SITE_URL}/v/{vote}: Validator hub — tier, income summary, wallet activity, claim audit, governance, OAI (vote OR identity pubkey)
-- ${SITE_URL}/income/{vote}: Per-epoch history table — the operator-facing drill-down for the hub (kept for older inbound links)
+- ${SITE_URL}/v/{vote}: Validator overview — tier, income summary, wallet activity, claim audit, governance, OAI (vote OR identity pubkey)
+- ${SITE_URL}/income/{vote}: Per-epoch income table — full history behind the overview page's 16-epoch sparkline. Indexed but non-canonical; /v/{vote} is the primary surface.
 - ${SITE_URL}/compare: Side-by-side comparison of two validators
 - ${SITE_URL}/glossary: Plain-language definitions of Solana validator terms
 - ${SITE_URL}/faq: Frequently asked questions

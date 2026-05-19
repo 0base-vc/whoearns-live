@@ -755,7 +755,7 @@ CDN).
 Embedding example:
 
 ```html
-<a href="https://whoearns.live/income/VOTE">
+<a href="https://whoearns.live/v/VOTE">
   <img
     src="https://whoearns.live/badge/VOTE.svg"
     alt="WhoEarns live performance for VOTE"

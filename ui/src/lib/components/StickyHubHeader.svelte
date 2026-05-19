@@ -20,12 +20,16 @@
     `bg-surface/90 backdrop-blur` mixed with heatmap dark cells
     scrolling underneath, dipping below WCAG 1.4.3 4.5:1 — solid
     fill is the only contrast-safe choice for a fixed bar.
-  - When visible, we apply `scroll-padding-top: 44px` to `<html>`
-    via a class so keyboard focus on an anchor doesn't land HIDDEN
-    behind the bar (WCAG 2.2 SC 2.4.11 Focus Not Obscured).
-  - `z-20` keeps the bar UNDER the global header (z-30) + search
-    combobox dropdown (z-30) — earlier z-40 covered the global
-    nav on mobile.
+  - Positioned at `top: 56px` (below the global `sticky top-0`
+    header) rather than `top: 0`. The earlier revisions tried both
+    `z-40` (covered the global nav) and `z-20` (was hidden BEHIND
+    the global nav since both targeted top:0) — neither worked.
+    Living below the global header stacks the two bars naturally
+    so both are visible and neither obscures the other.
+  - When visible, we apply `scroll-padding-top: 100px` to `<html>`
+    via a class (global header ~56px + sticky bar 44px + a small
+    breathing buffer). Keyboard focus on an anchor doesn't land
+    HIDDEN behind either bar (WCAG 2.2 SC 2.4.11 Focus Not Obscured).
 
   Visitor-safety:
   - Operator-only CTAs (Manage / Sign to claim) only render when
@@ -111,9 +115,9 @@
 -->
 {#if visible}
   <div
-    class="fixed inset-x-0 top-0 z-20 flex min-h-11 items-center gap-2 border-b border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-1.5 shadow-sm sm:hidden"
+    class="fixed inset-x-0 top-14 z-20 flex min-h-11 items-center gap-2 border-b border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-1.5 shadow-sm sm:hidden"
     role="region"
-    aria-label="Validator hub sticky header"
+    aria-label="Validator overview sticky header"
   >
     <span class="min-w-0 flex-1 truncate text-sm font-semibold tracking-tight">
       {moniker}
@@ -144,6 +148,7 @@
     $effect cleanup function above.
   */
   :global(html.has-sticky-hub-header) {
-    scroll-padding-top: 56px;
+    /* Global header (~56px) + sticky bar (~44px) + 4px buffer. */
+    scroll-padding-top: 104px;
   }
 </style>

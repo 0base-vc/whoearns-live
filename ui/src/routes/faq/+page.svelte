@@ -56,8 +56,8 @@
     {
       q_en: "What's the difference between a vote account and an identity pubkey?",
       q_ko: 'Vote account와 identity pubkey의 차이가 무엇인가요?',
-      a_en: "The vote account is the on-chain account stakers delegate to — it lives across the validator's lifetime as the canonical identifier. The identity pubkey is the validator's hot key, used to sign blocks and votes; operators rotate it periodically for security while keeping the same vote account. This site accepts both as input on /income/{pubkey} and resolves either to the same validator's history.",
-      a_ko: 'Vote account는 스테이커가 위임하는 온체인 계정이며 validator 평생 표준 식별자로 유지됩니다. Identity pubkey는 validator의 핫 키(hot key)로 블록 서명과 투표에 사용되며, 운영자는 보안을 위해 주기적으로 로테이션하면서 vote account는 그대로 둡니다. 이 사이트의 /income/{pubkey} 페이지는 두 형식 모두 입력으로 받아 같은 validator의 history로 안내합니다.',
+      a_en: "The vote account is the on-chain account stakers delegate to — it lives across the validator's lifetime as the canonical identifier. The identity pubkey is the validator's hot key, used to sign blocks and votes; operators rotate it periodically for security while keeping the same vote account. This site accepts both as input on /v/{pubkey} and resolves either to the same validator's history.",
+      a_ko: 'Vote account는 스테이커가 위임하는 온체인 계정이며 validator 평생 표준 식별자로 유지됩니다. Identity pubkey는 validator의 핫 키(hot key)로 블록 서명과 투표에 사용되며, 운영자는 보안을 위해 주기적으로 로테이션하면서 vote account는 그대로 둡니다. 이 사이트의 /v/{pubkey} 페이지는 두 형식 모두 입력으로 받아 같은 validator의 history로 안내합니다.',
     },
     {
       q_en: 'What does "income / slot" mean on the leaderboard?',
@@ -80,8 +80,8 @@
     {
       q_en: "Why doesn't my favorite validator appear in the leaderboard?",
       q_ko: '제가 좋아하는 validator가 왜 리더보드에 안 보이나요?',
-      a_en: 'The default leaderboard is live-trend, but it still only ranks validators with enough observed leader slots in the selected window. Validators below the minimum window slots are filtered to avoid noisy per-slot metrics. If a validator is brand-new or rarely scheduled, search by name or visit /income/{vote-or-identity-pubkey} directly.',
-      a_ko: '기본 리더보드는 live-trend이지만, 선택한 window에서 관측된 리더 슬롯이 충분한 validator만 랭킹합니다. window 슬롯 수가 최소 기준보다 적으면 슬롯당 지표 노이즈를 피하기 위해 제외됩니다. 신규 validator거나 스케줄이 드문 경우 이름으로 검색하거나 /income/{vote-또는-identity-pubkey}를 직접 방문하세요.',
+      a_en: 'The default leaderboard is live-trend, but it still only ranks validators with enough observed leader slots in the selected window. Validators below the minimum window slots are filtered to avoid noisy per-slot metrics. If a validator is brand-new or rarely scheduled, search by name or visit /v/{vote-or-identity-pubkey} directly.',
+      a_ko: '기본 리더보드는 live-trend이지만, 선택한 window에서 관측된 리더 슬롯이 충분한 validator만 랭킹합니다. window 슬롯 수가 최소 기준보다 적으면 슬롯당 지표 노이즈를 피하기 위해 제외됩니다. 신규 validator거나 스케줄이 드문 경우 이름으로 검색하거나 /v/{vote-또는-identity-pubkey}를 직접 방문하세요.',
     },
     {
       q_en: 'Can I use this data in my own dashboard or research?',

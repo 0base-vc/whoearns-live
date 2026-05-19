@@ -152,7 +152,9 @@ const NarrativeOverrideSchema = z
   .optional()
   .refine(
     (value) =>
-      value === undefined || value === null || !/[<>`{}\u202A-\u202E\u2066-\u2069]/.test(value),
+      value === undefined ||
+      value === null ||
+      !/[<>`{}\u200E\u200F\u202A-\u202E\u2066-\u2069]/.test(value),
     {
       message:
         'narrativeOverride must not contain angle brackets, backticks, braces, or text-direction-override characters',
@@ -278,8 +280,17 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
    * This is the GET of the claim instance — "status" is just reading
    * the resource at `/v1/claims/:vote`, no separate sub-path needed.
    */
-  app.get('/v1/claims/:vote', async (request) => {
+  app.get('/v1/claims/:vote', async (request, reply) => {
     const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
+    // SCORING tier — claim status flips on rare operator-initiated
+    // events (claim, profile edit, GitHub link, wallet register), all
+    // of which the operator already accepts a ~5min staleness for.
+    // Without this header the hub's CSR fan-out hits the origin
+    // every page load (4 parallel Postgres reads), which became the
+    // canonical surface in PR3 — leaderboard click-through traffic
+    // would otherwise saturate the DB pool with redundant claim
+    // lookups.
+    void reply.header('cache-control', cacheControl('SCORING'));
     const [claim, profile, githubLink, activeWallets] = await Promise.all([
       opts.claimService.getClaim(params.vote),
       opts.claimService.getProfile(params.vote),

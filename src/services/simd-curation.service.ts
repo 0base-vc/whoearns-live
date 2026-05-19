@@ -260,7 +260,7 @@ const FORBIDDEN_VOTING_PHRASES = [
  */
 const FORBIDDEN_CHARS =
   // eslint-disable-next-line no-control-regex -- intentional C0/C1 rejection
-  /[<>{}`]|javascript:|data:|\]\(|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202A-\u202E\u2066-\u2069]/i;
+  /[<>{}`]|javascript:|data:|\]\(|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200E\u200F\u202A-\u202E\u2066-\u2069]/i;
 
 /**
  * Minimum share of a summary's characters that must be Latin-1
@@ -308,12 +308,20 @@ export function parseCurationOutput(raw: string): CurationOutput | null {
 
   const questionsMatch = /QUESTIONS:\s*([\s\S]+)$/i.exec(cleaned);
   if (questionsMatch === null) return null;
-  const lines = (questionsMatch[1] ?? '')
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => /^Q:/i.test(l))
-    .map((l) => l.replace(/^Q:\s*/i, '').trim())
-    .filter((l) => l.length > 0);
+  // Dedupe so a hallucinating model that repeats a question doesn't
+  // ship duplicate strings to the UI — the hub's SimdProposalCard
+  // keys `{#each}` by value, and Svelte 5 throws `each_key_duplicate`
+  // on identical keys (would blank the card mid-render).
+  const lines = Array.from(
+    new Set(
+      (questionsMatch[1] ?? '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => /^Q:/i.test(l))
+        .map((l) => l.replace(/^Q:\s*/i, '').trim())
+        .filter((l) => l.length > 0),
+    ),
+  );
   if (lines.length < 2 || lines.length > 5) return null;
   for (const q of lines) {
     if (q.length > QUESTION_MAX_CHARS) return null;

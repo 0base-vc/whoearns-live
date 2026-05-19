@@ -172,7 +172,15 @@
   aria-labelledby="audit-log-heading"
 >
   <header class="flex items-baseline justify-between gap-2 pb-3">
-    <h3 id="audit-log-heading" class="text-base font-semibold tracking-tight">Claim audit</h3>
+    <!--
+      h2 — this section is a peer of "Wallet activity" / "Operator
+      Activity Index" / "Recent SIMD proposals" on the hub. Earlier
+      revision used h3 (inherited from PR2 when audit lived nested
+      inside a parent section), but in PR3's flat section order it
+      reads as a heading-hierarchy skip (h2 → h3 → h3 with no
+      intervening h2). WCAG 1.3.1.
+    -->
+    <h2 id="audit-log-heading" class="text-base font-semibold tracking-tight">Claim audit</h2>
     {#if !failed}
       <span class="text-xs text-[color:var(--color-text-subtle)]">
         {events.length}

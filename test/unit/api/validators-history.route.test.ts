@@ -16,7 +16,7 @@
 import { pino } from 'pino';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { NO_STORE_CACHE_CONTROL } from '../../../src/api/cache-headers.js';
+import { cacheControl } from '../../../src/api/cache-control.js';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import validatorsHistoryRoutes from '../../../src/api/routes/validators-history.route.js';
 import type { ValidatorService } from '../../../src/services/validator.service.js';
@@ -126,7 +126,11 @@ describe('GET /v1/validators/:idOrVote/history', () => {
       url: `/v1/validators/${VOTE_1}/history?limit=10`,
     });
     expect(res.statusCode).toBe(200);
-    expect(res.headers['cache-control']).toBe(NO_STORE_CACHE_CONTROL);
+    // SCORING tier — the canonical claimed-validator path was moved
+    // from no-store to SCORING in the PR3-fix wave to absorb hub
+    // canonical-flip traffic via CDN. Tracking + opted-out branches
+    // (separate test cases) still emit no-store.
+    expect(res.headers['cache-control']).toBe(cacheControl('SCORING'));
     const body = res.json() as {
       vote: string;
       identity: string;

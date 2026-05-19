@@ -15,7 +15,7 @@ import type { SimdProposal } from '../../types/domain.js';
  */
 /* eslint-disable no-control-regex -- intentional C0/C1 + BiDi-override strip */
 const UNSAFE_CHARS_RE =
-  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202A-\u202E\u2066-\u2069]/g;
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
 /* eslint-enable no-control-regex */
 
 function stripUnsafeChars(raw: string): string {

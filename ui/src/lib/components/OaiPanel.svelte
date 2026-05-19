@@ -34,17 +34,14 @@
 -->
 <script lang="ts">
   import type { OaiComponents } from '$lib/types';
-  import Button from './Button.svelte';
   import Pill from './Pill.svelte';
 
   interface Props {
     oai: OaiComponents | null;
     claimed: boolean;
-    /** Vote pubkey, used to build the "Claim this validator" link. */
-    vote: string;
   }
 
-  let { oai, claimed, vote }: Props = $props();
+  let { oai, claimed }: Props = $props();
 
   // The governance ingest is gated behind a backend job that ships
   // separately from this UI. `ingestStatus.governanceIngestActive`
@@ -70,7 +67,8 @@
   aria-labelledby="oai-heading"
 >
   <header class="flex items-baseline justify-between gap-2 pb-3">
-    <h3 id="oai-heading" class="text-base font-semibold tracking-tight">Operator Activity Index</h3>
+    <!-- h2 — peer of the other hub sections (Wallet activity, Audit, SIMD). -->
+    <h2 id="oai-heading" class="text-base font-semibold tracking-tight">Operator Activity Index</h2>
     <!--
       Pill renders ONLY when the composite is a real number — never
       "OAI —". Per the per-component breakdown mandate, a half-shown
@@ -84,16 +82,18 @@
   {#if !claimed || oai === null}
     <!--
       Unclaimed (or opted-out / identity-drifted, which the API
-      collapses) → no OAI surface. Collapse to a single claim-CTA
-      line per the "shorter page, not sadder" principle.
+      collapses) → no OAI surface. Collapse to a single explanatory
+      line per "shorter page, not sadder." The action footer at
+      the bottom of the hub carries the canonical operator CTA;
+      duplicating it here was the earlier brand-voice mistake
+      — a delegator scrolling past saw "Sign to claim" twice on
+      the same page.
     -->
     <p class="text-sm text-[color:var(--color-text-muted)]">
       This validator hasn't been claimed by its operator, so wallet and governance activity aren't
-      linked here yet. The claim itself takes one signed message — see the operator CTA below.
+      linked here yet. The operator can claim by signing one offline message — see the action footer
+      at the bottom of the page.
     </p>
-    <div class="mt-3">
-      <Button href="/claim/{vote}" variant="ghost" size="sm">Operator? Sign to claim</Button>
-    </div>
   {:else}
     <!--
       Claimed + OAI present. Three tiles in a single row on desktop,
@@ -104,7 +104,7 @@
       <!-- Governance half -->
       <div class="rounded-md border border-[color:var(--color-border-default)] p-3">
         <div class="flex items-baseline justify-between gap-2">
-          <h4 class="text-sm font-semibold tracking-tight">Governance</h4>
+          <h3 class="text-sm font-semibold tracking-tight">Governance</h3>
           {#if !governanceActive}
             <Pill tone="warn" size="sm">Ingest pending</Pill>
           {/if}
@@ -157,12 +157,19 @@
       <!-- Composite tile (per-component-breakdown mandate: composite lives next to its parts) -->
       <div class="rounded-md border border-[color:var(--color-border-default)] p-3">
         <div class="flex items-baseline justify-between gap-2">
-          <h4 class="text-sm font-semibold tracking-tight">Composite</h4>
+          <h3 class="text-sm font-semibold tracking-tight">Composite</h3>
         </div>
         {#if oai.composite !== null}
+          <!--
+            Composite renders as a bare 0-100 number — the
+            "/ 100" suffix is reserved for the two sub-tiles so
+            the eyeline reads as "Governance N/100, Composite N
+            (the blend), Wallet N/100." Duplicating the suffix
+            here was the earlier brand-voice mistake; the
+            sub-tile suffixes already establish the scale.
+          -->
           <p class="mt-1 text-3xl font-semibold tabular-nums text-[color:var(--color-brand-500)]">
             {formatScore(oai.composite)}
-            <span class="text-base font-normal text-[color:var(--color-text-muted)]">/ 100</span>
           </p>
           <p class="mt-3 text-xs text-[color:var(--color-text-muted)]">
             Equal-weight blend of the governance and wallet halves above.
@@ -184,7 +191,7 @@
       <!-- Wallet half -->
       <div class="rounded-md border border-[color:var(--color-border-default)] p-3">
         <div class="flex items-baseline justify-between gap-2">
-          <h4 class="text-sm font-semibold tracking-tight">Wallet activity</h4>
+          <h3 class="text-sm font-semibold tracking-tight">Wallet activity</h3>
           {#if !walletFeesActive}
             <Pill tone="info" size="sm" title="Fee anchoring deferred; v1 uses tx counts only.">
               Tx counts only

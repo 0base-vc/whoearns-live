@@ -73,13 +73,26 @@
     let sum = 0n;
     let hasAny = false;
     for (const row of rows) {
+      // Try/catch per field so a single malformed lamports string
+      // (e.g. an unexpected non-numeric from an API regression)
+      // doesn't crash the whole `$derived` and unmount the strip.
+      // Symmetric with the sparkline accumulator — earlier
+      // revision only guarded the sparkline path.
       if (row.blockFeesTotalLamports !== null) {
-        sum += BigInt(row.blockFeesTotalLamports);
-        hasAny = true;
+        try {
+          sum += BigInt(row.blockFeesTotalLamports);
+          hasAny = true;
+        } catch {
+          // Malformed → ignore this contribution but keep tallying.
+        }
       }
       if (row.blockTipsTotalLamports !== null) {
-        sum += BigInt(row.blockTipsTotalLamports);
-        hasAny = true;
+        try {
+          sum += BigInt(row.blockTipsTotalLamports);
+          hasAny = true;
+        } catch {
+          // Same posture as above — partial credit beats total render crash.
+        }
       }
     }
     return { sum, hasAny };
@@ -183,7 +196,7 @@
 >
   <header class="flex items-baseline justify-between gap-2 pb-3">
     <h2 id="income-summary-heading" class="text-base font-semibold tracking-tight">
-      Block income — recent windows
+      Recent income
     </h2>
     {#if !isColdStart}
       <a
@@ -197,8 +210,8 @@
 
   {#if isColdStart}
     <p class="text-sm text-[color:var(--color-text-muted)]">
-      This validator hasn't earned its first epoch of fees yet. The summary appears here once a
-      closed epoch with leader slots lands.
+      This validator hasn't earned its first epoch of fees yet. Check back after the next epoch
+      closes.
     </p>
   {:else}
     <div class="grid grid-cols-3 gap-3 sm:gap-4">
@@ -208,7 +221,13 @@
         title="Sum of fees + tips over the {rows60d} most-recent closed epochs (~60 days). Excludes the running epoch."
       >
         {#if last60dLabel === '—'}
-          <span aria-label="no data"><span aria-hidden="true">—</span></span>
+          <!--
+            `role="img"` is the only canonical way to give a generic
+            inline element an accessible name per ARIA 1.2 — without
+            it, screen readers may ignore aria-label on a plain span
+            and announce nothing for empty KPI tiles.
+          -->
+          <span role="img" aria-label="no data">—</span>
         {:else}
           {last60dLabel}
         {/if}
@@ -219,7 +238,13 @@
         title="Sum of fees + tips over the {rows30d} most-recent closed epochs (~30 days). Excludes the running epoch."
       >
         {#if last30dLabel === '—'}
-          <span aria-label="no data"><span aria-hidden="true">—</span></span>
+          <!--
+            `role="img"` is the only canonical way to give a generic
+            inline element an accessible name per ARIA 1.2 — without
+            it, screen readers may ignore aria-label on a plain span
+            and announce nothing for empty KPI tiles.
+          -->
+          <span role="img" aria-label="no data">—</span>
         {:else}
           {last30dLabel}
         {/if}
@@ -230,7 +255,13 @@
         title="Sum of fees + tips over the {rows7d} most-recent closed epochs (~7 days). Excludes the running epoch."
       >
         {#if last7dLabel === '—'}
-          <span aria-label="no data"><span aria-hidden="true">—</span></span>
+          <!--
+            `role="img"` is the only canonical way to give a generic
+            inline element an accessible name per ARIA 1.2 — without
+            it, screen readers may ignore aria-label on a plain span
+            and announce nothing for empty KPI tiles.
+          -->
+          <span role="img" aria-label="no data">—</span>
         {:else}
           {last7dLabel}
         {/if}
