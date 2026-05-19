@@ -46,6 +46,16 @@
   --color-surface-muted: var(--color-zinc-50);
   --color-surface-elevated: #ffffff;
   --color-border-default: var(--color-zinc-200);
+  /*
+   * Empty-cell fill for the operator-wallet activity heatmap
+   * (`ActivityHeatmap.svelte`). Light-mode uses the default border
+   * token (zinc-200 on white, ~12:1 contrast — fine). Dark-mode
+   * needs a brighter fill than `border-default` (zinc-800) because
+   * zinc-800 on zinc-950 is ~1.5:1 — below the 3:1 floor for
+   * non-text UI components (WCAG 1.4.11). The override below lifts
+   * bucket-0 cells to a perceptible neutral.
+   */
+  --color-heatmap-empty: var(--color-zinc-200);
   --color-text-default: var(--color-zinc-900);
   --color-text-muted: var(--color-zinc-600);
   --color-text-subtle: var(--color-zinc-500);
@@ -103,6 +113,9 @@
   --color-surface-muted: var(--color-zinc-900);
   --color-surface-elevated: var(--color-zinc-900);
   --color-border-default: var(--color-zinc-800);
+  /* zinc-700 lifts the heatmap bucket-0 above the 3:1 non-text floor
+     against the zinc-950 dark surface (zinc-800 was ~1.5:1). */
+  --color-heatmap-empty: var(--color-zinc-700);
   --color-text-default: var(--color-zinc-100);
   --color-text-muted: var(--color-zinc-300);
   --color-text-subtle: var(--color-zinc-400);

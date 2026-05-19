@@ -301,13 +301,17 @@
   Breadcrumb back to the validator overview. The income page is the
   drill-down for operators who want the per-epoch receipts; for a
   delegator who landed here from an external link, the overview is
-  the more useful page. Single-link breadcrumb uses the WAI-ARIA
-  Breadcrumb pattern (`<nav>` + `<ol>` + `<li>`) so screen readers
-  announce the landmark consistently. Link gets a 44×44 tap target
-  via min-h/inline-flex so mobile/keyboard users can hit it.
+  the more useful page.
+
+  Two list items per the WAI-ARIA Breadcrumb pattern: the ancestor
+  link AND the current-page item with `aria-current="page"`. A
+  single-item breadcrumb misuses the pattern (the WAI-ARIA spec
+  expects a trail of links to ancestors PLUS the current page);
+  with both items present screen readers announce the structural
+  position correctly.
 -->
 <nav aria-label="Breadcrumb" class="mb-3">
-  <ol class="flex list-none flex-wrap gap-2 p-0">
+  <ol class="flex list-none flex-wrap items-center gap-2 p-0">
     <li>
       <a
         href={`/v/${history.vote}`}
@@ -316,6 +320,10 @@
         <span aria-hidden="true">←</span>
         Validator overview
       </a>
+    </li>
+    <li class="text-xs text-[color:var(--color-text-subtle)]" aria-current="page">
+      <span aria-hidden="true">›</span>
+      <span class="ml-1">Income history</span>
     </li>
   </ol>
 </nav>

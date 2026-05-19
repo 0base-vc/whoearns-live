@@ -107,7 +107,12 @@
    * concatenation on every cell.
    */
   const BUCKET_FILL: readonly string[] = [
-    'var(--color-border-default)',
+    // `--color-heatmap-empty` is a dedicated token that lands at
+    // zinc-200 in light mode and zinc-700 in dark mode, lifting
+    // the empty-cell visibility above the 3:1 non-text floor on
+    // dark backgrounds (the earlier `--color-border-default`
+    // zinc-800 against zinc-950 surface read at ~1.5:1).
+    'var(--color-heatmap-empty)',
     'color-mix(in oklab, var(--color-status-ok-fg) 35%, transparent)',
     'color-mix(in oklab, var(--color-status-ok-fg) 55%, transparent)',
     'color-mix(in oklab, var(--color-status-ok-fg) 75%, transparent)',

@@ -117,16 +117,33 @@
     moniker ? (Array.from(moniker)[0] ?? '?').toUpperCase() : shortVote.slice(0, 1).toUpperCase(),
   );
   let iconLoadFailed = $state(false);
-  const safeIconUrl = $derived.by(() => {
-    const url = history?.iconUrl;
-    if (!url) return null;
+  /**
+   * HTTPS-only URL gate + domain-shape check. Rejects IPv4 literals
+   * (`1.2.3.4`), IPv6 literals (`[::1]` / hostnames containing `:`),
+   * and bare hostnames without a `.` separator. The browser would
+   * follow these to a real host, but on a trust-surface page we
+   * prefer not to render link copy that resolves to a numeric IP —
+   * that's a small phishing-aid (no recognisable domain in the
+   * link preview / address bar). Operators who genuinely want a
+   * vanity hostname can publish one via `validator-info`.
+   */
+  function safeOperatorUrl(raw: string | null | undefined): string | null {
+    if (!raw) return null;
     try {
-      const parsed = new URL(url);
-      return parsed.protocol === 'https:' ? parsed.toString() : null;
+      const parsed = new URL(raw);
+      if (parsed.protocol !== 'https:') return null;
+      const host = parsed.hostname;
+      if (host.length === 0) return null;
+      if (host.includes(':')) return null; // IPv6 literal
+      if (/^\d+(\.\d+)*$/.test(host)) return null; // IPv4 literal / all-numeric
+      if (!host.includes('.')) return null; // bare hostname
+      return parsed.toString();
     } catch {
       return null;
     }
-  });
+  }
+
+  const safeIconUrl = $derived(safeOperatorUrl(history?.iconUrl));
 
   // Korean accent strip — purely cosmetic, triggered by the operator's
   // own choice to put 🇰🇷 in their moniker. NOT geolocation, NOT inferred.
@@ -446,16 +463,8 @@
   // delegator-trust surface is the wrong default; a delegator
   // clicking through to an http:// site sees a browser security
   // warning, which is the opposite of what we want on a tier page).
-  const safeWebsiteUrl = $derived.by(() => {
-    const url = history?.website;
-    if (!url) return null;
-    try {
-      const parsed = new URL(url);
-      return parsed.protocol === 'https:' ? parsed.toString() : null;
-    } catch {
-      return null;
-    }
-  });
+  // Same posture as `safeIconUrl` — HTTPS + real-domain shape only.
+  const safeWebsiteUrl = $derived(safeOperatorUrl(history?.website));
 
   // SEO — concise title + description that pulls the tier into the
   // crawlable text without making it the whole page name. Matches
@@ -784,7 +793,11 @@
 -->
 {#if history !== null}
   <div class="mt-6">
-    <IncomeSummaryStrip vote={scoring.vote} items={history.items} />
+    <IncomeSummaryStrip
+      vote={scoring.vote}
+      items={history.items}
+      suppressColdStartProse={isUnrated}
+    />
   </div>
 {/if}
 
@@ -829,20 +842,30 @@
           delegator can see WHICH wallet's heatmap didn't load.
           `role="status"` for screen-reader announcement.
         -->
+        <!--
+          `role="status"` implies `aria-live="polite"` +
+          `aria-atomic="true"` per ARIA 1.2 — no need to spell out
+          both. The earlier explicit `aria-live="polite"` was
+          redundant chrome.
+        -->
         <div
           class="rounded-lg border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] p-4 text-sm text-[color:var(--color-status-warn-fg)]"
           role="status"
-          aria-live="polite"
         >
           Couldn't load activity for <strong>{walletEntry.label}</strong>. The wallet is registered;
           try refreshing the page.
         </div>
       {:else}
-        <!-- Skeleton: matches the heatmap's resting height so panels arriving via Wave 2 don't snap the page. -->
+        <!--
+          Skeleton: matches the heatmap's resting height so panels
+          arriving via Wave 2 don't snap the page. `aria-busy="true"`
+          tells AT users that the region is mid-load; the static
+          "Loading…" text is the visible cue.
+        -->
         <div
           class="min-h-[220px] animate-pulse rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 text-sm text-[color:var(--color-text-muted)]"
           role="status"
-          aria-live="polite"
+          aria-busy="true"
           aria-label="Loading activity for {walletEntry.label}"
         >
           Loading activity for {walletEntry.label}…
@@ -880,6 +903,7 @@
   <div
     class="mt-6 min-h-[320px] animate-pulse rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 text-sm text-[color:var(--color-text-muted)]"
     role="status"
+    aria-busy="true"
     aria-label="Loading claim audit timeline"
   >
     Loading audit timeline…

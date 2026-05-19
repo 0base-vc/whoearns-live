@@ -48,9 +48,23 @@
     vote: string;
     items: ReadonlyArray<ValidatorEpochRecord>;
     epochDurationDaysApprox?: number;
+    /**
+     * When the parent has ALREADY surfaced a "this validator is
+     * brand-new" explanation elsewhere on the page (e.g. the tier
+     * card's unrated-reason line), set this to `true` to hide the
+     * strip's cold-start prose. Two warm apologies in adjacent
+     * sections reads as "we keep apologising for empty data."
+     * Section heading still renders so the page rhythm is intact.
+     */
+    suppressColdStartProse?: boolean;
   }
 
-  let { vote, items, epochDurationDaysApprox = 2 }: Props = $props();
+  let {
+    vote,
+    items,
+    epochDurationDaysApprox = 2,
+    suppressColdStartProse = false,
+  }: Props = $props();
 
   /** Final rows only, newest-first (the API already returns that order). */
   const finalRows = $derived(items.filter((r) => r.isFinal === true));
@@ -209,10 +223,12 @@
   </header>
 
   {#if isColdStart}
-    <p class="text-sm text-[color:var(--color-text-muted)]">
-      This validator hasn't earned its first epoch of fees yet. Check back after the next epoch
-      closes.
-    </p>
+    {#if !suppressColdStartProse}
+      <p class="text-sm text-[color:var(--color-text-muted)]">
+        This validator hasn't earned its first epoch of fees yet. Check back after the next epoch
+        closes.
+      </p>
+    {/if}
   {:else}
     <div class="grid grid-cols-3 gap-3 sm:gap-4">
       <KpiStat
@@ -276,12 +292,19 @@
         `prefers-reduced-motion` is honored globally via app.css.
       -->
       <div class="mt-4 flex items-center gap-3">
+        <!--
+          `aria-hidden` because the canonical AT-readable data is the
+          `sr-only` `<dl>` below. Earlier revision combined an SVG
+          aria-label, the sr-only dl, AND the visible epoch range
+          label — screen readers got the same trend announced three
+          times. The polyline is purely visual chrome for sighted
+          viewers; the dl carries the precise per-epoch numbers.
+        -->
         <svg
           viewBox="0 0 100 30"
           preserveAspectRatio="none"
           class="h-10 flex-1 text-[color:var(--color-brand-500)]"
-          role="img"
-          aria-label="Income trend across the last {sparkPoints.length} closed epochs"
+          aria-hidden="true"
         >
           <polyline
             points={sparkPath}
