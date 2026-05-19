@@ -188,6 +188,17 @@ describe('intensityBucket', () => {
     expect(intensityBucket(31)).toBe(4);
     expect(intensityBucket(1000)).toBe(4);
   });
+
+  it('returns 0 for NaN (not bucket 4)', () => {
+    // Pre-fix bug: every comparison against NaN is false, so the
+    // function fell through to `return 4` (the BUSIEST bucket).
+    expect(intensityBucket(Number.NaN)).toBe(0);
+  });
+
+  it('returns 0 for Infinity / -Infinity (non-finite guard)', () => {
+    expect(intensityBucket(Number.POSITIVE_INFINITY)).toBe(0);
+    expect(intensityBucket(Number.NEGATIVE_INFINITY)).toBe(0);
+  });
 });
 
 describe('buildGridCells', () => {
@@ -314,6 +325,19 @@ describe('brightestDay', () => {
     const result = brightestDay([entry('2026-04-01', 10), entry('2026-05-01', 0)]);
     expect(result).toEqual({ date: '2026-04-01', txCount: 10 });
   });
+
+  it('rejects entries with malformed date strings (no header leak)', () => {
+    // Pre-fix bug: `'not-a-date' > '2026-05-01'` is true under string
+    // ordering, so the malformed entry could win the crown — and the
+    // header copy would render `brightest day: 50 tx on not-a-date`.
+    const result = brightestDay([entry('2026-05-01', 9), entry('not-a-date', 50)]);
+    expect(result).toEqual({ date: '2026-05-01', txCount: 9 });
+  });
+
+  it('rejects NaN tx counts even when they sort higher than zero', () => {
+    const result = brightestDay([entry('2026-05-01', Number.NaN), entry('2026-04-01', 3)]);
+    expect(result).toEqual({ date: '2026-04-01', txCount: 3 });
+  });
 });
 
 describe('activeDayCount', () => {
@@ -363,5 +387,22 @@ describe('daysSinceMostRecentActive', () => {
     expect(
       daysSinceMostRecentActive([entry('not-a-date', 7), entry('2026-05-15', 1)], END_SUN),
     ).toBe(2);
+  });
+
+  it('treats NaN tx counts as inactive (not the most recent active day)', () => {
+    expect(
+      daysSinceMostRecentActive([entry('2026-05-17', Number.NaN), entry('2026-05-10', 5)], END_SUN),
+    ).toBe(7);
+  });
+});
+
+describe('zeroFillWindow (PR2 doc-pin)', () => {
+  it('applies last-write-wins on duplicate dates (last entry survives)', () => {
+    // The DB PK `(wallet_pubkey, activity_date)` prevents dupes
+    // today, but the helper is the contract surface — pin the
+    // last-write-wins policy so a future aggregator bug surfaces
+    // as a test diff, not silent double-counting.
+    const m = zeroFillWindow([entry('2026-05-15', 7), entry('2026-05-15', 22)], END_SUN, 30);
+    expect(m.get('2026-05-15')).toBe(22);
   });
 });

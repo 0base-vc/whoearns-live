@@ -4,8 +4,8 @@
   The OAI is a Phase 6+7 composite of two halves:
     - Governance score: 0-1, derived from peer-reaction-weighted
       GitHub SIMD discussion comments. NULL today in every real
-      deployment because the SIMD-discussions ingest job is
-      unshipped.
+      deployment because the SIMD-discussions data feed isn't
+      live yet.
     - Wallet score: 0-1, derived from registered-wallet daily
       activity over the last 90 days.
 
@@ -16,23 +16,14 @@
   AND `walletScore` are populated as their real values though, so
   a wallet-only delegator still has something to read.
 
-  This panel renders all of that with intentional UI per-half
-  branching:
-    - When `governanceIngestActive` is false: governance side shows
-      a "Discussions ingest pending — coming soon" empty-state.
-      Wallet side renders normally.
-    - When the validator is not claimed (caller passes
-      `claimed=false`): the panel collapses entirely to a single
-      claim CTA line. There IS no OAI for a non-claimed validator
-      (the API returns `oai: null` on `/scoring`), so the empty-
-      panel "shorter page, not sadder" principle applies.
-
-  Per-component breakdown is mandatory: the composite ring isn't a
-  thing here — instead two stacked KpiStat tiles surface each
-  half's score, and a third tile shows the composite (null →
-  em-dash). The governance counts are exposed below as tabular
-  context so a delegator can see what's driving the score even
-  before the ingest activates.
+  Per-component breakdown is mandatory: three tiles in row — the
+  governance half, the wallet half, AND the composite tile sitting
+  between them so a delegator never sees a composite number without
+  its parts in the same eyeline. When governance is pending the
+  composite tile spells out WHY there is no composite ("waiting on
+  the governance half"), and the headline pill is dropped — the
+  PM-brief mandate is that the composite is louder than its parts
+  only when the parts agree on what it should be.
 
   Props:
     - `oai`: the OAI components block from /scoring (null when
@@ -58,15 +49,16 @@
   // The governance ingest is gated behind a backend job that ships
   // separately from this UI. `ingestStatus.governanceIngestActive`
   // tells us whether the comment data has actually been written to
-  // the DB yet — if false, we can't honestly report a score, so
-  // the half renders as a "coming soon" empty-state instead of a
-  // misleading 0.
+  // the DB yet — if false, we can't honestly report a score, so the
+  // half renders as a "coming soon" empty-state instead of a fake 0.
   const governanceActive = $derived(oai?.ingestStatus?.governanceIngestActive ?? false);
   const walletFeesActive = $derived(oai?.ingestStatus?.walletFeesIngestActive ?? false);
 
-  // Format a 0-1 score as a percentage. `null` renders as an
-  // em-dash so we never display a fake number. (Mirrors the
-  // TierRing's central composite label policy.)
+  /**
+   * Format a 0-1 score as a 0-100 integer string. `null` renders as
+   * an em-dash so we never display a fake number — same policy as
+   * `TierRing`'s composite label.
+   */
   function formatScore(score: number | null | undefined): string {
     if (score === null || score === undefined) return '—';
     return `${(score * 100).toFixed(0)}`;
@@ -74,43 +66,41 @@
 </script>
 
 <section
-  class="rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
-  aria-label="Operator Activity Index"
+  class="rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 lg:max-w-[calc((100%/12)*8)]"
+  aria-labelledby="oai-heading"
 >
   <header class="flex items-baseline justify-between gap-2 pb-3">
-    <h3 class="text-base font-semibold tracking-tight">Operator Activity Index</h3>
-    {#if oai !== null}
-      <Pill tone={oai.composite === null ? 'neutral' : 'brand'} size="sm">
-        OAI {formatScore(oai.composite)}
-      </Pill>
+    <h3 id="oai-heading" class="text-base font-semibold tracking-tight">Operator Activity Index</h3>
+    <!--
+      Pill renders ONLY when the composite is a real number — never
+      "OAI —". Per the per-component breakdown mandate, a half-shown
+      composite shouldn't be louder than its parts.
+    -->
+    {#if oai !== null && oai.composite !== null}
+      <Pill tone="brand" size="sm">OAI {formatScore(oai.composite)}</Pill>
     {/if}
   </header>
 
   {#if !claimed || oai === null}
     <!--
       Unclaimed (or opted-out / identity-drifted, which the API
-      collapses) → no OAI surface to render. Collapse to a single
-      claim-CTA line per the "shorter page, not sadder" principle.
-      The CTA is GHOST (not primary) for the same reason the
-      footer claim CTA is ghost — most visitors aren't the operator.
+      collapses) → no OAI surface. Collapse to a single claim-CTA
+      line per the "shorter page, not sadder" principle.
     -->
     <p class="text-sm text-[color:var(--color-text-muted)]">
-      OAI is published only for claimed validators. The operator must complete the offline Ed25519
-      claim flow to surface governance + wallet activity scoring.
+      This validator hasn't been claimed by its operator, so wallet and governance activity aren't
+      linked here yet. The claim itself takes one signed message — see the operator CTA below.
     </p>
     <div class="mt-3">
       <Button href="/claim/{vote}" variant="ghost" size="sm">Operator? Sign to claim</Button>
     </div>
   {:else}
     <!--
-      Claimed + OAI present. Render the two halves side-by-side on
-      desktop, stacked on mobile. Each half discloses its ingest
-      state honestly: governance shows "coming soon" when the
-      DB-level data isn't there yet; wallet shows its real score
-      regardless of the wallet-fees-ingest state (since v1 only
-      uses tx counts, the fees ingest doesn't gate the score).
+      Claimed + OAI present. Three tiles in a single row on desktop,
+      stacked on mobile. Composite tile is the middle so a viewer
+      reads left → centre → right as governance / blend / wallet.
     -->
-    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
       <!-- Governance half -->
       <div class="rounded-md border border-[color:var(--color-border-default)] p-3">
         <div class="flex items-baseline justify-between gap-2">
@@ -122,26 +112,34 @@
         {#if governanceActive}
           <p class="mt-1 text-3xl font-semibold tabular-nums">
             {formatScore(oai.components.governance.score)}
-            <span class="text-base font-normal text-[color:var(--color-text-subtle)]">/ 100</span>
+            <span class="text-base font-normal text-[color:var(--color-text-muted)]">/ 100</span>
           </p>
         {:else}
-          <p class="mt-1 text-3xl font-semibold tabular-nums text-[color:var(--color-text-subtle)]">
-            —
+          <!--
+            Em-dash with an accessible label so screen readers say
+            "pending" rather than literally "dash" — the visual
+            stays minimal but the semantic isn't a number.
+          -->
+          <p
+            class="mt-1 text-3xl font-semibold tabular-nums text-[color:var(--color-text-subtle)]"
+            aria-label="Governance score pending — feed not yet active"
+          >
+            <span aria-hidden="true">—</span>
           </p>
         {/if}
         <dl class="mt-3 grid grid-cols-3 gap-2 text-xs text-[color:var(--color-text-muted)]">
           <div>
-            <dt class="uppercase tracking-wide text-[color:var(--color-text-subtle)]">Comments</dt>
+            <dt class="uppercase tracking-wide text-[color:var(--color-text-muted)]">Comments</dt>
             <dd class="mt-0.5 tabular-nums">{oai.components.governance.commentCount}</dd>
           </div>
           <div>
-            <dt class="uppercase tracking-wide text-[color:var(--color-text-subtle)]">
+            <dt class="uppercase tracking-wide text-[color:var(--color-text-muted)]">
               Peer reactions
             </dt>
             <dd class="mt-0.5 tabular-nums">{oai.components.governance.reactionsReceived}</dd>
           </div>
           <div>
-            <dt class="uppercase tracking-wide text-[color:var(--color-text-subtle)]">
+            <dt class="uppercase tracking-wide text-[color:var(--color-text-muted)]">
               Active SIMDs
             </dt>
             <dd class="mt-0.5 tabular-nums">{oai.components.governance.activeWindowCount}</dd>
@@ -149,9 +147,36 @@
         </dl>
         {#if !governanceActive}
           <p class="mt-3 text-xs text-[color:var(--color-text-muted)]">
-            The GitHub-discussions ingest job is unshipped; the governance score will start
-            populating once it goes live. Comment / reaction counts above are accurate-but-zero
-            today.
+            The governance discussions feed isn't reading SIMD comments yet — this score will start
+            populating when the feed turns on. The numbers above are the real counts (currently
+            zero); they'll move once the data feed is live.
+          </p>
+        {/if}
+      </div>
+
+      <!-- Composite tile (per-component-breakdown mandate: composite lives next to its parts) -->
+      <div class="rounded-md border border-[color:var(--color-border-default)] p-3">
+        <div class="flex items-baseline justify-between gap-2">
+          <h4 class="text-sm font-semibold tracking-tight">Composite</h4>
+        </div>
+        {#if oai.composite !== null}
+          <p class="mt-1 text-3xl font-semibold tabular-nums text-[color:var(--color-brand-500)]">
+            {formatScore(oai.composite)}
+            <span class="text-base font-normal text-[color:var(--color-text-muted)]">/ 100</span>
+          </p>
+          <p class="mt-3 text-xs text-[color:var(--color-text-muted)]">
+            Equal-weight blend of the governance and wallet halves above.
+          </p>
+        {:else}
+          <p
+            class="mt-1 text-3xl font-semibold tabular-nums text-[color:var(--color-text-subtle)]"
+            aria-label="Composite pending — waiting on the governance half"
+          >
+            <span aria-hidden="true">—</span>
+          </p>
+          <p class="mt-3 text-xs text-[color:var(--color-text-muted)]">
+            There's no overall index number while one half is pending. The two halves above are
+            independently readable.
           </p>
         {/if}
       </div>
@@ -162,26 +187,19 @@
           <h4 class="text-sm font-semibold tracking-tight">Wallet activity</h4>
           {#if !walletFeesActive}
             <Pill tone="info" size="sm" title="Fee anchoring deferred; v1 uses tx counts only.">
-              tx counts
+              Tx counts only
             </Pill>
           {/if}
         </div>
         <p class="mt-1 text-3xl font-semibold tabular-nums">
           {formatScore(oai.components.walletScore)}
-          <span class="text-base font-normal text-[color:var(--color-text-subtle)]">/ 100</span>
+          <span class="text-base font-normal text-[color:var(--color-text-muted)]">/ 100</span>
         </p>
         <p class="mt-3 text-xs text-[color:var(--color-text-muted)]">
-          Derived from the 90-day active-day count across the operator's registered wallets.
-          Heatmaps below show the day-by-day pattern that drives this score.
+          Derived from the 90-day active-day count across the operator's registered wallets. The
+          heatmaps above the panel show the day-by-day pattern that drives this score.
         </p>
       </div>
     </div>
-
-    {#if oai.composite === null}
-      <p class="mt-3 text-xs text-[color:var(--color-text-muted)]">
-        Composite is <code>null</code> because the 50 / 50 blend can't be honestly reported with the governance
-        half pending. The two sub-scores above are independently usable.
-      </p>
-    {/if}
   {/if}
 </section>

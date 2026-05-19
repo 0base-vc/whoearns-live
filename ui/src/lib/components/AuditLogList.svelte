@@ -13,41 +13,57 @@
   Visual hierarchy. Every event renders neutral EXCEPT
   identity-rotation re-claims (`event_type === 'reclaim'` AND
   `prior_identity_pubkey !== null`). Those get a warn-tone left
-  border and a ⚠ glyph — they're the strongest delegator-facing
-  risk signal in the dataset ("the validator's identity key
-  changed; if the operator didn't do this, the key may be
-  compromised").
+  border AND a `role="alert"` semantic boost — they're the strongest
+  delegator-facing risk signal in the dataset ("the operator's
+  identity key changed; verify with the operator before assuming
+  prior reputation transfers to the new identity").
 
   Showing the LATEST 5 events inline keeps the panel scannable; a
   `<details>` "Show all (N)" expander reveals older history. The
-  expander is keyboard-accessible without extra script — native
-  HTML behaviour.
+  expander body is rendered ONLY when the user opens it (open-state
+  tracked via `onclick`); a forever-claim validator with 500 events
+  doesn't pay the DOM cost up-front.
 
-  Empty state. When `events` is empty the panel renders a single
-  muted line. We don't hide the section entirely because a
-  claimed validator with no audit history is informationally
-  distinct from an unclaimed one (the audit log is gated by claim
-  existence anyway — the caller hides the panel for unclaimed
-  validators).
+  Empty state distinguishes from a fetch FAILURE: the caller passes
+  `failed=true` when the audit fetch rejected, so the panel can show
+  a retryable error instead of pretending the audit log is clean.
+  An unclaimed validator's audit is hidden by the caller — this
+  component never renders a "Sign to claim" CTA.
 
   Props:
     - `events`: the events array (newest first by API contract)
     - `inlineLimit`: how many to show before the `<details>` expander (default 5)
+    - `failed`: caller signals the fetch rejected; component renders an error tile
 -->
 <script lang="ts">
   import type { ClaimAuditEvent } from '$lib/types';
   import { formatTimestamp } from '$lib/format';
+  import IconKey from '$lib/icons/IconKey.svelte';
+  import IconRotate from '$lib/icons/IconRotate.svelte';
+  import IconPencil from '$lib/icons/IconPencil.svelte';
+  import IconLink from '$lib/icons/IconLink.svelte';
+  import IconWallet from '$lib/icons/IconWallet.svelte';
+  import IconWarning from '$lib/icons/IconWarning.svelte';
+  import type { Component } from 'svelte';
 
   interface Props {
     events: ReadonlyArray<ClaimAuditEvent>;
     inlineLimit?: number;
+    failed?: boolean;
   }
 
-  let { events, inlineLimit = 5 }: Props = $props();
+  let { events, inlineLimit = 5, failed = false }: Props = $props();
 
   const inline = $derived(events.slice(0, inlineLimit));
   const overflow = $derived(events.slice(inlineLimit));
   const isEmpty = $derived(events.length === 0);
+
+  // Track open state of the `<details>` so we can avoid mounting the
+  // overflow `<ol>` until the user actually expands it. A long-lived
+  // claimed validator can accumulate 500+ events; rendering them all
+  // inside a closed `<details>` would still pay the full DOM cost
+  // (browsers don't lazy-mount `<details>` children).
+  let overflowOpen = $state(false);
 
   /**
    * Plain-English event-type → display string. Mirrors the
@@ -62,17 +78,18 @@
   };
 
   /**
-   * Glyph per event type. Inline unicode (the project's
-   * already-shipped icon convention via VerifiedBadge etc. uses
-   * unicode for non-tier glyphs). These read at small sizes
-   * (16-20px) and don't need a runtime icon library.
+   * Glyph per event type — monochrome SVG that inherits `currentColor`,
+   * keeping the audit list inside the site's hand-drawn icon family
+   * rather than dropping platform-rendered color emoji (which render
+   * inconsistently across Apple / Twemoji / Noto and clash with the
+   * 8-point-star tier vocabulary).
    */
-  const EVENT_GLYPH: Record<ClaimAuditEvent['eventType'], string> = {
-    claim: '🔐',
-    reclaim: '🔁',
-    profile_update: '✏️',
-    github_link: '🔗',
-    wallet_register: '💰',
+  const EVENT_GLYPH: Record<ClaimAuditEvent['eventType'], Component> = {
+    claim: IconKey,
+    reclaim: IconRotate,
+    profile_update: IconPencil,
+    github_link: IconLink,
+    wallet_register: IconWallet,
   };
 
   /**
@@ -98,10 +115,27 @@
   }
 
   /**
+   * Safe ISO conversion of `event.createdAt` for the `title=`
+   * tooltip. A man-in-the-middle (CDN mis-cache, hostile browser
+   * extension, etc.) could ship a malformed timestamp that throws
+   * inside `new Date(...).toISOString()` and unwinds the entire
+   * `<ol>` render. Falling back to the raw string keeps the rest of
+   * the panel rendered.
+   */
+  function safeIsoTooltip(raw: string): string {
+    try {
+      return new Date(raw).toISOString();
+    } catch {
+      return raw;
+    }
+  }
+
+  /**
    * One-line summary per event. The audit log is the public
    * surface — keep summaries factual, no inference about why
    * something happened. The "smoking gun" emphasis is purely
-   * visual (warn tone above), the text stays neutral.
+   * visual + ARIA (warn tone + alert role above), the text stays
+   * neutral.
    */
   function eventSummary(event: ClaimAuditEvent): string {
     if (event.eventType === 'reclaim' && event.priorIdentityPubkey !== null) {
@@ -126,55 +160,68 @@
     // crash the render.
     return `Event recorded (${event.eventType}).`;
   }
+
+  /** Stable key for `{#each}` — composite that doesn't collide across event types. */
+  function eventKey(event: ClaimAuditEvent): string {
+    return `${event.createdAt}:${event.eventType}:${event.identityPubkey}`;
+  }
 </script>
 
 <section
   class="rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
-  aria-label="Claim audit timeline"
+  aria-labelledby="audit-log-heading"
 >
   <header class="flex items-baseline justify-between gap-2 pb-3">
-    <h3 class="text-base font-semibold tracking-tight">Claim audit</h3>
-    <span class="text-xs text-[color:var(--color-text-subtle)]">
-      {events.length}
-      {events.length === 1 ? 'event' : 'events'}
-    </span>
+    <h3 id="audit-log-heading" class="text-base font-semibold tracking-tight">Claim audit</h3>
+    {#if !failed}
+      <span class="text-xs text-[color:var(--color-text-subtle)]">
+        {events.length}
+        {events.length === 1 ? 'event' : 'events'}
+      </span>
+    {/if}
   </header>
 
-  {#if isEmpty}
-    <p class="text-sm text-[color:var(--color-text-muted)]">
-      No events recorded yet. The audit log starts populating from a validator's first claim onward;
-      pre-claim historical activity is not retroactively backfilled.
+  {#if failed}
+    <!--
+      Distinct error state — a fetch failure rendered as "No events
+      recorded yet" misled delegators into thinking the audit log
+      was clean when it just hadn't loaded.
+    -->
+    <p class="text-sm text-[color:var(--color-status-warn-fg)]" role="status" aria-live="polite">
+      The audit log couldn't be loaded right now. Try refreshing — the timeline is public and should
+      be available shortly.
     </p>
+  {:else if isEmpty}
+    <p class="text-sm text-[color:var(--color-text-muted)]">No events recorded yet.</p>
   {:else}
     <ol class="flex flex-col gap-2">
-      {#each inline as event, i (i)}
+      {#each inline as event (eventKey(event))}
         {@const rotation = isIdentityRotation(event)}
+        {@const GlyphComponent = EVENT_GLYPH[event.eventType]}
         <li
           class="flex items-start gap-3 rounded-md border px-3 py-2 {rotation
             ? 'border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)]'
             : 'border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)]'}"
+          role={rotation ? 'alert' : undefined}
         >
-          <!--
-            Glyph in a fixed-width slot so the body text stays
-            left-aligned across rows. `aria-hidden` because the
-            event type is already in the EVENT_LABEL below.
-          -->
-          <span class="mt-0.5 text-base" aria-hidden="true">{EVENT_GLYPH[event.eventType]}</span>
+          <span class="mt-0.5 text-[color:var(--color-text-muted)]" aria-hidden="true">
+            {#if rotation}
+              <IconWarning size={16} />
+            {:else}
+              <GlyphComponent size={16} />
+            {/if}
+          </span>
           <div class="min-w-0 flex-1">
             <div class="flex items-baseline justify-between gap-2">
               <p class="text-sm font-medium">
-                {EVENT_LABEL[event.eventType]}
-                {#if rotation}
-                  <span class="ml-1 text-[color:var(--color-status-warn-fg)]" aria-hidden="true"
-                    >⚠</span
-                  >
-                  <span class="sr-only">— identity rotation, potential key compromise</span>
-                {/if}
+                <strong class={rotation ? 'text-[color:var(--color-status-warn-fg)]' : ''}>
+                  {EVENT_LABEL[event.eventType]}{#if rotation}{' '}— identity rotation{/if}
+                </strong>
               </p>
               <time
-                class="text-xs tabular-nums text-[color:var(--color-text-subtle)]"
+                class="text-xs tabular-nums text-[color:var(--color-text-muted)]"
                 datetime={event.createdAt}
-                title={new Date(event.createdAt).toISOString()}
+                title={safeIsoTooltip(event.createdAt)}
               >
                 {formatTimestamp(event.createdAt)}
               </time>
@@ -184,8 +231,8 @@
             </p>
             {#if rotation}
               <p class="mt-1 text-xs text-[color:var(--color-status-warn-fg)]">
-                If the operator did not initiate this rotation, their identity key may be
-                compromised. Investigation recommended.
+                Identity key changed. Verify with the operator that this rotation was intentional
+                before treating prior reputation as continuous.
               </p>
             {/if}
           </div>
@@ -194,53 +241,65 @@
     </ol>
 
     {#if overflow.length > 0}
-      <details class="mt-3 text-xs">
+      <details
+        class="mt-3 text-xs"
+        ontoggle={(e) => {
+          overflowOpen = (e.currentTarget as HTMLDetailsElement).open;
+        }}
+      >
         <summary
-          class="cursor-pointer text-[color:var(--color-text-subtle)] hover:text-[color:var(--color-text-default)]"
+          class="inline-flex min-h-[44px] cursor-pointer items-center text-[color:var(--color-text-muted)] hover:text-[color:var(--color-text-default)]"
         >
           Show {overflow.length} earlier {overflow.length === 1 ? 'event' : 'events'}
         </summary>
         <!--
-          The full older-history list uses the same row template
-          but is collapsed by default. We render text-only for
-          older entries; rotation emphasis still fires below for
-          parity with the inline list.
+          Only mount the overflow list when the user opens the
+          expander. A validator with 500+ audit events would
+          otherwise carry 495 hidden `<li>` rows in the DOM with no
+          benefit. Tracking via `ontoggle` rather than CSS-only so
+          the underlying `<ol>` doesn't allocate until needed.
         -->
-        <ol class="mt-2 flex flex-col gap-2">
-          {#each overflow as event, i (i + inlineLimit)}
-            {@const rotation = isIdentityRotation(event)}
-            <li
-              class="flex items-start gap-3 rounded-md border px-3 py-2 {rotation
-                ? 'border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)]'
-                : 'border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)]'}"
-            >
-              <span class="mt-0.5 text-base" aria-hidden="true">{EVENT_GLYPH[event.eventType]}</span
+        {#if overflowOpen}
+          <ol class="mt-2 flex flex-col gap-2">
+            {#each overflow as event (eventKey(event))}
+              {@const rotation = isIdentityRotation(event)}
+              {@const GlyphComponent = EVENT_GLYPH[event.eventType]}
+              <li
+                class="flex items-start gap-3 rounded-md border px-3 py-2 {rotation
+                  ? 'border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)]'
+                  : 'border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)]'}"
+                role={rotation ? 'alert' : undefined}
               >
-              <div class="min-w-0 flex-1">
-                <div class="flex items-baseline justify-between gap-2">
-                  <p class="text-sm font-medium">
-                    {EVENT_LABEL[event.eventType]}
-                    {#if rotation}
-                      <span class="ml-1 text-[color:var(--color-status-warn-fg)]" aria-hidden="true"
-                        >⚠</span
-                      >
-                      <span class="sr-only">— identity rotation, potential key compromise</span>
-                    {/if}
+                <span class="mt-0.5 text-[color:var(--color-text-muted)]" aria-hidden="true">
+                  {#if rotation}
+                    <IconWarning size={16} />
+                  {:else}
+                    <GlyphComponent size={16} />
+                  {/if}
+                </span>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-baseline justify-between gap-2">
+                    <p class="text-sm font-medium">
+                      <strong class={rotation ? 'text-[color:var(--color-status-warn-fg)]' : ''}>
+                        {EVENT_LABEL[event.eventType]}{#if rotation}{' '}— identity rotation{/if}
+                      </strong>
+                    </p>
+                    <time
+                      class="text-xs tabular-nums text-[color:var(--color-text-muted)]"
+                      datetime={event.createdAt}
+                      title={safeIsoTooltip(event.createdAt)}
+                    >
+                      {formatTimestamp(event.createdAt)}
+                    </time>
+                  </div>
+                  <p class="mt-0.5 text-xs text-[color:var(--color-text-muted)]">
+                    {eventSummary(event)}
                   </p>
-                  <time
-                    class="text-xs tabular-nums text-[color:var(--color-text-subtle)]"
-                    datetime={event.createdAt}
-                  >
-                    {formatTimestamp(event.createdAt)}
-                  </time>
                 </div>
-                <p class="mt-0.5 text-xs text-[color:var(--color-text-muted)]">
-                  {eventSummary(event)}
-                </p>
-              </div>
-            </li>
-          {/each}
-        </ol>
+              </li>
+            {/each}
+          </ol>
+        {/if}
       </details>
     {/if}
   {/if}

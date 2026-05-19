@@ -50,26 +50,75 @@ export class ApiError extends Error {
   }
 }
 
-async function call<T>(path: string, fetchFn: typeof fetch = fetch): Promise<T> {
+/**
+ * Optional per-call controls — every public fetcher accepts these so a
+ * caller can wire abort + timeout without rewriting the shared `call`.
+ * `signal` chains through to the underlying `fetch`; passing one from
+ * an `AbortController` that's aborted on component teardown is the
+ * canonical "don't poison the next page" pattern for hub-style CSR
+ * fan-outs (see `routes/v/[idOrVote]/+page.svelte`).
+ */
+export interface CallOptions {
+  fetchFn?: typeof fetch;
+  signal?: AbortSignal;
+  /** Hard timeout in ms; client-side AbortController fires when reached. */
+  timeoutMs?: number;
+}
+
+/** Same default everywhere — 15s feels generous on slow 4G without holding sockets forever. */
+const DEFAULT_TIMEOUT_MS = 15_000;
+
+async function call<T>(
+  path: string,
+  // Backward-compat: the legacy positional was just `fetchFn`. New
+  // callers pass `CallOptions` so we can wire signal + timeout. Pure
+  // typeof discrimination — a function arg routes to the legacy
+  // shape, an object arg to the new one.
+  arg: typeof fetch | CallOptions = {},
+): Promise<T> {
+  const options: CallOptions = typeof arg === 'function' ? { fetchFn: arg } : arg;
+  const { fetchFn = fetch, signal, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
   const url = `${getApiBase()}${path}`;
-  const res = await fetchFn(url, {
-    headers: { accept: 'application/json' },
-  });
-  if (!res.ok) {
-    let code = 'upstream_error';
-    let message = `${res.status} ${res.statusText}`;
-    try {
-      const body = (await res.json()) as { error?: { code?: string; message?: string } };
-      if (body?.error) {
-        code = body.error.code ?? code;
-        message = body.error.message ?? message;
-      }
-    } catch {
-      // body wasn't JSON — keep the defaults
-    }
-    throw new ApiError(res.status, code, message);
+
+  // Wire a local timeout that ALSO honours the caller's signal — when
+  // either fires, we abort. AbortSignal.any is a 2024+ spec helper but
+  // widely shipped; fall back to a manual chain when absent so the
+  // call doesn't crash older runtimes.
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const localCtrl = new AbortController();
+  const onAbort = () => localCtrl.abort(signal?.reason);
+  if (signal) {
+    if (signal.aborted) localCtrl.abort(signal.reason);
+    else signal.addEventListener('abort', onAbort, { once: true });
   }
-  return (await res.json()) as T;
+  if (timeoutMs > 0) {
+    timeoutId = setTimeout(() => localCtrl.abort(new Error('timeout')), timeoutMs);
+  }
+
+  try {
+    const res = await fetchFn(url, {
+      headers: { accept: 'application/json' },
+      signal: localCtrl.signal,
+    });
+    if (!res.ok) {
+      let code = 'upstream_error';
+      let message = `${res.status} ${res.statusText}`;
+      try {
+        const body = (await res.json()) as { error?: { code?: string; message?: string } };
+        if (body?.error) {
+          code = body.error.code ?? code;
+          message = body.error.message ?? message;
+        }
+      } catch {
+        // body wasn't JSON — keep the defaults
+      }
+      throw new ApiError(res.status, code, message);
+    }
+    return (await res.json()) as T;
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+    if (signal) signal.removeEventListener('abort', onAbort);
+  }
 }
 
 /** History endpoint accepts either a vote or an identity pubkey. */
@@ -171,10 +220,10 @@ export function fetchClaimChallenge(fetchFn: typeof fetch = fetch): Promise<Clai
  */
 export function fetchClaimStatus(
   vote: string,
-  fetchFn: typeof fetch = fetch,
+  opts: CallOptions | typeof fetch = {},
 ): Promise<ClaimStatus> {
   const safe = encodeURIComponent(vote);
-  return call<ClaimStatus>(`/v1/claims/${safe}`, fetchFn);
+  return call<ClaimStatus>(`/v1/claims/${safe}`, opts);
 }
 
 /**
@@ -303,10 +352,10 @@ function putJson<TResponse>(
  */
 export function fetchScoring(
   idOrVote: string,
-  fetchFn: typeof fetch = fetch,
+  opts: CallOptions | typeof fetch = {},
 ): Promise<ScoringResponse> {
   const safe = encodeURIComponent(idOrVote);
-  return call<ScoringResponse>(`/v1/validators/${safe}/scoring`, fetchFn);
+  return call<ScoringResponse>(`/v1/validators/${safe}/scoring`, opts);
 }
 
 /**
@@ -333,13 +382,13 @@ export function fetchOperatorWallet(
 export function fetchOperatorWalletActivity(
   wallet: string,
   days = 365,
-  fetchFn: typeof fetch = fetch,
+  opts: CallOptions | typeof fetch = {},
 ): Promise<OperatorWalletActivityResponse> {
   const safe = encodeURIComponent(wallet);
   const safeDays = Math.max(1, Math.min(Math.floor(days), 365));
   return call<OperatorWalletActivityResponse>(
     `/v1/operator-wallets/${safe}/activity?days=${safeDays}`,
-    fetchFn,
+    opts,
   );
 }
 
@@ -364,8 +413,8 @@ export function fetchSimdProposals(
  */
 export function fetchClaimAudit(
   vote: string,
-  fetchFn: typeof fetch = fetch,
+  opts: CallOptions | typeof fetch = {},
 ): Promise<ClaimAuditResponse> {
   const safe = encodeURIComponent(vote);
-  return call<ClaimAuditResponse>(`/v1/claims/${safe}/audit`, fetchFn);
+  return call<ClaimAuditResponse>(`/v1/claims/${safe}/audit`, opts);
 }

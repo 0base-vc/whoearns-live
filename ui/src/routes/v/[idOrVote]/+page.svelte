@@ -32,7 +32,8 @@
 -->
 <script lang="ts">
   import { page } from '$app/state';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { afterNavigate } from '$app/navigation';
 
   import Card from '$lib/components/Card.svelte';
   import Button from '$lib/components/Button.svelte';
@@ -112,79 +113,179 @@
   // tier card + tenure/client render from the SSR `/scoring`
   // payload, then these fill in as their fetches resolve.
   //
-  // All four can fail independently without breaking the page —
-  // the panels render their own loading / empty states from the
-  // `$state` shape. Errors are silently swallowed (the panel
-  // either stays in loading state or renders the empty fallback).
+  // Three failure dimensions, each tracked separately so the UI can
+  // tell "loaded successfully but empty" apart from "fetch failed":
+  //   - loading: request in-flight (skeleton)
+  //   - failed:  request rejected (error tile + retry hint)
+  //   - data:    fulfilled value (the real render)
+  // Mirroring this shape across all three surfaces is what closes the
+  // "audit-empty-OR-broken renders the same" silent-failure class.
   let claimStatus = $state<ClaimStatus | null>(null);
   let claimStatusLoading = $state(true);
+  let claimStatusFailed = $state(false);
   let auditEvents = $state<ClaimAuditEvent[]>([]);
   let auditLoading = $state(true);
+  let auditFailed = $state(false);
   let walletActivity = $state<Map<string, OperatorWalletActivityResponse>>(new Map());
+  // Per-wallet failure tracking — when one wallet's activity request
+  // rejects (5xx, network), we render an error tile for THAT wallet
+  // instead of silently dropping its heatmap. Other wallets still
+  // render their own state independently.
+  let walletActivityFailed = $state<Set<string>>(new Set());
   let walletActivityLoading = $state(true);
 
-  onMount(() => {
-    // Soft owner hint — sessionStorage flag + ?owner=1 query.
-    try {
-      const url = new URL(page.url.href);
-      if (url.searchParams.get('owner') === '1') {
-        isOwnerHint = true;
-      } else {
-        const key = `whoearns:owned:${scoring.vote}`;
-        if (sessionStorage.getItem(key) === '1') {
-          isOwnerHint = true;
-        }
-      }
-    } catch {
-      // Private mode / SSR — soft hint stays off. That's correct,
-      // any consumer that needs an auth boundary should use the
-      // claim flow's offline signing.
-    }
+  // Active AbortController for the current vote's CSR fan-out. Held
+  // outside `onMount` so `afterNavigate` (param-only nav) can abort
+  // the prior page's in-flight requests before kicking off the new
+  // wave. Without this the previous validator's wallet activity
+  // could land AFTER the new validator's, poisoning the panel.
+  let fanOutCtrl: AbortController | null = null;
 
-    // Fan-out CSR fetches. Two waves:
-    //   Wave 1: claim status + audit log (independent of each other)
-    //   Wave 2: wallet activity for every registered wallet (depends
-    //           on Wave 1's claim status for the wallet list)
-    //
-    // Audit + claim status run concurrently — both are cheap one-
-    // query lookups on the backend. Wallet activity is wave 2 because
-    // we need the wallet pubkey list from claim status first.
-    void (async () => {
-      const [claim, audit] = await Promise.allSettled([
-        fetchClaimStatus(scoring.vote),
-        fetchClaimAudit(scoring.vote),
-      ]);
-      if (claim.status === 'fulfilled') {
-        claimStatus = claim.value;
-      }
-      claimStatusLoading = false;
+  /** Reset every CSR-deferred state slot — used on first mount AND every param-only nav. */
+  function resetCsrState(): void {
+    claimStatus = null;
+    claimStatusLoading = true;
+    claimStatusFailed = false;
+    auditEvents = [];
+    auditLoading = true;
+    auditFailed = false;
+    walletActivity = new Map();
+    walletActivityFailed = new Set();
+    walletActivityLoading = true;
+  }
 
-      if (audit.status === 'fulfilled') {
-        auditEvents = audit.value.events;
-      }
-      auditLoading = false;
+  /**
+   * Drive the two-wave CSR fan-out for `vote`. Each request honours
+   * the shared `signal`; if the user navigates away before it
+   * completes, the controller aborts and the resulting rejection
+   * (with `name: 'AbortError'`) is intentionally ignored so we
+   * don't paint a stale error tile after teardown.
+   */
+  async function loadCsrPanels(vote: string, signal: AbortSignal): Promise<void> {
+    // Wave 1 — claim status + audit log. Independent; allSettled so a
+    // failed audit doesn't mask the wallet section. Wave 2 fans out
+    // as SOON as Wave 1's claim half resolves (not after the
+    // allSettled join), so a slow audit doesn't serialize the
+    // heatmaps behind it.
+    const claimPromise = fetchClaimStatus(vote, { signal }).then(
+      (v) => ({ ok: true as const, value: v }),
+      (err: unknown) => ({ ok: false as const, error: err }),
+    );
+    const auditPromise = fetchClaimAudit(vote, { signal }).then(
+      (v) => ({ ok: true as const, value: v }),
+      (err: unknown) => ({ ok: false as const, error: err }),
+    );
 
-      // Wave 2 — per-wallet activity. Skip entirely when there are
-      // no registered wallets (the heatmap section won't render).
-      const wallets = claim.status === 'fulfilled' ? claim.value.wallets.entries : [];
+    // Start Wave 2 as soon as the wallet list lands.
+    const walletWavePromise = claimPromise.then(async (claim) => {
+      if (signal.aborted) return;
+      const wallets = claim.ok ? claim.value.wallets.entries : [];
       if (wallets.length === 0) {
         walletActivityLoading = false;
         return;
       }
-      const results = await Promise.allSettled(
-        wallets.map((w) => fetchOperatorWalletActivity(w.wallet, 365)),
+      const settled = await Promise.allSettled(
+        wallets.map((w) => fetchOperatorWalletActivity(w.wallet, 365, { signal })),
       );
-      const next = new Map<string, OperatorWalletActivityResponse>();
-      results.forEach((r, i) => {
+      if (signal.aborted) return;
+      const nextMap = new Map<string, OperatorWalletActivityResponse>();
+      const nextFailed = new Set<string>();
+      settled.forEach((r, i) => {
         const wallet = wallets[i];
         if (wallet === undefined) return;
-        if (r.status === 'fulfilled') {
-          next.set(wallet.wallet, r.value);
-        }
+        if (r.status === 'fulfilled') nextMap.set(wallet.wallet, r.value);
+        else if (!isAbortError(r.reason)) nextFailed.add(wallet.wallet);
       });
-      walletActivity = next;
+      walletActivity = nextMap;
+      walletActivityFailed = nextFailed;
       walletActivityLoading = false;
-    })();
+    });
+
+    const [claim, audit] = await Promise.all([claimPromise, auditPromise]);
+    if (signal.aborted) return;
+
+    if (claim.ok) {
+      claimStatus = claim.value;
+    } else if (!isAbortError(claim.error)) {
+      claimStatusFailed = true;
+    }
+    claimStatusLoading = false;
+
+    if (audit.ok) {
+      auditEvents = audit.value.events;
+    } else if (!isAbortError(audit.error)) {
+      auditFailed = true;
+    }
+    auditLoading = false;
+
+    // If Wave 1's claim rejected we still need to flip Wave 2's
+    // loading flag — the walletWavePromise's short-circuit on
+    // `wallets.length === 0` does it, but only when claim resolved
+    // with an empty entries list. On a Wave 1 rejection wallets is
+    // []  (same path).
+    await walletWavePromise;
+  }
+
+  /** True when an unknown error is the rejection from a deliberate AbortController.abort(). */
+  function isAbortError(err: unknown): boolean {
+    return err instanceof Error && err.name === 'AbortError';
+  }
+
+  /**
+   * Re-run the soft owner hint detection. Called on first mount AND
+   * on every param-only nav — a delegator hopping from /v/A to /v/B
+   * needs B's owner hint, not A's.
+   */
+  function refreshOwnerHint(vote: string): void {
+    isOwnerHint = false;
+    try {
+      const url = new URL(page.url.href);
+      if (url.searchParams.get('owner') === '1') {
+        isOwnerHint = true;
+        return;
+      }
+      const key = `whoearns:owned:${vote}`;
+      if (sessionStorage.getItem(key) === '1') {
+        isOwnerHint = true;
+      }
+    } catch {
+      // Private mode / SSR — hint stays off. Any boundary that
+      // actually needs auth should use the claim flow's offline
+      // signing, not this UI hint.
+    }
+  }
+
+  onMount(() => {
+    refreshOwnerHint(scoring.vote);
+    fanOutCtrl = new AbortController();
+    void loadCsrPanels(scoring.vote, fanOutCtrl.signal);
+  });
+
+  // SvelteKit reuses the same component instance across param-only
+  // navigation (`/v/A` → `/v/B`), so `onMount` only fires on first
+  // mount. Without a reset hook the previous validator's wallet
+  // pubkeys + audit timeline would persist on the new page. The
+  // `afterNavigate` callback runs after every successful nav AND
+  // skips the first-mount case (delivered by `onMount` above).
+  afterNavigate((nav) => {
+    // Skip first mount — onMount already kicked things off.
+    if (nav.from === null) return;
+    // Skip navs that didn't actually change the vote (e.g. anchor
+    // scroll, identical URL). `scoring.vote` is the param the SSR
+    // load resolved, so it stays canonical across vote↔identity
+    // route lookups.
+    fanOutCtrl?.abort();
+    fanOutCtrl = new AbortController();
+    resetCsrState();
+    refreshOwnerHint(scoring.vote);
+    void loadCsrPanels(scoring.vote, fanOutCtrl.signal);
+  });
+
+  // Cleanup on unmount — aborts any in-flight fetch so we don't
+  // burn the per-IP rate-limit budget on a tab the user closed.
+  onDestroy(() => {
+    fanOutCtrl?.abort();
+    fanOutCtrl = null;
   });
 
   // Tier card — derive everything from the scoring response. The
@@ -239,13 +340,19 @@
   });
   const freshnessLabel = $derived(formatTimestamp(freshnessIso));
 
-  // Claim state — `/scoring` response carries `oai !== null` only
-  // when claimed + identity matches + not opted-out. We use that as
-  // the public proxy ("does this validator have a claim?"). Manage
-  // CTA appears for the soft-owner hint regardless of claim state
-  // (operators who haven't claimed yet are precisely who need the
-  // CTA the most).
-  const isClaimed = $derived(scoring.oai !== null);
+  // Claim state — drives the verified badge + footer CTA + audit
+  // panel visibility. We prefer the `/v1/claims/:vote` response
+  // (`claimStatus.claimed`) because it's the AUTHORITATIVE claim
+  // boolean: opted-out and identity-drifted claims are still claimed
+  // (their `oai` is null but their audit log + claim history must
+  // still surface for delegators). Until Wave 1 lands we fall back
+  // to the `/scoring.oai !== null` proxy — the SSR knows that much.
+  //
+  // Why two signals: SCORING is SSR (fast, but reductively gates on
+  // OAI eligibility), claimStatus is CSR (truthful, but arrives a
+  // tick later). The hub paints with the SSR proxy first and
+  // upgrades to the truth as soon as the CSR fetch resolves.
+  const isClaimed = $derived(claimStatus !== null ? claimStatus.claimed : scoring.oai !== null);
 
   // External website — operator-supplied, treat untrusted. HTTPS
   // only (was previously http: OR https:, but mixed content on a
@@ -516,48 +623,126 @@
   </div>
 </div>
 
-<!-- ─────────── 3. OAI panel (Operator Activity Index) ─────────── -->
-<div class="mt-6">
-  <OaiPanel oai={scoring.oai} claimed={isClaimed} vote={scoring.vote} />
-</div>
-
 <!--
-  ─────────── 4. Wallet activity heatmaps ───────────
+  ─────────── 3. Wallet activity heatmaps ───────────
 
-  One panel per registered operator wallet. Section is hidden
-  entirely when the validator has no wallets registered (matches
-  the "shorter page, not sadder" cold-start principle). Loading
-  state shows a single muted line; the panels render as they
-  resolve. `walletActivity` is populated by the second wave of
-  CSR fetches in `onMount`.
+  Promoted above OAI because the wallet half of the OAI today
+  is wallet-only (governance ingest pending in every deployment),
+  so the score the OAI publishes is ALREADY summarised here as
+  the per-day grid. The PM brief said: "shorter page, not sadder"
+  + "audit + heatmaps are the highest-signal delegator surfaces."
+
+  Each registered operator wallet renders its own panel. Cold-
+  start renders a CLS-stable skeleton (fixed min-height) so
+  panels arriving via Wave 2 don't snap the page. Per-wallet
+  rejections (5xx, network) render an explicit error tile —
+  silent dropout was the worst version of this.
 -->
-{#if claimStatus !== null && claimStatus.wallets.entries.length > 0}
-  <div class="mt-6 flex flex-col gap-4">
+{#if !claimStatusLoading && claimStatus !== null && claimStatus.wallets.entries.length > 0}
+  <section class="mt-6 flex flex-col gap-4" aria-labelledby="wallet-activity-heading">
+    <header class="px-1">
+      <h2 id="wallet-activity-heading" class="text-base font-semibold tracking-tight">
+        Wallet activity — last 365 days
+      </h2>
+      <p class="mt-1 text-xs text-[color:var(--color-text-muted)]">
+        Per-day transaction count across each registered operator wallet. Log-scaled — steady
+        activity outweighs single bursts.
+      </p>
+    </header>
     {#each claimStatus.wallets.entries as walletEntry (walletEntry.wallet)}
       {@const activity = walletActivity.get(walletEntry.wallet)}
+      {@const isFailed = walletActivityFailed.has(walletEntry.wallet)}
       {#if activity !== undefined}
         <ActivityHeatmap
           wallet={walletEntry.wallet}
           label={walletEntry.label}
           entries={activity.entries}
         />
-      {:else if walletActivityLoading}
+      {:else if isFailed}
+        <!--
+          Per-wallet failure tile. Distinct from "loading" so a
+          delegator can see WHICH wallet's heatmap didn't load.
+          `role="status"` for screen-reader announcement.
+        -->
         <div
-          class="rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 text-sm text-[color:var(--color-text-muted)]"
+          class="rounded-lg border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] p-4 text-sm text-[color:var(--color-status-warn-fg)]"
+          role="status"
+          aria-live="polite"
+        >
+          Couldn't load activity for <strong>{walletEntry.label}</strong>. The wallet is registered;
+          try refreshing the page.
+        </div>
+      {:else}
+        <!-- Skeleton: matches the heatmap's resting height so panels arriving via Wave 2 don't snap the page. -->
+        <div
+          class="min-h-[220px] animate-pulse rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 text-sm text-[color:var(--color-text-muted)]"
+          role="status"
+          aria-live="polite"
+          aria-label="Loading activity for {walletEntry.label}"
         >
           Loading activity for {walletEntry.label}…
         </div>
       {/if}
     {/each}
+  </section>
+{/if}
+
+<!--
+  ─────────── 4. Claim audit timeline ───────────
+
+  Moved above OAI in the section order. For a delegator with an
+  8-second skim window the highest-signal warning on the page is
+  the identity-rotation reclaim — burying it below a (currently
+  governance-pending) OAI panel hid the signal that matters most.
+
+  Gate: `claimStatus.claimed` rather than `scoring.oai !== null`.
+  An opted-out or identity-drifted validator still has a public
+  audit log (the reclaim row IS the smoking-gun signal); gating
+  on OAI eligibility hid those rows from the people who needed
+  them most.
+-->
+{#if !auditLoading && (isClaimed || auditFailed)}
+  <div class="mt-6">
+    <AuditLogList events={auditEvents} failed={auditFailed} />
+  </div>
+{:else if auditLoading && (isClaimed || claimStatusLoading)}
+  <!-- Audit skeleton — fixed height so the section below doesn't bounce. -->
+  <div
+    class="mt-6 min-h-[180px] animate-pulse rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 text-sm text-[color:var(--color-text-muted)]"
+    role="status"
+    aria-live="polite"
+    aria-label="Loading claim audit timeline"
+  >
+    Loading audit timeline…
   </div>
 {/if}
 
-<!-- ─────────── 5. Claim audit timeline ─────────── -->
-{#if isClaimed && !auditLoading}
-  <div class="mt-6">
-    <AuditLogList events={auditEvents} />
-  </div>
-{/if}
+<!--
+  ─────────── 5. OAI panel (Operator Activity Index) ───────────
+
+  Now BELOW the wallet heatmaps + audit because today's deployment
+  serves `governance: null` everywhere (the GitHub-discussions
+  ingest is unshipped), and the surface above already summarises
+  the wallet half as a per-day grid. When the governance ingest
+  ships and OAI publishes a real composite, this section will
+  move back up. Same component — only its place in the hierarchy
+  changes.
+-->
+<div class="mt-6">
+  {#if claimStatusLoading}
+    <!-- OAI skeleton — matches the panel's two-tile resting height. -->
+    <div
+      class="min-h-[200px] animate-pulse rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 text-sm text-[color:var(--color-text-muted)]"
+      role="status"
+      aria-live="polite"
+      aria-label="Loading Operator Activity Index"
+    >
+      Loading Operator Activity Index…
+    </div>
+  {:else}
+    <OaiPanel oai={scoring.oai} claimed={isClaimed} vote={scoring.vote} />
+  {/if}
+</div>
 
 <!-- ─────────── 6. Action footer (claim CTA / soft owner hint) ─────────── -->
 <Card tone="accent" class="mt-6">
@@ -568,8 +753,8 @@
       </h2>
       <p class="mt-1 text-sm text-[color:var(--color-text-muted)]">
         {#if isClaimed}
-          This validator's profile is claimed. The audit timeline + registered-wallet heatmaps above
-          are pulled live from the public claim surface.
+          This validator's profile is claimed. The audit timeline and wallet activity above come
+          from the operator's signed claim.
         {:else}
           Claim this validator with an offline Ed25519 signature to surface a public profile and
           register operator wallets.

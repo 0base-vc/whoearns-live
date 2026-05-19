@@ -126,6 +126,13 @@ export function windowStartDate(endDate: Date, days = 365): Date {
  * The API guarantees `entries` are within the requested window, but
  * we filter defensively to keep the function self-contained (a
  * future endpoint change won't silently corrupt the grid).
+ *
+ * Duplicate-date policy: when `entries` contains more than one row
+ * for the same date (the DB PK `(wallet_pubkey, activity_date)`
+ * makes this very unlikely, but a future aggregator bug could
+ * surface dupes), the LAST entry in the array wins. We pick
+ * last-write-wins rather than summing because the upstream is a
+ * `tx_count` per day, not a delta; summing would double-count.
  */
 export function zeroFillWindow(
   entries: ReadonlyArray<OperatorWalletActivityEntry>,
@@ -172,6 +179,12 @@ export function zeroFillWindow(
  * heatmap uses the same scale.
  */
 export function intensityBucket(txCount: number): IntensityBucket {
+  // NaN trap: every comparison against NaN is false, so without the
+  // guard the function falls through to bucket 4 (the BUSIEST bucket).
+  // A future `Number(undefined)` upstream or a malformed JSON value
+  // would silently mis-display the worst possible intensity. Treat
+  // anything non-finite as zero — same as the schema default.
+  if (!Number.isFinite(txCount)) return 0;
   if (txCount <= 0) return 0;
   if (txCount <= 2) return 1;
   if (txCount <= 10) return 2;
@@ -259,28 +272,19 @@ export interface MonthLabel {
 }
 
 export function monthLabels(endDate: Date, days = 365): MonthLabel[] {
+  // One label per month transition (including the leftmost column —
+  // a label there anchors the grid for the viewer's first scan).
+  // Sunday-of-column is the anchor date because every column's other
+  // six days fall within +6 calendar days of it.
   const labels: MonthLabel[] = [];
   const end = utcMidnight(endDate);
   const gridStart = gridStartDate(end, days);
   let lastMonth = -1;
   for (let week = 0; week < HEATMAP_WEEKS; week++) {
-    // Use the SUNDAY of each column as the label-anchor date.
     const col0Date = addUtcDays(gridStart, week * 7);
     const month = col0Date.getUTCMonth();
     if (month !== lastMonth) {
-      // Skip the very first column when it spans only a few days
-      // of an earlier month — labels for a partial column at the
-      // far left tend to crowd the grid edge. We only emit the
-      // label on the FIRST FULL transition (when we've already
-      // seen at least one column).
-      if (lastMonth !== -1) {
-        labels.push({ month, weekColumn: week });
-      } else {
-        // First column: emit the label so the leftmost month is
-        // identified, but anchor it slightly left of the column
-        // centre. The component handles the offset.
-        labels.push({ month, weekColumn: week });
-      }
+      labels.push({ month, weekColumn: week });
       lastMonth = month;
     }
   }
@@ -324,7 +328,11 @@ export function brightestDay(
 ): BrightestDay | null {
   let best: BrightestDay | null = null;
   for (const entry of entries) {
-    if (entry.txCount <= 0) continue;
+    if (!Number.isFinite(entry.txCount) || entry.txCount <= 0) continue;
+    // Validate the date so a malformed string can't win the crown
+    // (the header copy renders `brightest day: 50 tx on not-a-date`
+    // when the date is leaked unparsed). `mirrors daysSinceMostRecentActive`.
+    if (Number.isNaN(Date.parse(entry.date))) continue;
     if (best === null || entry.txCount > best.txCount) {
       best = { date: entry.date, txCount: entry.txCount };
       continue;
@@ -368,7 +376,10 @@ export function daysSinceMostRecentActive(
 ): number | null {
   let mostRecentTs: number | null = null;
   for (const entry of entries) {
-    if (entry.txCount <= 0) continue;
+    // `NaN <= 0` is false, so without the finite-guard a NaN txCount
+    // would slip past the zero filter and a malformed entry could
+    // dominate the "last active" header.
+    if (!Number.isFinite(entry.txCount) || entry.txCount <= 0) continue;
     const t = Date.parse(entry.date);
     if (Number.isNaN(t)) continue;
     if (mostRecentTs === null || t > mostRecentTs) mostRecentTs = t;

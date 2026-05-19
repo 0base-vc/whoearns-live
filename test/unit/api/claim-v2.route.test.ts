@@ -333,6 +333,39 @@ describe('POST /v1/claims/:vote/wallets', () => {
     await app.close();
   });
 
+  it('rejects wallet label containing a BiDi-override codepoint (SEC-M1)', async () => {
+    // U+202E (RIGHT-TO-LEFT OVERRIDE) lets an operator flip the
+    // visual order of surrounding hub copy — a phishing-friendly
+    // attack on the public ActivityHeatmap header. The narrativeOverride
+    // schema rejects the same codepoints; this mirrors that posture
+    // for wallet labels.
+    const { deps, appended } = buildDeps();
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/claims/${VOTE_1}/wallets`,
+      payload: walletBody({ label: 'hot‮BADGE' }),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('validation_error');
+    // Rejected at the schema layer, before any verify/insert work.
+    expect(appended).toHaveLength(0);
+    await app.close();
+  });
+
+  it('rejects wallet label with angle brackets (HTML injection guard)', async () => {
+    const { deps } = buildDeps();
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/claims/${VOTE_1}/wallets`,
+      payload: walletBody({ label: '<script>' }),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('validation_error');
+    await app.close();
+  });
+
   it('returns 400 vote_pubkey_mismatch when the path vote disagrees with the body', async () => {
     // REST-M7 — the vote pubkey rides in the path AND the request
     // body; the body stays authoritative for the dual-signature

@@ -1829,16 +1829,37 @@ components:
                 calls per wallet without having to scrape the audit
                 log. All fields are public (operator-DECLARED
                 affiliations registered via the Ed25519 co-sign flow).
+
+                Ordering: `registeredAt ASC`, with `wallet` ascending
+                as a tiebreaker. Stable across identical-timestamp
+                edge cases so CDN-cached responses don't flap.
+              example:
+                - wallet: WALL111111111111111111111111111111111111111
+                  label: hot
+                  registeredAt: '2026-02-01T00:00:00.000Z'
+                  expiresAt: '2026-05-01T00:00:00.000Z'
+                - wallet: WALL222222222222222222222222222222222222222
+                  label: operations
+                  registeredAt: '2026-02-15T00:00:00.000Z'
+                  expiresAt: '2026-05-15T00:00:00.000Z'
               items:
                 type: object
                 required: [wallet, label, registeredAt, expiresAt]
                 properties:
                   wallet:
                     type: string
-                    description: Wallet pubkey (base58 ed25519).
+                    minLength: 32
+                    maxLength: 44
+                    description: Wallet pubkey (base58 ed25519, 32-44 chars).
                   label:
                     type: string
-                    description: Operator-chosen label (e.g. "Hot wallet", "Operations").
+                    maxLength: 32
+                    description: |
+                      Operator-chosen label (e.g. "Hot wallet",
+                      "Operations"). Rejects angle brackets,
+                      backticks, braces, and Unicode text-direction-
+                      override codepoints — the same charset
+                      narrativeOverride uses.
                   registeredAt:
                     type: string
                     format: date-time

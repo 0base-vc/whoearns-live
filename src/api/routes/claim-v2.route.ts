@@ -421,11 +421,30 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
    *   5. `anchorTxSignature` is a well-formed Solana tx signature
    *      (full on-chain verification deferred — see service docstring).
    */
+  /*
+   * Wallet `label` is operator-controlled and renders into the public
+   * hub (`/v/[idOrVote]` ActivityHeatmap header + aria-label). Reject
+   * the same charset narrativeOverride does — angle brackets,
+   * backticks, braces, and the Unicode text-direction-override
+   * codepoints (U+202A-U+202E, U+2066-U+2069). The BiDi codepoints
+   * are the load-bearing piece: without rejecting them, an operator
+   * can register a label like "‮BADGE" to right-to-left-flip
+   * surrounding hub copy in a phishing-friendly way.
+   */
+  const LabelSchema = z
+    .string()
+    .max(LABEL_MAX_LEN)
+    .default('')
+    .refine((value) => !/[<>`{}\u202A-\u202E\u2066-\u2069]/.test(value), {
+      message:
+        'label must not contain angle brackets, backticks, braces, or text-direction-override characters',
+    });
+
   const WalletVerifyBodySchema = z.object({
     votePubkey: PubkeySchema,
     identityPubkey: PubkeySchema,
     walletPubkey: PubkeySchema,
-    label: z.string().max(LABEL_MAX_LEN).default(''),
+    label: LabelSchema,
     timestampMs: z.number().int().positive(),
     identitySignatureB58: z.string().min(64).max(128),
     walletSignatureB58: z.string().min(64).max(128),

@@ -182,14 +182,25 @@ describe('GET /v1/claims/:vote', () => {
   });
 
   it('folds in the ACTIVE GitHub link and operator-wallet summary (CROSS-M1)', async () => {
+    // Distinct `registeredAt` per fixture so a regression that
+    // accidentally re-sorts entries[] is detectable. Pre-fix the
+    // two fixtures shared the same registeredAt, so any swap was
+    // undetectable.
     const { deps } = buildDeps({
       claim: makeClaim(),
       githubLink: makeGithubLink({ githubUsername: 'alice' }),
       activeWallets: [
-        makeWallet({ expiresAt: new Date('2026-06-01T00:00:00Z') }),
+        makeWallet({
+          walletPubkey: 'WALL111111111111111111111111111111111111111',
+          label: 'first-registered',
+          registeredAt: new Date('2026-02-01T00:00:00Z'),
+          expiresAt: new Date('2026-06-01T00:00:00Z'),
+        }),
         // Soonest-expiring active registration → drives oldestExpiresAt.
         makeWallet({
           walletPubkey: 'WALL222222222222222222222222222222222222222',
+          label: 'second-registered',
+          registeredAt: new Date('2026-02-15T00:00:00Z'),
           expiresAt: new Date('2026-05-15T00:00:00Z'),
         }),
       ],
@@ -210,13 +221,23 @@ describe('GET /v1/claims/:vote', () => {
     expect(body.wallets.oldestExpiresAt).toBe('2026-05-15T00:00:00.000Z');
     // Per-wallet entries surface the pubkey + label + windows so the
     // hub page can fan-out activity heatmaps without scraping audits.
-    expect(body.wallets.entries).toHaveLength(2);
-    expect(body.wallets.entries[0]).toMatchObject({
-      wallet: expect.any(String),
-      label: expect.any(String),
-      registeredAt: expect.any(String),
-      expiresAt: expect.any(String),
-    });
+    // We assert the EXACT shape AND ordering — the repo serves rows
+    // in `registered_at ASC`, so a regression that re-orders
+    // (or swaps the wallet ↔ label fields) shows up as a diff.
+    expect(body.wallets.entries).toEqual([
+      {
+        wallet: 'WALL111111111111111111111111111111111111111',
+        label: 'first-registered',
+        registeredAt: '2026-02-01T00:00:00.000Z',
+        expiresAt: '2026-06-01T00:00:00.000Z',
+      },
+      {
+        wallet: 'WALL222222222222222222222222222222222222222',
+        label: 'second-registered',
+        registeredAt: '2026-02-15T00:00:00.000Z',
+        expiresAt: '2026-05-15T00:00:00.000Z',
+      },
+    ]);
     await app.close();
   });
 

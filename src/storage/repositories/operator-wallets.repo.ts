@@ -97,7 +97,7 @@ export class OperatorWalletsRepository {
     const { rows } = await this.pool.query<OperatorWalletRow>(
       `SELECT ${COLS} FROM operator_wallets
         WHERE vote_pubkey = $1
-        ORDER BY registered_at ASC`,
+        ORDER BY registered_at ASC, wallet_pubkey ASC`,
       [vote],
     );
     return rows.map(rowToWallet);
@@ -106,13 +106,19 @@ export class OperatorWalletsRepository {
   /**
    * Active (not-expired) wallets only. Used by scoring routes that
    * must drop lapsed registrations from contributing signal.
+   *
+   * Ordered by `registered_at ASC` with a `wallet_pubkey ASC`
+   * tiebreaker so two registrations landing in the same Postgres
+   * millisecond don't flap order across requests — the
+   * `/v1/claims/:vote.wallets.entries[]` shape relies on stable
+   * ordering for cache validity.
    */
   async listActiveByVote(vote: VotePubkey): Promise<OperatorWallet[]> {
     const { rows } = await this.pool.query<OperatorWalletRow>(
       `SELECT ${COLS} FROM operator_wallets
         WHERE vote_pubkey = $1
           AND expires_at > NOW()
-        ORDER BY registered_at ASC`,
+        ORDER BY registered_at ASC, wallet_pubkey ASC`,
       [vote],
     );
     return rows.map(rowToWallet);
