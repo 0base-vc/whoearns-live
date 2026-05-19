@@ -76,8 +76,13 @@
   --color-tier-anvil-50: var(--color-zinc-100);
   --color-tier-anvil-500: var(--color-zinc-600);
   --color-tier-anvil-900: var(--color-zinc-900);
+  /* Hearth bumped from amber-600 → amber-700 for the `-500` slot so
+     the stroke-only mark on white meets WCAG 1.4.11 (3:1 non-text UI
+     contrast) without ambiguity at small sizes. amber-600 (#d97706)
+     is ~3.8:1 on white — passes, but borderline for the thin TierBadge
+     stroke at 14px. amber-700 (#b45309) is ~5.6:1 — comfortable margin. */
   --color-tier-hearth-50: var(--color-amber-50);
-  --color-tier-hearth-500: var(--color-amber-600);
+  --color-tier-hearth-500: var(--color-amber-700);
   --color-tier-hearth-900: var(--color-amber-900);
   --color-tier-kindling-50: var(--color-zinc-50);
   --color-tier-kindling-500: var(--color-zinc-500);
@@ -149,6 +154,13 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    /* Also strip the transition SHORTHAND so an inline
+       `style="transition: stroke-dashoffset 180ms ..."` (which has
+       higher specificity than property-level `transition-duration`)
+       can't override the reduced-motion intent. The shorthand
+       resets `transition-property`, `-duration`, `-timing-function`,
+       `-delay` all at once. */
+    transition: none !important;
     scroll-behavior: auto !important;
   }
 }
@@ -164,6 +176,16 @@
   outline: 2px solid var(--color-brand-500);
   outline-offset: 2px;
   border-radius: 0.25rem;
+}
+
+/*
+ * Dark-mode focus ring override. `brand-500` (≈ #7c5cff) on
+ * dark-zinc-950 (#09090b) yields ~2.8:1 contrast — below WCAG
+ * 1.4.11's 3:1 floor for non-text UI components. `brand-300`
+ * (lighter violet) clears the floor on the same dark surface.
+ */
+:root.dark :where(a, button, input, select, textarea, [tabindex='0']):focus-visible {
+  outline-color: var(--color-brand-300);
 }
 
 body {

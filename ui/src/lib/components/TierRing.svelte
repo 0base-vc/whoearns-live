@@ -90,9 +90,18 @@
   // tiers; em-dash for unrated (we never invent a number we don't have).
   const centreLabel = $derived(composite === null ? '—' : `${Math.round(composite)}`);
 
-  // Per-tier ring colour token. Falls back to the unrated tone when
-  // the validator is unrated.
-  const ringColorVar = $derived(`--color-tier-${tier}-500`);
+  // Per-tier ring colour token. Record-typed (vs. template-string
+  // interpolation) so adding a future NodeTier variant is a
+  // typecheck error here rather than silently producing a
+  // nonexistent `--color-tier-???-500` CSS var that paints nothing.
+  const RING_COLOR_VAR: Record<NodeTier, string> = {
+    forge: '--color-tier-forge-500',
+    anvil: '--color-tier-anvil-500',
+    hearth: '--color-tier-hearth-500',
+    kindling: '--color-tier-kindling-500',
+    unrated: '--color-tier-unrated-500',
+  };
+  const ringColorVar = $derived(RING_COLOR_VAR[tier]);
 
   // Per-bar tones for reliability + economic percentile. The
   // reliability bar uses a warn tone when the floor fired so the

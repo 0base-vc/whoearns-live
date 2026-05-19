@@ -104,6 +104,13 @@ export function unratedReason(body: Pick<NodeTierBody, 'window' | 'components'>)
     return 'Economic percentile unmeasurable yet.';
   }
   if (w.slotsAssigned < MIN_LEADER_SLOTS_FOR_TIER) {
+    // Cold-start framing: a validator with zero leader slots is not
+    // "failing the floor" — they simply haven't been chosen yet by
+    // the stake-weighted leader schedule. Phrase it that way so the
+    // delegator doesn't read "0/10" as a deficiency.
+    if (w.slotsAssigned === 0) {
+      return 'No leader slots assigned yet — tier will update once the validator is selected.';
+    }
     return `Needs more leader slots (${w.slotsAssigned}/${MIN_LEADER_SLOTS_FOR_TIER}).`;
   }
   return 'Sample too thin to classify.';
@@ -146,10 +153,19 @@ export function isReliabilityFloorTriggered(
  * Skips fields that aren't measurable yet rather than rendering a
  * literal "null" string.
  *
+ * Separator: ` • ` (U+2022 bullet) instead of ` · ` (U+00B7 middle
+ * dot). Korean typography treats `·` as a *division mark* (semantic
+ * "divided by"), not a list separator, so a moniker like "0base.vc
+ * 🇰🇷" followed by `· Forge · Cycle 1 OG · …` reads as awkward
+ * arithmetic. The bullet is unambiguous as a list separator across
+ * Korean, Japanese, Chinese, and Western typographic conventions.
+ *
  * Example outputs:
- *   "Forge · Cycle 1 OG · Firedancer 0.405 · 0.4% skip · ◎0.234 last month"
- *   "Unrated · Recent-Era Operator · Agave 3.1.13 · — skip · — last month"
+ *   "Forge • Cycle 1 OG • Firedancer 0.405 • 0.4% skip • ◎0.234 last month"
+ *   "Unrated • Recent-Era Operator • Agave 3.1.13 • — skip • — last month"
  */
+const TRUST_SEPARATOR = ' • ';
+
 export function trustSummary(parts: {
   tierLabel: string;
   tenureBadge: string;
@@ -167,5 +183,5 @@ export function trustSummary(parts: {
   segments.push(
     parts.incomeLast30dSol === null ? '— last month' : `◎${parts.incomeLast30dSol} last month`,
   );
-  return segments.join(' · ');
+  return segments.join(TRUST_SEPARATOR);
 }

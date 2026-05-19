@@ -13,13 +13,30 @@
   import { page } from '$app/state';
   import { invalidateAll } from '$app/navigation';
 
-  /** Retry cadence — matches `/income/[idOrVote]/+error.svelte`. */
+  /**
+   * Base retry cadence — 5 s nominal, jittered ±20 % per attempt so
+   * 100 simultaneous error-page viewers don't retry in lockstep
+   * during a rolling deploy and thunder-herd the indexer the moment
+   * it comes back up. Matches `/income/[idOrVote]/+error.svelte`
+   * in cadence but adds the jitter that surfaced in the PR-1
+   * adversarial review.
+   */
   const RETRY_INTERVAL_MS = 5_000;
+  const RETRY_JITTER_FRACTION = 0.2;
   const MAX_AUTO_RETRIES = 6;
+
+  /**
+   * Per-attempt cadence with random jitter in `[1 - frac, 1 + frac]`.
+   * Rounded to seconds so the visible countdown stays integer.
+   */
+  function nextCountdownSeconds(): number {
+    const jitter = 1 + (Math.random() * 2 - 1) * RETRY_JITTER_FRACTION;
+    return Math.max(1, Math.round((RETRY_INTERVAL_MS * jitter) / 1000));
+  }
 
   let retryCount = $state(0);
   let retrying = $state(false);
-  let countdown = $state(RETRY_INTERVAL_MS / 1000);
+  let countdown = $state(nextCountdownSeconds());
 
   $effect(() => {
     if (retryCount >= MAX_AUTO_RETRIES) return;
@@ -35,9 +52,20 @@
   async function triggerRetry() {
     retrying = true;
     retryCount += 1;
-    countdown = RETRY_INTERVAL_MS / 1000;
+    countdown = nextCountdownSeconds();
     try {
       await invalidateAll();
+      // On successful recovery (no rethrown error), shift focus to
+      // the page's main landmark so a keyboard/AT user mid-action
+      // isn't stranded — the body element is the default focus
+      // target after a SvelteKit navigation, which announces
+      // nothing useful. Best-effort: if `#main` isn't present
+      // (e.g. layout overrides), the focus stays where SvelteKit
+      // put it.
+      if (typeof document !== 'undefined') {
+        const main = document.getElementById('main');
+        main?.focus?.();
+      }
     } finally {
       retrying = false;
     }
@@ -61,8 +89,18 @@
     <p class="mt-3 text-sm text-[color:var(--color-text-muted)]">
       {message}
     </p>
-    <p class="mt-2 text-xs text-[color:var(--color-text-subtle)]">
-      The validator may not be indexed yet, or may have opted out of public scoring.
+    <!--
+      We deliberately collapse the "unknown to indexer" and "opted
+      out" cases to the same 404 so the gate that fired stays
+      unobservable (consistent with the leaderboard + `/income/[id]`
+      contract). The copy below states both possibilities so a user
+      who arrives via an old shared link knows what happened, and
+      so the operator who just opted out knows the page is in the
+      expected state.
+    -->
+    <p class="mt-2 text-xs text-[color:var(--color-text-muted)]">
+      The validator may not be indexed yet, or may have opted out of public scoring. No automated
+      retries — neither case recovers on a refresh.
     </p>
     <a
       href="/"

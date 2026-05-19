@@ -84,10 +84,15 @@
   // The trigger respects the operator's identity.
   const showKoreanAccent = $derived(moniker !== null && moniker.includes('🇰🇷'));
 
-  // Soft owner hint — local-storage flag set after a successful claim
+  // Soft owner hint — sessionStorage flag set after a successful claim
   // flow + the `?owner=1` query param. NEITHER is a trusted owner
   // boundary; we only use them to surface a "Manage profile" CTA.
   // Every byte rendered on this page must be safe for ANY visitor.
+  //
+  // sessionStorage rather than localStorage so the hint clears when
+  // the browser/tab closes — a shared computer can't surface a
+  // misleading "Manage profile" CTA to a subsequent user just because
+  // someone earlier completed the claim flow.
   let isOwnerHint = $state(false);
   onMount(() => {
     try {
@@ -97,7 +102,7 @@
         return;
       }
       const key = `whoearns:owned:${scoring.vote}`;
-      if (localStorage.getItem(key) === '1') {
+      if (sessionStorage.getItem(key) === '1') {
         isOwnerHint = true;
       }
     } catch {
@@ -167,14 +172,17 @@
   // CTA the most).
   const isClaimed = $derived(scoring.oai !== null);
 
-  // External website — operator-supplied, treat untrusted. Mirror
-  // the income page's URL scheme validation.
+  // External website — operator-supplied, treat untrusted. HTTPS
+  // only (was previously http: OR https:, but mixed content on a
+  // delegator-trust surface is the wrong default; a delegator
+  // clicking through to an http:// site sees a browser security
+  // warning, which is the opposite of what we want on a tier page).
   const safeWebsiteUrl = $derived.by(() => {
     const url = history?.website;
     if (!url) return null;
     try {
       const parsed = new URL(url);
-      return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : null;
+      return parsed.protocol === 'https:' ? parsed.toString() : null;
     } catch {
       return null;
     }
@@ -267,9 +275,15 @@
           </p>
         {/if}
 
-        <!-- Freshness — oldest income/client timestamp in the window. -->
+        <!--
+          Freshness — oldest income/client timestamp in the window.
+          12px (`text-xs`) at `--color-text-muted` clears WCAG 1.4.3
+          comfortably; the previous 11px / `text-subtle` combo
+          sat just under the floor on the freshness path, which is
+          one of the more delegator-critical lines on the page.
+        -->
         {#if freshnessLabel}
-          <p class="mt-2 text-[11px] text-[color:var(--color-text-subtle)]">
+          <p class="mt-2 text-xs text-[color:var(--color-text-muted)]">
             Last refreshed {freshnessLabel}
           </p>
         {/if}
@@ -293,9 +307,17 @@
     cosmetic identity-respecting nod, not a locale inference.
   -->
   {#if showKoreanAccent}
+    <!--
+      South-Korean flag colours, literal hex throughout. Earlier
+      revision used `var(--color-text-default)` for the white
+      middle stripe, which inverts to near-black in light mode
+      (broken) and uses a theme-tinted near-white in dark mode
+      (off-flag). The flag's middle is `#ffffff` regardless of
+      theme; that's what we paint here.
+    -->
     <div
       class="mt-4 h-1 w-full rounded-full"
-      style="background: linear-gradient(90deg, #cd2e3a 0%, #cd2e3a 33%, var(--color-text-default) 33%, var(--color-text-default) 67%, #0047a0 67%, #0047a0 100%);"
+      style="background: linear-gradient(90deg, #cd2e3a 0%, #cd2e3a 33%, #ffffff 33%, #ffffff 67%, #0047a0 67%, #0047a0 100%);"
       aria-hidden="true"
     ></div>
   {/if}
@@ -317,6 +339,14 @@
 
         <p class="text-sm text-[color:var(--color-text-muted)]">{tierTagline}</p>
 
+        <!--
+          `size={144}` overrides the component default of 160px so
+          the ring uses ~38% of an iPhone SE viewport (375px) rather
+          than 43%. Desktop has plenty of horizontal breathing room
+          at this size; mobile feels less cramped. A larger size on
+          desktop isn't necessary — the surrounding card width
+          already implies "this is the focal point of the section."
+        -->
         <TierRing
           tier={tier.tier}
           composite={tier.composite}
@@ -324,20 +354,31 @@
           economicPercentile={tierComponents.economicPercentile}
           floorTriggered={reliabilityFloor}
           unratedReason={reason ?? undefined}
+          size={144}
         />
 
         {#if reliabilityFloor}
           <!--
-            Skip-rate-floor explanation chip. Only renders when the
-            reliability floor fired — explains WHY the tier was capped
-            independently of economic productivity.
+            Skip-rate-floor explanation chip. Renders ONLY when the
+            reliability floor fired — explains WHY the tier was
+            capped independently of economic productivity. Promoted
+            to a `role="status"` warn-tone banner (not muted text)
+            because a delegator skimming the page must NOT miss
+            that the tier classification reflects a hard floor, not
+            the economic half of the composite.
           -->
-          <p class="text-xs text-[color:var(--color-status-warn-fg)]">
-            ⚠ Skip rate {(
-              (tierWindow.slotsSkipped / Math.max(1, tierWindow.slotsAssigned)) *
-              100
-            ).toFixed(1)}% — tier capped at Kindling regardless of economic percentile.
-          </p>
+          <div
+            class="flex items-start gap-2 rounded-md border border-[color:var(--color-status-warn-fg)]/30 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-sm font-medium text-[color:var(--color-status-warn-fg)]"
+            role="status"
+          >
+            <span aria-hidden="true">⚠</span>
+            <span>
+              Skip rate {(
+                (tierWindow.slotsSkipped / Math.max(1, tierWindow.slotsAssigned)) *
+                100
+              ).toFixed(1)}% — tier capped at Kindling regardless of economic percentile.
+            </span>
+          </div>
         {/if}
 
         {#if reason}
@@ -417,12 +458,23 @@
         {/if}
       </p>
     </div>
+    <!--
+      CTA copy ladder:
+        - claimed + owner-hint: PRIMARY "Manage profile" (the operator
+          is the only audience that can act on this)
+        - unclaimed: GHOST "Operator? Sign to claim" (claim flow
+          requires offline Ed25519 — the soft phrasing makes clear
+          this is a guarded action, not a casual button for
+          delegators who happened to land on the page)
+        - claimed + no owner hint: GHOST "Operator? Manage profile"
+          (same reasoning — the visitor probably isn't the operator)
+    -->
     <div class="flex shrink-0 items-center gap-2">
       {#if isClaimed && isOwnerHint}
         <Button href="/claim/{scoring.vote}" variant="primary" size="md">Manage profile</Button>
       {:else if !isClaimed}
-        <Button href="/claim/{scoring.vote}" variant="primary" size="md"
-          >Claim this validator</Button
+        <Button href="/claim/{scoring.vote}" variant="ghost" size="md"
+          >Operator? Sign to claim</Button
         >
       {:else}
         <Button href="/claim/{scoring.vote}" variant="ghost" size="md"

@@ -60,7 +60,13 @@ export const load: PageLoad = async ({ params, fetch: fetchFn }) => {
       if (err.status === 404) {
         error(404, `Validator not found: ${idOrVote}`);
       }
-      error(err.status, err.message);
+      // Defensive: `ApiError.status` is typed `number` in the
+      // constructor, but if a transport-layer error (network drop,
+      // CORS rejection mid-flight) ever produced an instance with a
+      // zero / undefined status, `error(undefined, …)` would throw a
+      // TypeError. Floor to 500 so the error page renders cleanly.
+      const status = Number.isInteger(err.status) && err.status >= 400 ? err.status : 500;
+      error(status, err.message);
     }
     throw err;
   }
@@ -88,13 +94,24 @@ function aggregateLast30dIncome(
   // out of the API.
   const window = closedRows.slice(0, 15);
   let total = 0n;
+  // Track whether ANY row contributed measurable income data — even
+  // if the sum is `0n`. Distinguishes "no data ingested for this
+  // window yet" (return null, render em-dash) from "validator
+  // legitimately earned 0 lamports" (return '0', render ◎0.000).
+  // Without this, a brand-new validator with no fees/tips ingested
+  // looks identical to a validator that produced blocks but earned
+  // literally nothing.
+  let hasAnyIncomeData = false;
   for (const row of window) {
     if (row.blockFeesTotalLamports !== null) {
       total += BigInt(row.blockFeesTotalLamports);
+      hasAnyIncomeData = true;
     }
     if (row.blockTipsTotalLamports !== null) {
       total += BigInt(row.blockTipsTotalLamports);
+      hasAnyIncomeData = true;
     }
   }
+  if (!hasAnyIncomeData) return null;
   return total.toString();
 }

@@ -102,6 +102,15 @@
     kindling: 'Kindling — bottom of the rated set',
     unrated: 'Unrated — sample too thin to classify',
   };
+
+  // Stroke width scales with size so the outline reads consistently
+  // at 14px (tight inline use, ~1.25 stroke) through 32px (hero
+  // contexts, ~2 stroke). At fixed 1.25 the 32px badge looked
+  // hairline; at fixed 2.0 the 14px badge looked chunky. Linear
+  // interpolation against the hand-tuned 14-32 range keeps both
+  // ends visually balanced. Floor at 1.0 so the stroke doesn't
+  // disappear below 14px (e.g. a future favicon-scale rendering).
+  const strokeWidth = $derived(Math.max(1, size / 16));
 </script>
 
 <span
@@ -116,7 +125,7 @@
     height={size}
     fill="none"
     stroke="currentColor"
-    stroke-width="1.25"
+    stroke-width={strokeWidth}
     stroke-linejoin="round"
     aria-hidden="true"
   >
