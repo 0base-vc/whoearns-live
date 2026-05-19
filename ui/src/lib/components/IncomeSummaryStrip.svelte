@@ -195,15 +195,19 @@
   aria-labelledby="income-summary-heading"
 >
   <header class="flex items-baseline justify-between gap-2 pb-3">
-    <h2 id="income-summary-heading" class="text-base font-semibold tracking-tight">
-      Recent income
-    </h2>
+    <h2 id="income-summary-heading" class="text-base font-semibold tracking-tight">Epoch income</h2>
     {#if !isColdStart}
+      <!--
+        Deep-link to the full per-epoch table. Action-arrow `→`
+        (not the breadcrumb `›`) so a delegator visually
+        distinguishes "go to another page" from the breadcrumb
+        separator on the destination.
+      -->
       <a
         href={`/income/${vote}`}
         class="inline-flex min-h-11 items-center text-xs text-[color:var(--color-brand-500)] hover:underline"
       >
-        Epoch income ›
+        Full history →
       </a>
     {/if}
   </header>

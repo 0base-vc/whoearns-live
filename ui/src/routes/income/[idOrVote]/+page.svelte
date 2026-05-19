@@ -120,9 +120,14 @@
   // recents, and shared-link previews actually readable. Falls back
   // to the short pubkey for unregistered validators.
   const titleLabel = $derived(history.name ?? shortVote);
-  const pageTitle = $derived(`${titleLabel} — Epoch income | ${SITE_NAME}`);
+  // Typography matches the hub page (`${heroTitle} • ${tierLabel} tier
+  // • WhoEarns Live`) so a delegator navigating hub ↔ income sees one
+  // page-name shape, not two. The bullet `•` is deliberate — Korean
+  // treats the middle-dot `·` as a division mark, so the site
+  // standardises on the slightly wider bullet across both pages.
+  const pageTitle = $derived(`${titleLabel} • Epoch income • ${SITE_NAME}`);
   const pageDescription = $derived(
-    `Per-epoch income for Solana validator ${history.vote}: block fees, on-chain Jito tips, slot production, and indexed-validator median income per leader slot over the most recent month-sized window.`,
+    `Per-epoch income for ${titleLabel}: block fees, on-chain Jito tips, slot production, and indexed-validator median income per leader slot over the most recent month-sized window.`,
   );
 
   /**
@@ -141,10 +146,13 @@
       {
         '@type': 'BreadcrumbList',
         // Three-item trail matches the visible breadcrumb on the
-        // page. The canonical (`/v/<vote>`) is the validator's
-        // ancestor surface; the current page is the per-epoch
-        // drill-down ("Epoch income"). Structured data, visible
-        // breadcrumb, and `<link rel="canonical">` all agree.
+        // page. Structural shape (Leaderboard → validator hub →
+        // Epoch income) is identical across the two surfaces.
+        // The `<link rel="canonical">` separately points to the
+        // hub (`/v/<vote>`) — that's intentional: position-3 is
+        // the current page (per schema.org BreadcrumbList spec),
+        // canonical is the surface to be indexed. Not a
+        // contradiction; different jobs, deliberately decoupled.
         itemListElement: [
           { '@type': 'ListItem', position: 1, name: 'Leaderboard', item: `${SITE_URL}/` },
           {
@@ -308,7 +316,7 @@
   Separator is `›` between every item; earlier revision mixed a
   back-arrow `←` on the first item with a forward chevron `›` on
   the second, which is a malformed breadcrumb. Every `<li>` is
-  `min-h-11` so the two items have matching vertical rhythm.
+  `min-h-11` so all three items have matching vertical rhythm.
 -->
 <nav aria-label="Breadcrumb" class="mb-3">
   <ol class="flex list-none flex-wrap items-center gap-1 p-0">

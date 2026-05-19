@@ -16,15 +16,33 @@
  *     real DNS form for public sites
  *
  * Operators who genuinely want a LAN / IP-based site can publish a
- * vanity hostname via `validator-info publish --website`.
+ * vanity hostname via `validator-info publish --website`. The
+ * silent rejection of legitimate `http://` URLs is intentional:
+ * mixed-content blocks the render anyway on an HTTPS page, so
+ * surfacing the would-be-broken link is dishonest. The operator-
+ * facing fix is "republish with HTTPS"; that lives in operator
+ * documentation, not in the rendered page.
  *
- * Used by both the hub (`/v/[idOrVote]/+page.svelte`) and the
- * income page (`/income/[idOrVote]/+page.svelte`) so the gate is
- * symmetric across the two consumer routes. Earlier the hub had
- * its own inline copy and the income page used a looser
- * `safeHttpUrl` that allowed `http:` AND skipped IPv4/host checks
- * — same `history.iconUrl` / `history.website` data, two different
- * postures. This module is the canonical gate.
+ * Used by:
+ *   - validator hub (`/v/[idOrVote]/+page.svelte`)
+ *   - income page (`/income/[idOrVote]/+page.svelte`)
+ *   - validator-search combobox (`ValidatorSearchCombobox.svelte`)
+ *
+ * If a new route renders an operator URL into an `<img src>` or an
+ * `<a href>`, route it through this helper too.
+ *
+ * **DO NOT use this for:**
+ *   - redirect validation (e.g. `?redirect=` query params) — the
+ *     helper only verifies the URL's surface shape, not whether
+ *     the destination is allow-listed. Any attacker-controlled
+ *     HTTPS hostname passes.
+ *   - iframe / embed `src` — same reason; nothing here gates
+ *     against malicious-but-well-formed origins.
+ *   - server-side fetch targets — same.
+ *   - any flow where the gate's pass is interpreted as "this is
+ *     a trusted destination". The helper's contract is "this URL
+ *     is shaped like a public website link"; trust is the
+ *     caller's responsibility.
  */
 export function safeOperatorUrl(raw: string | null | undefined): string | null {
   if (!raw) return null;

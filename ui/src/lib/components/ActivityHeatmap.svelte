@@ -116,14 +116,19 @@
     // Bucket-1 was previously 35% — once bucket-0 lifted to
     // zinc-700, the two cells' luminance differed by only ~10-12 ΔL
     // with a faint green tint that vanishes under protan/deutan
-    // simulation. Bucket-1 now starts at 50% so the bucket-0 →
-    // bucket-1 luminance gap stays clear for color-blind viewers
-    // even when the green hue is desaturated. Buckets 2-4 stay
-    // spaced so the cross-bucket ramp still reads as a gradient.
+    // simulation. Bucket-1 now starts at 50%.
+    //
+    // 50/68/82/95 widens BOTH the bucket-1→bucket-2 step (was 15pt
+    // at 50/65) AND the bucket-3→bucket-4 high-end step (was 15pt
+    // at 80/95). Net result: ~18/14/13 percentage-point spacing
+    // versus the prior 15/15/15. Every adjacent-bucket transition
+    // stays discriminable under protan/deutan simulation while the
+    // "brightest day stands out" sighted-user signal isn't
+    // compressed into the very top of the ramp.
     'var(--color-heatmap-empty)',
     'color-mix(in oklab, var(--color-status-ok-fg) 50%, transparent)',
-    'color-mix(in oklab, var(--color-status-ok-fg) 65%, transparent)',
-    'color-mix(in oklab, var(--color-status-ok-fg) 80%, transparent)',
+    'color-mix(in oklab, var(--color-status-ok-fg) 68%, transparent)',
+    'color-mix(in oklab, var(--color-status-ok-fg) 82%, transparent)',
     'color-mix(in oklab, var(--color-status-ok-fg) 95%, transparent)',
   ];
 
