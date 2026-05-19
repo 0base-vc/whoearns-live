@@ -1,5 +1,5 @@
 <!--
-  Validator Hub `/v/[idOrVote]` — PR 1 (foundation) + PR 2 (panels).
+  Validator Hub `/v/[idOrVote]` — PR 1 + PR 2 + PR 3 complete.
 
   PR 1 shipped:
    - Identity hero with moniker / icon / verified+claim chip / share widget
@@ -8,27 +8,37 @@
    - Freshness line ("Last refreshed N ago")
    - Action footer (claim CTA OR soft "Manage profile" hint via `?owner=1` / sessionStorage)
 
-  PR 2 adds:
-   - OAI panel (governance + wallet score with ingest-status null branching)
+  PR 2 added:
+   - OAI panel (governance + wallet + composite tile; honest pending state)
    - Wallet activity heatmap per registered operator wallet (53×7 grid,
      log-bucketed intensity, brightest-day star, today outline)
-   - Claim audit timeline (latest 5 inline + `<details>` for older, with
-     ⚠ visual emphasis for identity-rotation re-claims)
-   - CSR `onMount` two-wave fetch (claim+audit, then per-wallet activity)
+   - Claim audit timeline (latest 5 inline + lazy `<details>` for older,
+     identity-rotation `role="alert"` warning)
+   - CSR fan-out with AbortController + per-surface failure tiles +
+     `afterNavigate` reset for param-only navigation
 
-  PR 3 still adds: income summary strip + sparkline, SIMD feed, sticky
-  mobile tier header, cross-link swap from `/income/[id]` → `/v/[id]`.
+  PR 3 adds:
+   - Income summary strip (lifetime / 30d / 7d KPI + 16-epoch sparkline
+     + deep-link to `/income/[id]` for the full epoch table)
+   - SIMD curations section (count=0 hidden; AI-summary cards)
+   - Sticky mobile header (IntersectionObserver-driven; moniker + tier
+     pill + claim CTA when hero scrolls past)
+   - Canonical URL is now `/v/[id]`; the income page keeps a back-
+     breadcrumb so operators drilling down can hop back
+
   Plan reference: `/Users/jjangg96/.claude/plans/adaptive-nibbling-ocean.md`.
 
   Design principles honoured:
    - Per-component breakdown is mandatory: TierRing always shows the
-     two sub-component bars next to the composite.
+     two sub-component bars next to the composite; OaiPanel surfaces
+     governance + wallet halves alongside the composite tile.
    - No half-shown scores: `composite: null` paints the ring as a faint
      stroke + em-dash, never a fake "0".
    - Cold-start = "shorter page, not sadder": identity, tier, tenure,
      client, share widget all work without claim/OAI/wallet/audit data.
    - Visitor-safe: no trusted-owner state. `?owner=1` and
-     localStorage are SOFT UI hints only.
+     sessionStorage are SOFT UI hints only — every byte is safe for
+     any visitor.
 -->
 <script lang="ts">
   import { page } from '$app/state';
@@ -48,6 +58,9 @@
   import OaiPanel from '$lib/components/OaiPanel.svelte';
   import ActivityHeatmap from '$lib/components/ActivityHeatmap.svelte';
   import AuditLogList from '$lib/components/AuditLogList.svelte';
+  import IncomeSummaryStrip from '$lib/components/IncomeSummaryStrip.svelte';
+  import SimdProposalCard from '$lib/components/SimdProposalCard.svelte';
+  import StickyHubHeader from '$lib/components/StickyHubHeader.svelte';
 
   import {
     TIER_LABEL,
@@ -59,8 +72,18 @@
   } from '$lib/tier';
   import { formatSolFixed, formatTimestamp } from '$lib/format';
   import { SITE_URL } from '$lib/site';
-  import { fetchClaimAudit, fetchClaimStatus, fetchOperatorWalletActivity } from '$lib/api';
-  import type { ClaimAuditEvent, ClaimStatus, OperatorWalletActivityResponse } from '$lib/types';
+  import {
+    fetchClaimAudit,
+    fetchClaimStatus,
+    fetchOperatorWalletActivity,
+    fetchSimdProposals,
+  } from '$lib/api';
+  import type {
+    ClaimAuditEvent,
+    ClaimStatus,
+    OperatorWalletActivityResponse,
+    SimdProposalListItem,
+  } from '$lib/types';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -133,6 +156,18 @@
   // render their own state independently.
   let walletActivityFailed = $state<Set<string>>(new Set());
   let walletActivityLoading = $state(true);
+  // SIMD proposals — fetched as a CSR (the homepage hits the same
+  // endpoint, so an SSR fetch here would double-charge per-IP
+  // budget for the common 'visit homepage → click hub link' flow).
+  // Section is hidden when `simdItems` is empty: the AI-curation
+  // job ships separately, so an unshipped feed is the common case
+  // today.
+  let simdItems = $state<ReadonlyArray<SimdProposalListItem>>([]);
+  let simdLoading = $state(true);
+  // Hero sentinel for the sticky mobile header — set on a 1×1 div
+  // at the bottom of the hero card via `bind:this`. IntersectionObserver
+  // watches it; once it scrolls out of view, the header appears.
+  let heroSentinel = $state<HTMLElement | null>(null);
 
   // Active AbortController for the current vote's CSR fan-out. Held
   // outside `onMount` so `afterNavigate` (param-only nav) can abort
@@ -152,6 +187,8 @@
     walletActivity = new Map();
     walletActivityFailed = new Set();
     walletActivityLoading = true;
+    simdItems = [];
+    simdLoading = true;
   }
 
   /**
@@ -172,6 +209,15 @@
       (err: unknown) => ({ ok: false as const, error: err }),
     );
     const auditPromise = fetchClaimAudit(vote, { signal }).then(
+      (v) => ({ ok: true as const, value: v }),
+      (err: unknown) => ({ ok: false as const, error: err }),
+    );
+    // SIMD proposals are validator-independent — same response on every
+    // hub page — but kept inside this fan-out so it gets the same
+    // AbortController teardown semantics + can fire in parallel with
+    // claim+audit. A `count: 0` response (the unshipped-feed common
+    // case today) hides the section entirely.
+    const simdPromise = fetchSimdProposals({ limit: 6 }, { signal }).then(
       (v) => ({ ok: true as const, value: v }),
       (err: unknown) => ({ ok: false as const, error: err }),
     );
@@ -201,7 +247,7 @@
       walletActivityLoading = false;
     });
 
-    const [claim, audit] = await Promise.all([claimPromise, auditPromise]);
+    const [claim, audit, simd] = await Promise.all([claimPromise, auditPromise, simdPromise]);
     if (signal.aborted) return;
 
     if (claim.ok) {
@@ -217,6 +263,12 @@
       auditFailed = true;
     }
     auditLoading = false;
+
+    // SIMD failure is silent — the section is hidden when the list is
+    // empty anyway, and the curator job being down doesn't change a
+    // delegator's trust signal. No error tile here.
+    if (simd.ok) simdItems = simd.value.items;
+    simdLoading = false;
 
     // If Wave 1's claim rejected we still need to flip Wave 2's
     // loading flag — the walletWavePromise's short-circuit on
@@ -503,7 +555,24 @@
       aria-hidden="true"
     ></div>
   {/if}
+  <!--
+    Sentinel for StickyHubHeader's IntersectionObserver — a zero-
+    height element at the END of the hero card. Once the user
+    scrolls past it, the sticky bar at the top appears (mobile
+    only). No visual presence; pure observation target.
+  -->
+  <div bind:this={heroSentinel} aria-hidden="true" style="height: 0;"></div>
 </Card>
+
+<StickyHubHeader
+  moniker={heroTitle}
+  tier={tier.tier}
+  {tierLabel}
+  vote={scoring.vote}
+  {isClaimed}
+  {isOwnerHint}
+  sentinel={heroSentinel}
+/>
 
 <!-- ─────────── 2. Tier card + Tenure/Client stack ─────────── -->
 <div class="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-12">
@@ -624,7 +693,24 @@
 </div>
 
 <!--
-  ─────────── 3. Wallet activity heatmaps ───────────
+  ─────────── 3. Income summary strip ───────────
+
+  Lifetime / 30d / 7d KPIs + a 16-epoch sparkline. Driven entirely
+  from the SSR `/history` rows so there's no extra fetch. The deep
+  link sends a viewer to `/income/[vote]` for the full epoch table
+  (the hub's hierarchy is "at-a-glance"; the income page is "drill
+  down"). Hidden entirely when `history` is null (brand-new
+  validator with no rows — `/income/[vote]` will show the
+  tracking-hand-off banner if the visitor follows the deep link).
+-->
+{#if history !== null}
+  <div class="mt-6">
+    <IncomeSummaryStrip vote={scoring.vote} items={history.items} />
+  </div>
+{/if}
+
+<!--
+  ─────────── 4. Wallet activity heatmaps ───────────
 
   Promoted above OAI because the wallet half of the OAI today
   is wallet-only (governance ingest pending in every deployment),
@@ -688,7 +774,7 @@
 {/if}
 
 <!--
-  ─────────── 4. Claim audit timeline ───────────
+  ─────────── 5. Claim audit timeline ───────────
 
   Moved above OAI in the section order. For a delegator with an
   8-second skim window the highest-signal warning on the page is
@@ -718,7 +804,7 @@
 {/if}
 
 <!--
-  ─────────── 5. OAI panel (Operator Activity Index) ───────────
+  ─────────── 6. OAI panel (Operator Activity Index) ───────────
 
   Now BELOW the wallet heatmaps + audit because today's deployment
   serves `governance: null` everywhere (the GitHub-discussions
@@ -744,7 +830,35 @@
   {/if}
 </div>
 
-<!-- ─────────── 6. Action footer (claim CTA / soft owner hint) ─────────── -->
+<!--
+  ─────────── 7. SIMD curations ───────────
+
+  AI-curated SIMD proposals (`/v1/simd-proposals`). Section is
+  hidden entirely when the curator job hasn't published any rows
+  yet — `count: 0` is the common case today (the AI-curation
+  worker ships separately from the API + UI). On a populated
+  response, render up to 6 cards in a 2-column grid on desktop.
+-->
+{#if !simdLoading && simdItems.length > 0}
+  <section class="mt-6 flex flex-col gap-4" aria-labelledby="simd-curations-heading">
+    <header class="px-1">
+      <h2 id="simd-curations-heading" class="text-base font-semibold tracking-tight">
+        Governance — recent SIMDs
+      </h2>
+      <p class="mt-1 text-xs text-[color:var(--color-text-muted)]">
+        AI-summarised proposals from the SIMD repository so operators can vote informed. The summary
+        + key questions are curated; the source link is canonical.
+      </p>
+    </header>
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      {#each simdItems as proposal (proposal.simdNumber)}
+        <SimdProposalCard {proposal} />
+      {/each}
+    </div>
+  </section>
+{/if}
+
+<!-- ─────────── 8. Action footer (claim CTA / soft owner hint) ─────────── -->
 <Card tone="accent" class="mt-6">
   <div class="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
     <div class="min-w-0 flex-1">

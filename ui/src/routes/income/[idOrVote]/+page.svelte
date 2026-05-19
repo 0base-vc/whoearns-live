@@ -250,7 +250,15 @@
 <svelte:head>
   <title>{pageTitle}</title>
   <meta name="description" content={pageDescription} />
-  <link rel="canonical" href={`${SITE_URL}/income/${history.vote}`} />
+  <!--
+    Canonical points at the validator hub `/v/<vote>`. The income
+    page stays a first-class drill-down ("the full epoch table for
+    operators who want the receipts"), but the hub is the surface
+    search engines and AI crawlers should index as "this validator's
+    page." Existing inbound links to /income still resolve — they
+    just don't compete for ranking.
+  -->
+  <link rel="canonical" href={`${SITE_URL}/v/${history.vote}`} />
   <meta property="og:title" content={pageTitle} />
   <meta property="og:description" content={pageDescription} />
   <meta property="og:locale" content="en_US" />
@@ -283,6 +291,23 @@
     <meta http-equiv="refresh" content="45" />
   {/if}
 </svelte:head>
+
+<!--
+  Breadcrumb back to the validator hub. The income page is the
+  drill-down for operators who want the per-epoch receipts; for a
+  delegator who landed here from an external link, the hub is the
+  more useful overview. Cross-link lets either audience flip
+  context without a full search.
+-->
+<nav aria-label="Breadcrumb" class="mb-3">
+  <a
+    href={`/v/${history.vote}`}
+    class="inline-flex items-center gap-1 text-xs text-[color:var(--color-text-muted)] hover:text-[color:var(--color-brand-500)] hover:underline"
+  >
+    <span aria-hidden="true">←</span>
+    Validator hub
+  </a>
+</nav>
 
 <!-- ─────────── 1. Validator hero (identity + recent income) ─────────── -->
 <Card tone="raised">

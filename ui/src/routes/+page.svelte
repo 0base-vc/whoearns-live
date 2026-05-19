@@ -33,7 +33,7 @@
       searchError = 'Select a validator from results or paste a vote / identity pubkey.';
       return;
     }
-    window.location.href = `/income/${encodeURIComponent(trimmed)}`;
+    window.location.href = `/v/${encodeURIComponent(trimmed)}`;
   }
 
   const features = [
@@ -116,7 +116,7 @@
         bind:value={input}
         onSelect={(item) => {
           searchError = null;
-          window.location.href = `/income/${encodeURIComponent(item.vote)}`;
+          window.location.href = `/v/${encodeURIComponent(item.vote)}`;
         }}
       />
       {#if searchError !== null}

@@ -399,10 +399,10 @@ export function fetchOperatorWalletActivity(
  */
 export function fetchSimdProposals(
   opts: { limit?: number } = {},
-  fetchFn: typeof fetch = fetch,
+  callOpts: CallOptions | typeof fetch = {},
 ): Promise<SimdProposalListResponse> {
   const qs = opts.limit !== undefined ? `?limit=${opts.limit}` : '';
-  return call<SimdProposalListResponse>(`/v1/simd-proposals${qs}`, fetchFn);
+  return call<SimdProposalListResponse>(`/v1/simd-proposals${qs}`, callOpts);
 }
 
 /**

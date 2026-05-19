@@ -402,7 +402,7 @@
               </td>
               <td class="max-w-xs px-4 py-2.5">
                 <a
-                  href={`/income/${item.vote}`}
+                  href={`/v/${item.vote}`}
                   class="group/row block hover:text-[color:var(--color-brand-500)]"
                   aria-label={item.name ? `${item.name} (${item.vote})` : item.vote}
                 >
@@ -479,7 +479,7 @@
       {#each data.items as item (item.vote)}
         <li>
           <a
-            href={`/income/${item.vote}`}
+            href={`/v/${item.vote}`}
             class="group block px-5 py-3 transition-colors hover:bg-[color:var(--color-surface-muted)]"
           >
             <div class="flex items-center gap-3">
