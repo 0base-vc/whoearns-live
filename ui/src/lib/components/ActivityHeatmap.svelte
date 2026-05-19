@@ -112,10 +112,18 @@
     // the empty-cell visibility above the 3:1 non-text floor on
     // dark backgrounds (the earlier `--color-border-default`
     // zinc-800 against zinc-950 surface read at ~1.5:1).
+    //
+    // Bucket-1 was previously 35% — once bucket-0 lifted to
+    // zinc-700, the two cells' luminance differed by only ~10-12 ΔL
+    // with a faint green tint that vanishes under protan/deutan
+    // simulation. Bucket-1 now starts at 50% so the bucket-0 →
+    // bucket-1 luminance gap stays clear for color-blind viewers
+    // even when the green hue is desaturated. Buckets 2-4 stay
+    // spaced so the cross-bucket ramp still reads as a gradient.
     'var(--color-heatmap-empty)',
-    'color-mix(in oklab, var(--color-status-ok-fg) 35%, transparent)',
-    'color-mix(in oklab, var(--color-status-ok-fg) 55%, transparent)',
-    'color-mix(in oklab, var(--color-status-ok-fg) 75%, transparent)',
+    'color-mix(in oklab, var(--color-status-ok-fg) 50%, transparent)',
+    'color-mix(in oklab, var(--color-status-ok-fg) 65%, transparent)',
+    'color-mix(in oklab, var(--color-status-ok-fg) 80%, transparent)',
     'color-mix(in oklab, var(--color-status-ok-fg) 95%, transparent)',
   ];
 

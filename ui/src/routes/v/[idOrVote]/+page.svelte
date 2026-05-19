@@ -72,6 +72,7 @@
   } from '$lib/tier';
   import { formatTimestamp, lamportsStringToSolNumber } from '$lib/format';
   import { SITE_URL } from '$lib/site';
+  import { safeOperatorUrl } from '$lib/url-safety';
   import {
     fetchClaimAudit,
     fetchClaimStatus,
@@ -117,32 +118,9 @@
     moniker ? (Array.from(moniker)[0] ?? '?').toUpperCase() : shortVote.slice(0, 1).toUpperCase(),
   );
   let iconLoadFailed = $state(false);
-  /**
-   * HTTPS-only URL gate + domain-shape check. Rejects IPv4 literals
-   * (`1.2.3.4`), IPv6 literals (`[::1]` / hostnames containing `:`),
-   * and bare hostnames without a `.` separator. The browser would
-   * follow these to a real host, but on a trust-surface page we
-   * prefer not to render link copy that resolves to a numeric IP —
-   * that's a small phishing-aid (no recognisable domain in the
-   * link preview / address bar). Operators who genuinely want a
-   * vanity hostname can publish one via `validator-info`.
-   */
-  function safeOperatorUrl(raw: string | null | undefined): string | null {
-    if (!raw) return null;
-    try {
-      const parsed = new URL(raw);
-      if (parsed.protocol !== 'https:') return null;
-      const host = parsed.hostname;
-      if (host.length === 0) return null;
-      if (host.includes(':')) return null; // IPv6 literal
-      if (/^\d+(\.\d+)*$/.test(host)) return null; // IPv4 literal / all-numeric
-      if (!host.includes('.')) return null; // bare hostname
-      return parsed.toString();
-    } catch {
-      return null;
-    }
-  }
-
+  // `safeOperatorUrl` lifted to `$lib/url-safety.ts` so the hub and
+  // the income page share one canonical gate (icon + website URLs).
+  // See the helper's docstring for the full rejection list.
   const safeIconUrl = $derived(safeOperatorUrl(history?.iconUrl));
 
   // Korean accent strip — purely cosmetic, triggered by the operator's
@@ -399,6 +377,24 @@
   const tierLabel = $derived(TIER_LABEL[tier.tier]);
   const tierTagline = $derived(TIER_TAGLINE[tier.tier]);
   const isUnrated = $derived(tier.tier === 'unrated');
+
+  /**
+   * True when the SSR history payload has zero closed-epoch rows
+   * with any income data. Matches `IncomeSummaryStrip`'s internal
+   * `isColdStart` derivation; surfaced here so the parent can
+   * decide whether to render the strip at all (we skip when
+   * unrated + no income, to avoid duplicating the tier card's
+   * "this validator is brand-new" message).
+   */
+  const historyIsColdStart = $derived.by<boolean>(() => {
+    if (history === null) return true;
+    for (const row of history.items) {
+      if (row.isFinal !== true) continue;
+      if (row.blockFeesTotalLamports !== null) return false;
+      if (row.blockTipsTotalLamports !== null) return false;
+    }
+    return true;
+  });
   const reason = $derived(isUnrated ? unratedReason(scoring.tier) : null);
 
   // Skip rate for the trust summary line — point estimate, not Wilson
@@ -791,13 +787,19 @@
   validator with no rows — `/income/[vote]` will show the
   tracking-hand-off banner if the visitor follows the deep link).
 -->
-{#if history !== null}
+<!--
+  IncomeSummaryStrip rendered only when there's something to say.
+  An unrated validator with zero closed epochs has both the
+  tier card AND a hypothetical income strip explaining "no data
+  yet" — the strip's heading-only fallback was the worst of both
+  (longer than nothing, sadder than honest). Hide the whole
+  section in that exact case; otherwise render normally (the
+  strip's own cold-start prose still fires for rated-but-quiet
+  validators).
+-->
+{#if history !== null && !(isUnrated && historyIsColdStart)}
   <div class="mt-6">
-    <IncomeSummaryStrip
-      vote={scoring.vote}
-      items={history.items}
-      suppressColdStartProse={isUnrated}
-    />
+    <IncomeSummaryStrip vote={scoring.vote} items={history.items} />
   </div>
 {/if}
 

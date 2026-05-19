@@ -48,23 +48,9 @@
     vote: string;
     items: ReadonlyArray<ValidatorEpochRecord>;
     epochDurationDaysApprox?: number;
-    /**
-     * When the parent has ALREADY surfaced a "this validator is
-     * brand-new" explanation elsewhere on the page (e.g. the tier
-     * card's unrated-reason line), set this to `true` to hide the
-     * strip's cold-start prose. Two warm apologies in adjacent
-     * sections reads as "we keep apologising for empty data."
-     * Section heading still renders so the page rhythm is intact.
-     */
-    suppressColdStartProse?: boolean;
   }
 
-  let {
-    vote,
-    items,
-    epochDurationDaysApprox = 2,
-    suppressColdStartProse = false,
-  }: Props = $props();
+  let { vote, items, epochDurationDaysApprox = 2 }: Props = $props();
 
   /** Final rows only, newest-first (the API already returns that order). */
   const finalRows = $derived(items.filter((r) => r.isFinal === true));
@@ -217,18 +203,16 @@
         href={`/income/${vote}`}
         class="inline-flex min-h-11 items-center text-xs text-[color:var(--color-brand-500)] hover:underline"
       >
-        Full epoch history ›
+        Epoch income ›
       </a>
     {/if}
   </header>
 
   {#if isColdStart}
-    {#if !suppressColdStartProse}
-      <p class="text-sm text-[color:var(--color-text-muted)]">
-        This validator hasn't earned its first epoch of fees yet. Check back after the next epoch
-        closes.
-      </p>
-    {/if}
+    <p class="text-sm text-[color:var(--color-text-muted)]">
+      This validator hasn't earned its first epoch of fees yet. Check back after the next epoch
+      closes.
+    </p>
   {:else}
     <div class="grid grid-cols-3 gap-3 sm:gap-4">
       <KpiStat

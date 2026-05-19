@@ -46,6 +46,7 @@
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { serializeJsonLd } from '$lib/json-ld';
   import { SITE_NAME, SITE_URL } from '$lib/site';
+  import { safeOperatorUrl } from '$lib/url-safety';
 
   // Per-row decimal counts in the epoch-history table. Fixed-
   // precision SOL renders so decimal points line up across rows —
@@ -55,16 +56,6 @@
   const HISTORY_PER_EPOCH_DECIMALS = 3;
 
   const LAST_MONTH_EPOCHS = 16;
-
-  function safeHttpUrl(raw: string | null | undefined): string | null {
-    if (raw === null || raw === undefined) return null;
-    try {
-      const url = new URL(raw);
-      return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
-    } catch {
-      return null;
-    }
-  }
 
   let { data }: { data: PageData } = $props();
 
@@ -79,8 +70,12 @@
    */
   const isTracking = $derived<boolean>(history.tracking === true);
   const trackingMessage = $derived<string | null>(history.trackingMessage ?? null);
-  const safeWebsiteUrl = $derived(safeHttpUrl(history.website));
-  const safeIconUrl = $derived(safeHttpUrl(history.iconUrl));
+  // Shared HTTPS-only gate with userinfo / IP / bare-host rejection,
+  // matching the hub's surface. Earlier this page used a looser
+  // `safeHttpUrl` (allowed `http:` + no shape checks) which created
+  // an asymmetric defense — same data, two postures.
+  const safeWebsiteUrl = $derived(safeOperatorUrl(history.website));
+  const safeIconUrl = $derived(safeOperatorUrl(history.iconUrl));
 
   const lastMonthRows = $derived<ValidatorEpochRecord[]>(history.items.slice(0, LAST_MONTH_EPOCHS));
   const lastMonthFeesSol = $derived<number>(
@@ -125,7 +120,7 @@
   // recents, and shared-link previews actually readable. Falls back
   // to the short pubkey for unregistered validators.
   const titleLabel = $derived(history.name ?? shortVote);
-  const pageTitle = $derived(`${titleLabel} — Solana validator income | ${SITE_NAME}`);
+  const pageTitle = $derived(`${titleLabel} — Epoch income | ${SITE_NAME}`);
   const pageDescription = $derived(
     `Per-epoch income for Solana validator ${history.vote}: block fees, on-chain Jito tips, slot production, and indexed-validator median income per leader slot over the most recent month-sized window.`,
   );
@@ -145,23 +140,30 @@
     '@graph': [
       {
         '@type': 'BreadcrumbList',
+        // Three-item trail matches the visible breadcrumb on the
+        // page. The canonical (`/v/<vote>`) is the validator's
+        // ancestor surface; the current page is the per-epoch
+        // drill-down ("Epoch income"). Structured data, visible
+        // breadcrumb, and `<link rel="canonical">` all agree.
         itemListElement: [
           { '@type': 'ListItem', position: 1, name: 'Leaderboard', item: `${SITE_URL}/` },
           {
             '@type': 'ListItem',
             position: 2,
             name: history.name ?? shortenPubkey(history.vote, 6, 6),
-            // Canonical surface (PR3 flip) — point the breadcrumb at
-            // the hub so the structured-data URL matches the page's
-            // `<link rel="canonical">` and Google's structured-data
-            // linter doesn't flag a URL/canonical mismatch.
             item: `${SITE_URL}/v/${history.vote}`,
+          },
+          {
+            '@type': 'ListItem',
+            position: 3,
+            name: 'Epoch income',
+            item: `${SITE_URL}/income/${history.vote}`,
           },
         ],
       },
       {
         '@type': 'Dataset',
-        name: `${history.name ?? shortenPubkey(history.vote, 6, 6)} — Solana validator income | ${SITE_NAME}`,
+        name: `${history.name ?? shortenPubkey(history.vote, 6, 6)} — Epoch income | ${SITE_NAME}`,
         inLanguage: 'en',
         description: operatorNarrative ?? pageDescription,
         // Same canonical-alignment: Dataset URL points at the hub.
@@ -298,32 +300,41 @@
 </svelte:head>
 
 <!--
-  Breadcrumb back to the validator overview. The income page is the
-  drill-down for operators who want the per-epoch receipts; for a
-  delegator who landed here from an external link, the overview is
-  the more useful page.
+  Breadcrumb trail (WAI-ARIA Breadcrumb pattern): Leaderboard →
+  validator overview → current page. Three items match the JSON-LD
+  `BreadcrumbList` below so structured-data crawlers + screen
+  readers + sighted users all see the same hierarchy.
 
-  Two list items per the WAI-ARIA Breadcrumb pattern: the ancestor
-  link AND the current-page item with `aria-current="page"`. A
-  single-item breadcrumb misuses the pattern (the WAI-ARIA spec
-  expects a trail of links to ancestors PLUS the current page);
-  with both items present screen readers announce the structural
-  position correctly.
+  Separator is `›` between every item; earlier revision mixed a
+  back-arrow `←` on the first item with a forward chevron `›` on
+  the second, which is a malformed breadcrumb. Every `<li>` is
+  `min-h-11` so the two items have matching vertical rhythm.
 -->
 <nav aria-label="Breadcrumb" class="mb-3">
-  <ol class="flex list-none flex-wrap items-center gap-2 p-0">
-    <li>
+  <ol class="flex list-none flex-wrap items-center gap-1 p-0">
+    <li class="inline-flex min-h-11 items-center">
       <a
-        href={`/v/${history.vote}`}
-        class="inline-flex min-h-11 items-center gap-1 text-xs text-[color:var(--color-text-muted)] hover:text-[color:var(--color-brand-500)] hover:underline"
+        href="/"
+        class="inline-flex items-center text-xs text-[color:var(--color-text-muted)] hover:text-[color:var(--color-brand-500)] hover:underline"
       >
-        <span aria-hidden="true">←</span>
-        Validator overview
+        Leaderboard
       </a>
     </li>
-    <li class="text-xs text-[color:var(--color-text-subtle)]" aria-current="page">
-      <span aria-hidden="true">›</span>
-      <span class="ml-1">Income history</span>
+    <li class="inline-flex min-h-11 items-center text-[color:var(--color-text-subtle)]">
+      <span aria-hidden="true" class="px-1.5">›</span>
+      <a
+        href={`/v/${history.vote}`}
+        class="inline-flex items-center text-xs text-[color:var(--color-text-muted)] hover:text-[color:var(--color-brand-500)] hover:underline"
+      >
+        {history.name ?? shortenPubkey(history.vote, 6, 6)}
+      </a>
+    </li>
+    <li
+      class="inline-flex min-h-11 items-center text-xs text-[color:var(--color-text-subtle)]"
+      aria-current="page"
+    >
+      <span aria-hidden="true" class="px-1.5">›</span>
+      <span>Epoch income</span>
     </li>
   </ol>
 </nav>
