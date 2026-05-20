@@ -1001,8 +1001,7 @@
                 {/if}
               </dl>
               <p class="text-[color:var(--color-text-subtle)]">
-                Percentile is ranked against the validators WhoEarns indexes, not the whole
-                cluster.
+                Percentile is ranked against the validators WhoEarns indexes, not the whole cluster.
               </p>
             </div>
           </div>

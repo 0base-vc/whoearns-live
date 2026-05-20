@@ -104,7 +104,7 @@
     "vitest": "^4.1.4"
   },
   "lint-staged": {
-    "*.{ts,js,json,md,yml,yaml}": [
+    "*.{ts,js,json,md,yml,yaml,svelte,css,html}": [
       "prettier --write"
     ],
     "*.{ts,js}": [
