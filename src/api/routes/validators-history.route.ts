@@ -199,23 +199,16 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // isn't slowed by bookkeeping.
     void watchedDynamicRepo.touchLookup(validator.votePubkey);
 
-    // Ensure known validators are in the dynamic watched set without
-    // calling `trackOnDemand`. The known path already resolved from
-    // local DB; falling back to full `getVoteAccounts` here lets
-    // ordinary page views amplify into upstream RPC work during a
-    // cold-start window. `add` is idempotent and also bumps lookup_count.
-    void watchedDynamicRepo
-      .add({
-        votePubkey: validator.votePubkey,
-        activatedStakeLamportsAtAdd:
-          validatorService.getActivatedStakeLamports(validator.votePubkey) ?? 0n,
-      })
-      .catch((err) => {
-        request.log.warn(
-          { err, vote: validator.votePubkey },
-          'validators-history: ensure-watched dynamic add failed (non-fatal)',
-        );
-      });
+    // Ensure known validators flow through the same on-demand
+    // tracking gate as unknown validators so the minimum activated
+    // stake policy is consistently enforced before any dynamic-watch
+    // insertion.
+    void validatorService.trackOnDemand(validator.votePubkey).catch((err) => {
+      request.log.warn(
+        { err, vote: validator.votePubkey },
+        'validators-history: ensure-watched trackOnDemand failed (non-fatal)',
+      );
+    });
 
     // Phase 3: pull the validator's profile + claim in parallel with
     // history. If the operator has opted out, the short-circuit
