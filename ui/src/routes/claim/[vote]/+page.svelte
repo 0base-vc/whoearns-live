@@ -1017,7 +1017,7 @@
       message, sign with your validator identity keypair, and submit.
     </p>
 
-    <div class="mt-5 grid gap-5">
+    <div class="mt-5 grid grid-cols-1 gap-5">
       <label class="block">
         <span
           class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
@@ -1241,7 +1241,7 @@
       half of the Operator Activity Index.
     </p>
 
-    <div class="mt-5 grid gap-4">
+    <div class="mt-5 grid grid-cols-1 gap-4">
       <label class="block">
         <span
           class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
@@ -1271,7 +1271,7 @@
       </button>
 
       {#if githubEnvelope !== null && githubCliCommand !== null && githubGistTemplate !== null}
-        <div class="grid gap-4">
+        <div class="grid grid-cols-1 gap-4">
           <div>
             <p
               class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
@@ -1544,8 +1544,8 @@
     {/if}
 
     {#if !walletsState.capReached}
-      <div class="mt-5 grid gap-4">
-        <div class="grid gap-3 sm:grid-cols-2">
+      <div class="mt-5 grid grid-cols-1 gap-4">
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <label class="block">
             <span
               class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
@@ -1587,7 +1587,7 @@
         </button>
 
         {#if walletEnvelope !== null && walletIdentityCli !== null && walletWalletCli !== null}
-          <div class="grid gap-4">
+          <div class="grid grid-cols-1 gap-4">
             <div>
               <p
                 class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"

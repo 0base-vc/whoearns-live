@@ -70,6 +70,15 @@ const GIST_BOUNDARY_LINE = '--whoearns-proof--';
 const GIST_BOUNDARY_RE = /\r?\n--whoearns-proof--\r?\n/;
 const GIST_SIGNATURE_PREFIX = 'signature:';
 
+/**
+ * A bare base58 Ed25519 signature — base58 alphabet, ~88 chars for a
+ * 64-byte signature. Recognises a signature line the operator pasted
+ * WITHOUT the `signature:` label. The length floor stops a stray
+ * short token being mistaken for the signature; the exact 64-byte
+ * length is still enforced downstream by the `bs58.decode(...)` check.
+ */
+const BARE_SIGNATURE_RE = /^[1-9A-HJ-NP-Za-km-z]{80,100}$/;
+
 export const DEFAULT_NONCE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 export const DEFAULT_LINK_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 
@@ -179,12 +188,24 @@ export function extractGistProof(body: string): { nonce: string; signatureB58: s
   const sigSection = parts[2]?.trim();
   if (nonce === undefined || sigSection === undefined) return null;
   if (!nonce.startsWith('{') || !nonce.endsWith('}')) return null;
-  const sigLine = sigSection
+  const sigLines = sigSection
     .split('\n')
     .map((l) => l.trim())
-    .find((l) => l.toLowerCase().startsWith(GIST_SIGNATURE_PREFIX));
-  if (sigLine === undefined) return null;
-  const signatureB58 = sigLine.slice(GIST_SIGNATURE_PREFIX.length).trim();
+    .filter((l) => l.length > 0);
+  // Preferred shape: an explicit `signature: <base58>` line — exactly
+  // what the UI's gist template prints.
+  const labelled = sigLines.find((l) => l.toLowerCase().startsWith(GIST_SIGNATURE_PREFIX));
+  // Tolerated shape: a BARE base58 line with no `signature:` label.
+  // Operators routinely replace the WHOLE `signature: <paste …>`
+  // template line with just the base58 string, dropping the label —
+  // which made an otherwise-valid proof fail as `malformed_proof`.
+  // The section after the second `--whoearns-proof--` boundary is
+  // unambiguously the signature, so a lone base58 token is safe to
+  // accept here (the 64-byte length is still checked downstream).
+  const signatureB58 =
+    labelled !== undefined
+      ? labelled.slice(GIST_SIGNATURE_PREFIX.length).trim()
+      : (sigLines.find((l) => BARE_SIGNATURE_RE.test(l)) ?? '');
   if (signatureB58.length === 0) return null;
   return { nonce, signatureB58 };
 }

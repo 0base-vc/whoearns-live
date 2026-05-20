@@ -118,6 +118,18 @@ describe('extractGistProof', () => {
     expect(p!.nonce).toBe(nonce);
     expect(p!.signatureB58).toBe('ZZZ');
   });
+  it('tolerates a bare base58 signature line with no `signature:` label', () => {
+    // Operators commonly replace the whole `signature: <paste …>`
+    // template line with just the base58 string. The section after
+    // the second boundary is unambiguously the signature, so a lone
+    // base58 token is accepted (its 64-byte length is checked later).
+    const sig = 'A'.repeat(88);
+    const body = `--whoearns-proof--\n{"a":1}\n--whoearns-proof--\n${sig}`;
+    const p = extractGistProof(body);
+    expect(p).not.toBeNull();
+    expect(p!.nonce).toBe('{"a":1}');
+    expect(p!.signatureB58).toBe(sig);
+  });
 });
 
 describe('GithubGistVerificationService.verify', () => {
