@@ -564,16 +564,18 @@
 
         <!--
           Trust summary one-liner — the hub's scannable hero line.
-          Promoted from `text-sm text-text-muted` to `text-base
-          text-text-default` because this line IS the hero's payload
-          (tier · tenure · client · skip · last-month income); a
-          muted treatment buried it amid the freshness + website
-          lines below at exactly the same colour. The wrapper has
-          `bg-surface-muted` so it reads as a distinct trust strip
-          rather than another body paragraph.
+          The hero Card is `tone="raised"` which is already
+          `bg-surface-muted` — wrapping the strip in the SAME token
+          produced an invisible chip. Promoted to `bg-surface` so
+          the strip steps DOWN to a brighter inner surface (white on
+          a zinc-50 card in light mode; zinc-950 inside a zinc-900
+          card in dark mode). Border + ring give the chip a frame
+          on both themes. Mobile drops the chip treatment entirely
+          (`lg:` gated) so a long trust line doesn't wrap into a
+          multi-line filled paragraph that loses the chip metaphor.
         -->
         <p
-          class="mt-3 inline-block rounded-md bg-[color:var(--color-surface-muted)] px-3 py-2 text-base font-medium text-[color:var(--color-text-default)]"
+          class="mt-3 text-base font-medium text-[color:var(--color-text-default)] lg:inline-block lg:rounded-md lg:border lg:border-[color:var(--color-border-default)] lg:bg-[color:var(--color-surface)] lg:px-3 lg:py-2"
           data-testid="trust-summary"
         >
           {trustLine}
@@ -806,18 +808,23 @@
         <h2 class="text-base font-semibold tracking-tight">Client</h2>
         <ClientBadge client={scoring.client} size="md" />
         <!--
-          "Gossip" is the Solana cluster gossip protocol — to a
-          casual delegator it reads as SNS gossip. Renamed to
-          "Client version last verified" which preserves the
-          technical truth without leaking the protocol name.
+          "Gossip" was internal Solana protocol vocabulary; the
+          earlier rename to "last verified" was wrong in the
+          opposite direction — `verified` is reserved in this
+          project for cryptographic attestations (claim ceremony,
+          gist proof, dual-signature wallet). Gossip-reported
+          client banner is unauthenticated; calling it "verified"
+          implicitly promotes its trust signal. `last seen` is
+          accurate (we observed this self-reported value on the
+          cluster) without overloading the verified verb.
         -->
         {#if scoring.client.updatedAt !== null}
           <p class="text-xs text-[color:var(--color-text-muted)]">
-            Client version last verified {formatTimestamp(scoring.client.updatedAt)}.
+            Client version last seen {formatTimestamp(scoring.client.updatedAt)}.
           </p>
         {:else}
           <p class="text-xs text-[color:var(--color-text-muted)]">
-            Client version not yet verified for this validator.
+            Client version not yet seen for this validator.
           </p>
         {/if}
       </div>

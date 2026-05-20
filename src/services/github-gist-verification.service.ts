@@ -42,15 +42,32 @@ export interface GithubLinkNonce {
 }
 
 /**
- * What the operator publishes as a public Gist. Two fields, on
- * separate lines so a human reading the Gist sees a readable proof:
+ * What the operator publishes as a public Gist. Three lines: a
+ * sentinel boundary marker, the canonical-nonce JSON, the
+ * sentinel again, then `signature: <base58 sig>` on a separate line.
  *
- *     ---
+ *     --whoearns-proof--
  *     <canonical JSON of nonce>
- *     ---
+ *     --whoearns-proof--
  *     signature: <base58 ed25519 sig>
+ *
+ * The boundary is the full LITERAL line `--whoearns-proof--`
+ * (newline before AND after), not the bare string `--whoearns-proof--`
+ * embedded inside the JSON body. The earlier `---` delimiter was a
+ * security hazard: `JSON.stringify` does NOT escape hyphens, so any
+ * deployment whose `SITE_URL` contained three consecutive dashes
+ * (legal DNS — `cluster---prod.example.com`, etc.) embedded `---`
+ * inside the canonical nonce JSON. The `split('---')` parse then
+ * fragmented the nonce mid-string, and every signature verification
+ * returned `malformed_proof` forever, with no error message
+ * pointing at the domain. Anchoring the boundary on a full LINE
+ * (with the newlines as part of the literal match) means a stray
+ * substring inside JSON can never collide — JSON.stringify never
+ * emits newlines, so the boundary marker can't appear inside the
+ * encoded JSON body.
  */
-const GIST_DELIMITER = '---';
+const GIST_BOUNDARY_LINE = '--whoearns-proof--';
+const GIST_BOUNDARY_RE = /\r?\n--whoearns-proof--\r?\n/;
 const GIST_SIGNATURE_PREFIX = 'signature:';
 
 export const DEFAULT_NONCE_TTL_MS = 30 * 60 * 1000; // 30 minutes
@@ -140,14 +157,26 @@ export function canonicaliseNonce(n: GithubLinkNonce): string {
  * this manually so we shouldn't be brittle about formatting.
  */
 export function extractGistProof(body: string): { nonce: string; signatureB58: string } | null {
+  // Tolerant of leading/trailing whitespace and CRLF line endings —
+  // operators copy-paste this manually. The boundary regex carries
+  // the line terminators (`\r?\n`) on both sides so a stray
+  // `--whoearns-proof--` substring inside a JSON value couldn't
+  // match (JSON.stringify never emits newlines).
   const normalised = body.replace(/\r\n/g, '\n').trim();
-  const sections = normalised
-    .split(GIST_DELIMITER)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  if (sections.length < 2) return null;
-  const nonce = sections[0];
-  const sigSection = sections[1];
+  // The boundary is a full-line marker. We expect:
+  //   <maybe blank>\n--whoearns-proof--\n<json>\n--whoearns-proof--\nsignature: <b58>
+  // After trim() the leading boundary may or may not have a newline
+  // before it; if it does, the regex's `\r?\n` consumes it. If the
+  // body STARTS with `--whoearns-proof--` (no leading newline) we
+  // pad a leading `\n` so the regex sees a uniform shape.
+  const padded = normalised.startsWith(GIST_BOUNDARY_LINE) ? `\n${normalised}` : normalised;
+  const parts = padded.split(GIST_BOUNDARY_RE);
+  // After splitting we expect [preamble, nonce, signature-section].
+  // The preamble is whatever comes before the first boundary; we
+  // ignore it (operators sometimes prepend a friendly comment).
+  if (parts.length < 3) return null;
+  const nonce = parts[1]?.trim();
+  const sigSection = parts[2]?.trim();
   if (nonce === undefined || sigSection === undefined) return null;
   if (!nonce.startsWith('{') || !nonce.endsWith('}')) return null;
   const sigLine = sigSection

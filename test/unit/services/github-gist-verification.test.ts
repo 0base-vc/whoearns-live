@@ -80,27 +80,43 @@ describe('canonicaliseNonce', () => {
 
 describe('extractGistProof', () => {
   it('extracts a well-formed proof', () => {
-    const body = `---\n{"a":1}\n---\nsignature: ABCDEFG`;
+    const body = `--whoearns-proof--\n{"a":1}\n--whoearns-proof--\nsignature: ABCDEFG`;
     const p = extractGistProof(body);
     expect(p).not.toBeNull();
     expect(p!.nonce).toBe('{"a":1}');
     expect(p!.signatureB58).toBe('ABCDEFG');
   });
   it('handles CRLF line endings + extra whitespace', () => {
-    const body = `   \r\n---\r\n{"a":1}\r\n---\r\nsignature:   XYZ   \r\n   `;
+    const body = `   \r\n--whoearns-proof--\r\n{"a":1}\r\n--whoearns-proof--\r\nsignature:   XYZ   \r\n   `;
     const p = extractGistProof(body);
     expect(p).not.toBeNull();
     expect(p!.signatureB58).toBe('XYZ');
   });
   it('returns null on missing delimiters', () => {
     expect(extractGistProof('no delimiters')).toBeNull();
-    expect(extractGistProof('---\n{"a":1}')).toBeNull();
+    expect(extractGistProof('--whoearns-proof--\n{"a":1}')).toBeNull();
   });
   it('returns null when nonce is not JSON', () => {
-    expect(extractGistProof('---\nplain text\n---\nsignature: x')).toBeNull();
+    expect(
+      extractGistProof('--whoearns-proof--\nplain text\n--whoearns-proof--\nsignature: x'),
+    ).toBeNull();
   });
   it('returns null when signature line is missing', () => {
-    expect(extractGistProof('---\n{"a":1}\n---\nno-sig-here')).toBeNull();
+    expect(
+      extractGistProof('--whoearns-proof--\n{"a":1}\n--whoearns-proof--\nno-sig-here'),
+    ).toBeNull();
+  });
+  it('rejects the old bare `---` delimiter (deprecated)', () => {
+    expect(extractGistProof(`---\n{"a":1}\n---\nsignature: ABCDEFG`)).toBeNull();
+  });
+  it('survives a canonical-JSON value that contains three consecutive dashes', () => {
+    // SITE_URL with `---` was the bug the new delimiter prevents.
+    const nonce = JSON.stringify({ domain: 'https://foo---bar.com', x: 1 });
+    const body = `--whoearns-proof--\n${nonce}\n--whoearns-proof--\nsignature: ZZZ`;
+    const p = extractGistProof(body);
+    expect(p).not.toBeNull();
+    expect(p!.nonce).toBe(nonce);
+    expect(p!.signatureB58).toBe('ZZZ');
   });
 });
 
@@ -118,7 +134,7 @@ describe('GithubGistVerificationService.verify', () => {
     // against that envelope, so the test must sign it too.
     const msg = buildOffchainMessage(canonical);
     const sig = await ed.signAsync(msg, priv);
-    return `---\n${canonical}\n---\nsignature: ${bs58.encode(sig)}`;
+    return `--whoearns-proof--\n${canonical}\n--whoearns-proof--\nsignature: ${bs58.encode(sig)}`;
   }
 
   it('verifies a well-formed proof end-to-end', async () => {
@@ -194,7 +210,7 @@ describe('GithubGistVerificationService.verify', () => {
     // offchain-message envelope the service now verifies against).
     const msg = buildOffchainMessage('not the nonce');
     const sig = await ed.signAsync(msg, priv);
-    const gistBody = `---\n${canonical}\n---\nsignature: ${bs58.encode(sig)}`;
+    const gistBody = `--whoearns-proof--\n${canonical}\n--whoearns-proof--\nsignature: ${bs58.encode(sig)}`;
     const fakeFetch = (async () => ({
       ok: true,
       arrayBuffer: async () => new TextEncoder().encode(gistBody).buffer,

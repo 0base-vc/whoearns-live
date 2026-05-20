@@ -421,24 +421,49 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
    *   5. `anchorTxSignature` is a well-formed Solana tx signature
    *      (full on-chain verification deferred — see service docstring).
    */
-  /*
+  /**
    * Wallet `label` is operator-controlled and renders into the public
-   * hub (`/v/[idOrVote]` ActivityHeatmap header + aria-label). Reject
-   * the same charset narrativeOverride does — angle brackets,
-   * backticks, braces, and the Unicode text-direction-override
-   * codepoints (U+202A-U+202E, U+2066-U+2069). The BiDi codepoints
-   * are the load-bearing piece: without rejecting them, an operator
-   * can register a label like "‮BADGE" to right-to-left-flip
-   * surrounding hub copy in a phishing-friendly way.
+   * hub (`/v/[idOrVote]` ActivityHeatmap header + aria-label).
+   * Hardened rejection set (mirror the client-side preflight in
+   * `ui/src/routes/claim/[vote]/+page.svelte` + migration
+   * `0038_operator_wallets_label_charset_hardened.sql`):
+   *   - HTML-injection trio `<>` / backtick / `{}` — defense
+   *     against future Svelte-templating-bypass regressions.
+   *   - C0/DEL/C1 control range (U+0000-U+001F, U+007F-U+009F)
+   *     — NUL terminates PG wire messages, TAB/LF/CR break
+   *     one-line announce, the rest have no legitimate use in
+   *     a 32-char label.
+   *   - U+200B ZWSP through U+200F RLM — invisible padding +
+   *     direction-flip cousins that bypassed the original
+   *     filter.
+   *   - U+202A-U+202E text-direction-override codepoints — the
+   *     original load-bearing rejection; flipping RTL on a
+   *     label can right-to-left-mirror surrounding hub copy in
+   *     a phishing-friendly way.
+   *   - U+2066-U+2069 isolate codepoints — narrower direction
+   *     override that achieved the same effect once browsers
+   *     defended against U+202E.
+   *   - U+FEFF byte-order mark / ZWNBSP — invisible padding
+   *     that defeats character-count and uniqueness checks.
    */
   const LabelSchema = z
     .string()
     .max(LABEL_MAX_LEN)
     .default('')
-    .refine((value) => !/[<>`{}\u200E\u200F\u202A-\u202E\u2066-\u2069]/.test(value), {
-      message:
-        'label must not contain angle brackets, backticks, braces, or text-direction-override characters',
-    });
+    // C0/DEL/C1 control bytes are the load-bearing rejections
+    // (NUL breaks PG wire, TAB/LF/CR break one-line announce);
+    // the regex is intentionally catching exactly those ranges.
+    .refine(
+      (value) =>
+        // eslint-disable-next-line no-control-regex
+        !/[<>`{}\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/.test(
+          value,
+        ),
+      {
+        message:
+          'label cannot contain HTML metacharacters, control characters, or invisible/text-direction codepoints',
+      },
+    );
 
   const WalletVerifyBodySchema = z.object({
     votePubkey: PubkeySchema,

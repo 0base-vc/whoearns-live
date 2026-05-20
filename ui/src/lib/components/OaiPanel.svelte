@@ -77,13 +77,20 @@
   <header class="flex items-baseline justify-between gap-2 pb-3">
     <!--
       h2 — peer of the other hub sections (Wallet activity, Audit,
-      SIMD). The earlier name "Operator Activity Index" leaked
-      backend taxonomy to a delegator surface; `Operator engagement`
-      reads as plain English while the score-tile labels below
-      ("Governance", "Wallet activity") preserve the technical
-      sub-shape.
+      SIMD). The earlier rename to "Operator engagement" was a
+      partial relabel that left the same product as
+      "Operator Activity Index" in `/claim/[vote]`, `seo.route.ts`,
+      `docs/openapi.yaml`, `docs/api.md`, and the URL itself
+      (`/v1/validators/{id}/operator-activity-index`). Half-renames
+      are worse than no rename: a delegator reads the hub, clicks
+      claim, and sees a different name for the same thing. Reverted
+      to the canonical "Operator Activity Index (OAI)" name with the
+      acronym appended so the score-tile labels below ("Governance",
+      "Wallet activity") still read as the breakdown shape.
     -->
-    <h2 id="oai-heading" class="text-lg font-semibold tracking-tight">Operator engagement</h2>
+    <h2 id="oai-heading" class="text-lg font-semibold tracking-tight">
+      Operator Activity Index (OAI)
+    </h2>
     <!--
       Pill renders ONLY when the composite is a real number — never
       "OAI —". Per the per-component breakdown mandate, a half-shown
@@ -213,12 +220,18 @@
         <div class="flex items-baseline justify-between gap-2">
           <h3 class="text-sm font-semibold tracking-tight">Wallet activity</h3>
           {#if !walletFeesActive}
+            <!--
+              Pill copy is "Counts, not fees" so it ADDS information
+              to the heading "Wallet activity" instead of tautologously
+              echoing it ("Wallet activity · Activity only"). Explains
+              what the score is derived from in 3 words.
+            -->
             <Pill
               tone="info"
               size="sm"
               title="Counts active days, not fees. Per-day fee weighting ships in a later version."
             >
-              Activity only
+              Counts, not fees
             </Pill>
           {/if}
         </div>

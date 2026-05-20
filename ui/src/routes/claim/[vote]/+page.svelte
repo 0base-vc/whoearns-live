@@ -274,6 +274,35 @@
   const shortVote = $derived(shortenPubkey(history.vote, 6, 6));
   const pageTitle = $derived(`Claim ${history.name ?? shortVote} — ${SITE_NAME}`);
 
+  /**
+   * Format `expiresAt` (ISO string) as one of:
+   *   - "expires in 47 days" (normal)
+   *   - "expires in 4 days ⚠" (≤7 days)
+   *   - "expired 3 days ago" (past)
+   *
+   * The server-side claim status endpoint filters lapsed entries
+   * out, but we still defensively render the past-expiry shape:
+   * the page might be stale (tab open from yesterday), the
+   * operator's clock might be skewed, or the read endpoint might
+   * change its filter behaviour in the future.
+   */
+  function formatExpiry(expiresAtIso: string): { label: string; tone: 'ok' | 'warn' | 'expired' } {
+    const expMs = new Date(expiresAtIso).getTime();
+    const nowMs = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const diffDays = Math.floor((expMs - nowMs) / dayMs);
+    if (diffDays < 0) {
+      return {
+        label: `expired ${Math.abs(diffDays)} day${Math.abs(diffDays) === 1 ? '' : 's'} ago`,
+        tone: 'expired',
+      };
+    }
+    if (diffDays <= 7) {
+      return { label: `expires in ${diffDays} day${diffDays === 1 ? '' : 's'}`, tone: 'warn' };
+    }
+    return { label: `expires in ${diffDays} days`, tone: 'ok' };
+  }
+
   // ──────────────────────────────────────────────────────────────────
   // GitHub link ceremony (PUT /v1/claims/:vote/github)
   //
@@ -301,10 +330,16 @@
   let githubUsernameDraft = $state<string>(
     status.claimed && status.githubLink ? status.githubLink.githubUsername : '',
   );
+  // The envelope captures the inputs that produced the canonical
+  // nonce so we can detect drift later (operator edits the username
+  // AFTER generating but BEFORE submitting). `submittedUsername` is
+  // the value the signature actually covers; the live input may have
+  // moved on. See `githubInputsDrifted` below.
   let githubEnvelope = $state<{
     nonceJson: string;
     timestampMs: number;
     expiresAtMs: number;
+    submittedUsername: string;
   } | null>(null);
   let githubGistUrl = $state('');
   let githubError = $state<string | null>(null);
@@ -342,9 +377,14 @@
   const GITHUB_NONCE_TTL_MS = 30 * 60 * 1000; // mirrors server DEFAULT_NONCE_TTL_MS
 
   function generateGithubEnvelope() {
+    // Clear ONLY status banners up front. The Gist URL is intentionally
+    // preserved across regenerate clicks — operators commonly tweak
+    // a username typo and want their already-published Gist URL to
+    // stick around so they can edit the Gist body in-place rather
+    // than re-publishing. Input fields (the username) and the signed
+    // envelope itself are the only things that should change here.
     githubError = null;
     githubSuccess = null;
-    githubGistUrl = '';
     const trimmed = githubUsernameDraft.trim();
     if (trimmed.length === 0) {
       githubError = 'Enter a GitHub username first.';
@@ -363,8 +403,22 @@
       issuedAtMs: timestampMs,
       expiresAtMs,
     });
-    githubEnvelope = { nonceJson, timestampMs, expiresAtMs };
+    githubEnvelope = { nonceJson, timestampMs, expiresAtMs, submittedUsername: trimmed };
   }
+
+  /**
+   * True when the operator generated an envelope, then edited the
+   * username input. The signature in `githubEnvelope` covers
+   * `submittedUsername`; submitting with a different live input
+   * would mean the server reconstructs canonical JSON from the new
+   * username, the signature would not verify against it, and the
+   * server returns `bad_signature` with no path forward visible to
+   * the operator. We block submit on drift and surface a clear
+   * "Regenerate" CTA instead.
+   */
+  const githubInputsDrifted = $derived(
+    githubEnvelope !== null && githubEnvelope.submittedUsername !== githubUsernameDraft.trim(),
+  );
 
   /**
    * CLI command the operator runs on their validator box. The
@@ -382,14 +436,17 @@
   });
 
   /**
-   * Reference Gist body — what the operator must publish on GitHub.
-   * `<canonical-nonce-json>` + literal `---` line + `<base58 sig>`.
-   * The operator literally pastes this exact template, replacing
-   * the signature line with their CLI output.
+   * Reference Gist body — what the operator publishes on GitHub.
+   * Three lines: the boundary `--whoearns-proof--`, the canonical
+   * nonce JSON, the boundary again, then `signature: <base58>`.
+   * Earlier revision used a bare `---` delimiter; that broke when
+   * SITE_URL contained `---` because JSON.stringify doesn't escape
+   * hyphens. The unique-string boundary anchored on a full line
+   * cannot collide with any JSON-encoded value.
    */
   const githubGistTemplate = $derived.by<string | null>(() => {
     if (githubEnvelope === null) return null;
-    return `${githubEnvelope.nonceJson}\n---\n<paste base58 signature here>`;
+    return `--whoearns-proof--\n${githubEnvelope.nonceJson}\n--whoearns-proof--\nsignature: <paste base58 signature here>`;
   });
 
   async function handleSubmitGithub() {
@@ -397,21 +454,36 @@
       githubError = 'Generate a signable nonce first.';
       return;
     }
-    const trimmedUsername = githubUsernameDraft.trim();
+    if (githubInputsDrifted) {
+      githubError =
+        'Username changed after the nonce was generated. Click Regenerate so the signature covers the new value.';
+      return;
+    }
     const trimmedUrl = githubGistUrl.trim();
     if (trimmedUrl.length === 0) {
       githubError = 'Paste your public Gist URL first.';
       return;
     }
     try {
-      // Reject obvious shape errors before the round-trip.
+      // Reject obvious shape errors before the round-trip. The
+      // server (`parseGistUrl`) accepts BOTH the canonical
+      // `gist.github.com/<user>/<id>` and the raw-content
+      // `gist.githubusercontent.com/<user>/<id>/raw` form — operators
+      // who click GitHub's "Raw" button get the latter, so the
+      // client mirrors that acceptance set. `endsWith()` was unsafe
+      // (it would accept `attacker.gist.github.com`); the exact-
+      // hostname `===` check matches the server's regex behaviour.
       const parsedUrl = new URL(trimmedUrl);
       if (parsedUrl.protocol !== 'https:') throw new Error('not https');
-      if (!parsedUrl.hostname.endsWith('gist.github.com')) {
+      if (
+        parsedUrl.hostname !== 'gist.github.com' &&
+        parsedUrl.hostname !== 'gist.githubusercontent.com'
+      ) {
         throw new Error('not a gist.github.com URL');
       }
     } catch {
-      githubError = 'Gist URL must be an https://gist.github.com/... link.';
+      githubError =
+        'Gist URL must be on https://gist.github.com or https://gist.githubusercontent.com.';
       return;
     }
     githubSubmitting = true;
@@ -421,7 +493,11 @@
       const result = await linkGithub({
         votePubkey: history.vote,
         identityPubkey: history.identity,
-        githubUsername: trimmedUsername,
+        // Submit the captured username so the server reconstructs
+        // the canonical nonce from EXACTLY the same bytes the
+        // signature covered. `githubInputsDrifted` check above
+        // already guarantees they agree.
+        githubUsername: githubEnvelope.submittedUsername,
         gistUrl: trimmedUrl,
         timestampMs: githubEnvelope.timestampMs,
       });
@@ -468,10 +544,18 @@
 
   let walletPubkeyDraft = $state('');
   let walletLabelDraft = $state('');
+  // Captures the inputs that produced the canonical nonce. See the
+  // matching note on `githubEnvelope` above — the body sent at
+  // submit-time is the SAME shape the server reconstructs the
+  // canonical nonce from, so any drift between submit-time inputs
+  // and the captured-at-generate inputs produces a cryptic
+  // `bad_signature` 403. We block on drift.
   let walletEnvelope = $state<{
     nonceJson: string;
     timestampMs: number;
     expiresAtMs: number;
+    submittedPubkey: string;
+    submittedLabel: string;
   } | null>(null);
   let walletIdentitySig = $state('');
   let walletWalletSig = $state('');
@@ -521,11 +605,12 @@
   }
 
   function generateWalletEnvelope() {
+    // Clear ONLY banners up front. Pasted signatures are preserved
+    // until validation passes — losing 3 hand-pasted base58 strings
+    // because of a label typo would be cruel. Signatures clear only
+    // when a NEW envelope replaces the old one (see end of function).
     walletError = null;
     walletSuccess = null;
-    walletIdentitySig = '';
-    walletWalletSig = '';
-    walletAnchorSig = '';
     const wallet = walletPubkeyDraft.trim();
     const label = walletLabelDraft.trim();
     if (!isLikelyPubkey(wallet)) {
@@ -544,9 +629,18 @@
       walletError = `Label must be ${WALLET_LABEL_MAX} characters or fewer.`;
       return;
     }
-    if (/[<>`{}]/.test(label) || /[‎‏‪-‮⁦-⁩]/.test(label)) {
+    // Mirror of the server LabelSchema (`claim-v2.route.ts`) and
+    // migration 0038 — HTML trio + C0/DEL/C1 + invisible/ZW family
+    // + BiDi override + isolate codepoints + BOM. Earlier client
+    // regex only covered U+200E/U+200F + U+202A-U+202E + U+2066-
+    // U+2069, leaving NUL/TAB/ZWSP/BOM as accepted-but-server-
+    // rejected friction.
+    if (
+      // eslint-disable-next-line no-control-regex
+      /[<>`{}\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/.test(label)
+    ) {
       walletError =
-        'Label cannot contain angle brackets, backticks, braces, or text-direction-override characters.';
+        'Label cannot contain HTML metacharacters, control characters, or invisible/text-direction codepoints.';
       return;
     }
     if (walletsState.capReached) {
@@ -563,8 +657,28 @@
       issuedAtMs: timestampMs,
       expiresAtMs,
     });
-    walletEnvelope = { nonceJson, timestampMs, expiresAtMs };
+    walletEnvelope = {
+      nonceJson,
+      timestampMs,
+      expiresAtMs,
+      submittedPubkey: wallet,
+      submittedLabel: label,
+    };
+    // New envelope minted → any old pasted signatures are stale.
+    walletIdentitySig = '';
+    walletWalletSig = '';
+    walletAnchorSig = '';
   }
+
+  /**
+   * True when the operator generated an envelope, then edited the
+   * pubkey or label. See the matching `githubInputsDrifted` note.
+   */
+  const walletInputsDrifted = $derived(
+    walletEnvelope !== null &&
+      (walletEnvelope.submittedPubkey !== walletPubkeyDraft.trim() ||
+        walletEnvelope.submittedLabel !== walletLabelDraft.trim()),
+  );
 
   /**
    * Two CLI commands — identity key + wallet key — both signing the
@@ -588,6 +702,11 @@
       walletError = 'Generate a signable nonce first.';
       return;
     }
+    if (walletInputsDrifted) {
+      walletError =
+        'Wallet pubkey or label changed after the nonce was generated. Click Regenerate so the signatures cover the new values.';
+      return;
+    }
     const trimmedIdentitySig = walletIdentitySig.trim();
     const trimmedWalletSig = walletWalletSig.trim();
     const trimmedAnchor = walletAnchorSig.trim();
@@ -608,11 +727,16 @@
     walletError = null;
     walletSuccess = null;
     try {
+      // Submit using the captured-at-generate values, NOT the live
+      // drafts — `walletInputsDrifted` check above ensures they agree,
+      // but using the envelope's captured values defensively guarantees
+      // the body bytes match the canonical nonce the server will
+      // reconstruct + verify against.
       const result = await registerOperatorWallet({
         votePubkey: history.vote,
         identityPubkey: history.identity,
-        walletPubkey: walletPubkeyDraft.trim(),
-        label: walletLabelDraft.trim(),
+        walletPubkey: walletEnvelope.submittedPubkey,
+        label: walletEnvelope.submittedLabel,
         timestampMs: walletEnvelope.timestampMs,
         identitySignatureB58: trimmedIdentitySig,
         walletSignatureB58: trimmedWalletSig,
@@ -918,10 +1042,23 @@
     <div class="flex flex-wrap items-baseline justify-between gap-3">
       <h2 class="text-base font-semibold">GitHub link</h2>
       {#if githubLink !== null}
-        <span class="text-xs text-[color:var(--color-status-ok-fg)]">
-          ✓ {githubLink.githubUsername} · expires {new Date(
-            githubLink.expiresAt,
-          ).toLocaleDateString()}
+        {@const exp = formatExpiry(githubLink.expiresAt)}
+        <!--
+          Tone-aware rendering: green check when the link is healthy
+          (>7 days remaining), amber warn when ≤7 days, red strikethrough
+          when expired. The server filters lapsed entries out of the
+          read endpoint, but a stale tab or clock skew can still surface
+          a past-expiry entry — fail visibly rather than silently green.
+        -->
+        <span
+          class="text-xs"
+          class:text-[color:var(--color-status-ok-fg)]={exp.tone === 'ok'}
+          class:text-[color:var(--color-status-warn-fg)]={exp.tone === 'warn'}
+          class:text-red-600={exp.tone === 'expired'}
+          class:dark:text-red-400={exp.tone === 'expired'}
+        >
+          {exp.tone === 'expired' ? '⚠' : '✓'}
+          {githubLink.githubUsername} · {exp.label}
         </span>
       {/if}
     </div>
@@ -1005,7 +1142,9 @@
             <p class="mt-1.5 text-xs text-[color:var(--color-text-subtle)]">
               Replace the signature placeholder with the base58 string the CLI printed in Step 1.
               The Gist file extension does not matter; the body must contain the canonical nonce
-              JSON, a literal <code class="font-mono">---</code> line, and the signature.
+              JSON between two literal
+              <code class="font-mono">--whoearns-proof--</code> lines, followed by
+              <code class="font-mono">signature:</code> and the base58 signature.
             </p>
           </div>
 
@@ -1029,10 +1168,20 @@
             </p>
           </label>
 
+          {#if githubInputsDrifted}
+            <p
+              role="alert"
+              class="rounded-md border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-xs text-[color:var(--color-status-warn-fg)]"
+            >
+              Username changed. The current signature covers
+              <code class="font-mono">{githubEnvelope.submittedUsername}</code> — click Regenerate above
+              to mint a fresh nonce for the new value.
+            </p>
+          {/if}
           <button
             type="button"
             onclick={handleSubmitGithub}
-            disabled={githubSubmitting || githubGistUrl.trim().length === 0}
+            disabled={githubSubmitting || githubGistUrl.trim().length === 0 || githubInputsDrifted}
             class="min-h-11 w-full rounded-lg bg-[color:var(--color-brand-500)] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[color:var(--color-brand-600)] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {githubSubmitting ? 'Verifying Gist…' : 'Link GitHub'}
@@ -1082,10 +1231,21 @@
     </p>
 
     {#if walletsState.entries.length > 0}
+      <!--
+        Sorted ascending by expiry so the wallet that ages out FIRST
+        is at the top of the list — when the operator is cap-reached,
+        the soonest-to-expire is the one they're waiting on. Tone-
+        coded same as the GitHub link badge: ok / warn (≤7d) /
+        expired (past).
+      -->
+      {@const sortedWallets = [...walletsState.entries].sort((a, b) =>
+        a.expiresAt < b.expiresAt ? -1 : a.expiresAt > b.expiresAt ? 1 : 0,
+      )}
       <ul
         class="mt-4 divide-y divide-[color:var(--color-border-default)] rounded-lg border border-[color:var(--color-border-default)]"
       >
-        {#each walletsState.entries as entry (entry.wallet)}
+        {#each sortedWallets as entry (entry.wallet)}
+          {@const exp = formatExpiry(entry.expiresAt)}
           <li class="flex flex-wrap items-baseline justify-between gap-2 px-3 py-2">
             <div class="min-w-0">
               <div class="text-sm font-semibold">{entry.label}</div>
@@ -1093,8 +1253,14 @@
                 {shortenPubkey(entry.wallet, 8, 8)}
               </div>
             </div>
-            <div class="text-xs text-[color:var(--color-text-muted)]">
-              expires {new Date(entry.expiresAt).toLocaleDateString()}
+            <div
+              class="text-xs"
+              class:text-[color:var(--color-text-muted)]={exp.tone === 'ok'}
+              class:text-[color:var(--color-status-warn-fg)]={exp.tone === 'warn'}
+              class:text-red-600={exp.tone === 'expired'}
+              class:dark:text-red-400={exp.tone === 'expired'}
+            >
+              {exp.label}
             </div>
           </li>
         {/each}
@@ -1211,8 +1377,11 @@
                 Step 3 · Paste any tx signature the wallet has emitted
               </p>
               <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
-                Any base58 tx signature (86-88 chars) — proves the wallet has been used on chain.
-                Solana Explorer's "Transaction" page header has the signature near the top; or run
+                Any base58 tx signature (86-88 chars) the wallet has previously emitted. Today the
+                server SHAPE-checks this (base58 decoding + 64-byte length); full on-chain
+                <code class="font-mono">getTransaction</code> verification is a follow-up hardening
+                pass tracked separately — do not yet treat this as proof of on-chain custody. Solana
+                Explorer's "Transaction" page header has the signature near the top; or run
                 <code class="font-mono">solana transfer --from ~/operator-wallet.json …</code> and copy
                 the signature it prints.
               </p>
@@ -1230,42 +1399,66 @@
               </p>
             </div>
 
+            {#if walletInputsDrifted}
+              <p
+                role="alert"
+                class="rounded-md border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-xs text-[color:var(--color-status-warn-fg)]"
+              >
+                Wallet pubkey or label changed. The current signatures cover
+                <code class="font-mono">{shortenPubkey(walletEnvelope.submittedPubkey, 4, 4)}</code>
+                / <code class="font-mono">{walletEnvelope.submittedLabel}</code> — click Regenerate above
+                to mint a fresh nonce for the new values.
+              </p>
+            {/if}
             <button
               type="button"
               onclick={handleSubmitWallet}
               disabled={walletSubmitting ||
                 walletIdentitySig.trim().length === 0 ||
                 walletWalletSig.trim().length === 0 ||
-                walletAnchorSig.trim().length === 0}
+                walletAnchorSig.trim().length === 0 ||
+                walletInputsDrifted}
               class="min-h-11 w-full rounded-lg bg-[color:var(--color-brand-500)] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[color:var(--color-brand-600)] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {walletSubmitting ? 'Verifying signatures…' : 'Register wallet'}
             </button>
           </div>
         {/if}
-
-        {#if walletError}
-          <div
-            role="alert"
-            class="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-300"
-          >
-            {walletError}
-          </div>
-        {/if}
-        {#if walletSuccess}
-          <div
-            role="status"
-            class="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300"
-          >
-            {walletSuccess}
-          </div>
-        {/if}
       </div>
     {:else}
       <p class="mt-4 text-sm text-[color:var(--color-text-muted)]">
         This validator has reached the 3-wallet cap. Existing entries expire on a 90-day rolling
-        window — once the oldest entry expires you can register another.
+        window — once the oldest entry expires you can register another. If you registered an
+        incorrect wallet by mistake, contact the operator team (a wallet-removal flow is in
+        progress); the cap-bound entries will still age out on the 90-day window.
       </p>
+    {/if}
+
+    <!--
+      Error / success banners live OUTSIDE the `!capReached` branch.
+      The pattern mirrors the v1 claim Card's comment at line ~877:
+      on a successful 3rd wallet register, `status.wallets.capReached`
+      flips true, the draft form tears down, and a banner placed
+      inside the form would be torn down with it — the operator
+      never sees confirmation of the very registration they just
+      completed. Banners outside the branch always render regardless
+      of mode.
+    -->
+    {#if walletError}
+      <div
+        role="alert"
+        class="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-300"
+      >
+        {walletError}
+      </div>
+    {/if}
+    {#if walletSuccess}
+      <div
+        role="status"
+        class="mt-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300"
+      >
+        {walletSuccess}
+      </div>
     {/if}
   </Card>
 {/if}
