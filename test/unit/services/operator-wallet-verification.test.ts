@@ -8,11 +8,46 @@ import {
   OPERATOR_WALLET_NONCE_PURPOSE,
   OperatorWalletVerificationService,
   type OperatorWalletNonce,
+  type OperatorWalletRpc,
 } from '../../../src/services/operator-wallet-verification.service.js';
 
 const silent = pino({ level: 'silent' });
 
 const VALID_TX_SIG = bs58.encode(new Uint8Array(64).fill(7)); // 64 random bytes → base58 ~88 chars
+
+/**
+ * Build a stub RPC whose `getTransaction` reports the given pubkey as
+ * a signer of the anchor tx. The default behaviour (used by happy-path
+ * tests) accepts ANY signature and reports the wallet pubkey from the
+ * test's nonce as the first (and only) signer.
+ */
+function rpcWithSigner(walletPubkey: string): OperatorWalletRpc {
+  return {
+    async getTransaction() {
+      return { accountKeys: [walletPubkey], numRequiredSignatures: 1 };
+    },
+  };
+}
+
+const RPC_RETURNS_NULL: OperatorWalletRpc = {
+  async getTransaction() {
+    return null;
+  },
+};
+
+function rpcWithoutSigner(otherSigner: string): OperatorWalletRpc {
+  return {
+    async getTransaction() {
+      return { accountKeys: [otherSigner], numRequiredSignatures: 1 };
+    },
+  };
+}
+
+const RPC_THROWS: OperatorWalletRpc = {
+  async getTransaction() {
+    throw new Error('upstream 502');
+  },
+};
 
 async function makeKeypair(): Promise<{ priv: Uint8Array; pubB58: string }> {
   const priv = crypto.getRandomValues(new Uint8Array(32));
@@ -53,11 +88,11 @@ describe('canonicaliseOperatorNonce', () => {
 });
 
 describe('OperatorWalletVerificationService.verify', () => {
-  function makeService() {
-    return new OperatorWalletVerificationService({ logger: silent });
+  function makeService(solanaRpc: OperatorWalletRpc) {
+    return new OperatorWalletVerificationService({ logger: silent, solanaRpc });
   }
 
-  it('verifies when both signatures are valid + anchor signature well-formed', async () => {
+  it('verifies when both signatures are valid + anchor tx is signed by the wallet on chain', async () => {
     const identity = await makeKeypair();
     const wallet = await makeKeypair();
     const now = Date.now();
@@ -72,7 +107,7 @@ describe('OperatorWalletVerificationService.verify', () => {
       domain: 'whoearns.live',
     };
     const canonical = canonicaliseOperatorNonce(nonce);
-    const result = await makeService().verify({
+    const result = await makeService(rpcWithSigner(wallet.pubB58)).verify({
       issuedNonce: nonce,
       identitySignatureB58: await signCanonical(canonical, identity.priv),
       walletSignatureB58: await signCanonical(canonical, wallet.priv),
@@ -99,7 +134,7 @@ describe('OperatorWalletVerificationService.verify', () => {
       domain: 'd',
     };
     const canonical = canonicaliseOperatorNonce(nonce);
-    const result = await makeService().verify({
+    const result = await makeService(rpcWithSigner(wallet.pubB58)).verify({
       issuedNonce: nonce,
       identitySignatureB58: await signCanonical(canonical, identity.priv),
       walletSignatureB58: await signCanonical(canonical, wallet.priv),
@@ -124,7 +159,7 @@ describe('OperatorWalletVerificationService.verify', () => {
       domain: 'd',
     };
     const canonical = canonicaliseOperatorNonce(nonce);
-    const result = await makeService().verify({
+    const result = await makeService(rpcWithSigner(wallet.pubB58)).verify({
       issuedNonce: nonce,
       identitySignatureB58: await signCanonical(canonical, identity.priv),
       walletSignatureB58: await signCanonical(canonical, wallet.priv),
@@ -150,7 +185,7 @@ describe('OperatorWalletVerificationService.verify', () => {
       domain: 'd',
     };
     const canonical = canonicaliseOperatorNonce(nonce);
-    const result = await makeService().verify({
+    const result = await makeService(rpcWithSigner(wallet.pubB58)).verify({
       issuedNonce: nonce,
       // Signed by `other` (a different identity) — verification
       // should fail because identityBytes is `identity.pubB58`.
@@ -178,7 +213,7 @@ describe('OperatorWalletVerificationService.verify', () => {
       domain: 'd',
     };
     const canonical = canonicaliseOperatorNonce(nonce);
-    const result = await makeService().verify({
+    const result = await makeService(rpcWithSigner(wallet.pubB58)).verify({
       issuedNonce: nonce,
       identitySignatureB58: await signCanonical(canonical, identity.priv),
       walletSignatureB58: await signCanonical(canonical, other.priv),
@@ -186,5 +221,84 @@ describe('OperatorWalletVerificationService.verify', () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe('bad_wallet_signature');
+  });
+
+  it('rejects when the anchor tx is not found on chain', async () => {
+    const identity = await makeKeypair();
+    const wallet = await makeKeypair();
+    const now = Date.now();
+    const nonce: OperatorWalletNonce = {
+      purpose: OPERATOR_WALLET_NONCE_PURPOSE,
+      votePubkey: 'Vote1',
+      identityPubkey: identity.pubB58,
+      walletPubkey: wallet.pubB58,
+      label: '',
+      issuedAtMs: now,
+      expiresAtMs: now + 60_000,
+      domain: 'd',
+    };
+    const canonical = canonicaliseOperatorNonce(nonce);
+    const result = await makeService(RPC_RETURNS_NULL).verify({
+      issuedNonce: nonce,
+      identitySignatureB58: await signCanonical(canonical, identity.priv),
+      walletSignatureB58: await signCanonical(canonical, wallet.priv),
+      anchorTxSignature: VALID_TX_SIG,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('anchor_tx_not_found');
+  });
+
+  it('rejects when the wallet is not a signer of the anchor tx', async () => {
+    const identity = await makeKeypair();
+    const wallet = await makeKeypair();
+    const other = await makeKeypair();
+    const now = Date.now();
+    const nonce: OperatorWalletNonce = {
+      purpose: OPERATOR_WALLET_NONCE_PURPOSE,
+      votePubkey: 'Vote1',
+      identityPubkey: identity.pubB58,
+      walletPubkey: wallet.pubB58,
+      label: '',
+      issuedAtMs: now,
+      expiresAtMs: now + 60_000,
+      domain: 'd',
+    };
+    const canonical = canonicaliseOperatorNonce(nonce);
+    // RPC reports the anchor tx as signed by `other`, not the
+    // operator's wallet. The dual-signature still passes but the
+    // chain-custody check fails.
+    const result = await makeService(rpcWithoutSigner(other.pubB58)).verify({
+      issuedNonce: nonce,
+      identitySignatureB58: await signCanonical(canonical, identity.priv),
+      walletSignatureB58: await signCanonical(canonical, wallet.priv),
+      anchorTxSignature: VALID_TX_SIG,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('anchor_tx_wallet_not_signer');
+  });
+
+  it('demotes RPC errors to anchor_tx_rpc_unavailable (transient)', async () => {
+    const identity = await makeKeypair();
+    const wallet = await makeKeypair();
+    const now = Date.now();
+    const nonce: OperatorWalletNonce = {
+      purpose: OPERATOR_WALLET_NONCE_PURPOSE,
+      votePubkey: 'Vote1',
+      identityPubkey: identity.pubB58,
+      walletPubkey: wallet.pubB58,
+      label: '',
+      issuedAtMs: now,
+      expiresAtMs: now + 60_000,
+      domain: 'd',
+    };
+    const canonical = canonicaliseOperatorNonce(nonce);
+    const result = await makeService(RPC_THROWS).verify({
+      issuedNonce: nonce,
+      identitySignatureB58: await signCanonical(canonical, identity.priv),
+      walletSignatureB58: await signCanonical(canonical, wallet.priv),
+      anchorTxSignature: VALID_TX_SIG,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('anchor_tx_rpc_unavailable');
   });
 });

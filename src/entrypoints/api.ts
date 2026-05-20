@@ -91,7 +91,16 @@ export async function startApi(): Promise<void> {
     logger,
   });
   const githubGistService = new GithubGistVerificationService({ logger });
-  const operatorWalletService = new OperatorWalletVerificationService({ logger });
+  // `solanaRpc` wires the shared `SolanaRpcClient` into the wallet
+  // verifier so the anchor-tx chain check (`getTransaction` →
+  // accountKeys signer-set) can run inline. The client carries its
+  // own retry / rate-limit / abort wiring; the service treats RPC
+  // failures as `anchor_tx_rpc_unavailable` (transient) rather
+  // than `bad_signature`.
+  const operatorWalletService = new OperatorWalletVerificationService({
+    logger,
+    solanaRpc: rpc,
+  });
   const services = {
     validator: validatorService,
     claim: claimService,

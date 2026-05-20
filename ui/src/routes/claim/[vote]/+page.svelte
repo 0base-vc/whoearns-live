@@ -1377,10 +1377,10 @@
                 Step 3 · Paste any tx signature the wallet has emitted
               </p>
               <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
-                Any base58 tx signature (86-88 chars) the wallet has previously emitted. Today the
-                server SHAPE-checks this (base58 decoding + 64-byte length); full on-chain
-                <code class="font-mono">getTransaction</code> verification is a follow-up hardening
-                pass tracked separately — do not yet treat this as proof of on-chain custody. Solana
+                Any finalised base58 tx signature (86-88 chars) the wallet has signed. The server
+                fetches the transaction via
+                <code class="font-mono">getTransaction</code> and verifies the wallet pubkey is in
+                the tx's signer set — proves the wallet keypair has working on-chain custody. Solana
                 Explorer's "Transaction" page header has the signature near the top; or run
                 <code class="font-mono">solana transfer --from ~/operator-wallet.json …</code> and copy
                 the signature it prints.

@@ -91,14 +91,35 @@ export type VerifyOperatorWalletFailure =
   | { ok: false; reason: 'bad_identity_signature' }
   | { ok: false; reason: 'bad_wallet_signature' }
   | { ok: false; reason: 'invalid_anchor_signature' }
+  | { ok: false; reason: 'anchor_tx_not_found' }
+  | { ok: false; reason: 'anchor_tx_wallet_not_signer' }
+  | { ok: false; reason: 'anchor_tx_rpc_unavailable' }
   | { ok: false; reason: 'malformed_pubkey' };
 
 export type VerifyOperatorWalletResult =
   | { ok: true; wallet: OperatorWallet }
   | VerifyOperatorWalletFailure;
 
+/**
+ * Minimal RPC capability surface the wallet verification needs.
+ * Carved out as a dependency-injection point so the service can be
+ * unit-tested with a tiny stub instead of the full SolanaRpcClient.
+ */
+export interface OperatorWalletRpc {
+  getTransaction(
+    signature: string,
+    opts?: { commitment?: 'processed' | 'confirmed' | 'finalized' },
+  ): Promise<{ accountKeys: string[]; numRequiredSignatures: number } | null>;
+}
+
 export interface OperatorWalletVerificationServiceDeps {
   logger: Logger;
+  /**
+   * RPC client used for the anchor-tx chain check. Must implement
+   * `getTransaction`. Today this is the shared `SolanaRpcClient` —
+   * type-narrowed to `OperatorWalletRpc` so tests can pass a stub.
+   */
+  solanaRpc: OperatorWalletRpc;
   ttlMs?: number;
 }
 
@@ -107,27 +128,33 @@ export interface OperatorWalletVerificationServiceDeps {
  *
  * Steps:
  *   1. Reject if `issuedNonce.expiresAtMs` is in the past.
- *   2. Validate that `anchorTxSignature` looks like a Solana tx
- *      signature (base58, 64-96 chars). Full on-chain verification
- *      via `getTransaction` is left to a follow-up hardening pass
- *      — the signature shape check + the operator's published
- *      memo-tx-hash-of-nonce gives us the bulk of the assurance
- *      (an attacker producing a fake signature would have to also
- *      forge the on-chain memo's relationship with the nonce).
+ *   2. Validate that `anchorTxSignature` is a well-formed Solana tx
+ *      signature (base58 → 64 bytes).
  *   3. Decode both pubkeys (identity, wallet) from base58 → 32 bytes.
  *   4. Verify the identity-key signature against the canonical nonce.
  *   5. Verify the wallet-key signature against the canonical nonce.
  *      Both signatures must clear.
+ *   6. Resolve the anchor tx via `getTransaction` and confirm
+ *      `walletPubkey` is one of the first `numRequiredSignatures`
+ *      entries of `accountKeys` — i.e. the wallet actually signed
+ *      a real on-chain transaction. This is the load-bearing
+ *      "wallet has working on-chain custody" check; earlier
+ *      revisions deferred it to a follow-up pass and the UI was
+ *      lying about the property. RPC errors are demoted to
+ *      `anchor_tx_rpc_unavailable` (transient, retryable) so the
+ *      operator gets actionable feedback instead of a 500.
  *
  * The label is captured verbatim (truncated to 32 chars at the
  * route layer to match the DB CHECK).
  */
 export class OperatorWalletVerificationService {
   private readonly logger: Logger;
+  private readonly solanaRpc: OperatorWalletRpc;
   private readonly walletTtlMs: number;
 
   constructor(deps: OperatorWalletVerificationServiceDeps) {
     this.logger = deps.logger;
+    this.solanaRpc = deps.solanaRpc;
     this.walletTtlMs = deps.ttlMs ?? DEFAULT_OPERATOR_WALLET_TTL_MS;
   }
 
@@ -180,6 +207,41 @@ export class OperatorWalletVerificationService {
     const walletOk = await ed25519VerifyAsync(walletSig, signedBytes, walletBytes);
     if (!walletOk) {
       return { ok: false, reason: 'bad_wallet_signature' };
+    }
+
+    // Anchor-tx chain check. Resolve the operator-supplied signature
+    // via `getTransaction` and assert the wallet pubkey is one of the
+    // first `numRequiredSignatures` entries of `accountKeys`. The
+    // ordering invariant is from the Solana tx wire format: the
+    // first N keys of a message are its signers, in the same order
+    // as the `signatures` array. If the wallet isn't in that prefix,
+    // the wallet keypair did NOT sign this transaction — the
+    // dual-signature passed but the chain-custody claim hasn't.
+    //
+    // RPC failures (provider unreachable, archive node behind, 5xx)
+    // surface as `anchor_tx_rpc_unavailable` — a retryable transient
+    // distinct from `anchor_tx_not_found` (the signature really is
+    // unknown, e.g. invalid or never landed). The route layer maps
+    // unavailable → 502 and not-found → 403 so the operator can tell
+    // "we're flaky, retry" apart from "your signature is fake".
+    let chainResult: { accountKeys: string[]; numRequiredSignatures: number } | null;
+    try {
+      chainResult = await this.solanaRpc.getTransaction(args.anchorTxSignature, {
+        commitment: 'finalized',
+      });
+    } catch (err) {
+      this.logger.warn(
+        { err, signature: args.anchorTxSignature },
+        'operator-wallet: anchor-tx getTransaction failed',
+      );
+      return { ok: false, reason: 'anchor_tx_rpc_unavailable' };
+    }
+    if (chainResult === null) {
+      return { ok: false, reason: 'anchor_tx_not_found' };
+    }
+    const signerSet = chainResult.accountKeys.slice(0, chainResult.numRequiredSignatures);
+    if (!signerSet.includes(args.issuedNonce.walletPubkey)) {
+      return { ok: false, reason: 'anchor_tx_wallet_not_signer' };
     }
 
     const now = new Date();

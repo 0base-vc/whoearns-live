@@ -107,6 +107,12 @@ function humanMessageForWalletFailure(reason: WalletFailureReason): string {
       return 'The wallet signature did not verify against the nonce.';
     case 'invalid_anchor_signature':
       return 'The anchor transaction signature is not a valid Solana transaction signature.';
+    case 'anchor_tx_not_found':
+      return 'The anchor transaction was not found on chain. Verify the signature is correct and the transaction has landed and been finalised.';
+    case 'anchor_tx_wallet_not_signer':
+      return 'The anchor transaction exists, but the wallet pubkey did not sign it. The anchor must be a transaction the wallet itself signed.';
+    case 'anchor_tx_rpc_unavailable':
+      return 'The Solana RPC was unavailable while verifying the anchor transaction. This is usually transient — retry in a few seconds.';
     case 'malformed_pubkey':
       return 'One of the supplied pubkeys is not a valid base58 Solana pubkey.';
   }
@@ -571,9 +577,13 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     if (!result.ok) {
       // `code` stays the stable machine id; `message` is human prose
       // (REST-M2) — previously both were the bare `result.reason`.
+      // Status code is 502 for the transient RPC-availability case
+      // (operator should retry) and 403 for the proof-failed family
+      // (operator must regenerate or re-anchor).
+      const statusCode = result.reason === 'anchor_tx_rpc_unavailable' ? 502 : 403;
       return sendError(reply, {
         code: result.reason,
-        statusCode: 403,
+        statusCode,
         message: humanMessageForWalletFailure(result.reason),
         requestId: request.id,
       });

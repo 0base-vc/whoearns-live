@@ -47,6 +47,10 @@ export const DEFAULT_METHOD_COSTS: Readonly<Record<string, number>> = Object.fre
   // `getSignaturesForAddress` returns up to 1000 signatures (~120B
   // each, ~120KB response). Cost similar to a getBlock — set at 30.
   getSignaturesForAddress: 30,
+  // `getTransaction` returns a single tx with metadata; payload is
+  // typically a few KB. Provider quotas treat it comparably to a
+  // single-slot `getBlock` lookup.
+  getTransaction: 30,
   // `getProgramAccounts` on the Config program (~3k accounts,
   // ~500B each, ~3MB response) is heavier than the per-slot calls.
   // Providers commonly bill this higher depending on response size; we set it
@@ -593,6 +597,72 @@ export class SolanaRpcClient {
     if (options.commitment !== undefined) opts['commitment'] = options.commitment;
     if (Object.keys(opts).length > 0) params.push(opts);
     return this.enqueue<RpcSignatureInfo[]>('getSignaturesForAddress', params);
+  }
+
+  /**
+   * Fetch a single transaction's signer-set + accountKeys for the
+   * operator-wallet anchor-tx verification.
+   *
+   * The return projection is intentionally MINIMAL: the only thing
+   * the wallet verification cares about is "did walletPubkey sign
+   * this tx?" which reduces to "is walletPubkey one of the first
+   * `numRequiredSignatures` entries of `accountKeys`?". We don't
+   * need any of the instruction data, logs, post-balances, or other
+   * metadata. Returning the narrow shape keeps the surface small
+   * and stops downstream code from accidentally depending on the
+   * 100+ fields the full RPC response carries.
+   *
+   * Returns `null` when the signature isn't found (provider missed
+   * the slot, archive node not yet caught up, signature is invalid).
+   * Versioned transactions (v0+) are accepted via
+   * `maxSupportedTransactionVersion: 0`; LUT-loaded addresses are
+   * NOT included in `accountKeys` (the lookup-table indirection
+   * lives in a different field) — which is fine for the signer
+   * check because LUT addresses can never be signers.
+   */
+  async getTransaction(
+    signature: string,
+    opts?: { commitment?: Commitment },
+  ): Promise<{ accountKeys: string[]; numRequiredSignatures: number } | null> {
+    const config: Record<string, unknown> = {
+      encoding: 'json',
+      maxSupportedTransactionVersion: 0,
+    };
+    if (opts?.commitment !== undefined) config['commitment'] = opts.commitment;
+    const raw = await this.enqueue<{
+      transaction?: {
+        message?: {
+          accountKeys?: unknown;
+          header?: { numRequiredSignatures?: unknown };
+        };
+      };
+    } | null>('getTransaction', [signature, config]);
+    if (raw === null) return null;
+    const msg = raw.transaction?.message;
+    const keysRaw = msg?.accountKeys;
+    const numSigners = msg?.header?.numRequiredSignatures;
+    if (!Array.isArray(keysRaw)) return null;
+    const accountKeys: string[] = [];
+    for (const k of keysRaw) {
+      // Versioned txs may serialise an accountKey as `{ pubkey, signer,
+      // writable, source }`. Legacy txs use bare strings. Accept both
+      // shapes; reject anything else.
+      if (typeof k === 'string') {
+        accountKeys.push(k);
+      } else if (
+        k !== null &&
+        typeof k === 'object' &&
+        typeof (k as { pubkey?: unknown }).pubkey === 'string'
+      ) {
+        accountKeys.push((k as { pubkey: string }).pubkey);
+      } else {
+        return null;
+      }
+    }
+    if (typeof numSigners !== 'number' || numSigners < 1 || numSigners > accountKeys.length) {
+      return null;
+    }
+    return { accountKeys, numRequiredSignatures: numSigners };
   }
 
   /**
