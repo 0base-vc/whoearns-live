@@ -34,6 +34,7 @@
 -->
 <script lang="ts">
   import type { OaiComponents } from '$lib/types';
+  import Card from './Card.svelte';
   import Pill from './Pill.svelte';
 
   interface Props {
@@ -63,30 +64,17 @@
 </script>
 
 <!--
-  Full-width section. Earlier revision self-clamped to `col-8`
-  (`lg:max-w-[calc((100%/12)*8)]`) under the assumption a sibling
-  card would occupy the right `col-4` — but the hub's grid never
-  added that sibling, so the clamp produced a visible empty band
-  to the right. The OAI is a peer of Wallet-activity / Audit /
-  SIMD, all of which render full-width; matching that rhythm.
+  Section shell routes through `Card` (tone="panel") so radius +
+  padding match every other hub section — earlier this hand-rolled
+  `rounded-lg p-4`, drifting from the `rounded-xl p-5` Card shell.
 -->
-<section
-  class="rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
-  aria-labelledby="oai-heading"
->
+<Card tone="panel" ariaLabelledby="oai-heading">
   <header class="flex items-baseline justify-between gap-2 pb-3">
     <!--
-      h2 — peer of the other hub sections (Wallet activity, Audit,
-      SIMD). The earlier rename to "Operator engagement" was a
-      partial relabel that left the same product as
-      "Operator Activity Index" in `/claim/[vote]`, `seo.route.ts`,
-      `docs/openapi.yaml`, `docs/api.md`, and the URL itself
-      (`/v1/validators/{id}/operator-activity-index`). Half-renames
-      are worse than no rename: a delegator reads the hub, clicks
-      claim, and sees a different name for the same thing. Reverted
-      to the canonical "Operator Activity Index (OAI)" name with the
-      acronym appended so the score-tile labels below ("Governance",
-      "Wallet activity") still read as the breakdown shape.
+      h2 — `text-lg`, the standard hub section-heading size. The
+      "Operator Activity Index (OAI)" name is the canonical one used
+      by `/claim/[vote]`, `seo.route.ts`, `docs/openapi.yaml`, and the
+      `/v1/validators/{id}/operator-activity-index` route.
     -->
     <h2 id="oai-heading" class="text-lg font-semibold tracking-tight">
       Operator Activity Index (OAI)
@@ -102,19 +90,10 @@
   </header>
 
   {#if !claimed || oai === null}
-    <!--
-      Unclaimed (or opted-out / identity-drifted, which the API
-      collapses) → no OAI surface. Collapse to a single explanatory
-      line per "shorter page, not sadder." The action footer at
-      the bottom of the hub carries the canonical operator CTA;
-      duplicating it here was the earlier brand-voice mistake
-      — a delegator scrolling past saw "Sign to claim" twice on
-      the same page.
-    -->
+    <!-- Unclaimed / opted-out / identity-drifted → no OAI surface. -->
     <p class="text-sm text-[color:var(--color-text-muted)]">
-      This validator hasn't been claimed by its operator, so wallet and governance activity aren't
-      linked here yet. The operator can claim by signing one offline message — see the action footer
-      at the bottom of the page.
+      Not claimed yet — wallet and governance activity appear once an operator claims this
+      validator.
     </p>
   {:else}
     <!--
@@ -150,33 +129,28 @@
           </p>
         {/if}
         <!--
-          Vertical stack instead of `grid-cols-3 gap-2`. With the
-          tile already 1/3 of a now-full-width panel, the inner
-          3-col grid was crushing each cell to ~60-70px and the
-          uppercase 14-char labels ("PEER REACTIONS") collided
-          into "COMMENTSPEER REACTIONSSIMDS" on the live page.
-          One row per label-value pair scales legibly at any
-          breakpoint and keeps the same vertical footprint.
+          One row per label-value pair — sentence-case (not
+          uppercase): a small uppercase label nested inside a tile
+          inside a panel is a third level of "shouty". The
+          `tabular-nums` value carries the emphasis.
         -->
         <dl class="mt-3 space-y-1.5 text-xs text-[color:var(--color-text-muted)]">
           <div class="flex items-baseline justify-between gap-2">
-            <dt class="uppercase tracking-wide">SIMD comments</dt>
+            <dt>SIMD comments</dt>
             <dd class="tabular-nums">{oai.components.governance.commentCount}</dd>
           </div>
           <div class="flex items-baseline justify-between gap-2">
-            <dt class="uppercase tracking-wide">Reactions</dt>
+            <dt>Reactions</dt>
             <dd class="tabular-nums">{oai.components.governance.reactionsReceived}</dd>
           </div>
           <div class="flex items-baseline justify-between gap-2">
-            <dt class="uppercase tracking-wide">SIMDs engaged</dt>
+            <dt>SIMDs engaged</dt>
             <dd class="tabular-nums">{oai.components.governance.activeWindowCount}</dd>
           </div>
         </dl>
         {#if !governanceActive}
           <p class="mt-3 text-xs text-[color:var(--color-text-muted)]">
-            The governance discussions feed isn't reading SIMD comments yet — this score will start
-            populating when the feed turns on. The numbers above are the real counts (currently
-            zero); they'll move once the data feed is live.
+            The SIMD-discussions feed isn't live yet.
           </p>
         {/if}
       </div>
@@ -199,7 +173,7 @@
             {formatScore(oai.composite)}
           </p>
           <p class="mt-3 text-xs text-[color:var(--color-text-muted)]">
-            Equal-weight blend of the governance and wallet halves above.
+            Equal-weight blend of the two halves.
           </p>
         {:else}
           <p
@@ -209,8 +183,7 @@
             <span aria-hidden="true">—</span>
           </p>
           <p class="mt-3 text-xs text-[color:var(--color-text-muted)]">
-            There's no overall index number while one half is pending. The two halves above are
-            independently readable.
+            No blend until both halves are in.
           </p>
         {/if}
       </div>
@@ -240,10 +213,9 @@
           <span class="text-base font-normal text-[color:var(--color-text-muted)]">/ 100</span>
         </p>
         <p class="mt-3 text-xs text-[color:var(--color-text-muted)]">
-          Derived from the 90-day active-day count across the operator's registered wallets. The
-          heatmaps above the panel show the day-by-day pattern that drives this score.
+          90-day active-day count across registered wallets.
         </p>
       </div>
     </div>
   {/if}
-</section>
+</Card>

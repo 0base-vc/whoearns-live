@@ -70,11 +70,12 @@
 >
   {#if hasGlow}
     <!--
-      Ember star — same 8-point silhouette as VerifiedBadge / TierBadge,
-      sized 10px to sit next to the label without dominating. The
-      `currentColor` fill picks up the brand-900 ink colour above.
-      `prefers-reduced-motion` honoured globally (app.css:99-108) —
-      no JS animation here, only a CSS `box-shadow` puff below.
+      Landmark star — same 8-point silhouette as VerifiedBadge /
+      TierBadge, sized 10px to sit next to the label without
+      dominating. Static (no pulse): a perpetually-animating
+      element on a static credential read as a notification badge,
+      not prestige — the `ring` glow on the pill already marks the
+      earliest-landmark tier. Calm = confident.
     -->
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -82,7 +83,7 @@
       width="10"
       height="10"
       fill="currentColor"
-      class="shrink-0 text-[color:var(--color-brand-500)] motion-safe:animate-pulse"
+      class="shrink-0 text-[color:var(--color-brand-500)]"
       aria-hidden="true"
     >
       <path d={STAR_8_PATH_D} />

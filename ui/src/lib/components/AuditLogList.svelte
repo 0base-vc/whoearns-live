@@ -38,6 +38,7 @@
 <script lang="ts">
   import type { ClaimAuditEvent } from '$lib/types';
   import { formatTimestamp } from '$lib/format';
+  import Card from './Card.svelte';
   import IconKey from '$lib/icons/IconKey.svelte';
   import IconRotate from '$lib/icons/IconRotate.svelte';
   import IconPencil from '$lib/icons/IconPencil.svelte';
@@ -174,20 +175,10 @@
   }
 </script>
 
-<section
-  class="rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
-  aria-labelledby="audit-log-heading"
->
+<Card tone="panel" ariaLabelledby="audit-log-heading">
   <header class="flex items-baseline justify-between gap-2 pb-3">
-    <!--
-      h2 — this section is a peer of "Wallet activity" / "Operator
-      Activity Index" / "Recent SIMD proposals" on the hub. Earlier
-      revision used h3 (inherited from PR2 when audit lived nested
-      inside a parent section), but in PR3's flat section order it
-      reads as a heading-hierarchy skip (h2 → h3 → h3 with no
-      intervening h2). WCAG 1.3.1.
-    -->
-    <h2 id="audit-log-heading" class="text-base font-semibold tracking-tight">Claim audit</h2>
+    <!-- h2 `text-lg` — standard hub section-heading size. -->
+    <h2 id="audit-log-heading" class="text-lg font-semibold tracking-tight">Claim audit</h2>
     {#if !failed}
       <span class="text-xs text-[color:var(--color-text-subtle)]">
         {events.length}
@@ -203,8 +194,7 @@
       was clean when it just hadn't loaded.
     -->
     <p class="text-sm text-[color:var(--color-status-warn-fg)]" role="status" aria-live="polite">
-      The audit log couldn't be loaded right now. Try refreshing — the timeline is public and should
-      be available shortly.
+      Couldn't load the audit log. Try refreshing.
     </p>
   {:else if isEmpty}
     <p class="text-sm text-[color:var(--color-text-muted)]">No events recorded yet.</p>
@@ -318,4 +308,4 @@
       </details>
     {/if}
   {/if}
-</section>
+</Card>

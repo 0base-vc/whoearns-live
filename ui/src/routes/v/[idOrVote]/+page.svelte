@@ -64,7 +64,6 @@
 
   import {
     TIER_LABEL,
-    TIER_TAGLINE,
     isReliabilityFloorTriggered,
     skipRate,
     trustSummary,
@@ -370,7 +369,6 @@
     }),
   );
   const tierLabel = $derived(TIER_LABEL[tier.tier]);
-  const tierTagline = $derived(TIER_TAGLINE[tier.tier]);
   const isUnrated = $derived(tier.tier === 'unrated');
 
   /**
@@ -562,18 +560,16 @@
 
         <!--
           Trust summary one-liner — the hub's scannable hero line.
-          The hero Card is `tone="raised"` which is already
-          `bg-surface-muted` — wrapping the strip in the SAME token
-          produced an invisible chip. Promoted to `bg-surface` so
-          the strip steps DOWN to a brighter inner surface (white on
-          a zinc-50 card in light mode; zinc-950 inside a zinc-900
-          card in dark mode). Border + ring give the chip a frame
-          on both themes. Mobile drops the chip treatment entirely
-          (`lg:` gated) so a long trust line doesn't wrap into a
-          multi-line filled paragraph that loses the chip metaphor.
+          Plain emphasized text at every breakpoint. An earlier
+          revision gave it a bordered "chip" frame only at `lg:`;
+          a frame that exists on one breakpoint and vanishes on
+          another is an inconsistent component, not a responsive
+          one. `text-base font-medium text-default` carries enough
+          weight on its own — the line IS the hero's payload, it
+          doesn't need a box.
         -->
         <p
-          class="mt-3 text-base font-medium text-[color:var(--color-text-default)] lg:inline-block lg:rounded-md lg:border lg:border-[color:var(--color-border-default)] lg:bg-[color:var(--color-surface)] lg:px-3 lg:py-2"
+          class="mt-3 text-base font-medium text-[color:var(--color-text-default)]"
           data-testid="trust-summary"
         >
           {trustLine}
@@ -650,14 +646,17 @@
   prose, not editorial.
 -->
 {#if operatorNarrative !== null}
-  <section
-    class="mt-6 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
-    aria-label="Operator note"
-  >
-    <p class="text-sm leading-relaxed text-[color:var(--color-text-muted)]">
+  <Card tone="panel" class="mt-6" ariaLabelledby="operator-note-heading">
+    <p
+      id="operator-note-heading"
+      class="text-xs font-semibold uppercase tracking-wider text-[color:var(--color-text-subtle)]"
+    >
+      Operator note
+    </p>
+    <p class="mt-2 text-sm leading-relaxed text-[color:var(--color-text-muted)]">
       {operatorNarrative}
     </p>
-  </section>
+  </Card>
 {/if}
 
 <!-- ─────────── 2. Tier card + Tenure/Client stack ─────────── -->
@@ -675,14 +674,12 @@
     <Card tone="panel">
       <div class="flex flex-col gap-4">
         <div class="flex items-baseline justify-between gap-2">
-          <h2 class="text-base font-semibold tracking-tight">Node Tier</h2>
+          <h2 class="text-lg font-semibold tracking-tight">Node Tier</h2>
           <Pill tone={isUnrated ? 'neutral' : 'brand'} size="sm">
             <TierBadge tier={tier.tier} size={12} label="" />
             <span class="ml-1">{tierLabel}</span>
           </Pill>
         </div>
-
-        <p class="text-sm text-[color:var(--color-text-muted)]">{tierTagline}</p>
 
         <!--
           `size={144}` overrides the component default of 160px so
@@ -721,7 +718,7 @@
               Skip rate {(
                 (tierWindow.slotsSkipped / Math.max(1, tierWindow.slotsAssigned)) *
                 100
-              ).toFixed(1)}% — tier capped at Kindling regardless of economic percentile.
+              ).toFixed(1)}% — too high to rate above the lowest tier.
             </span>
           </div>
         {/if}
@@ -734,7 +731,7 @@
           <summary
             class="inline-flex min-h-11 cursor-pointer items-center text-[color:var(--color-text-muted)] hover:text-[color:var(--color-text-default)]"
           >
-            Scoring window
+            How this tier was scored
           </summary>
           <!--
             Plain-English labels. Earlier revision used internal
@@ -765,7 +762,7 @@
   <div class="flex flex-col gap-6 lg:col-span-5">
     <Card tone="panel">
       <div class="flex flex-col gap-3">
-        <h2 class="text-base font-semibold tracking-tight">Tenure</h2>
+        <h2 class="text-lg font-semibold tracking-tight">Tenure</h2>
         <TenureBadge tenure={scoring.tenure} size="md" />
         <!--
           Mainnet epoch ≈ 2 days. Appending the rough day-count
@@ -783,7 +780,7 @@
 
     <Card tone="panel">
       <div class="flex flex-col gap-3">
-        <h2 class="text-base font-semibold tracking-tight">Client</h2>
+        <h2 class="text-lg font-semibold tracking-tight">Client</h2>
         <ClientBadge client={scoring.client} size="md" />
         <!--
           "Gossip" was internal Solana protocol vocabulary; the
@@ -798,12 +795,10 @@
         -->
         {#if scoring.client.updatedAt !== null}
           <p class="text-xs text-[color:var(--color-text-muted)]">
-            Client version last seen {formatTimestamp(scoring.client.updatedAt)}.
+            Version last seen {formatTimestamp(scoring.client.updatedAt)}.
           </p>
         {:else}
-          <p class="text-xs text-[color:var(--color-text-muted)]">
-            Client version not yet seen for this validator.
-          </p>
+          <p class="text-xs text-[color:var(--color-text-muted)]">Version not yet observed.</p>
         {/if}
       </div>
     </Card>
@@ -855,12 +850,11 @@
 {#if !claimStatusLoading && claimStatus !== null && claimStatus.wallets.entries.length > 0}
   <section class="mt-6 flex flex-col gap-4" aria-labelledby="wallet-activity-heading">
     <header class="px-1">
-      <h2 id="wallet-activity-heading" class="text-base font-semibold tracking-tight">
+      <h2 id="wallet-activity-heading" class="text-lg font-semibold tracking-tight">
         Wallet activity
       </h2>
       <p class="mt-1 text-xs text-[color:var(--color-text-muted)]">
-        Per-day transaction count across each registered operator wallet over the last 365 days.
-        Log-scaled so steady activity outweighs single bursts.
+        Daily transactions per registered wallet, last 365 days.
       </p>
     </header>
     {#each claimStatus.wallets.entries as walletEntry (walletEntry.wallet)}
@@ -1001,12 +995,11 @@
 {#if !simdLoading && simdItems.length > 0}
   <section class="mt-6 flex flex-col gap-4" aria-labelledby="simd-curations-heading">
     <header class="px-1">
-      <h2 id="simd-curations-heading" class="text-base font-semibold tracking-tight">
+      <h2 id="simd-curations-heading" class="text-lg font-semibold tracking-tight">
         Recent SIMD proposals
       </h2>
       <p class="mt-1 text-xs text-[color:var(--color-text-muted)]">
-        AI-curated summaries of recent SIMD proposals — read the key questions a thoughtful operator
-        should weigh before voting.
+        AI-curated summaries of recent SIMD proposals.
       </p>
     </header>
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -1032,16 +1025,14 @@
   <Card tone="accent" class="mt-6">
     <div class="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div class="min-w-0 flex-1">
-        <h2 class="text-base font-semibold tracking-tight">
+        <h2 class="text-lg font-semibold tracking-tight">
           {#if isClaimed}Operator dashboard{:else}Are you the operator?{/if}
         </h2>
         <p class="mt-1 text-sm text-[color:var(--color-text-muted)]">
           {#if isClaimed}
-            This validator's profile is claimed. The audit timeline and wallet activity above come
-            from the operator's signed claim.
+            Claimed and verified by the validator's operator.
           {:else}
-            Claim this validator with an offline Ed25519 signature to surface a public profile and
-            register operator wallets.
+            Claim with an offline Ed25519 signature to publish a profile and register wallets.
           {/if}
         </p>
       </div>

@@ -41,6 +41,7 @@
 -->
 <script lang="ts">
   import type { ValidatorEpochRecord } from '$lib/types';
+  import Card from './Card.svelte';
   import KpiStat from './KpiStat.svelte';
   import { lamportsStringToSolNumber } from '$lib/format';
 
@@ -190,12 +191,9 @@
   });
 </script>
 
-<section
-  class="rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
-  aria-labelledby="income-summary-heading"
->
+<Card tone="panel" ariaLabelledby="income-summary-heading">
   <header class="flex items-baseline justify-between gap-2 pb-3">
-    <h2 id="income-summary-heading" class="text-base font-semibold tracking-tight">Epoch income</h2>
+    <h2 id="income-summary-heading" class="text-lg font-semibold tracking-tight">Epoch income</h2>
     {#if !isColdStart}
       <!--
         Deep-link to the full per-epoch table. Action-arrow `→`
@@ -214,8 +212,7 @@
 
   {#if isColdStart}
     <p class="text-sm text-[color:var(--color-text-muted)]">
-      This validator hasn't earned its first epoch of fees yet. Check back after the next epoch
-      closes.
+      Hasn't earned its first epoch of fees yet.
     </p>
   {:else}
     <div class="grid grid-cols-3 gap-3 sm:gap-4">
@@ -325,4 +322,4 @@
       </div>
     {/if}
   {/if}
-</section>
+</Card>
