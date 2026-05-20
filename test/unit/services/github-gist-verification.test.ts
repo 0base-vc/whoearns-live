@@ -251,4 +251,101 @@ describe('GithubGistVerificationService.verify', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe('expired');
   });
+
+  it('rejects a Content-Length larger than the cap WITHOUT reading the body (P1-5)', async () => {
+    // PR #11 review finding P1-5 regression — preflight on the
+    // Content-Length header MUST short-circuit before the body is
+    // read. We assert the body reader is never touched by recording
+    // whether `arrayBuffer` / `body.getReader` was invoked.
+    let bodyTouched = false;
+    const headers = new Headers({ 'content-length': String(2 * 1024 * 1024) }); // 2 MB > 1 MB cap
+    const fakeFetch = (async () => ({
+      ok: true,
+      headers,
+      body: {
+        getReader: () => {
+          bodyTouched = true;
+          throw new Error('preflight should have rejected before reaching the reader');
+        },
+        cancel: async () => {},
+      },
+      arrayBuffer: async () => {
+        bodyTouched = true;
+        throw new Error('preflight should have rejected before reaching arrayBuffer');
+      },
+    })) as unknown as typeof fetch;
+    const svc = new GithubGistVerificationService({ fetcher: fakeFetch, logger: silent });
+    const nonce: GithubLinkNonce = {
+      purpose: GITHUB_LINK_NONCE_PURPOSE,
+      votePubkey: 'Vote1',
+      identityPubkey: 'Identity1',
+      githubUsername: 'alice',
+      issuedAtMs: Date.now(),
+      expiresAtMs: Date.now() + 60_000,
+      domain: 'whoearns.live',
+    };
+    const result = await svc.verify({
+      issuedNonce: nonce,
+      gistUrl: 'https://gist.github.com/alice/abcdef1234567890abcdef12',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('gist_too_large');
+    expect(bodyTouched).toBe(false);
+  });
+
+  it('aborts mid-stream when accumulated bytes exceed the cap (P1-5)', async () => {
+    // P1-5 streaming counter — when Content-Length is missing (or
+    // lies), the running byte total must trip the same cap. Each
+    // chunk is below the cap individually; their sum exceeds it.
+    // 512 KB × 4 = 2 MB total. The 3rd chunk brings the running
+    // total to 1.5 MB which trips the 1 MB cap; chunks 1-3 get
+    // pulled, chunk 4 never does.
+    const chunkSize = 512 * 1024; // 512 KB
+    const chunks = [
+      new Uint8Array(chunkSize).fill(65),
+      new Uint8Array(chunkSize).fill(66),
+      new Uint8Array(chunkSize).fill(67),
+      new Uint8Array(chunkSize).fill(68),
+    ];
+    let chunkIdx = 0;
+    let cancelled = false;
+    const fakeFetch = (async () => ({
+      ok: true,
+      headers: new Headers(),
+      body: {
+        getReader: () => ({
+          async read() {
+            if (chunkIdx >= chunks.length) return { done: true, value: undefined };
+            const value = chunks[chunkIdx];
+            chunkIdx += 1;
+            return { done: false, value };
+          },
+          async cancel() {
+            cancelled = true;
+          },
+        }),
+      },
+    })) as unknown as typeof fetch;
+    const svc = new GithubGistVerificationService({ fetcher: fakeFetch, logger: silent });
+    const nonce: GithubLinkNonce = {
+      purpose: GITHUB_LINK_NONCE_PURPOSE,
+      votePubkey: 'Vote1',
+      identityPubkey: 'Identity1',
+      githubUsername: 'alice',
+      issuedAtMs: Date.now(),
+      expiresAtMs: Date.now() + 60_000,
+      domain: 'whoearns.live',
+    };
+    const result = await svc.verify({
+      issuedNonce: nonce,
+      gistUrl: 'https://gist.github.com/alice/abcdef1234567890abcdef12',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('gist_too_large');
+    expect(cancelled).toBe(true);
+    // Fewer than the full 5 chunks should have been pulled — the
+    // streaming reader cancels as soon as the running total
+    // exceeds the 1 MB cap (which happens after the 4th chunk).
+    expect(chunkIdx).toBeLessThan(chunks.length);
+  });
 });

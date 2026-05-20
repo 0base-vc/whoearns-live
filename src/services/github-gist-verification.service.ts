@@ -271,11 +271,77 @@ export class GithubGistVerificationService {
       if (!response.ok) {
         return { ok: false, reason: 'fetch_failed', detail: `http ${response.status}` };
       }
-      const ab = await response.arrayBuffer();
-      if (ab.byteLength > MAX_GIST_BYTES) {
-        return { ok: false, reason: 'gist_too_large' };
+      // PR #11 review finding P1-5 — earlier revision called
+      // `response.arrayBuffer()` to pull the entire body into memory
+      // BEFORE comparing against `MAX_GIST_BYTES`. A `Content-Length:
+      // 100_000_000` body would commit 100 MB on the heap before the
+      // size check fired. Public unauthenticated endpoint → trivial
+      // OOM amplifier.
+      //
+      // Now two-layer:
+      //   (1) Content-Length PREFLIGHT — if the upstream advertises
+      //       a size larger than MAX_GIST_BYTES, reject without ever
+      //       reading the body. GitHub raw URLs always set the
+      //       header; a missing one falls through to (2).
+      //   (2) Streaming byte counter — accumulate chunks while
+      //       enforcing the same MAX_GIST_BYTES ceiling. If the
+      //       running total exceeds it mid-stream, abort the reader
+      //       and return `gist_too_large`. Caps memory at
+      //       MAX_GIST_BYTES + one chunk.
+      // Optional-chain on `headers` so test stubs that omit the
+      // header bag (older fetch fakes) still take the streaming /
+      // arrayBuffer fallback below. Real `fetch` always has it.
+      const contentLengthHeader = response.headers?.get?.('content-length') ?? null;
+      if (contentLengthHeader !== null) {
+        const parsedLength = Number.parseInt(contentLengthHeader, 10);
+        if (Number.isFinite(parsedLength) && parsedLength > MAX_GIST_BYTES) {
+          // Drain so the underlying socket can be reused / closed —
+          // some fetch implementations leak connections otherwise.
+          await response.body?.cancel().catch(() => {});
+          return { ok: false, reason: 'gist_too_large' };
+        }
       }
-      body = new TextDecoder('utf-8').decode(ab);
+      const reader = response.body?.getReader();
+      if (reader === undefined) {
+        // No streaming body (test stubs that return `arrayBuffer`-only
+        // mocks). Fall back to the old shape with the same cap so the
+        // path stays testable; the production fetcher always exposes
+        // a stream.
+        const ab = await response.arrayBuffer();
+        if (ab.byteLength > MAX_GIST_BYTES) {
+          return { ok: false, reason: 'gist_too_large' };
+        }
+        body = new TextDecoder('utf-8').decode(ab);
+      } else {
+        const chunks: Uint8Array[] = [];
+        let totalBytes = 0;
+        let tooLarge = false;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value === undefined) continue;
+          totalBytes += value.byteLength;
+          if (totalBytes > MAX_GIST_BYTES) {
+            tooLarge = true;
+            // Stop pulling; cancel releases the underlying socket.
+            await reader.cancel().catch(() => {});
+            break;
+          }
+          chunks.push(value);
+        }
+        if (tooLarge) {
+          return { ok: false, reason: 'gist_too_large' };
+        }
+        // Concatenate exactly once, decode UTF-8. `Buffer.concat`
+        // accepts `Uint8Array` directly in modern Node.
+        const merged = new Uint8Array(totalBytes);
+        let offset = 0;
+        for (const chunk of chunks) {
+          merged.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        body = new TextDecoder('utf-8').decode(merged);
+      }
     } catch (err) {
       this.logger.warn({ err, url: parsed.rawUrl }, 'github-gist: fetch error');
       return {
