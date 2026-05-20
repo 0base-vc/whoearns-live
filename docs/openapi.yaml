@@ -1152,7 +1152,17 @@ components:
               cohortAsOfEpoch,
             ]
           properties:
-            epochs: { type: integer, minimum: 0 }
+            epochs:
+              type: integer
+              minimum: 0
+              maximum: 5
+              description: |
+                Count of closed-epoch rows actually indexed for this
+                validator (≤ 5) — NOT the configured scoring window,
+                which is always 5. A value below 5 is a cold-start
+                state: the indexer has not yet backfilled this
+                validator's older epochs. The tier is still computed
+                over the rows available so far.
             slotsAssigned: { type: integer, minimum: 0 }
             slotsSkipped: { type: integer, minimum: 0 }
             economicCohortSize:

@@ -481,6 +481,13 @@ computed against the **indexed-validator cohort** (the deployment's
 validator). Tier cutoffs: `forge ≥ 95`, `anvil ≥ 80`, `hearth ≥ 40`,
 `kindling < 40`.
 
+`window.epochs` is the count of closed-epoch rows actually indexed
+for this validator (`≤ 5`) — **not** the configured window, which is
+always 5. A value below 5 is a cold-start state: the indexer has not
+yet backfilled this validator's older epochs. The tier is still
+computed, just over the rows available so far; `economicMeasuredEpochs`
+(epochs with measurable income) is likewise `≤ window.epochs`.
+
 `tier === "unrated"` when the validator has fewer than 10 leader slots
 across the window, OR the cohort had fewer than 10 indexed peers with
 measurable income, OR this validator had measurable income in fewer
@@ -490,9 +497,9 @@ tiny-sample validators from being mis-classified. **`composite === null`
 when tier is `unrated`** so a UI cannot accidentally display a
 half-shown score.
 
-**Reliability floor (hard cap).** A validator with `skip_rate > 0.20`
-(`slotsSkipped / slotsAssigned` over the window) is **tier-capped at
-`kindling`** regardless of `economicPercentile`. This is a hygiene
+**Reliability floor (hard cap).** A validator whose Wilson 95% upper
+bound on `skip_rate` exceeds `0.20` is **tier-capped at `kindling`**
+regardless of `economicPercentile`. This is a hygiene
 check, not a bypassable signal — a top earner who flakes out on a
 fifth of their assigned blocks does not earn a higher tier on the
 strength of their economics alone.

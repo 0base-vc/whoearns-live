@@ -44,6 +44,20 @@ export const MIN_MEASURED_EPOCHS_FOR_ECONOMIC = 4;
 export const MIN_COHORT_FOR_PERCENTILE = 10;
 
 /**
+ * Configured scoring window — the tier composite is computed over
+ * the most recent N CLOSED epochs. Mirrors `WINDOW_CLOSED_EPOCHS`
+ * in `src/services/node-tier.ts`.
+ *
+ * This is the *target* window, NOT the count of epochs a given
+ * validator currently has indexed. `NodeTierBody.window.epochs`
+ * carries the latter — the rows actually available, which is `≤`
+ * this on a cold start. The hub renders "{window.epochs} of
+ * {WINDOW_CLOSED_EPOCHS}" so a still-filling dataset reads as a
+ * cold start, not as a deliberately tiny window.
+ */
+export const WINDOW_CLOSED_EPOCHS = 5;
+
+/**
  * Skip-rate hard floor — when `wilson.upper(skip)` exceeds this value
  * the tier is capped at `kindling` regardless of economic percentile,
  * because no amount of income makes a flaking validator a good
@@ -63,6 +77,42 @@ export const TIER_LABEL: Record<NodeTier, string> = {
   kindling: 'Kindling',
   unrated: 'Unrated',
 };
+
+/**
+ * Composite-score cutoffs for each rated tier. Mirrors the cascade
+ * in `computeTier` (`src/services/node-tier.ts`): `forge ≥ 95`,
+ * `anvil ≥ 80`, `hearth ≥ 40`, else `kindling`. The hub's tier card
+ * renders these so the composite has a visible scale — a bare "79"
+ * means nothing without "Anvil starts at 80" beside it.
+ */
+export const TIER_CUTOFFS = {
+  hearth: 40,
+  anvil: 80,
+  forge: 95,
+} as const;
+
+/**
+ * The four rated tiers with their inclusive composite ranges,
+ * ordered high → low for the hub's "tier thresholds" table.
+ * Derived from `TIER_CUTOFFS`; `forge` tops out at the composite
+ * ceiling of 100.
+ */
+export const TIER_BANDS: ReadonlyArray<{
+  tier: Exclude<NodeTier, 'unrated'>;
+  label: string;
+  min: number;
+  max: number;
+}> = [
+  { tier: 'forge', label: TIER_LABEL.forge, min: TIER_CUTOFFS.forge, max: 100 },
+  { tier: 'anvil', label: TIER_LABEL.anvil, min: TIER_CUTOFFS.anvil, max: TIER_CUTOFFS.forge - 1 },
+  {
+    tier: 'hearth',
+    label: TIER_LABEL.hearth,
+    min: TIER_CUTOFFS.hearth,
+    max: TIER_CUTOFFS.anvil - 1,
+  },
+  { tier: 'kindling', label: TIER_LABEL.kindling, min: 0, max: TIER_CUTOFFS.hearth - 1 },
+];
 
 /**
  * One-line tier tagline — used as a tooltip or in compact contexts.
@@ -146,6 +196,93 @@ export function isReliabilityFloorTriggered(
   // the boundary need a real reason to investigate either way.
   const pointEstimate = window.slotsAssigned === 0 ? 0 : window.slotsSkipped / window.slotsAssigned;
   return pointEstimate > SKIP_RATE_FLOOR;
+}
+
+/** The next tier above a composite + the exact integer gap to reach it. */
+export interface TierGap {
+  /** Tier directly above the current composite. Never `kindling` / `unrated`. */
+  nextTier: Exclude<NodeTier, 'kindling' | 'unrated'>;
+  /** Plain-English label for `nextTier` (e.g. "Anvil"). */
+  nextLabel: string;
+  /** Composite value at which `nextTier` begins. */
+  nextCutoff: number;
+  /** Exact integer points from the current composite to `nextCutoff`. */
+  pointsAway: number;
+}
+
+/**
+ * The tier directly above `composite` and the exact integer point
+ * gap to reach it — the data behind the hub's "gap to next tier"
+ * strip. `null` when `composite` is already in the `forge` band
+ * (no tier above; the caller renders a "top tier" state instead).
+ *
+ * `composite` is the API's already-`Math.round()`'d integer
+ * (`node-tier.ts` `computeTier`), so `pointsAway` is exact, not an
+ * approximation. The caller MUST suppress the gap strip when the
+ * skip-rate floor capped the tier — in that state the composite is
+ * not the blocker and "N points to Anvil" would be a lie.
+ */
+export function nextTierGap(composite: number): TierGap | null {
+  if (composite < TIER_CUTOFFS.hearth) {
+    return {
+      nextTier: 'hearth',
+      nextLabel: TIER_LABEL.hearth,
+      nextCutoff: TIER_CUTOFFS.hearth,
+      pointsAway: TIER_CUTOFFS.hearth - composite,
+    };
+  }
+  if (composite < TIER_CUTOFFS.anvil) {
+    return {
+      nextTier: 'anvil',
+      nextLabel: TIER_LABEL.anvil,
+      nextCutoff: TIER_CUTOFFS.anvil,
+      pointsAway: TIER_CUTOFFS.anvil - composite,
+    };
+  }
+  if (composite < TIER_CUTOFFS.forge) {
+    return {
+      nextTier: 'forge',
+      nextLabel: TIER_LABEL.forge,
+      nextCutoff: TIER_CUTOFFS.forge,
+      pointsAway: TIER_CUTOFFS.forge - composite,
+    };
+  }
+  return null;
+}
+
+/**
+ * Reliability is treated as "near its ceiling" above this value —
+ * past it the economic percentile is the only practical lever, so
+ * `scoreLever` stops naming reliability as something to improve.
+ */
+const RELIABILITY_NEAR_CEILING = 0.97;
+
+/**
+ * One-line "what raises your score" guidance for the tier card —
+ * names the input the operator actually controls so the score
+ * motivates rather than merely labels. `null` when there is nothing
+ * constructive to say on this surface:
+ *
+ *   - unrated (`composite === null`): the `unratedReason` copy
+ *     already states what's missing.
+ *   - skip-floor capped: the warn chip owns the recovery message.
+ *     Naming economic percentile here would be actively wrong — the
+ *     tier is hard-capped regardless of it.
+ *
+ * Otherwise it weight-ranks the two live levers, surfacing economic
+ * percentile alone once reliability is already near its ceiling.
+ */
+export function scoreLever(args: {
+  composite: number | null;
+  reliability: number;
+  reliabilityFloorTriggered: boolean;
+}): string | null {
+  if (args.composite === null) return null;
+  if (args.reliabilityFloorTriggered) return null;
+  if (args.reliability >= RELIABILITY_NEAR_CEILING) {
+    return 'Economic percentile is the lever here — it carries 70% of the score, and reliability is already near its ceiling.';
+  }
+  return 'Both signals move the score: economic percentile carries 70% of the weight, reliability the other 30%.';
 }
 
 /**

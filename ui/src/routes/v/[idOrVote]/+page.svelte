@@ -63,8 +63,14 @@
   import StickyHubHeader from '$lib/components/StickyHubHeader.svelte';
 
   import {
+    SKIP_RATE_FLOOR,
+    TIER_BANDS,
+    TIER_CUTOFFS,
     TIER_LABEL,
+    WINDOW_CLOSED_EPOCHS,
     isReliabilityFloorTriggered,
+    nextTierGap,
+    scoreLever,
     skipRate,
     trustSummary,
     unratedReason,
@@ -81,6 +87,7 @@
   import type {
     ClaimAuditEvent,
     ClaimStatus,
+    NodeTier,
     OperatorWalletActivityResponse,
     SimdProposalListItem,
   } from '$lib/types';
@@ -389,6 +396,88 @@
     return true;
   });
   const reason = $derived(isUnrated ? unratedReason(scoring.tier) : null);
+
+  // ── Tier card: gap-to-next, score lever, composite arithmetic ──
+  // All presentation-layer derivations off the SSR scoring payload —
+  // no extra fetch. The card answers not just "what tier" but "why",
+  // "how far to the next tier", and "what raises the score".
+
+  // Per-tier ring/fill colour token. Record-typed (not template
+  // interpolation) so a future NodeTier variant is a typecheck error
+  // here, not a silently-missing CSS var — same rationale as TierRing.
+  const TIER_COLOR_VAR: Record<NodeTier, string> = {
+    forge: '--color-tier-forge-500',
+    anvil: '--color-tier-anvil-500',
+    hearth: '--color-tier-hearth-500',
+    kindling: '--color-tier-kindling-500',
+    unrated: '--color-tier-unrated-500',
+  };
+  const tierColorVar = $derived(TIER_COLOR_VAR[tier.tier]);
+
+  // Cutoff ticks drawn on the gap strip's 0-100 scale.
+  const SCALE_TICKS = [TIER_CUTOFFS.hearth, TIER_CUTOFFS.anvil, TIER_CUTOFFS.forge];
+
+  // The gap strip renders only for a rated, non-floored validator.
+  // Floored: the composite is not the blocker (warn chip owns that).
+  // Unrated: the composite is null (the reason box owns that).
+  const showGapStrip = $derived(tier.composite !== null && !reliabilityFloor);
+  // `nextTierGap` is null at forge (top tier) — the strip then shows
+  // the "top tier" headline instead of a points-away line.
+  const tierGap = $derived(tier.composite === null ? null : nextTierGap(tier.composite));
+  // Clamp for the fill width — composite is already 0-100, defensive.
+  const gapFillPct = $derived(
+    tier.composite === null ? 0 : Math.max(0, Math.min(100, tier.composite)),
+  );
+
+  // One-line "what raises the score" lever. Null for unrated +
+  // skip-floored (the reason box / warn chip carry those messages).
+  const lever = $derived(
+    scoreLever({
+      composite: tier.composite,
+      reliability: tierComponents.reliability,
+      reliabilityFloorTriggered: reliabilityFloor,
+    }),
+  );
+
+  // Composite arithmetic for the <details> breakdown — shows the
+  // score is BUILT (0.3·reliability + 0.7·economic), not assigned.
+  // Null when there's no composite (unrated): the breakdown then
+  // shows only tier bands + measurement, never a phantom sum.
+  const compositeMath = $derived.by(() => {
+    const composite = tier.composite;
+    const economicPercentile = tierComponents.economicPercentile;
+    if (composite === null || economicPercentile === null) return null;
+    const reliabilityPct = tierComponents.reliability * 100;
+    const economicPct = economicPercentile * 100;
+    return {
+      reliabilityPct,
+      economicPct,
+      reliabilityTerm: 0.3 * reliabilityPct,
+      economicTerm: 0.7 * economicPct,
+      composite,
+    };
+  });
+
+  // Median per-leader-slot income behind the economic percentile —
+  // the raw figure the percentile ranks. 6 decimals: per-slot income
+  // is the same magnitude class as median block fees.
+  const economicMedianSol = $derived.by(() => {
+    const sol = lamportsStringToSolNumber(tierWindow.economicMedianLamportsPerSlot);
+    return sol === null ? null : sol.toFixed(6);
+  });
+
+  // Cold start — fewer closed-epoch rows indexed than the configured
+  // 5-epoch window. Drives the honest "{n} of 5 (window still
+  // filling)" copy (the screenshot's bare "4" read as a tiny window).
+  const windowStillFilling = $derived(tierWindow.epochs < WINDOW_CLOSED_EPOCHS);
+
+  // Skip-rate point estimate as a display percentage — used by the
+  // reliability-floor warn chip.
+  const skipRatePctLabel = $derived(
+    ((tierWindow.slotsSkipped / Math.max(1, tierWindow.slotsAssigned)) * 100).toFixed(1),
+  );
+  // Skip-rate floor 0.20 → "20" for the warn chip's recovery copy.
+  const skipFloorPctLabel = (SKIP_RATE_FLOOR * 100).toFixed(0);
 
   // Skip rate for the trust summary line — point estimate, not Wilson
   // upper (the hub's hero summary is for-humans context, not the
@@ -701,13 +790,14 @@
 
         {#if reliabilityFloor}
           <!--
-            Skip-rate-floor explanation chip. Renders ONLY when the
-            reliability floor fired — explains WHY the tier was
-            capped independently of economic productivity. Promoted
-            to a `role="status"` warn-tone banner (not muted text)
-            because a delegator skimming the page must NOT miss
-            that the tier classification reflects a hard floor, not
-            the economic half of the composite.
+            Skip-rate-floor banner. Renders whenever the reliability
+            floor fired. `role="status"` warn-tone (not muted text)
+            because a delegator skimming the page must NOT miss that
+            the tier reflects a hard floor, not the economic half of
+            the composite. Copy states the FLOOR RULE (always true)
+            rather than asserting the current displayed tier, and
+            carries the recovery path — a capped validator should
+            read this as recoverable, not as a dead end.
           -->
           <div
             class="flex items-start gap-2 rounded-md border border-[color:var(--color-status-warn-fg)]/30 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-sm font-medium text-[color:var(--color-status-warn-fg)]"
@@ -715,16 +805,94 @@
           >
             <span aria-hidden="true">⚠</span>
             <span>
-              Skip rate {(
-                (tierWindow.slotsSkipped / Math.max(1, tierWindow.slotsAssigned)) *
-                100
-              ).toFixed(1)}% — too high to rate above the lowest tier.
+              Skip rate {skipRatePctLabel}% is above the {skipFloorPctLabel}% reliability floor —
+              this hard-caps the tier at Kindling regardless of economic percentile. Bring it under
+              {skipFloorPctLabel}% to lift the cap.
             </span>
           </div>
         {/if}
 
+        {#if showGapStrip}
+          <!--
+            Gap-to-next-tier strip. The composite alone is a number
+            with no scale; this places it on the 0-100 tier map so a
+            delegator (and the operator) can see how far the next
+            tier is. Suppressed for skip-floored validators — there
+            the composite is not the blocker. The decorative bar is
+            `aria-hidden`; the headline <p> carries the same fact as
+            real text for assistive tech.
+          -->
+          <div class="flex flex-col gap-1.5">
+            <p class="text-sm">
+              {#if tierGap}
+                <span class="font-semibold text-[color:var(--color-text-default)]">
+                  {tierGap.pointsAway}
+                  {tierGap.pointsAway === 1 ? 'point' : 'points'}
+                </span>
+                <span class="text-[color:var(--color-text-muted)]">
+                  to {tierGap.nextLabel} tier (composite {tierGap.nextCutoff})
+                </span>
+              {:else}
+                <span class="font-semibold text-[color:var(--color-text-default)]">
+                  {tierLabel}
+                </span>
+                <span class="text-[color:var(--color-text-muted)]">
+                  — the top tier, composite {tier.composite} of 100
+                </span>
+              {/if}
+            </p>
+            <div
+              class="relative h-2 w-full rounded-full bg-[color:var(--color-border-default)]"
+              aria-hidden="true"
+            >
+              <div
+                class="absolute inset-y-0 left-0 rounded-full"
+                style="width: {gapFillPct}%; background-color: var({tierColorVar}); transition: width 200ms ease-out;"
+              ></div>
+              {#each SCALE_TICKS as tickAt (tickAt)}
+                <div
+                  class="absolute top-1/2 h-3 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[color:var(--color-text-subtle)]"
+                  style="left: {tickAt}%;"
+                ></div>
+              {/each}
+            </div>
+            <div
+              class="relative h-3 text-[10px] tabular-nums text-[color:var(--color-text-subtle)]"
+              aria-hidden="true"
+            >
+              <span class="absolute left-0">0</span>
+              <span class="absolute -translate-x-1/2" style="left: {TIER_CUTOFFS.hearth}%;">
+                {TIER_CUTOFFS.hearth}
+              </span>
+              <span class="absolute -translate-x-1/2" style="left: {TIER_CUTOFFS.anvil}%;">
+                {TIER_CUTOFFS.anvil}
+              </span>
+              <span class="absolute right-0">100</span>
+            </div>
+          </div>
+        {/if}
+
+        {#if lever}
+          <p class="text-sm text-[color:var(--color-text-muted)]">
+            <span class="font-semibold text-[color:var(--color-text-default)]">
+              What raises this score:
+            </span>
+            {lever}
+          </p>
+        {/if}
+
         {#if reason}
-          <p class="text-xs text-[color:var(--color-text-muted)]">{reason}</p>
+          <!--
+            Unrated reason. For an unrated validator this line IS the
+            "what to do" — given a calm bordered box (not the faintest
+            muted text) so it isn't skimmed past, without an alarmist
+            warn tone.
+          -->
+          <p
+            class="rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] px-3 py-2 text-sm text-[color:var(--color-text-muted)]"
+          >
+            {reason}
+          </p>
         {/if}
 
         <details class="text-xs">
@@ -733,26 +901,111 @@
           >
             How this tier was scored
           </summary>
-          <!--
-            Plain-English labels. Earlier revision used internal
-            engineering vocabulary ("Cohort size", "Measured epochs",
-            "Cohort window") which a delegator doesn't recognise.
-            The plain labels here are the same scope but readable.
-          -->
-          <dl class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[color:var(--color-text-muted)]">
-            <dt>Window length (epochs)</dt>
-            <dd class="tabular-nums">{tierWindow.epochs}</dd>
-            <dt>Peers compared</dt>
-            <dd class="tabular-nums">{tierWindow.economicCohortSize.toLocaleString()}</dd>
-            <dt>Epochs with income</dt>
-            <dd class="tabular-nums">{tierWindow.economicMeasuredEpochs}</dd>
-            {#if tierWindow.cohortAsOfEpoch}
-              <dt>Peer-group epoch range</dt>
-              <dd class="tabular-nums">
-                {tierWindow.cohortAsOfEpoch.fromEpoch}–{tierWindow.cohortAsOfEpoch.toEpoch}
-              </dd>
+          <div class="mt-2 flex flex-col gap-4">
+            <!-- (a) The composite — the literal arithmetic, so the
+                 score reads as built, not assigned. Hidden when
+                 unrated (no composite to break down). -->
+            {#if compositeMath}
+              <div class="flex flex-col gap-1.5">
+                <p
+                  class="text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-text-subtle)]"
+                >
+                  How the composite is built
+                </p>
+                <dl class="flex flex-col gap-1 font-mono text-[color:var(--color-text-muted)]">
+                  <div class="flex items-baseline justify-between gap-3">
+                    <dt>0.30 × reliability {compositeMath.reliabilityPct.toFixed(1)}%</dt>
+                    <dd class="tabular-nums">≈ {compositeMath.reliabilityTerm.toFixed(1)}</dd>
+                  </div>
+                  <div class="flex items-baseline justify-between gap-3">
+                    <dt>0.70 × economic percentile {compositeMath.economicPct.toFixed(1)}%</dt>
+                    <dd class="tabular-nums">≈ {compositeMath.economicTerm.toFixed(1)}</dd>
+                  </div>
+                  <div
+                    class="flex items-baseline justify-between gap-3 border-t border-[color:var(--color-border-default)] pt-1 font-semibold text-[color:var(--color-text-default)]"
+                  >
+                    <dt>composite (rounded)</dt>
+                    <dd class="tabular-nums">{compositeMath.composite}</dd>
+                  </div>
+                </dl>
+                {#if reliabilityFloor}
+                  <p class="text-[color:var(--color-status-warn-fg)]">
+                    The skip-rate floor caps the tier below this composite — see the warning above.
+                  </p>
+                {/if}
+              </div>
             {/if}
-          </dl>
+
+            <!-- (b) The tiers — every cutoff named so the composite
+                 has a scale; the current tier is marked. -->
+            <div class="flex flex-col gap-1.5">
+              <p
+                class="text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-text-subtle)]"
+              >
+                Tier thresholds
+              </p>
+              <dl class="flex flex-col gap-1 text-[color:var(--color-text-muted)]">
+                {#each TIER_BANDS as band (band.tier)}
+                  {@const isCurrentTier = band.tier === tier.tier}
+                  <div
+                    class="flex items-baseline justify-between gap-3 {isCurrentTier
+                      ? 'font-semibold text-[color:var(--color-text-default)]'
+                      : ''}"
+                  >
+                    <dt class="flex items-center gap-1.5">
+                      <span
+                        class="inline-block h-2 w-2 shrink-0 rounded-full"
+                        style="background-color: var({TIER_COLOR_VAR[band.tier]});"
+                      ></span>
+                      {band.label}
+                      {#if isCurrentTier}
+                        <span class="font-normal text-[color:var(--color-text-subtle)]">
+                          — this validator
+                        </span>
+                      {/if}
+                    </dt>
+                    <dd class="tabular-nums">{band.min}–{band.max}</dd>
+                  </div>
+                {/each}
+              </dl>
+            </div>
+
+            <!-- (c) This measurement — the sample facts, cold-start
+                 honest ("{n} of 5", not a bare "4"). -->
+            <div class="flex flex-col gap-1.5">
+              <p
+                class="text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-text-subtle)]"
+              >
+                This measurement
+              </p>
+              <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-[color:var(--color-text-muted)]">
+                <dt>Closed epochs scored</dt>
+                <dd class="tabular-nums">
+                  {tierWindow.epochs} of {WINDOW_CLOSED_EPOCHS}{windowStillFilling
+                    ? ' (window still filling)'
+                    : ''}
+                </dd>
+                <dt>Epochs with income</dt>
+                <dd class="tabular-nums">{tierWindow.economicMeasuredEpochs}</dd>
+                <dt>Peers compared</dt>
+                <dd class="tabular-nums">{tierWindow.economicCohortSize.toLocaleString()}</dd>
+                {#if economicMedianSol !== null}
+                  <dt>Median income / leader slot</dt>
+                  <dd class="tabular-nums">◎{economicMedianSol}</dd>
+                {/if}
+                {#if tierWindow.cohortAsOfEpoch}
+                  <dt>Cohort epoch range</dt>
+                  <dd class="tabular-nums">
+                    {tierWindow.cohortAsOfEpoch.fromEpoch}–{tierWindow.cohortAsOfEpoch.toEpoch}
+                  </dd>
+                {/if}
+              </dl>
+              <p class="text-[color:var(--color-text-subtle)]">
+                Percentile is ranked against the validators WhoEarns indexes, not the whole
+                cluster.
+              </p>
+            </div>
+          </div>
         </details>
       </div>
     </Card>

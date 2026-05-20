@@ -230,9 +230,12 @@ closed-epoch range the percentile reflects.
 
 #### Reliability floor
 
-Regardless of how high `economicPercentile` is, **a validator with
-`skip_rate > 0.20` (Wilson-point estimate, `slotsSkipped /
-slotsAssigned`) is hard-capped at the `kindling` tier**. This is a
+Regardless of how high `economicPercentile` is, **a validator whose
+Wilson 95% upper bound on `skip_rate` exceeds `0.20` is hard-capped
+at the `kindling` tier**. The Wilson _upper_ bound — not the raw
+`slotsSkipped / slotsAssigned` point estimate — is used so a thin
+sample cannot duck the floor, matching the pessimistic direction the
+`reliability` component itself is built on. This is a
 hygiene check, not a bypassable signal: a top earner who lets a
 fifth of their assigned blocks drop is not a top-tier operator
 regardless of how much fee + tip income they bank when they DO
