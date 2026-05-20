@@ -301,7 +301,7 @@ export function updateClaimProfile(
  * it is, mirroring `putJson`.
  */
 async function sendJson<TResponse>(
-  method: 'POST' | 'PUT',
+  method: 'POST' | 'PUT' | 'DELETE',
   path: string,
   body: unknown,
   fetchFn: typeof fetch = fetch,
@@ -427,6 +427,43 @@ export function registerOperatorWallet(
 }> {
   const safe = encodeURIComponent(body.votePubkey);
   return postJson(`/v1/claims/${safe}/wallets`, body, fetchFn);
+}
+
+/**
+ * Unregister (delete) a previously-registered operator wallet.
+ *
+ * Single-signature ceremony — the validator identity key alone is
+ * sufficient. The endpoint exists to give an operator a way out of
+ * the 3-wallet cap when they registered an incorrect wallet (typo'd
+ * pubkey, lost-key wallet) without waiting the 90-day TTL.
+ *
+ * Path is `/v1/claims/:vote/wallets/:wallet`; body carries the
+ * signed nonce + identity signature. Server-side rejects (a)
+ * (vote, wallet) miss as 404, (b) signature/freshness failures as
+ * 403, (c) auth role mismatches as 403, and (d) mismatch between
+ * path :wallet and body.walletPubkey as 400.
+ *
+ * Throws `ApiError` on any failure — `code` carries the stable
+ * machine id, `message` the human-readable sentence.
+ */
+export function unregisterOperatorWallet(
+  body: {
+    votePubkey: string;
+    identityPubkey: string;
+    walletPubkey: string;
+    timestampMs: number;
+    identitySignatureB58: string;
+  },
+  fetchFn: typeof fetch = fetch,
+): Promise<{ unregistered: { walletPubkey: string } }> {
+  const safeVote = encodeURIComponent(body.votePubkey);
+  const safeWallet = encodeURIComponent(body.walletPubkey);
+  return sendJson<{ unregistered: { walletPubkey: string } }>(
+    'DELETE',
+    `/v1/claims/${safeVote}/wallets/${safeWallet}`,
+    body,
+    fetchFn,
+  );
 }
 
 // ────────────────────────────────────────────────────────────────────

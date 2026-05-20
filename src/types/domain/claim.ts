@@ -107,7 +107,8 @@ export type ValidatorClaimEventType =
   | 'reclaim'
   | 'profile_update'
   | 'github_link'
-  | 'wallet_register';
+  | 'wallet_register'
+  | 'wallet_unregister';
 
 /**
  * SEC-M4 — one immutable, append-only audit-log row covering a single

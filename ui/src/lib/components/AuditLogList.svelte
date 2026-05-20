@@ -75,6 +75,7 @@
     profile_update: 'Profile updated',
     github_link: 'Linked GitHub',
     wallet_register: 'Registered wallet',
+    wallet_unregister: 'Removed wallet',
   };
 
   /**
@@ -90,6 +91,9 @@
     profile_update: IconPencil,
     github_link: IconLink,
     wallet_register: IconWallet,
+    // Re-use the wallet glyph — visually still "wallet operation",
+    // distinguished by the EVENT_LABEL prefix ("Removed wallet").
+    wallet_unregister: IconWallet,
   };
 
   /**
@@ -155,6 +159,9 @@
     }
     if (event.eventType === 'wallet_register') {
       return 'An operator wallet was registered.';
+    }
+    if (event.eventType === 'wallet_unregister') {
+      return 'An operator wallet was removed.';
     }
     // Defensive — a future event type from the backend shouldn't
     // crash the render.

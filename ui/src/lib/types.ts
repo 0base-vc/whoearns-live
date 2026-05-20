@@ -361,7 +361,13 @@ export interface SimdProposalListResponse {
 
 /** One forensic event from `/v1/claims/:vote/audit`. */
 export interface ClaimAuditEvent {
-  eventType: 'claim' | 'reclaim' | 'profile_update' | 'github_link' | 'wallet_register';
+  eventType:
+    | 'claim'
+    | 'reclaim'
+    | 'profile_update'
+    | 'github_link'
+    | 'wallet_register'
+    | 'wallet_unregister';
   identityPubkey: string;
   priorIdentityPubkey: string | null;
   detail: string | null;

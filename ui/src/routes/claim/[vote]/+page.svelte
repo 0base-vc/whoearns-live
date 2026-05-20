@@ -41,6 +41,7 @@
     verifyClaim,
     linkGithub,
     registerOperatorWallet,
+    unregisterOperatorWallet,
     ApiError,
   } from '$lib/api';
   import Card from '$lib/components/Card.svelte';
@@ -786,6 +787,152 @@
       walletSubmitting = false;
     }
   }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Operator wallet UNREGISTER ceremony
+  // (DELETE /v1/claims/:vote/wallets/:wallet)
+  //
+  // Single-signature flow — operator signs an unregister nonce with
+  // their identity key only (the wallet keypair isn't required, see
+  // service docstring for rationale). Removes a previously-registered
+  // wallet so the operator isn't trapped by a typo'd pubkey or a
+  // lost-key wallet sitting in one of the 3 cap slots for 90 days.
+  //
+  // The unregister flow is targeted: only one wallet entry is being
+  // unregistered at a time. `unregisterTarget` carries the wallet
+  // pubkey the flow is currently scoped to (null = no flow open).
+  // ──────────────────────────────────────────────────────────────────
+
+  let unregisterTarget = $state<string | null>(null);
+  let unregisterEnvelope = $state<{
+    nonceJson: string;
+    timestampMs: number;
+    expiresAtMs: number;
+    submittedPubkey: string;
+  } | null>(null);
+  let unregisterSig = $state('');
+  let unregisterError = $state<string | null>(null);
+  let unregisterSuccess = $state<string | null>(null);
+  let unregisterSubmitting = $state(false);
+
+  function buildUnregisterNonceJson(args: {
+    identityPubkey: string;
+    votePubkey: string;
+    walletPubkey: string;
+    issuedAtMs: number;
+    expiresAtMs: number;
+  }): string {
+    // Sorted keys — must match `canonicaliseOperatorUnregisterNonce`
+    // in `src/services/operator-wallet-verification.service.ts`
+    // byte-for-byte.
+    return JSON.stringify({
+      domain: SITE_URL,
+      expiresAtMs: args.expiresAtMs,
+      identityPubkey: args.identityPubkey,
+      issuedAtMs: args.issuedAtMs,
+      purpose: 'wallet-unregister',
+      votePubkey: args.votePubkey,
+      walletPubkey: args.walletPubkey,
+    });
+  }
+
+  function startUnregister(walletPubkey: string): void {
+    unregisterTarget = walletPubkey;
+    unregisterEnvelope = null;
+    unregisterSig = '';
+    unregisterError = null;
+    unregisterSuccess = null;
+  }
+
+  function cancelUnregister(): void {
+    unregisterTarget = null;
+    unregisterEnvelope = null;
+    unregisterSig = '';
+    unregisterError = null;
+  }
+
+  function generateUnregisterEnvelope(): void {
+    if (unregisterTarget === null) return;
+    unregisterError = null;
+    unregisterSuccess = null;
+    const timestampMs = Date.now();
+    const expiresAtMs = timestampMs + WALLET_NONCE_TTL_MS;
+    const nonceJson = buildUnregisterNonceJson({
+      identityPubkey: history.identity,
+      votePubkey: history.vote,
+      walletPubkey: unregisterTarget,
+      issuedAtMs: timestampMs,
+      expiresAtMs,
+    });
+    unregisterEnvelope = {
+      nonceJson,
+      timestampMs,
+      expiresAtMs,
+      submittedPubkey: unregisterTarget,
+    };
+    unregisterSig = '';
+  }
+
+  const unregisterCliCommand = $derived.by<string | null>(() => {
+    if (unregisterEnvelope === null) return null;
+    const escaped = unregisterEnvelope.nonceJson.replace(/'/g, "'\\''");
+    return `solana sign-offchain-message --keypair ~/validator-identity.json '${escaped}'`;
+  });
+
+  async function handleSubmitUnregister(): Promise<void> {
+    if (unregisterTarget === null || unregisterEnvelope === null) {
+      unregisterError = 'Generate a signable nonce first.';
+      return;
+    }
+    const trimmedSig = unregisterSig.trim();
+    if (trimmedSig.length === 0) {
+      unregisterError = 'Paste the identity-key signature first.';
+      return;
+    }
+    unregisterSubmitting = true;
+    unregisterError = null;
+    unregisterSuccess = null;
+    try {
+      await unregisterOperatorWallet({
+        votePubkey: history.vote,
+        identityPubkey: history.identity,
+        walletPubkey: unregisterEnvelope.submittedPubkey,
+        timestampMs: unregisterEnvelope.timestampMs,
+        identitySignatureB58: trimmedSig,
+      });
+      const removed = unregisterEnvelope.submittedPubkey;
+      unregisterSuccess = `Wallet ${shortenPubkey(removed, 4, 4)} removed.`;
+      // Fold the deletion into local state so the list re-renders
+      // without re-fetching `/v1/claims/:vote`.
+      if (status.claimed) {
+        const entries = status.wallets.entries.filter((e) => e.wallet !== removed);
+        status = {
+          ...status,
+          wallets: {
+            count: entries.length,
+            capReached: entries.length >= 3,
+            oldestExpiresAt: entries.reduce(
+              (acc: string | null, e) => (acc === null || e.expiresAt < acc ? e.expiresAt : acc),
+              null,
+            ),
+            entries,
+          },
+        };
+      }
+      unregisterTarget = null;
+      unregisterEnvelope = null;
+      unregisterSig = '';
+    } catch (err) {
+      unregisterError =
+        err instanceof ApiError
+          ? `${err.code}: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : 'Wallet removal failed — try again.';
+    } finally {
+      unregisterSubmitting = false;
+    }
+  }
 </script>
 
 <svelte:head>
@@ -1246,25 +1393,128 @@
       >
         {#each sortedWallets as entry (entry.wallet)}
           {@const exp = formatExpiry(entry.expiresAt)}
-          <li class="flex flex-wrap items-baseline justify-between gap-2 px-3 py-2">
-            <div class="min-w-0">
-              <div class="text-sm font-semibold">{entry.label}</div>
-              <div class="font-mono text-[11px] text-[color:var(--color-text-subtle)]">
-                {shortenPubkey(entry.wallet, 8, 8)}
+          <li class="flex flex-col gap-2 px-3 py-2">
+            <div class="flex flex-wrap items-baseline justify-between gap-2">
+              <div class="min-w-0">
+                <div class="text-sm font-semibold">{entry.label}</div>
+                <div class="font-mono text-[11px] text-[color:var(--color-text-subtle)]">
+                  {shortenPubkey(entry.wallet, 8, 8)}
+                </div>
+              </div>
+              <div class="flex items-center gap-3">
+                <div
+                  class="text-xs"
+                  class:text-[color:var(--color-text-muted)]={exp.tone === 'ok'}
+                  class:text-[color:var(--color-status-warn-fg)]={exp.tone === 'warn'}
+                  class:text-red-600={exp.tone === 'expired'}
+                  class:dark:text-red-400={exp.tone === 'expired'}
+                >
+                  {exp.label}
+                </div>
+                <!--
+                  Remove button — opens an inline single-signature
+                  removal flow scoped to THIS wallet entry. Closes
+                  any in-progress removal for a different wallet
+                  (only one removal can be in flight at a time).
+                -->
+                {#if unregisterTarget === entry.wallet}
+                  <button
+                    type="button"
+                    onclick={cancelUnregister}
+                    class="text-xs text-[color:var(--color-text-muted)] hover:text-[color:var(--color-text-default)]"
+                  >
+                    Cancel
+                  </button>
+                {:else}
+                  <button
+                    type="button"
+                    onclick={() => startUnregister(entry.wallet)}
+                    class="text-xs text-red-600 hover:underline dark:text-red-400"
+                  >
+                    Remove
+                  </button>
+                {/if}
               </div>
             </div>
-            <div
-              class="text-xs"
-              class:text-[color:var(--color-text-muted)]={exp.tone === 'ok'}
-              class:text-[color:var(--color-status-warn-fg)]={exp.tone === 'warn'}
-              class:text-red-600={exp.tone === 'expired'}
-              class:dark:text-red-400={exp.tone === 'expired'}
-            >
-              {exp.label}
-            </div>
+
+            {#if unregisterTarget === entry.wallet}
+              <!--
+                Inline single-signature removal flow.
+
+                Step 1: Generate signable nonce + render CLI command.
+                Step 2: Operator pastes the base58 signature.
+                Step 3: Submit; on success the entry disappears from
+                the list (folded into local status).
+
+                Scoped inside the targeted `<li>` so the operator
+                can see exactly which wallet they're removing.
+              -->
+              <div
+                class="mt-1 rounded-md border border-red-500/30 bg-red-500/5 p-3 dark:bg-red-500/10"
+              >
+                <p class="text-xs text-[color:var(--color-text-muted)]">
+                  Removing this wallet sends a single
+                  <code class="font-mono">DELETE</code> with your identity-key signature — the wallet
+                  keypair is NOT required. The wallet's row + its slot in the 3-wallet cap are released
+                  immediately on success.
+                </p>
+                <button
+                  type="button"
+                  onclick={generateUnregisterEnvelope}
+                  class="mt-2 inline-flex min-h-9 items-center rounded-lg border border-red-500/60 px-3 py-1 text-xs font-semibold text-red-600 transition-colors hover:bg-red-500 hover:text-white dark:text-red-400"
+                >
+                  {unregisterEnvelope === null ? 'Generate signable nonce' : 'Regenerate'}
+                </button>
+                {#if unregisterCliCommand !== null}
+                  <div class="mt-3 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
+                    <pre
+                      class="flex-1 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed"><code
+                        >{unregisterCliCommand}</code
+                      ></pre>
+                    <button
+                      type="button"
+                      onclick={() => copyToClipboard(unregisterCliCommand)}
+                      class="inline-flex min-h-9 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <textarea
+                    bind:value={unregisterSig}
+                    rows={2}
+                    placeholder="Paste identity-key base58 signature"
+                    class="mt-2 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-3 font-mono text-base sm:text-xs"
+                  ></textarea>
+                  <button
+                    type="button"
+                    onclick={handleSubmitUnregister}
+                    disabled={unregisterSubmitting || unregisterSig.trim().length === 0}
+                    class="mt-2 min-h-9 w-full rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {unregisterSubmitting ? 'Removing…' : 'Remove wallet'}
+                  </button>
+                {/if}
+                {#if unregisterError}
+                  <div
+                    role="alert"
+                    class="mt-2 rounded-lg border border-red-500/40 bg-red-500/10 p-2 text-xs text-red-700 dark:text-red-300"
+                  >
+                    {unregisterError}
+                  </div>
+                {/if}
+              </div>
+            {/if}
           </li>
         {/each}
       </ul>
+      {#if unregisterSuccess}
+        <div
+          role="status"
+          class="mt-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300"
+        >
+          {unregisterSuccess}
+        </div>
+      {/if}
     {/if}
 
     {#if !walletsState.capReached}
@@ -1429,8 +1679,8 @@
       <p class="mt-4 text-sm text-[color:var(--color-text-muted)]">
         This validator has reached the 3-wallet cap. Existing entries expire on a 90-day rolling
         window — once the oldest entry expires you can register another. If you registered an
-        incorrect wallet by mistake, contact the operator team (a wallet-removal flow is in
-        progress); the cap-bound entries will still age out on the 90-day window.
+        incorrect wallet by mistake, click <strong>Remove</strong> on the offending entry above to free
+        the slot immediately.
       </p>
     {/if}
 

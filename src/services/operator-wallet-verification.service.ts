@@ -15,6 +15,50 @@ import type { IdentityPubkey, OperatorWallet, VotePubkey } from '../types/domain
 export const OPERATOR_WALLET_NONCE_PURPOSE = 'wallet-register' as const;
 
 /**
+ * Domain-separation tag for the unregister ceremony — distinct from
+ * `wallet-register` so a register signature can't be replayed into a
+ * delete (or vice versa).
+ */
+export const OPERATOR_WALLET_UNREGISTER_NONCE_PURPOSE = 'wallet-unregister' as const;
+
+export interface OperatorWalletUnregisterNonce {
+  purpose: typeof OPERATOR_WALLET_UNREGISTER_NONCE_PURPOSE;
+  votePubkey: VotePubkey;
+  identityPubkey: IdentityPubkey;
+  walletPubkey: string;
+  issuedAtMs: number;
+  expiresAtMs: number;
+  domain: string;
+}
+
+/**
+ * Canonical serialisation of the unregister nonce. Sorted keys, no
+ * whitespace, same envelope discipline as `canonicaliseOperatorNonce`.
+ * Mirror in `ui/src/routes/claim/[vote]/+page.svelte`'s
+ * `buildWalletUnregisterNonceJson`.
+ */
+export function canonicaliseOperatorUnregisterNonce(n: OperatorWalletUnregisterNonce): string {
+  return JSON.stringify({
+    domain: n.domain,
+    expiresAtMs: n.expiresAtMs,
+    identityPubkey: n.identityPubkey,
+    issuedAtMs: n.issuedAtMs,
+    purpose: n.purpose,
+    votePubkey: n.votePubkey,
+    walletPubkey: n.walletPubkey,
+  });
+}
+
+export type VerifyOperatorWalletUnregisterFailure =
+  | { ok: false; reason: 'expired' }
+  | { ok: false; reason: 'bad_identity_signature' }
+  | { ok: false; reason: 'malformed_pubkey' };
+
+export type VerifyOperatorWalletUnregisterResult =
+  | { ok: true }
+  | VerifyOperatorWalletUnregisterFailure;
+
+/**
  * Nonce payload signed by BOTH the validator identity key and the
  * operator wallet key. Inclusion of both pubkeys inside the signed
  * message prevents a third party from re-binding a half-signed
@@ -257,5 +301,48 @@ export class OperatorWalletVerificationService {
         expiresAt: new Date(now.getTime() + this.walletTtlMs),
       },
     };
+  }
+
+  /**
+   * Verify a wallet unregister request. Single-signature ceremony
+   * (identity key only) — the original register required dual-sig
+   * proving both the operator AND the wallet keypair holder
+   * cooperated, but for DELETE the identity key alone is sufficient:
+   *   - The validator-claim already binds vote -> identity, and
+   *     unregister only affects the (vote, wallet) tuple this
+   *     operator owns.
+   *   - Requiring the wallet keypair AGAIN would lock an operator
+   *     out if they lost the wallet keypair (the primary "why I
+   *     need to unregister" scenario — wrong pubkey, lost keys).
+   *   - Hostile identity rotation can already do worse via reclaim;
+   *     unregister doesn't widen that surface.
+   *
+   * No chain check — there is no anchor tx for unregister.
+   */
+  async verifyUnregister(args: {
+    issuedNonce: OperatorWalletUnregisterNonce;
+    identitySignatureB58: string;
+  }): Promise<VerifyOperatorWalletUnregisterResult> {
+    if (Date.now() > args.issuedNonce.expiresAtMs) {
+      return { ok: false, reason: 'expired' };
+    }
+    let identitySig: Uint8Array;
+    let identityBytes: Uint8Array;
+    try {
+      identitySig = bs58.decode(args.identitySignatureB58);
+      identityBytes = bs58.decode(args.issuedNonce.identityPubkey);
+    } catch {
+      return { ok: false, reason: 'malformed_pubkey' };
+    }
+    if (identitySig.length !== 64 || identityBytes.length !== 32) {
+      return { ok: false, reason: 'malformed_pubkey' };
+    }
+    const canonical = canonicaliseOperatorUnregisterNonce(args.issuedNonce);
+    const signedBytes = buildOffchainMessage(canonical);
+    const ok = await ed25519VerifyAsync(identitySig, signedBytes, identityBytes);
+    if (!ok) {
+      return { ok: false, reason: 'bad_identity_signature' };
+    }
+    return { ok: true };
   }
 }

@@ -11,7 +11,9 @@ import {
 } from '../../services/github-gist-verification.service.js';
 import {
   OPERATOR_WALLET_NONCE_PURPOSE,
+  OPERATOR_WALLET_UNREGISTER_NONCE_PURPOSE,
   type OperatorWalletNonce,
+  type OperatorWalletUnregisterNonce,
   type OperatorWalletVerificationService,
   type VerifyOperatorWalletFailure,
 } from '../../services/operator-wallet-verification.service.js';
@@ -633,6 +635,121 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
         expiresAt: result.wallet.expiresAt.toISOString(),
       },
     };
+  });
+
+  /**
+   * Operator wallet UNREGISTER ceremony.
+   *
+   * Single-signature variant of the register ceremony: the operator
+   * signs a canonical `wallet-unregister` nonce with their
+   * VALIDATOR-IDENTITY key (the wallet keypair itself is NOT
+   * required — see service docstring for rationale). On success the
+   * (vote, wallet) row is hard-deleted and an audit event recorded.
+   *
+   * The endpoint exists because the original cap-reached UX trapped
+   * operators who registered an incorrect wallet (e.g. a pubkey
+   * typo) — they had to wait the full 90-day TTL before the slot
+   * freed up. With this endpoint, a mistake costs nothing.
+   *
+   * 404 on (vote, wallet) miss: the resource never existed for this
+   * operator, so "delete" is undefined. 403 on signature failure to
+   * match the path/body wallet — same posture as the register
+   * route.
+   */
+  const UnregisterBodySchema = z.object({
+    votePubkey: PubkeySchema,
+    identityPubkey: PubkeySchema,
+    walletPubkey: PubkeySchema,
+    timestampMs: z.number().int().positive(),
+    identitySignatureB58: z.string().min(64).max(128),
+  });
+
+  const VoteAndWalletParamSchema = z.object({
+    vote: PubkeySchema,
+    wallet: PubkeySchema,
+  });
+
+  app.delete('/v1/claims/:vote/wallets/:wallet', async (request, reply) => {
+    const params = unwrap(VoteAndWalletParamSchema.safeParse(request.params), 'path parameter');
+    const body = unwrap(UnregisterBodySchema.safeParse(request.body), 'body');
+    if (rejectVoteMismatch(reply, request.id, params.vote, body.votePubkey)) return reply;
+    if (params.wallet !== body.walletPubkey) {
+      return sendError(reply, {
+        code: 'wallet_pubkey_mismatch',
+        statusCode: 400,
+        message: 'wallet pubkey in the path does not match walletPubkey in the signed body',
+        requestId: request.id,
+      });
+    }
+    if (!freshnessOk(body.timestampMs)) {
+      return sendError(reply, {
+        code: 'stale_timestamp',
+        statusCode: 403,
+        message: 'timestampMs is outside the freshness window',
+        requestId: request.id,
+      });
+    }
+    const existingClaim = await opts.claimsRepo.findByVote(body.votePubkey);
+    if (existingClaim === null) {
+      return sendError(reply, {
+        code: 'not_claimed',
+        statusCode: 403,
+        message: 'validator must be claimed before unregistering a wallet',
+        requestId: request.id,
+      });
+    }
+    if (existingClaim.identityPubkey !== body.identityPubkey) {
+      return sendError(reply, {
+        code: 'identity_mismatch',
+        statusCode: 403,
+        message: 'identity pubkey does not match claim',
+        requestId: request.id,
+      });
+    }
+    const issuedNonce: OperatorWalletUnregisterNonce = {
+      purpose: OPERATOR_WALLET_UNREGISTER_NONCE_PURPOSE,
+      votePubkey: body.votePubkey,
+      identityPubkey: body.identityPubkey,
+      walletPubkey: body.walletPubkey,
+      issuedAtMs: body.timestampMs,
+      expiresAtMs: body.timestampMs + DEFAULT_NONCE_TTL_MS,
+      domain: opts.config.SITE_URL,
+    };
+    const verifyResult = await opts.operatorWalletService.verifyUnregister({
+      issuedNonce,
+      identitySignatureB58: body.identitySignatureB58,
+    });
+    if (!verifyResult.ok) {
+      const humanMessage =
+        verifyResult.reason === 'expired'
+          ? 'The signed nonce has expired. Generate a fresh one and re-sign.'
+          : verifyResult.reason === 'bad_identity_signature'
+            ? 'The validator identity signature did not verify against the nonce.'
+            : 'One of the supplied pubkeys is not a valid base58 Solana pubkey.';
+      return sendError(reply, {
+        code: verifyResult.reason,
+        statusCode: 403,
+        message: humanMessage,
+        requestId: request.id,
+      });
+    }
+    const deleted = await opts.operatorWalletsRepo.delete(body.votePubkey, body.walletPubkey);
+    if (!deleted) {
+      return sendError(reply, {
+        code: 'wallet_not_registered',
+        statusCode: 404,
+        message: 'no wallet registration matches the supplied (vote, wallet) pair',
+        requestId: request.id,
+      });
+    }
+    await recordClaimEvent(opts.claimEventsRepo, request, {
+      votePubkey: body.votePubkey,
+      eventType: 'wallet_unregister',
+      identityPubkey: existingClaim.identityPubkey,
+      detail: { walletPubkey: body.walletPubkey },
+      submittedIp: request.ip,
+    });
+    return { unregistered: { walletPubkey: body.walletPubkey } };
   });
 };
 
