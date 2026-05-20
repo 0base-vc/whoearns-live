@@ -124,10 +124,26 @@ export class OperatorWalletsRepository {
     return rows.map(rowToWallet);
   }
 
-  /** Count for the per-validator cap check at the route layer. */
+  /**
+   * ACTIVE count for the per-validator cap check at the route layer.
+   *
+   * Counts only `expires_at > NOW()` rows — the cap is enforced over
+   * ACTIVE registrations, not over the row lifetime. An operator whose
+   * three 90-day registrations all lapsed has three free slots without
+   * needing to call DELETE on each.
+   *
+   * Mirrors the BEFORE INSERT trigger installed by migration 0039 — the
+   * route's fast-fail count + the DB defense-in-depth count must agree
+   * on what "3" means, otherwise the trigger would raise
+   * `check_violation` for a row the route already cleared (or vice
+   * versa).
+   */
   async countByVote(vote: VotePubkey): Promise<number> {
     const { rows } = await this.pool.query<{ count: string }>(
-      `SELECT COUNT(*)::text AS count FROM operator_wallets WHERE vote_pubkey = $1`,
+      `SELECT COUNT(*)::text AS count
+         FROM operator_wallets
+        WHERE vote_pubkey = $1
+          AND expires_at > NOW()`,
       [vote],
     );
     return Number(rows[0]?.count ?? 0);

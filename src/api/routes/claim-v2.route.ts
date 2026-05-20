@@ -210,15 +210,27 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
   opts: ClaimV2RoutesDeps,
 ) => {
   /**
-   * Asymmetric freshness window. Past-skew is generous (5 min) because
-   * clients legitimately need a few minutes to publish a Gist and
-   * submit. Future-skew is tight (60 s) because a future timestamp
-   * means the server is being asked to extend the verifiable lifetime
-   * of a signature — combined with `expiresAtMs = timestampMs +
-   * NONCE_TTL`, accepting 5 min of future skew would push the
-   * effective replay window to ~35 min.
+   * Asymmetric freshness window.
+   *
+   * PR #11 review finding P1-3 — the past-skew used to be a hard
+   * 5 minute window which contradicted both the `DEFAULT_NONCE_TTL_MS`
+   * (30 min) used to compute `expiresAtMs` AND the UI's "Nonce expires
+   * in ~30 minutes" message. An operator who took 7 minutes to publish
+   * a Gist + paste the URL would hit 403 `stale_timestamp` while the
+   * countdown still showed 23 minutes remaining.
+   *
+   * Now: past-skew matches the full nonce TTL so the route's fast-
+   * fail agrees with the canonical-nonce's `expiresAtMs` (which the
+   * services then re-check on `Date.now() > issuedNonce.expiresAtMs`).
+   * The route check is still useful for fast-rejecting obviously
+   * stale submissions BEFORE the crypto work, but no longer rejects
+   * legitimate signatures inside the advertised window.
+   *
+   * Future-skew stays tight (60 s) because a future timestamp would
+   * be the server being asked to extend the verifiable lifetime of
+   * a signature past `now + NONCE_TTL`.
    */
-  const NONCE_PAST_SKEW_MS = 5 * 60 * 1000;
+  const NONCE_PAST_SKEW_MS = DEFAULT_NONCE_TTL_MS;
   const NONCE_FUTURE_SKEW_MS = 60 * 1000;
   const LABEL_MAX_LEN = 32;
 
