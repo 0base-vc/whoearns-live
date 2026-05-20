@@ -62,8 +62,11 @@ const SIGNATURES_PER_CALL = 1000;
  * Hard per-tick ceiling: 10× the single-call cap. Bounds the RPC
  * spend + memory of one wallet's tick even if it's extremely busy or
  * has no checkpoint yet (first-ever tick). A wallet past this in one
- * window is rare and still converges — each tick advances the
- * checkpoint, so the backlog drains over a few ticks.
+ * window is rare and still converges — each tick that DIDN'T hit
+ * the ceiling advances the checkpoint, and ceiling-truncated ticks
+ * leave the old checkpoint in place so the next tick re-walks the
+ * same range and picks up beyond where the ceiling cut off. See the
+ * `cleanExit` flag in `indexWallet` for the exact gate.
  */
 const MAX_SIGNATURES_PER_TICK = SIGNATURES_PER_CALL * 10;
 /**
@@ -77,24 +80,54 @@ const WINDOW_DAYS = 365;
 /** `ingestion_cursors.job_name` prefix for the per-wallet checkpoint. */
 const CURSOR_JOB_PREFIX = 'wallet-activity:';
 
-/** Shape of the JSON payload persisted in `ingestion_cursors.payload`. */
+/**
+ * Shape of the JSON payload persisted in `ingestion_cursors.payload`.
+ *
+ * Two-cursor state machine:
+ *   - `newestSignature` — newest signature EVER seen for this wallet.
+ *     Used as the stop condition when scanning newest-first to detect
+ *     new traffic. Advances once a tick completes a clean walk.
+ *   - `backfillFrontier` — when set, the wallet is in BACKFILL MODE.
+ *     The previous tick ran into the per-tick ceiling
+ *     (`MAX_SIGNATURES_PER_TICK`) and saved the OLDEST signature it
+ *     visited here. Next tick continues paginating from that frontier
+ *     DOWNWARD (older), draining the backlog one ceiling-bounded chunk
+ *     at a time. Once a backfill tick reaches the 365-day cutoff (or
+ *     an empty page), the frontier clears and the wallet exits
+ *     backfill mode — subsequent ticks resume newest-first scans.
+ *
+ * Earlier revision only carried `newestSignature` and advanced it
+ * unconditionally on every tick, including the ceiling-truncated
+ * ones. A first-ever tick on a wallet with > MAX_SIGNATURES_PER_TICK
+ * history would: (a) hit the ceiling at some intermediate signature,
+ * (b) save the page-1-top signature as checkpoint, (c) the next tick
+ * would page-1-top → checkpoint match → terminate, leaving the
+ * older backlog (the bit the ceiling cut off) permanently un-indexed.
+ * PR #11 review finding P1-1.
+ */
 interface WalletActivityCursorPayload {
-  /**
-   * The newest (most recent) signature observed for this wallet on
-   * the tick that wrote this cursor. The next tick pages backwards
-   * and stops once it reaches this signature.
-   */
-  newestSignature: string;
+  newestSignature: string | null;
+  /** Present + non-null only when the wallet is in backfill mode. */
+  backfillFrontier?: string | null;
 }
 
 function cursorJobName(walletPubkey: string): string {
   return `${CURSOR_JOB_PREFIX}${walletPubkey}`;
 }
 
-function readCursorPayload(payload: Record<string, unknown> | null): string | null {
-  if (payload === null) return null;
+interface WalletActivityCursor {
+  newestSignature: string | null;
+  backfillFrontier: string | null;
+}
+
+function readCursorPayload(payload: Record<string, unknown> | null): WalletActivityCursor {
+  if (payload === null) return { newestSignature: null, backfillFrontier: null };
   const newest = payload['newestSignature'];
-  return typeof newest === 'string' && newest.length > 0 ? newest : null;
+  const frontier = payload['backfillFrontier'];
+  return {
+    newestSignature: typeof newest === 'string' && newest.length > 0 ? newest : null,
+    backfillFrontier: typeof frontier === 'string' && frontier.length > 0 ? frontier : null,
+  };
 }
 
 function utcDateString(unixSeconds: number): string {
@@ -128,19 +161,37 @@ export class WalletActivityIndexerService {
    * signatures observed this tick (for operator-facing telemetry).
    */
   async indexWallet(walletPubkey: string): Promise<{ daysWritten: number; signatures: number }> {
-    const checkpoint = await this.readCheckpoint(walletPubkey);
+    const cursor = await this.readCheckpoint(walletPubkey);
 
     const todayUtc = new Date();
     const cutoffMs = todayUtc.getTime() - WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
+    // Backfill mode? When `backfillFrontier` is set, the previous
+    // tick hit the per-tick ceiling — resume paginating DOWNWARD
+    // from that frontier (older signatures). When unset, walk
+    // newest-first stopping at `newestSignature`. The two modes
+    // share most of the loop body; the difference is the starting
+    // `before` cursor and whether we update `newestSignature`.
+    const isBackfill = cursor.backfillFrontier !== null;
+
     const buckets = new Map<string, number>(); // dateStr → tx_count
     let observed = 0;
-    // The newest signature of the FIRST page becomes the next
-    // checkpoint. `null` until we see the first page's first row.
-    let newestSignature: string | null = null;
-    // Pagination cursor — `undefined` for page 1, then the oldest
-    // signature of the previous page.
-    let before: string | undefined;
+    // The newest signature of the FIRST page in newest-first mode.
+    // In backfill mode we DON'T overwrite the existing checkpoint —
+    // the goal is to drain older history, not to detect new traffic.
+    let newestSignatureThisTick: string | null = null;
+    // Oldest signature visited during this tick. Used to update the
+    // backfill frontier when the walk hits the per-tick ceiling.
+    let oldestSignatureThisTick: string | null = null;
+    // Pagination cursor. In newest-first mode: undefined → page 1.
+    // In backfill mode: starts at the saved frontier so the first
+    // page is OLDER than where the previous tick stopped.
+    let before: string | undefined = cursor.backfillFrontier ?? undefined;
+    // CLEAN exit means the walk reached a natural stopping condition
+    // (history exhausted / checkpoint hit / cutoff reached). DIRTY
+    // exit means the per-tick ceiling cut us off OR an RPC call
+    // failed — both keep more work for the next tick.
+    let cleanExit = false;
 
     pageLoop: while (observed < MAX_SIGNATURES_PER_TICK) {
       // Never ask for more than the hard ceiling leaves room for.
@@ -160,36 +211,51 @@ export class WalletActivityIndexerService {
           { err, wallet: walletPubkey, before },
           'wallet-activity: RPC fetch failed',
         );
-        // Partial progress is fine — the upsert is idempotent and the
-        // checkpoint is only advanced AFTER a clean walk. Bail out of
-        // pagination but still flush whatever we bucketed so far.
+        // DIRTY exit. Flush what we bucketed (upsert is idempotent)
+        // and let the next tick resume — either from the same
+        // `newestSignature` (if not in backfill) or from the
+        // unchanged `backfillFrontier`.
         break;
       }
 
-      if (page.length === 0) break; // exhausted history
+      if (page.length === 0) {
+        cleanExit = true; // history exhausted (or backfill complete)
+        break;
+      }
 
       for (const sig of page) {
-        // Checkpoint hit — everything from here backwards was indexed
-        // on a previous tick. Stop the whole walk.
-        if (checkpoint !== null && sig.signature === checkpoint) {
+        // Newest-first mode: hit the existing checkpoint → everything
+        // from here backwards was indexed on a previous tick.
+        // Backfill mode: the checkpoint comparison is irrelevant
+        // because we started from a frontier already older than it.
+        if (
+          !isBackfill &&
+          cursor.newestSignature !== null &&
+          sig.signature === cursor.newestSignature
+        ) {
+          cleanExit = true;
           break pageLoop;
         }
-        if (newestSignature === null) {
-          // First row of the first page is the most recent signature
-          // overall — this becomes the next checkpoint.
-          newestSignature = sig.signature;
+        if (newestSignatureThisTick === null && !isBackfill) {
+          // First row of page 1 in newest-first mode is the most
+          // recent signature overall — candidate for the next
+          // checkpoint when this tick exits cleanly.
+          newestSignatureThisTick = sig.signature;
         }
+        oldestSignatureThisTick = sig.signature;
         observed += 1;
         // `blockTime === null` (not yet finalised everywhere): skip
-        // for bucketing AND for the cutoff test — a null time is not
-        // evidence the signature is old. It'll resolve on a later
-        // tick (it's newer than the checkpoint, so still in range).
+        // bucketing AND the cutoff test — null is not evidence of
+        // age, the signature is still in range and will resolve on
+        // a later tick.
         if (sig.blockTime === null) continue;
         const ms = sig.blockTime * 1000;
         if (ms < cutoffMs) {
-          // This signature — and, since the listing is newest-first,
-          // every signature after it — is outside the 365-day render
-          // window. Nothing useful past here.
+          // Outside the 365-day render window. In newest-first mode
+          // this completes the indexing pass. In backfill mode this
+          // is also the natural end — the backlog older than the
+          // cutoff doesn't need indexing.
+          cleanExit = true;
           break pageLoop;
         }
         const dateStr = utcDateString(sig.blockTime);
@@ -197,11 +263,26 @@ export class WalletActivityIndexerService {
       }
 
       // A short page means the RPC has no more history to give.
-      if (page.length < limit) break;
-      // Otherwise continue from the oldest signature of this page.
+      if (page.length < limit) {
+        cleanExit = true;
+        break;
+      }
+      // Continue from the oldest signature of this page.
       before = page[page.length - 1]!.signature;
     }
+    // Falling out via `observed >= MAX_SIGNATURES_PER_TICK` is the
+    // DIRTY ceiling exit — `cleanExit` stays false.
 
+    if (observed === 0 && cleanExit && isBackfill) {
+      // Backfill ran but found nothing new (RPC returned empty,
+      // which means we walked past the wallet's full history).
+      // Clear the frontier so the next tick resumes newest-first.
+      await this.writeCheckpoint(walletPubkey, {
+        newestSignature: cursor.newestSignature,
+        backfillFrontier: null,
+      });
+      return { daysWritten: 0, signatures: 0 };
+    }
     if (observed === 0) {
       return { daysWritten: 0, signatures: 0 };
     }
@@ -222,21 +303,51 @@ export class WalletActivityIndexerService {
       ({ written } = await this.repo.upsertBatch(rows));
     }
 
-    // Advance the checkpoint to the newest signature we saw. Done
-    // last so a mid-walk crash leaves the OLD checkpoint in place and
-    // the next tick simply re-scans — idempotent upsert, no harm.
-    if (newestSignature !== null) {
-      await this.writeCheckpoint(walletPubkey, newestSignature);
+    // Cursor update — depends on which mode we ran in and whether
+    // the exit was clean.
+    let nextCursor: WalletActivityCursor;
+    if (isBackfill) {
+      if (cleanExit) {
+        // Backfill drained. Exit backfill mode; `newestSignature`
+        // unchanged (the previous newest-first tick already set it).
+        nextCursor = { newestSignature: cursor.newestSignature, backfillFrontier: null };
+      } else {
+        // Ceiling/RPC dirty exit during backfill. Advance the
+        // frontier to the oldest signature we visited so next tick
+        // continues older.
+        nextCursor = {
+          newestSignature: cursor.newestSignature,
+          backfillFrontier: oldestSignatureThisTick ?? cursor.backfillFrontier,
+        };
+      }
+    } else if (cleanExit) {
+      // Newest-first clean exit. Advance checkpoint to the new top.
+      nextCursor = {
+        newestSignature: newestSignatureThisTick ?? cursor.newestSignature,
+        backfillFrontier: null,
+      };
+    } else {
+      // Newest-first ceiling/RPC dirty exit. Save the new top as
+      // `newestSignature` (so subsequent newest-first scans can
+      // skip everything above it) AND save the frontier so next
+      // tick continues paginating older.
+      nextCursor = {
+        newestSignature: newestSignatureThisTick ?? cursor.newestSignature,
+        backfillFrontier: oldestSignatureThisTick,
+      };
     }
+    await this.writeCheckpoint(walletPubkey, nextCursor);
 
     return { daysWritten: written, signatures: observed };
   }
 
-  /** Read the per-wallet "newest signature seen" checkpoint, if any. */
-  private async readCheckpoint(walletPubkey: string): Promise<string | null> {
+  /** Read the per-wallet two-cursor checkpoint, if any. */
+  private async readCheckpoint(walletPubkey: string): Promise<WalletActivityCursor> {
     try {
       const cursor = await this.cursors.get(cursorJobName(walletPubkey));
-      return cursor === null ? null : readCursorPayload(cursor.payload);
+      return cursor === null
+        ? { newestSignature: null, backfillFrontier: null }
+        : readCursorPayload(cursor.payload);
     } catch (err) {
       // A missing/unreadable checkpoint is non-fatal: we fall back to
       // a full walk bounded by the 365-day cutoff + hard ceiling.
@@ -244,13 +355,16 @@ export class WalletActivityIndexerService {
         { err, wallet: walletPubkey },
         'wallet-activity: checkpoint read failed; falling back to full walk',
       );
-      return null;
+      return { newestSignature: null, backfillFrontier: null };
     }
   }
 
-  /** Persist the per-wallet "newest signature seen" checkpoint. */
-  private async writeCheckpoint(walletPubkey: string, newestSignature: string): Promise<void> {
-    const payload: WalletActivityCursorPayload = { newestSignature };
+  /** Persist the per-wallet two-cursor checkpoint. */
+  private async writeCheckpoint(walletPubkey: string, cursor: WalletActivityCursor): Promise<void> {
+    const payload: WalletActivityCursorPayload = {
+      newestSignature: cursor.newestSignature,
+      backfillFrontier: cursor.backfillFrontier,
+    };
     try {
       await this.cursors.upsert({
         jobName: cursorJobName(walletPubkey),
