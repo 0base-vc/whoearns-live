@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest 
 import satori from 'satori';
 import type { AppConfig } from '../../core/config.js';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
+import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import type { IdentityPubkey, VotePubkey } from '../../types/domain.js';
@@ -15,6 +16,17 @@ export interface BadgeRoutesDeps {
   config: AppConfig;
   validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>;
   statsRepo: Pick<StatsRepository, 'findHistoryByVote'>;
+  /**
+   * PR #11 review finding P1-4 — opted-out validators must NOT
+   * surface their name + closed-epoch income in the embeddable SVG
+   * badge. Every other surface (leaderboard / history / search /
+   * income / hub) already filters on `opted_out`; the badge route
+   * was the lone outlier. We resolve the vote pubkey from the
+   * validator, then check `validator_profiles.opted_out` and return
+   * 404 to match the policy used by `/income/[id]` for opted-out
+   * validators.
+   */
+  profilesRepo: Pick<ProfilesRepository, 'findByVote'>;
 }
 
 const BADGE_WIDTH = 440;
@@ -310,6 +322,19 @@ const badgeRoutes: FastifyPluginAsync<BadgeRoutesDeps> = async (
         validator = await opts.validatorsRepo.findByIdentity(param as IdentityPubkey);
       }
       if (validator === null) {
+        throw new NotFoundError('validator', param);
+      }
+
+      // PR #11 review finding P1-4 — opt-out gate. The validator's
+      // operator may have set `opted_out = TRUE` on the profile; every
+      // other surface (history, search, scoring, leaderboard) returns
+      // a stub or 404 for opted-out validators. The badge SVG was the
+      // lone outlier exposing the name + closed-epoch income on an
+      // embeddable, third-party-rendered surface. Surface a 404 to
+      // match `/income/[idOrVote]`'s policy for opted-out validators
+      // — same shape the existing NotFoundError above raises.
+      const profile = await opts.profilesRepo.findByVote(validator.votePubkey);
+      if (profile?.optedOut === true) {
         throw new NotFoundError('validator', param);
       }
 

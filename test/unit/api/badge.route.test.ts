@@ -5,6 +5,7 @@ import type { AppConfig } from '../../../src/core/config.js';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import badgeRoutes, { _resetBadgeCacheForTesting } from '../../../src/api/routes/badge.route.js';
 import { _resetFontCacheForTesting } from '../../../src/api/satori-font.js';
+import type { ProfilesRepository } from '../../../src/storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../../src/storage/repositories/validators.repo.js';
 import {
@@ -25,6 +26,22 @@ interface Ctx {
   app: FastifyInstance;
   stats: FakeStatsRepo;
   validators: FakeValidatorsRepo;
+  profiles: FakeProfilesRepo;
+}
+
+// Minimal fake for the new `profilesRepo` dep wired in by PR #11
+// review finding P1-4 (badge opt-out gate). Default behaviour is
+// "no profile row" → opt-out treated as false. The opt-out test
+// case below populates `optedOut: true` directly to exercise the
+// 404 path.
+class FakeProfilesRepo {
+  private byVote = new Map<string, { optedOut: boolean }>();
+  setOptedOut(vote: string, optedOut: boolean): void {
+    this.byVote.set(vote, { optedOut });
+  }
+  async findByVote(vote: string): Promise<{ optedOut: boolean } | null> {
+    return this.byVote.get(vote) ?? null;
+  }
 }
 
 async function makeCtx(): Promise<Ctx> {
@@ -32,14 +49,16 @@ async function makeCtx(): Promise<Ctx> {
   _resetFontCacheForTesting();
   const stats = new FakeStatsRepo();
   const validators = new FakeValidatorsRepo();
+  const profiles = new FakeProfilesRepo();
   const app = makeTestApp(silent);
   setErrorHandler(app, silent);
   await app.register(badgeRoutes, {
     config: FAKE_CONFIG,
     validatorsRepo: validators as unknown as ValidatorsRepository,
     statsRepo: stats as unknown as StatsRepository,
+    profilesRepo: profiles as unknown as ProfilesRepository,
   });
-  return { app, stats, validators };
+  return { app, stats, validators, profiles };
 }
 
 async function seed(ctx: Ctx, vote: string, identity: string): Promise<void> {
@@ -120,6 +139,17 @@ describe('GET /badge/:vote.svg', () => {
 
   it('returns 404 for an unknown validator', async () => {
     const res = await ctx.app.inject({ method: 'GET', url: `/badge/${VOTE_2}.svg` });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toMatchObject({ error: { code: 'not_found' } });
+  });
+
+  it('returns 404 when the validator has opted out', async () => {
+    // PR #11 review finding P1-4 regression. Same shape as the
+    // "unknown validator" case so opt-out doesn't surface a
+    // distinguishable existence-oracle response.
+    await seed(ctx, VOTE_1, IDENTITY_1);
+    ctx.profiles.setOptedOut(VOTE_1, true);
+    const res = await ctx.app.inject({ method: 'GET', url: `/badge/${VOTE_1}.svg` });
     expect(res.statusCode).toBe(404);
     expect(res.json()).toMatchObject({ error: { code: 'not_found' } });
   });

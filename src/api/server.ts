@@ -408,6 +408,8 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       config: deps.config,
       validatorsRepo: deps.repos.validators,
       statsRepo: deps.repos.stats,
+      // PR #11 review finding P1-4 — opt-out gate. See `badge.route.ts`.
+      profilesRepo: deps.repos.profiles,
     });
     // MCP server. Streamable-HTTP transport, stateless mode. Four
     // read-only tools backed by the same repos the v1/* routes use
