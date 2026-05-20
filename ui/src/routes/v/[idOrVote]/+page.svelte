@@ -552,7 +552,10 @@
         >
           <span class="truncate">{heroTitle}</span>
           {#if isClaimed}
-            <VerifiedBadge size={18} />
+            <VerifiedBadge
+              size={18}
+              label="Verified — claim signed with the validator identity key (Ed25519)"
+            />
           {/if}
         </h1>
         <p class="mt-0.5">

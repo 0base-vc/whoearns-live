@@ -276,6 +276,30 @@
   const pageTitle = $derived(`Claim ${history.name ?? shortVote} — ${SITE_NAME}`);
 
   /**
+   * Reactive "now" tick.
+   *
+   * Envelope-expiry countdowns ("Nonce expires in ~N minutes") and
+   * wallet/github entry expiry badges derive from `expiresAtMs -
+   * Date.now()`. `Date.now()` is NOT reactive — without an explicit
+   * tick the count is frozen at last-mutation time. An operator
+   * signing offline (the whole point of the flow) could come back
+   * 28 minutes later, see "expires in ~28 minutes", confidently
+   * submit, and discover the envelope is in fact about to die.
+   *
+   * Tick every 30s — half the smallest unit the UI displays
+   * (minutes). `$effect` only registers the interval client-side
+   * (Svelte 5 effects don't run during SSR). Teardown clears the
+   * interval on component destroy.
+   */
+  let nowMs = $state(Date.now());
+  $effect(() => {
+    const id = setInterval(() => {
+      nowMs = Date.now();
+    }, 30_000);
+    return () => clearInterval(id);
+  });
+
+  /**
    * Format `expiresAt` (ISO string) as one of:
    *   - "expires in 47 days" (normal)
    *   - "expires in 4 days ⚠" (≤7 days)
@@ -289,7 +313,9 @@
    */
   function formatExpiry(expiresAtIso: string): { label: string; tone: 'ok' | 'warn' | 'expired' } {
     const expMs = new Date(expiresAtIso).getTime();
-    const nowMs = Date.now();
+    // Read from the reactive `nowMs` (ticked every 30s) so the
+    // computed label re-evaluates as time passes; using bare
+    // `Date.now()` here would freeze the value at first render.
     const dayMs = 24 * 60 * 60 * 1000;
     const diffDays = Math.floor((expMs - nowMs) / dayMs);
     if (diffDays < 0) {
@@ -1310,7 +1336,7 @@
             <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
               Nonce expires in ~{Math.max(
                 0,
-                Math.floor((githubEnvelope.expiresAtMs - Date.now()) / 60_000),
+                Math.floor((githubEnvelope.expiresAtMs - nowMs) / 60_000),
               )} minutes.
             </p>
           </label>
@@ -1644,7 +1670,7 @@
               <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
                 Nonce expires in ~{Math.max(
                   0,
-                  Math.floor((walletEnvelope.expiresAtMs - Date.now()) / 60_000),
+                  Math.floor((walletEnvelope.expiresAtMs - nowMs) / 60_000),
                 )} minutes.
               </p>
             </div>

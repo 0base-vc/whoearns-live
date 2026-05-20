@@ -470,7 +470,10 @@
                 (read name → see verification cue), and `shrink-0`
                 keeps it intact when the moniker truncates.
               -->
-              <VerifiedBadge size={18} />
+              <VerifiedBadge
+                size={18}
+                label="Verified — claim signed with the validator identity key (Ed25519)"
+              />
             {/if}
           </h1>
           <!--
@@ -497,7 +500,10 @@
           >
             <span class="truncate">{shortVote}</span>
             {#if history.claimed}
-              <VerifiedBadge size={18} />
+              <VerifiedBadge
+                size={18}
+                label="Verified — claim signed with the validator identity key (Ed25519)"
+              />
             {/if}
           </h1>
         {/if}

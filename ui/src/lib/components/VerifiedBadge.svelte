@@ -27,16 +27,18 @@
     label?: string;
   }
 
-  // Default label spells out the exact trust scope: this isn't a
-  // Twitter-style "real person" attestation, it's a cryptographic
-  // proof. The shape borrows Twitter's verification iconography
-  // for instant pattern-recognition, but the meaning is strictly
-  // weaker — only the validator-identity-key holder can produce
-  // the signature, not necessarily the named human or org.
-  let {
-    size = 14,
-    label = 'Verified — claim signed with the validator identity key (Ed25519)',
-  }: Props = $props();
+  // Default label is the SHORT form — appropriate for list-surface
+  // uses (leaderboard rows, search dropdown, compare table) where
+  // the badge is one of many things and a 60-char tooltip would be
+  // noise. Surfaces that want to make the cryptographic scope
+  // explicit (the hub hero, the income hero) override the prop
+  // with the longer "claim signed with the validator identity key
+  // (Ed25519)" form. The shape borrows Twitter's verification
+  // iconography for instant pattern-recognition, but the meaning
+  // is strictly weaker — only the validator-identity-key holder
+  // can produce the signature, not necessarily the named human
+  // or org.
+  let { size = 14, label = 'Operator-claimed (Ed25519 signature)' }: Props = $props();
 </script>
 
 <span
