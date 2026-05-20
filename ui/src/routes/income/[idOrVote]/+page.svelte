@@ -41,7 +41,6 @@
   import IncomeChartLoader from '$lib/components/IncomeChartLoader.svelte';
   import Card from '$lib/components/Card.svelte';
   import AddressDisplay from '$lib/components/AddressDisplay.svelte';
-  import EllipsisAddress from '$lib/components/EllipsisAddress.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
   import TierBadge from '$lib/components/TierBadge.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -476,23 +475,6 @@
               />
             {/if}
           </h1>
-          <!--
-            Vote pubkey under the moniker. `EllipsisAddress` is
-            elastic: on iPhone Pro and narrower viewports it
-            middle-truncates ("5BAi9Y…C6uBPZ") so the address sits
-            on a single line and the hero stays vertically tight;
-            on tablet+ where 318 px fits comfortably, the full
-            44-char pubkey renders. Copy-on-select still yields
-            the full pubkey via the component's clipboard hijack.
-            Earlier this used `break-all` which wrapped to two
-            lines on iPhone Pro — visually noisy.
-          -->
-          <p class="mt-0.5">
-            <EllipsisAddress
-              pubkey={history.vote}
-              class="font-mono text-xs text-[color:var(--color-text-subtle)]"
-            />
-          </p>
         {:else}
           <h1
             class="mt-1 flex min-w-0 items-center gap-2 text-2xl font-semibold tracking-tight sm:text-3xl"
@@ -507,6 +489,39 @@
             {/if}
           </h1>
         {/if}
+
+        <!--
+          Compact vote + identity row. `head…tail`-truncated, each with
+          a copy button and an `(i)` tooltip. This replaces BOTH the
+          old full-width vote pubkey under the moniker AND the separate
+          bordered `<dl>` block lower in the hero — the vote pubkey
+          used to render twice (once full under the moniker, once in
+          the dl). Identity, which previously only lived in the dl,
+          is now surfaced here too. One compact line instead of a
+          line + a whole bordered block + its divider.
+        -->
+        <div class="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+          <span class="inline-flex items-center gap-1">
+            <span class="font-medium uppercase tracking-wide text-[color:var(--color-text-subtle)]">
+              Vote
+            </span>
+            <Tooltip
+              label="About the vote account"
+              content="The on-chain vote account. Stakers delegate to this address. Each validator has exactly one fixed vote account that lives forever — even across re-keys."
+            />
+            <AddressDisplay pubkey={history.vote} variant="inline" head={6} tail={6} />
+          </span>
+          <span class="inline-flex items-center gap-1">
+            <span class="font-medium uppercase tracking-wide text-[color:var(--color-text-subtle)]">
+              Identity
+            </span>
+            <Tooltip
+              label="About the identity key"
+              content="The validator's identity keypair — the hot key that signs blocks and votes. Operators can rotate this key periodically while keeping the same vote account."
+            />
+            <AddressDisplay pubkey={history.identity} variant="inline" head={6} tail={6} />
+          </span>
+        </div>
         {#if safeWebsiteUrl}
           <!--
             Website is user-supplied on-chain; treat as untrusted link.
@@ -594,32 +609,6 @@
       </div>
     {/if}
   </div>
-
-  <!--
-    Addresses moved below the hero row so the money-shot gets a clean
-    horizontal band to dominate. On mobile they stack naturally under
-    the identity block; on desktop they form a two-column strip.
-  -->
-  <dl
-    class="mt-5 grid grid-cols-1 gap-3 border-t border-[color:var(--color-border-default)] pt-4 sm:grid-cols-2"
-  >
-    <AddressDisplay
-      pubkey={history.vote}
-      variant="block"
-      label="Vote"
-      head={8}
-      tail={8}
-      tooltip="The on-chain vote account. Stakers delegate to this address. Each validator has exactly one fixed vote account that lives forever — even across re-keys."
-    />
-    <AddressDisplay
-      pubkey={history.identity}
-      variant="block"
-      label="Identity"
-      head={8}
-      tail={8}
-      tooltip="The validator's identity keypair — the hot key that signs blocks and votes. Operators can rotate this key periodically while keeping the same vote account."
-    />
-  </dl>
 </Card>
 
 <!-- ─────────── 1b. On-demand tracking banner ───────────
