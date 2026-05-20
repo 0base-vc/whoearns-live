@@ -164,6 +164,10 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       }
 
       const vote = validator.votePubkey;
+      const optedOutVotes = await profilesRepo.findOptedOutVotes();
+      if (optedOutVotes.has(vote)) {
+        throw new NotFoundError('validator', params.idOrVote);
+      }
       const stats = await statsRepo.findByVoteEpoch(vote, current.epoch);
       if (stats !== null) {
         return serializeValidator(stats, current, serialCtx);
@@ -203,6 +207,7 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
 
       const knownValidators = await validatorsRepo.findManyByVotes(body.votes);
       const validatorByVote = new Map(knownValidators.map((v) => [v.votePubkey, v]));
+      const optedOutVotes = await profilesRepo.findOptedOutVotes();
 
       const statsRows = await statsRepo.findManyByVotesCurrentEpoch(body.votes, current.epoch);
       const statsByVote = new Map(statsRows.map((r) => [r.votePubkey, r]));
@@ -212,6 +217,10 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       for (const vote of body.votes) {
         const validator = validatorByVote.get(vote);
         if (!validator) {
+          missing.push(vote);
+          continue;
+        }
+        if (optedOutVotes.has(vote)) {
           missing.push(vote);
           continue;
         }
@@ -257,6 +266,10 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       }
 
       const vote = validator.votePubkey;
+      const optedOutVotes = await profilesRepo.findOptedOutVotes();
+      if (optedOutVotes.has(vote)) {
+        throw new NotFoundError('validator', params.idOrVote);
+      }
       const [stats, epochRow] = await Promise.all([
         statsRepo.findByVoteEpoch(vote, params.epoch),
         epochsRepo.findByEpoch(params.epoch),
