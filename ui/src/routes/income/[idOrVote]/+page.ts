@@ -1,15 +1,21 @@
 import { error } from '@sveltejs/kit';
-import { fetchCurrentEpoch, fetchValidatorHistory, ApiError } from '$lib/api';
+import { fetchCurrentEpoch, fetchScoring, fetchValidatorHistory, ApiError } from '$lib/api';
 import type { PageLoad } from './$types';
 
 export const load: PageLoad = async ({ params, fetch: fetchFn }) => {
   const { idOrVote } = params;
   try {
-    // Run both requests in parallel — the endpoints are independent and
-    // the page needs both before it can render meaningfully.
-    const [history, currentEpoch] = await Promise.all([
+    // Run the requests in parallel — the endpoints are independent and
+    // the page needs both `history` and `currentEpoch` before it can
+    // render meaningfully. `scoring` is best-effort: if the validator
+    // is unrated, opted-out, or otherwise gated out of the tier
+    // surface the call 404s and we fall back to `null`, which the
+    // page renders as a "no tier yet" pill. The income page renders
+    // fine without it.
+    const [history, currentEpoch, scoring] = await Promise.all([
       fetchValidatorHistory(idOrVote, 50, fetchFn),
       fetchCurrentEpoch(fetchFn).catch(() => null),
+      fetchScoring(idOrVote, fetchFn).catch(() => null),
     ]);
     // Signal to the layout that the 0base.vc footer CTA should be
     // hidden on THIS validator's page. The layout reads `page.data`
@@ -18,6 +24,7 @@ export const load: PageLoad = async ({ params, fetch: fetchFn }) => {
     return {
       history,
       currentEpoch,
+      scoring,
       hideFooterCta: history.profile?.hideFooterCta === true,
     };
   } catch (err) {

@@ -29,7 +29,7 @@
 -->
 <script lang="ts">
   import type { PageData } from './$types';
-  import type { ValidatorEpochRecord } from '$lib/types';
+  import type { NodeTier, ValidatorEpochRecord } from '$lib/types';
   import {
     formatNumberOrDash,
     formatSkipRate,
@@ -43,6 +43,7 @@
   import AddressDisplay from '$lib/components/AddressDisplay.svelte';
   import EllipsisAddress from '$lib/components/EllipsisAddress.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
+  import TierBadge from '$lib/components/TierBadge.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { serializeJsonLd } from '$lib/json-ld';
   import { SITE_NAME, SITE_URL } from '$lib/site';
@@ -60,6 +61,32 @@
   let { data }: { data: PageData } = $props();
 
   const history = $derived(data.history);
+  /**
+   * Best-effort tier surface for the cross-link strip below the
+   * breadcrumb. `null` when:
+   *   - the validator has no scoring yet (unrated / sample too thin),
+   *   - the operator opted out of the gamification surface, or
+   *   - the `/scoring` endpoint 404s for any other reason.
+   * Income page renders fine without it; the strip just collapses.
+   */
+  const scoring = $derived(data.scoring);
+
+  /**
+   * Tier-name in plain English for the cross-link strip. Mirrors the
+   * `tierLabel` map inside `TierBadge`'s aria-label, capitalised so
+   * it reads as a proper noun in the strip ("Forge tier · …").
+   */
+  const tierName = $derived.by<string | null>(() => {
+    if (scoring === null) return null;
+    const map: Record<NodeTier, string> = {
+      forge: 'Forge',
+      anvil: 'Anvil',
+      hearth: 'Hearth',
+      kindling: 'Kindling',
+      unrated: 'Unrated',
+    };
+    return map[scoring.tier.tier];
+  });
 
   /**
    * True when the user hit an unknown pubkey and the indexer just
@@ -145,26 +172,18 @@
     '@graph': [
       {
         '@type': 'BreadcrumbList',
-        // Three-item trail matches the visible breadcrumb on the
-        // page. Structural shape (Leaderboard → validator hub →
-        // Epoch income) is identical across the two surfaces.
-        // The `<link rel="canonical">` separately points to the
-        // hub (`/v/<vote>`) — that's intentional: position-3 is
-        // the current page (per schema.org BreadcrumbList spec),
-        // canonical is the surface to be indexed. Not a
-        // contradiction; different jobs, deliberately decoupled.
+        // Two-item trail matches the visible breadcrumb on the page:
+        // Leaderboard → this validator's income. With income as the
+        // canonical surface (the page user landed on), the hub no
+        // longer sits between them in the hierarchy — the tier-glance
+        // strip handles that cross-link as garnish rather than a
+        // breadcrumb step.
         itemListElement: [
           { '@type': 'ListItem', position: 1, name: 'Leaderboard', item: `${SITE_URL}/` },
           {
             '@type': 'ListItem',
             position: 2,
             name: history.name ?? shortenPubkey(history.vote, 6, 6),
-            item: `${SITE_URL}/v/${history.vote}`,
-          },
-          {
-            '@type': 'ListItem',
-            position: 3,
-            name: 'Epoch income',
             item: `${SITE_URL}/income/${history.vote}`,
           },
         ],
@@ -174,8 +193,10 @@
         name: `${history.name ?? shortenPubkey(history.vote, 6, 6)} — Epoch income | ${SITE_NAME}`,
         inLanguage: 'en',
         description: operatorNarrative ?? pageDescription,
-        // Same canonical-alignment: Dataset URL points at the hub.
-        url: `${SITE_URL}/v/${history.vote}`,
+        // Dataset URL points at the income page itself (canonical
+        // alignment): structured-data crawlers should attribute
+        // earnings data to this surface, not the hub.
+        url: `${SITE_URL}/income/${history.vote}`,
         creator: { '@type': 'Organization', name: '0base.vc' },
         license: 'https://creativecommons.org/publicdomain/zero/1.0/',
         keywords: ['Solana', 'validator', 'MEV', 'Jito', 'block fees', history.vote],
@@ -266,14 +287,16 @@
   <title>{pageTitle}</title>
   <meta name="description" content={pageDescription} />
   <!--
-    Canonical points at the validator hub `/v/<vote>`. The income
-    page stays a first-class drill-down ("the full epoch table for
-    operators who want the receipts"), but the hub is the surface
-    search engines and AI crawlers should index as "this validator's
-    page." Existing inbound links to /income still resolve — they
-    just don't compete for ranking.
+    Canonical points at this income page itself. Site naming
+    (`whoearns.live`) + the leaderboard's income-sorted default make
+    "per-validator earnings" the primary surface; the validator hub
+    `/v/<vote>` is the secondary "operator profile" surface and links
+    here back via its own breadcrumb + share widget. Keeping the
+    canonical here matches user intent on inbound traffic — most
+    sources (search results, social shares, leaderboard rows) are
+    looking up income, not gamification.
   -->
-  <link rel="canonical" href={`${SITE_URL}/v/${history.vote}`} />
+  <link rel="canonical" href={`${SITE_URL}/income/${history.vote}`} />
   <meta property="og:title" content={pageTitle} />
   <meta property="og:description" content={pageDescription} />
   <meta property="og:locale" content="en_US" />
@@ -309,14 +332,14 @@
 
 <!--
   Breadcrumb trail (WAI-ARIA Breadcrumb pattern): Leaderboard →
-  validator overview → current page. Three items match the JSON-LD
-  `BreadcrumbList` below so structured-data crawlers + screen
-  readers + sighted users all see the same hierarchy.
+  current validator. Two items match the JSON-LD `BreadcrumbList`
+  below so structured-data crawlers + screen readers + sighted users
+  all see the same hierarchy. With income as the canonical surface
+  the hub is reached via the tier-glance strip below, not as a
+  breadcrumb step — that keeps the breadcrumb a true ancestor chain.
 
-  Separator is `›` between every item; earlier revision mixed a
-  back-arrow `←` on the first item with a forward chevron `›` on
-  the second, which is a malformed breadcrumb. Every `<li>` is
-  `min-h-11` so all three items have matching vertical rhythm.
+  Every `<li>` is `min-h-11` for matching vertical rhythm + meeting
+  WCAG 2.5.5 (44×44 target size on mobile).
 -->
 <nav aria-label="Breadcrumb" class="mb-3">
   <ol class="flex list-none flex-wrap items-center gap-1 p-0">
@@ -328,24 +351,64 @@
         Leaderboard
       </a>
     </li>
-    <li class="inline-flex min-h-11 items-center text-[color:var(--color-text-subtle)]">
-      <span aria-hidden="true" class="px-1.5">›</span>
-      <a
-        href={`/v/${history.vote}`}
-        class="inline-flex items-center text-xs text-[color:var(--color-text-muted)] hover:text-[color:var(--color-brand-500)] hover:underline"
-      >
-        {history.name ?? shortenPubkey(history.vote, 6, 6)}
-      </a>
-    </li>
     <li
       class="inline-flex min-h-11 items-center text-xs text-[color:var(--color-text-subtle)]"
       aria-current="page"
     >
       <span aria-hidden="true" class="px-1.5">›</span>
-      <span>Epoch income</span>
+      <span>{history.name ?? shortenPubkey(history.vote, 6, 6)}</span>
     </li>
   </ol>
 </nav>
+
+<!--
+  Tier-glance strip. Sits between the breadcrumb and the income hero
+  as a soft hand-off to the validator hub (`/v/<vote>`), where the
+  full gamification surface lives (tier ring, tenure, client, OAI,
+  wallet activity heatmap, audit log). The income page stays the
+  primary "performance" view — site name is whoearns.live, leaderboard
+  sort key is income, the entire user expectation when clicking a row
+  is "show me this validator's numbers." The strip lets a reader who
+  IS curious about the operator-craft side of things hop over in one
+  click without making that the default destination.
+
+  Collapses silently when scoring is unavailable (unrated, opted-out,
+  /scoring 404) — the income page is the contract; the strip is
+  cross-link garnish.
+
+  Whole strip is a single `<a>` so the hover affordance covers the
+  entire row and the click target is large (WCAG 2.5.5 — 44×44 on
+  mobile, the strip's `py-2.5` gives ~44px vertical even for a one-
+  line text + 18px badge).
+-->
+{#if scoring !== null && tierName !== null}
+  <a
+    href={`/v/${history.vote}`}
+    class="mb-4 flex items-center justify-between gap-3 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)]/40 px-3 py-2.5 transition-colors hover:border-[color:var(--color-brand-500)] hover:bg-[color:var(--color-surface-muted)]"
+    aria-label={`See ${tierName} tier details, badges, and activity on the validator hub`}
+  >
+    <span class="flex min-w-0 items-center gap-2 text-xs text-[color:var(--color-text-muted)]">
+      <TierBadge tier={scoring.tier.tier} size={18} />
+      <span class="truncate">
+        <span class="font-semibold text-[color:var(--color-text-default)]">{tierName}</span>
+        {#if scoring.tier.composite !== null}
+          <span class="text-[color:var(--color-text-subtle)]">
+            · {scoring.tier.composite} of 100
+          </span>
+        {/if}
+        <span class="text-[color:var(--color-text-subtle)]">
+          — tier, tenure, client, activity
+        </span>
+      </span>
+    </span>
+    <span
+      class="shrink-0 text-xs font-semibold text-[color:var(--color-brand-500)]"
+      aria-hidden="true"
+    >
+      Operator profile →
+    </span>
+  </a>
+{/if}
 
 <!-- ─────────── 1. Validator hero (identity + recent income) ─────────── -->
 <Card tone="raised">

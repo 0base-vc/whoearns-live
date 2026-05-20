@@ -498,7 +498,17 @@
   <meta property="og:url" content="{SITE_URL}/v/{scoring.vote}" />
   <meta property="og:image" content="{SITE_URL}/og/{scoring.vote}.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <link rel="canonical" href="{SITE_URL}/v/{scoring.vote}" />
+  <!--
+    Canonical points at the income page (`/income/<vote>`). Site
+    naming (whoearns.live) + the leaderboard's income-sorted default
+    establish per-validator earnings as the primary surface; this hub
+    is the secondary "operator profile" view. Pointing canonical
+    there avoids the hub competing for the same query as income when
+    both surfaces describe the same validator. The hub still indexes
+    via its own URL; canonical just tells search engines which to
+    prefer for ranking attribution.
+  -->
+  <link rel="canonical" href="{SITE_URL}/income/{scoring.vote}" />
 </svelte:head>
 
 <!-- ─────────── 1. Identity hero ─────────── -->
