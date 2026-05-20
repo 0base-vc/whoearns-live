@@ -20,9 +20,11 @@ function makeValidator(): Validator {
     identityPubkey: IDENTITY_1,
     // first_seen_epoch = 100 → predates CYCLE_1_OG (200) → "Cycle 1 OG"
     // landmark, mirroring the /badges route test so the tenure block
-    // is asserted against a known value.
+    // is asserted against a known value. `genesisEpoch: null` so the
+    // tenure computation falls back to first_seen_epoch.
     firstSeenEpoch: 100,
     lastSeenEpoch: 500,
+    genesisEpoch: null,
     updatedAt: new Date(),
     name: null,
     details: null,

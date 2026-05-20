@@ -29,6 +29,8 @@ import { createClusterNodesIngesterJob } from '../jobs/cluster-nodes-ingester.jo
 import { createValidatorInfoRefreshJob } from '../jobs/validator-info-refresh.job.js';
 import { createSlotIngesterJob } from '../jobs/slot-ingester.job.js';
 import { createWalletActivityIngesterJob } from '../jobs/wallet-activity-ingester.job.js';
+import { createStakewizTenureIngesterJob } from '../jobs/stakewiz-tenure-ingester.job.js';
+import { StakewizClient } from '../clients/stakewiz.js';
 import { withRpcFallback } from '../jobs/rpc-fallback.js';
 import { Scheduler } from '../jobs/scheduler.js';
 import { runMigrations } from '../storage/migrations/runner.js';
@@ -324,6 +326,22 @@ export async function startWorker(): Promise<void> {
     // (hundreds at scale). Last in the stagger so the live-path
     // ingest jobs get RPC headroom first.
     initialDelayMs: 45_000,
+  });
+
+  // Tenure true-age — pulls stakewiz `first_epoch_with_stake` into
+  // `validators.genesis_epoch` so the hub Tenure card shows real
+  // on-chain age, not indexer-relative age. One bulk HTTP call per
+  // tick; off the RPC path entirely.
+  scheduler.register({
+    ...createStakewizTenureIngesterJob({
+      stakewizClient: new StakewizClient({ logger }),
+      validatorsRepo,
+      intervalMs: config.STAKEWIZ_TENURE_INTERVAL_MS,
+      logger,
+    }),
+    // +60s: not on the RPC path and not latency-sensitive (genesis
+    // epoch is immutable) — last in the stagger.
+    initialDelayMs: 60_000,
   });
 
   shutdown.register('scheduler', async () => {

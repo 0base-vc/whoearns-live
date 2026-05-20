@@ -16,6 +16,7 @@ function makeValidator(identityPubkey: string = IDENTITY_1): Validator {
     identityPubkey,
     firstSeenEpoch: 500,
     lastSeenEpoch: 500,
+    genesisEpoch: null,
     updatedAt: new Date(),
     name: null,
     details: null,

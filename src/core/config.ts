@@ -221,6 +221,12 @@ export const ConfigSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().default('claude-sonnet-4-6'),
   SIMD_CURATION_INTERVAL_MS: PositiveInt.default(12 * 60 * 60 * 1000),
+  // Tenure true-age refresh — pulls `first_epoch_with_stake` from the
+  // stakewiz API into `validators.genesis_epoch`. 24 h is generous:
+  // a genesis epoch is immutable once known, so the only reason to
+  // re-run is to pick up validators newly added to our watched set.
+  // One bulk HTTP call per tick regardless of watched-set size.
+  STAKEWIZ_TENURE_INTERVAL_MS: PositiveInt.default(24 * 60 * 60 * 1000),
 
   SLOT_FINALITY_BUFFER: NonNegativeInt.default(32),
 

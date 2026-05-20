@@ -765,15 +765,17 @@
         <h2 class="text-lg font-semibold tracking-tight">Tenure</h2>
         <TenureBadge tenure={scoring.tenure} size="md" />
         <!--
-          Mainnet epoch ≈ 2 days. Appending the rough day-count
-          makes the epoch-number readable for delegators who don't
-          know Solana's epoch math — same constant as
-          `IncomeSummaryStrip` uses (`epochDurationDaysApprox = 2`).
+          `tenure.firstSeenEpoch` carries the validator's TRUE first
+          epoch with stake when the stakewiz ingester has backfilled
+          `genesis_epoch`, falling back to the indexer-relative
+          first-seen epoch otherwise — hence "Active since", not
+          "First seen". Mainnet epoch ≈ 2 days; the day-count gloss
+          makes the epoch number legible without teaching epoch math.
         -->
         <p class="text-xs text-[color:var(--color-text-muted)]">
-          First seen at epoch <span class="tabular-nums">{scoring.tenure.firstSeenEpoch}</span> ·
-          active <span class="tabular-nums">{scoring.tenure.activeEpochs.toLocaleString()}</span>
-          epochs (~{(scoring.tenure.activeEpochs * 2).toLocaleString()} days).
+          Active since epoch <span class="tabular-nums">{scoring.tenure.firstSeenEpoch}</span> ·
+          <span class="tabular-nums">{scoring.tenure.activeEpochs.toLocaleString()}</span>
+          epochs (~{(scoring.tenure.activeEpochs * 2).toLocaleString()}d).
         </p>
       </div>
     </Card>

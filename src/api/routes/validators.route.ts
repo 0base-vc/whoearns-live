@@ -295,6 +295,7 @@ export function tenureClientBlocks(
   const tenure = summariseTenure(
     validator.firstSeenEpoch,
     currentEpoch !== null ? currentEpoch.epoch : validator.lastSeenEpoch,
+    validator.genesisEpoch,
   );
   // Re-narrow the stored client kind to the documented enum at the
   // public boundary. The DB column is intentionally wide so a

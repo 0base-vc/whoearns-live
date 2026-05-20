@@ -1029,6 +1029,7 @@ async function buildValidatorBadgesPayload(
   const tenure = summariseTenure(
     validator.firstSeenEpoch,
     currentEpoch !== null ? currentEpoch.epoch : validator.lastSeenEpoch,
+    validator.genesisEpoch,
   );
   // Re-narrow the stored client kind to the documented enum at the
   // public boundary — same as the /badges route.

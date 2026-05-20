@@ -17,6 +17,15 @@ export interface Validator {
   identityPubkey: IdentityPubkey;
   firstSeenEpoch: Epoch;
   lastSeenEpoch: Epoch;
+  /**
+   * True on-chain tenure start — the validator's first epoch with
+   * stake, sourced from stakewiz (`first_epoch_with_stake`) by the
+   * `stakewiz-tenure-ingester` job. `null` until backfilled. Tenure
+   * computation prefers this over `firstSeenEpoch`, which is only
+   * indexer-relative (the epoch WhoEarns first observed the vote
+   * account, NOT when the validator actually started).
+   */
+  genesisEpoch: Epoch | null;
   updatedAt: Date;
   /**
    * On-chain validator-info fields — mirrored from the Solana Config

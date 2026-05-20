@@ -13,6 +13,7 @@ interface ValidatorRow {
   identity_pubkey: string;
   first_seen_epoch: string;
   last_seen_epoch: string;
+  genesis_epoch: string | null;
   updated_at: Date;
   name: string | null;
   details: string | null;
@@ -27,7 +28,7 @@ interface ValidatorRow {
 
 /** Column list shared by every SELECT so new info columns stay in sync. */
 const VALIDATOR_COLS = `vote_pubkey, identity_pubkey, first_seen_epoch, last_seen_epoch,
-  updated_at, name, details, website, keybase_username, icon_url, info_updated_at,
+  genesis_epoch, updated_at, name, details, website, keybase_username, icon_url, info_updated_at,
   COALESCE(client_kind, 'unknown') AS client_kind, client_version, client_updated_at`;
 
 function rowToValidator(row: ValidatorRow): Validator {
@@ -36,6 +37,13 @@ function rowToValidator(row: ValidatorRow): Validator {
     identityPubkey: row.identity_pubkey,
     firstSeenEpoch: Number(row.first_seen_epoch),
     lastSeenEpoch: Number(row.last_seen_epoch),
+    // Treat both `null` and `undefined` as "no genesis epoch" — a
+    // partial-projection SELECT that omits the column yields
+    // `undefined`, which must map to `null`, not `NaN`.
+    genesisEpoch:
+      row.genesis_epoch === null || row.genesis_epoch === undefined
+        ? null
+        : Number(row.genesis_epoch),
     updatedAt: row.updated_at,
     name: row.name,
     details: row.details,
@@ -74,6 +82,42 @@ export class ValidatorsRepository {
          updated_at = NOW()`,
       [v.votePubkey, v.identityPubkey, v.firstSeenEpoch, v.lastSeenEpoch],
     );
+  }
+
+  /**
+   * Bulk-set `genesis_epoch` for the supplied (vote, epoch) pairs.
+   *
+   * Driven by the `stakewiz-tenure-ingester` job. Only rows that
+   * ALREADY exist in `validators` are touched — stakewiz returns the
+   * whole mainnet set but we only carry rows for validators we've
+   * indexed, and an `UPDATE … FROM (VALUES …)` naturally no-ops the
+   * non-matching pairs. The `IS DISTINCT FROM` guard skips a write
+   * when the stored value already matches (genesis epoch is
+   * immutable once known — most ticks are pure no-ops).
+   *
+   * Returns the number of rows actually changed. Empty input is a
+   * no-op. Done in one statement so a ~1-2k-pair refresh is a single
+   * round-trip.
+   */
+  async setGenesisEpochs(
+    entries: ReadonlyArray<{ votePubkey: string; genesisEpoch: number }>,
+  ): Promise<{ updated: number }> {
+    if (entries.length === 0) return { updated: 0 };
+    const votes = entries.map((e) => e.votePubkey);
+    const epochs = entries.map((e) => e.genesisEpoch);
+    const { rowCount } = await this.pool.query(
+      `UPDATE validators v
+          SET genesis_epoch = data.epoch,
+              updated_at    = NOW()
+         FROM (
+           SELECT UNNEST($1::text[])    AS vote,
+                  UNNEST($2::integer[]) AS epoch
+         ) AS data
+        WHERE v.vote_pubkey = data.vote
+          AND v.genesis_epoch IS DISTINCT FROM data.epoch`,
+      [votes, epochs],
+    );
+    return { updated: rowCount ?? 0 };
   }
 
   /**
@@ -365,8 +409,8 @@ export class ValidatorsRepository {
       const namePattern = matchMode === 'prefix' ? prefix : like;
       const { rows } = await this.pool.query<ValidatorRow>(
         `SELECT v.vote_pubkey, v.identity_pubkey, v.first_seen_epoch, v.last_seen_epoch,
-                v.updated_at, v.name, v.details, v.website, v.keybase_username, v.icon_url,
-                v.info_updated_at,
+                v.genesis_epoch, v.updated_at, v.name, v.details, v.website,
+                v.keybase_username, v.icon_url, v.info_updated_at,
                 CASE
                   WHEN lower(v.vote_pubkey) LIKE $3 ESCAPE '\\' THEN 0
                   WHEN lower(v.identity_pubkey) LIKE $3 ESCAPE '\\' THEN 1

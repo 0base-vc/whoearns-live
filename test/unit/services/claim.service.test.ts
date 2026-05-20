@@ -194,6 +194,7 @@ class FakeValidatorsRepo implements Pick<ValidatorsRepository, 'findByVote' | 'f
       identityPubkey: identity,
       firstSeenEpoch: 950,
       lastSeenEpoch: 960,
+      genesisEpoch: null,
       updatedAt: new Date(),
       name: null,
       details: null,

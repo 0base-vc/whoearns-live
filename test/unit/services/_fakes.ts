@@ -54,6 +54,8 @@ export class FakeValidatorsRepo {
       identityPubkey: v.identityPubkey,
       firstSeenEpoch: firstSeen,
       lastSeenEpoch: lastSeen,
+      // `genesis_epoch` is owned by `setGenesisEpochs`, not `upsert`.
+      genesisEpoch: existing ? existing.genesisEpoch : null,
       updatedAt: new Date(),
       // Info columns are owned by `upsertInfo`, not `upsert` — the
       // hot-path validator sync must not clobber monikers. Preserve

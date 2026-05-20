@@ -55,4 +55,48 @@ describe('summariseTenure', () => {
     expect(t.firstSeenEpoch).toBe(0);
     expect(t.landmark).toBe('MAINNET_BETA_LAUNCH');
   });
+
+  describe('genesisEpoch (stakewiz true-age)', () => {
+    it('prefers genesisEpoch over firstSeenEpoch when supplied', () => {
+      // The bug this fixes: indexer first-seen is recent (epoch 956),
+      // but the validator truly started at epoch 82. Without the
+      // genesis epoch, tenure mis-classifies a years-old "Cycle 1 OG"
+      // validator as a recent "Newer Operator" (the RECENT landmark).
+      const indexerRelative = summariseTenure(956, 1015);
+      expect(indexerRelative.landmark).toBe('RECENT');
+      expect(indexerRelative.badge).toBe('Newer Operator');
+
+      const trueAge = summariseTenure(956, 1015, 82);
+      expect(trueAge.firstSeenEpoch).toBe(82);
+      expect(trueAge.landmark).toBe('CYCLE_1_OG');
+      expect(trueAge.badge).toBe('Cycle 1 OG');
+      // activeEpochs computed from the genesis epoch, not first-seen.
+      expect(trueAge.activeEpochs).toBe(1015 - 82);
+    });
+
+    it('falls back to firstSeenEpoch when genesisEpoch is null', () => {
+      const t = summariseTenure(100, 1000, null);
+      expect(t.firstSeenEpoch).toBe(100);
+      expect(t.landmark).toBe('CYCLE_1_OG');
+    });
+
+    it('falls back to firstSeenEpoch when genesisEpoch is undefined', () => {
+      const t = summariseTenure(100, 1000, undefined);
+      expect(t.firstSeenEpoch).toBe(100);
+    });
+
+    it('ignores a NaN / negative genesisEpoch and falls back', () => {
+      const nan = summariseTenure(100, 1000, Number.NaN);
+      expect(nan.firstSeenEpoch).toBe(100);
+      const negative = summariseTenure(100, 1000, -5);
+      expect(negative.firstSeenEpoch).toBe(100);
+    });
+
+    it('genesisEpoch === 0 is honoured (Genesis Operator), not treated as falsy-missing', () => {
+      const t = summariseTenure(956, 1015, 0);
+      expect(t.firstSeenEpoch).toBe(0);
+      expect(t.landmark).toBe('MAINNET_BETA_LAUNCH');
+      expect(t.badge).toBe('Genesis Operator');
+    });
+  });
 });

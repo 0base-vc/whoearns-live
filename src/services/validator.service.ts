@@ -157,6 +157,11 @@ export class ValidatorService {
         identityPubkey: identity,
         firstSeenEpoch: epoch,
         lastSeenEpoch: epoch,
+        // `genesis_epoch` is owned by the stakewiz-tenure-ingester
+        // job; refreshFromRpc doesn't load it (same as the info +
+        // client columns below). Callers needing tenure re-fetch via
+        // `findByVote`, which SELECTs the full row.
+        genesisEpoch: null,
         updatedAt: new Date(),
         // Info columns are owned by the validator-info-refresh job;
         // refreshFromRpc doesn't load them, so we return null here

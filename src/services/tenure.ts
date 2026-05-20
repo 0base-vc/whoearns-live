@@ -40,7 +40,12 @@ export const TENURE_LANDMARKS = {
 } as const;
 
 export interface TenureSummary {
-  /** Epoch the indexer first recorded this validator. */
+  /**
+   * The epoch tenure was computed FROM — the validator's true first
+   * epoch with stake (`genesisEpoch`) when known, otherwise the
+   * indexer-relative first-seen epoch. The field name is kept for
+   * API back-compat; its value is genesis-preferred.
+   */
   firstSeenEpoch: number;
   /** Closed-or-running epoch count since `firstSeenEpoch`. */
   activeEpochs: number;
@@ -54,16 +59,25 @@ export interface TenureSummary {
 }
 
 /**
- * Compute tenure summary from the validator's first-seen epoch and
- * the current epoch.
+ * Compute tenure summary for a validator.
+ *
+ * `genesisEpoch` is the validator's TRUE first epoch with stake
+ * (sourced from stakewiz by the `stakewiz-tenure-ingester`). When
+ * present + valid it is preferred over `firstSeenEpoch` — the latter
+ * is only indexer-relative (the epoch WhoEarns first observed the
+ * vote account), so a validator running for years but indexed
+ * recently would otherwise mis-render as a brand-new operator with
+ * the wrong landmark badge. `genesisEpoch` is `undefined`/`null`
+ * until the ingester backfills it; the fallback keeps tenure
+ * working (just indexer-relative) in the meantime.
  *
  * Defensive against impossible / corrupt inputs:
  *   - non-finite or negative inputs are coerced to 0 before the
- *     landmark cascade. A `NaN` first-seen epoch (e.g. from BIGINT
- *     precision loss in `Number(row.first_seen_epoch)`) would
- *     otherwise propagate through the cascade as never-matching and
- *     emit `activeEpochs: NaN`, which serialises to `null` in JSON
- *     and violates the OpenAPI `integer, minimum: 0` contract.
+ *     landmark cascade. A `NaN` epoch (e.g. from BIGINT precision
+ *     loss in `Number(row.first_seen_epoch)`) would otherwise
+ *     propagate through the cascade as never-matching and emit
+ *     `activeEpochs: NaN`, which serialises to `null` in JSON and
+ *     violates the OpenAPI `integer, minimum: 0` contract.
  *
  * **Landmark maintenance.** Today the highest landmark is
  * `RECENT: 1000`. As mainnet epoch advances past `RECENT + ~200`,
@@ -72,9 +86,20 @@ export interface TenureSummary {
  * `RECENT` accordingly. Keep the chain short; bloat dilutes the
  * signal.
  */
-export function summariseTenure(firstSeenEpoch: number, currentEpoch: number): TenureSummary {
+export function summariseTenure(
+  firstSeenEpoch: number,
+  currentEpoch: number,
+  genesisEpoch?: number | null,
+): TenureSummary {
+  // Prefer the true on-chain genesis epoch when the ingester has
+  // supplied a valid one; fall back to the indexer-relative
+  // first-seen epoch otherwise.
+  const effectiveFirst =
+    typeof genesisEpoch === 'number' && Number.isFinite(genesisEpoch) && genesisEpoch >= 0
+      ? genesisEpoch
+      : firstSeenEpoch;
   const safeFirst =
-    Number.isFinite(firstSeenEpoch) && firstSeenEpoch >= 0 ? Math.floor(firstSeenEpoch) : 0;
+    Number.isFinite(effectiveFirst) && effectiveFirst >= 0 ? Math.floor(effectiveFirst) : 0;
   const safeCurrent =
     Number.isFinite(currentEpoch) && currentEpoch >= 0 ? Math.floor(currentEpoch) : safeFirst;
   const activeEpochs = Math.max(0, safeCurrent - safeFirst);
