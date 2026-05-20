@@ -123,11 +123,6 @@
   // See the helper's docstring for the full rejection list.
   const safeIconUrl = $derived(safeOperatorUrl(history?.iconUrl));
 
-  // Korean accent strip — purely cosmetic, triggered by the operator's
-  // own choice to put 🇰🇷 in their moniker. NOT geolocation, NOT inferred.
-  // The trigger respects the operator's identity.
-  const showKoreanAccent = $derived(moniker !== null && moniker.includes('🇰🇷'));
-
   // Soft owner hint — sessionStorage flag set after a successful claim
   // flow + the `?owner=1` query param. NEITHER is a trusted owner
   // boundary; we only use them to surface a "Manage profile" CTA.
@@ -623,26 +618,6 @@
     </div>
   </div>
 
-  <!--
-    Korean accent chip — small flag swatch at the bottom of the hero.
-    Triggered ONLY by 🇰🇷 in the operator's own moniker. This is a
-    cosmetic identity-respecting nod (`title` tooltip is explicit
-    about that — WhoEarns is NOT inferring a locale), not a
-    geographic claim. Earlier revision rendered the strip as a
-    full-width 4px hairline that read as a broken `<hr>` rather
-    than a flag; now a 64×8px rounded swatch sits inline below the
-    hero content so it reads as a deliberate accent.
-  -->
-  {#if showKoreanAccent}
-    <div class="mt-4 inline-flex items-center gap-2">
-      <span
-        class="h-2 w-16 rounded-sm shadow-sm ring-1 ring-black/10"
-        style="background: linear-gradient(90deg, #cd2e3a 0%, #cd2e3a 33%, #ffffff 33%, #ffffff 67%, #0047a0 67%, #0047a0 100%);"
-        title="Mirrors 🇰🇷 from the operator's moniker — WhoEarns does not infer locale."
-        aria-label="Korean flag accent — mirrors the 🇰🇷 emoji in the operator's moniker"
-      ></span>
-    </div>
-  {/if}
   <!--
     Sentinel for StickyHubHeader's IntersectionObserver — a zero-
     height element at the END of the hero card. Once the user
