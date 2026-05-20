@@ -19,6 +19,7 @@ import type { FastifyInstance } from 'fastify';
 import { cacheControl } from '../../../src/api/cache-control.js';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import validatorsHistoryRoutes from '../../../src/api/routes/validators-history.route.js';
+import { LAMPORTS_PER_SOL } from '../../../src/core/lamports.js';
 import type { ValidatorService } from '../../../src/services/validator.service.js';
 import type { AggregatesRepository } from '../../../src/storage/repositories/aggregates.repo.js';
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
@@ -120,6 +121,7 @@ describe('GET /v1/validators/:idOrVote/history', () => {
       basis: 'income_per_assigned_slot',
     });
     await ctx.epochs.upsert(makeEpochInfo(500, 0, 431_999, { isClosed: true }));
+    ctx.validatorService.activatedStakeLamports = LAMPORTS_PER_SOL;
 
     const res = await ctx.app.inject({
       method: 'GET',
@@ -164,6 +166,28 @@ describe('GET /v1/validators/:idOrVote/history', () => {
     expect(ctx.validatorService.trackCalls).toHaveLength(0);
     expect(await ctx.watchedDynamic.findByVote(VOTE_1)).not.toBeNull();
 
+    await ctx.app.close();
+  });
+
+  it('does not add a known validator to dynamic tracking below the stake floor', async () => {
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    ctx.validatorService.activatedStakeLamports = LAMPORTS_PER_SOL - 1n;
+
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/history?limit=10`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ctx.validatorService.trackCalls).toHaveLength(0);
+    expect(await ctx.watchedDynamic.findByVote(VOTE_1)).toBeNull();
     await ctx.app.close();
   });
 

@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { NotFoundError } from '../../core/errors.js';
+import { LAMPORTS_PER_SOL } from '../../core/lamports.js';
 import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import type { ValidatorService } from '../../services/validator.service.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
@@ -28,6 +29,7 @@ import { unwrap } from '../zod-helpers.js';
  * query parameter.
  */
 const DEFAULT_CLUSTER_TOP_N = 100;
+const DYNAMIC_WATCH_MIN_ACTIVATED_STAKE_LAMPORTS = LAMPORTS_PER_SOL;
 
 export interface ValidatorsHistoryRoutesDeps {
   statsRepo: Pick<StatsRepository, 'findHistoryByVote' | 'findIndexedIncomePerSlotBenchmarks'>;
@@ -191,23 +193,28 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // isn't slowed by bookkeeping.
     void watchedDynamicRepo.touchLookup(validator.votePubkey);
 
-    // Ensure known validators are in the dynamic watched set without
-    // calling `trackOnDemand`. The known path already resolved from
-    // local DB; falling back to full `getVoteAccounts` here lets
-    // ordinary page views amplify into upstream RPC work during a
-    // cold-start window. `add` is idempotent and also bumps lookup_count.
-    void watchedDynamicRepo
-      .add({
-        votePubkey: validator.votePubkey,
-        activatedStakeLamportsAtAdd:
-          validatorService.getActivatedStakeLamports(validator.votePubkey) ?? 0n,
-      })
-      .catch((err) => {
-        request.log.warn(
-          { err, vote: validator.votePubkey },
-          'validators-history: ensure-watched dynamic add failed (non-fatal)',
-        );
-      });
+    // Ensure known validators can enter the dynamic watched set without
+    // re-entering `trackOnDemand`. The unknown-validator path may refresh
+    // vote accounts via RPC; doing that on every known direct hit would
+    // reintroduce cold-start RPC amplification. This path only trusts the
+    // in-memory stake cache populated by the validator refresh job.
+    const activatedStakeLamports = validatorService.getActivatedStakeLamports(validator.votePubkey);
+    if (
+      activatedStakeLamports !== null &&
+      activatedStakeLamports >= DYNAMIC_WATCH_MIN_ACTIVATED_STAKE_LAMPORTS
+    ) {
+      void watchedDynamicRepo
+        .add({
+          votePubkey: validator.votePubkey,
+          activatedStakeLamportsAtAdd: activatedStakeLamports,
+        })
+        .catch((err) => {
+          request.log.warn(
+            { err, vote: validator.votePubkey },
+            'validators-history: ensure-watched add failed (non-fatal)',
+          );
+        });
+    }
 
     // Phase 3: pull the validator's profile + claim in parallel with
     // history. If the operator has opted out, the short-circuit
