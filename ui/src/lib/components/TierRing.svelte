@@ -194,12 +194,26 @@
       to the wrapper still works.
     -->
     <div
-      class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1"
+      class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-0.5"
     >
-      <TierBadge {tier} size={Math.round(size * 0.32)} label="" />
-      <span class="font-semibold tabular-nums text-2xl">
-        {centreLabel}
-      </span>
+      <TierBadge {tier} size={Math.round(size * 0.24)} label="" />
+      <!--
+        The composite is the single most prominent number on the
+        hub — was `text-2xl` (24px), now `text-4xl` so it dominates
+        the ring centre. The `/ 100` suffix mirrors the OAI tile
+        convention and answers the "out of what" question that the
+        bare `79` used to leave hanging.
+      -->
+      <div class="flex items-baseline gap-1">
+        <span class="font-bold tabular-nums text-4xl leading-none">
+          {centreLabel}
+        </span>
+        {#if composite !== null}
+          <span class="text-xs font-normal text-[color:var(--color-text-muted)] leading-none">
+            / 100
+          </span>
+        {/if}
+      </div>
     </div>
   </div>
 
@@ -224,7 +238,7 @@
         </dt>
         <dd class="tabular-nums">{reliabilityPct}%</dd>
       </div>
-      <div class="h-1 w-full rounded-full bg-[color:var(--color-border-default)]">
+      <div class="h-1.5 w-full rounded-full bg-[color:var(--color-border-default)]">
         <div
           class="h-full rounded-full {reliabilityTone}"
           style="width: {reliabilityBarWidth};"
@@ -238,7 +252,7 @@
         </dt>
         <dd class="tabular-nums">{economicPct}%</dd>
       </div>
-      <div class="h-1 w-full rounded-full bg-[color:var(--color-border-default)]">
+      <div class="h-1.5 w-full rounded-full bg-[color:var(--color-border-default)]">
         <div class="h-full rounded-full {economicTone}" style="width: {economicBarWidth};"></div>
       </div>
     </div>

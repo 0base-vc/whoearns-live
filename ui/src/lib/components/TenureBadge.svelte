@@ -3,7 +3,7 @@
 
   Renders the `tenure` block from `/scoring` or `/badges` as a compact
   pill showing the landmark display string ("Cycle 1 OG", "DeFi 2
-  Era", "Recent-Era Operator", …) alongside the first-seen epoch and
+  Era", "Newer Operator", …) alongside the first-seen epoch and
   active-epoch count. The landmark drives the visual treatment —
   Cycle 1 OG and Mainnet Beta Launch (the two earliest landmarks) get
   an additional brand-tinted ember-glow accent and a tiny star

@@ -29,7 +29,7 @@ describe('summariseTenure', () => {
     // the constants so the recalibration in tenure.ts can't desync it.
     const t = summariseTenure(TENURE_LANDMARKS.FIREDANCER_LAUNCH + 100, TENURE_LANDMARKS.RECENT);
     expect(t.landmark).toBe('RECENT');
-    expect(t.badge).toBe('Recent-Era Operator');
+    expect(t.badge).toBe('Newer Operator');
   });
 
   it('classifies a brand-new operator past the last landmark', () => {

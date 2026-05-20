@@ -379,7 +379,13 @@
   <footer
     class="mt-3 flex items-center justify-end gap-1 text-[10px] text-[color:var(--color-text-muted)]"
   >
-    <span>Less</span>
+    <!--
+      Unit-prefixed label so the bucket numbers ("0", "1-2", "3-10",
+      …) read as "transactions per day", not naked counts the
+      reader has to guess at. Earlier "Less … More" framing was
+      directional but unit-less — leaving "1-2 what?" hanging.
+    -->
+    <span>Txs per day:</span>
     {#each [0, 1, 2, 3, 4] as bucket (bucket)}
       <span class="flex flex-col items-center gap-0.5">
         <span
@@ -390,6 +396,5 @@
         <span class="tabular-nums">{BUCKET_RANGES[bucket]}</span>
       </span>
     {/each}
-    <span>More</span>
   </footer>
 </section>

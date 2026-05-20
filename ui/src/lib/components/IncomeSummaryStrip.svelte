@@ -207,7 +207,7 @@
         href={`/income/${vote}`}
         class="inline-flex min-h-11 items-center text-xs text-[color:var(--color-brand-500)] hover:underline"
       >
-        Full history →
+        Full income history →
       </a>
     {/if}
   </header>

@@ -169,8 +169,19 @@
   Touch targets are 44×44 (WCAG SC 2.5.5 minimum); the wrapper gap
   keeps the visual cluster compact.
 -->
+<!--
+  Cluster gap is `gap-2` (was `gap-1`) so the three 44×44 buttons
+  read as separate actions, not one toolbar widget.
+
+  Each button now carries a visible text label on `lg:` breakpoints
+  (`hidden lg:inline`) — sighted desktop users see "Share / Copy URL
+  / Embed" alongside the icon instead of guessing what each glyph
+  does. The `title` tooltip stays as the canonical label source for
+  touch + mobile + assistive tech (which is where `lg:hidden` keeps
+  the icon-only layout for hit-target compactness).
+-->
 <div
-  class="flex items-center gap-1"
+  class="flex items-center gap-2"
   role="group"
   aria-label="Share this validator profile"
   aria-live="polite"
@@ -179,7 +190,7 @@
     href={xShareUrl}
     target="_blank"
     rel="noopener noreferrer"
-    class="inline-flex h-11 w-11 items-center justify-center rounded-lg text-[color:var(--color-text-subtle)] hover:bg-[color:var(--color-surface-muted)] hover:text-[color:var(--color-text-default)] transition-colors"
+    class="inline-flex h-11 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[color:var(--color-text-subtle)] hover:bg-[color:var(--color-surface-muted)] hover:text-[color:var(--color-text-default)] transition-colors"
     title="Share on X (formerly Twitter)"
     aria-label="Share on X (formerly Twitter)"
   >
@@ -199,11 +210,12 @@
       <path d="M8 11V2" />
       <path d="M5 5l3-3 3 3" />
     </svg>
+    <span class="hidden text-xs font-medium lg:inline">Share</span>
   </a>
   <button
     type="button"
     onclick={() => copy(hubUrl, 'url')}
-    class="inline-flex h-11 w-11 items-center justify-center rounded-lg text-[color:var(--color-text-subtle)] hover:bg-[color:var(--color-surface-muted)] hover:text-[color:var(--color-text-default)] transition-colors"
+    class="inline-flex h-11 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[color:var(--color-text-subtle)] hover:bg-[color:var(--color-surface-muted)] hover:text-[color:var(--color-text-default)] transition-colors"
     title={urlCopied ? 'Copied!' : 'Copy hub URL'}
     aria-label={urlCopied ? 'Hub URL copied to clipboard' : 'Copy hub URL'}
   >
@@ -239,12 +251,15 @@
         <path d="M3 11V3a1 1 0 0 1 1-1h8" />
       </svg>
     {/if}
+    <span class="hidden text-xs font-medium lg:inline">
+      {urlCopied ? 'Copied!' : 'Copy URL'}
+    </span>
   </button>
   <button
     type="button"
     onclick={() => copy(embedSnippet, 'embed')}
-    class="inline-flex h-11 w-11 items-center justify-center rounded-lg text-[color:var(--color-text-subtle)] hover:bg-[color:var(--color-surface-muted)] hover:text-[color:var(--color-text-default)] transition-colors"
-    title={embedCopied ? 'Copied!' : 'Copy <img> embed snippet for the SVG badge'}
+    class="inline-flex h-11 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[color:var(--color-text-subtle)] hover:bg-[color:var(--color-surface-muted)] hover:text-[color:var(--color-text-default)] transition-colors"
+    title={embedCopied ? 'Copied!' : 'Copy embed HTML for this validator'}
     aria-label={embedCopied ? 'Embed snippet copied to clipboard' : 'Copy embed snippet'}
   >
     {#if embedCopied}
@@ -278,5 +293,8 @@
         <path d="M11 4l3 4-3 4" />
       </svg>
     {/if}
+    <span class="hidden text-xs font-medium lg:inline">
+      {embedCopied ? 'Copied!' : 'Embed'}
+    </span>
   </button>
 </div>

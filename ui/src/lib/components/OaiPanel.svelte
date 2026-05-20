@@ -62,13 +62,28 @@
   }
 </script>
 
+<!--
+  Full-width section. Earlier revision self-clamped to `col-8`
+  (`lg:max-w-[calc((100%/12)*8)]`) under the assumption a sibling
+  card would occupy the right `col-4` — but the hub's grid never
+  added that sibling, so the clamp produced a visible empty band
+  to the right. The OAI is a peer of Wallet-activity / Audit /
+  SIMD, all of which render full-width; matching that rhythm.
+-->
 <section
-  class="rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 lg:max-w-[calc((100%/12)*8)]"
+  class="rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
   aria-labelledby="oai-heading"
 >
   <header class="flex items-baseline justify-between gap-2 pb-3">
-    <!-- h2 — peer of the other hub sections (Wallet activity, Audit, SIMD). -->
-    <h2 id="oai-heading" class="text-base font-semibold tracking-tight">Operator Activity Index</h2>
+    <!--
+      h2 — peer of the other hub sections (Wallet activity, Audit,
+      SIMD). The earlier name "Operator Activity Index" leaked
+      backend taxonomy to a delegator surface; `Operator engagement`
+      reads as plain English while the score-tile labels below
+      ("Governance", "Wallet activity") preserve the technical
+      sub-shape.
+    -->
+    <h2 id="oai-heading" class="text-lg font-semibold tracking-tight">Operator engagement</h2>
     <!--
       Pill renders ONLY when the composite is a real number — never
       "OAI —". Per the per-component breakdown mandate, a half-shown
@@ -106,7 +121,7 @@
         <div class="flex items-baseline justify-between gap-2">
           <h3 class="text-sm font-semibold tracking-tight">Governance</h3>
           {#if !governanceActive}
-            <Pill tone="warn" size="sm">Ingest pending</Pill>
+            <Pill tone="warn" size="sm">Data pending</Pill>
           {/if}
         </div>
         {#if governanceActive}
@@ -127,22 +142,27 @@
             <span aria-hidden="true">—</span>
           </p>
         {/if}
-        <dl class="mt-3 grid grid-cols-3 gap-2 text-xs text-[color:var(--color-text-muted)]">
-          <div>
-            <dt class="uppercase tracking-wide text-[color:var(--color-text-muted)]">Comments</dt>
-            <dd class="mt-0.5 tabular-nums">{oai.components.governance.commentCount}</dd>
+        <!--
+          Vertical stack instead of `grid-cols-3 gap-2`. With the
+          tile already 1/3 of a now-full-width panel, the inner
+          3-col grid was crushing each cell to ~60-70px and the
+          uppercase 14-char labels ("PEER REACTIONS") collided
+          into "COMMENTSPEER REACTIONSSIMDS" on the live page.
+          One row per label-value pair scales legibly at any
+          breakpoint and keeps the same vertical footprint.
+        -->
+        <dl class="mt-3 space-y-1.5 text-xs text-[color:var(--color-text-muted)]">
+          <div class="flex items-baseline justify-between gap-2">
+            <dt class="uppercase tracking-wide">SIMD comments</dt>
+            <dd class="tabular-nums">{oai.components.governance.commentCount}</dd>
           </div>
-          <div>
-            <dt class="uppercase tracking-wide text-[color:var(--color-text-muted)]">
-              Peer reactions
-            </dt>
-            <dd class="mt-0.5 tabular-nums">{oai.components.governance.reactionsReceived}</dd>
+          <div class="flex items-baseline justify-between gap-2">
+            <dt class="uppercase tracking-wide">Reactions</dt>
+            <dd class="tabular-nums">{oai.components.governance.reactionsReceived}</dd>
           </div>
-          <div>
-            <dt class="uppercase tracking-wide text-[color:var(--color-text-muted)]">
-              Active SIMDs
-            </dt>
-            <dd class="mt-0.5 tabular-nums">{oai.components.governance.activeWindowCount}</dd>
+          <div class="flex items-baseline justify-between gap-2">
+            <dt class="uppercase tracking-wide">SIMDs engaged</dt>
+            <dd class="tabular-nums">{oai.components.governance.activeWindowCount}</dd>
           </div>
         </dl>
         {#if !governanceActive}
@@ -193,8 +213,12 @@
         <div class="flex items-baseline justify-between gap-2">
           <h3 class="text-sm font-semibold tracking-tight">Wallet activity</h3>
           {#if !walletFeesActive}
-            <Pill tone="info" size="sm" title="Fee anchoring deferred; v1 uses tx counts only.">
-              Tx counts only
+            <Pill
+              tone="info"
+              size="sm"
+              title="Counts active days, not fees. Per-day fee weighting ships in a later version."
+            >
+              Activity only
             </Pill>
           {/if}
         </div>

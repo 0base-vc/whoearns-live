@@ -562,8 +562,20 @@
           />
         </p>
 
-        <!-- Trust summary one-liner — the hub's scannable hero line. -->
-        <p class="mt-3 text-sm text-[color:var(--color-text-muted)]" data-testid="trust-summary">
+        <!--
+          Trust summary one-liner — the hub's scannable hero line.
+          Promoted from `text-sm text-text-muted` to `text-base
+          text-text-default` because this line IS the hero's payload
+          (tier · tenure · client · skip · last-month income); a
+          muted treatment buried it amid the freshness + website
+          lines below at exactly the same colour. The wrapper has
+          `bg-surface-muted` so it reads as a distinct trust strip
+          rather than another body paragraph.
+        -->
+        <p
+          class="mt-3 inline-block rounded-md bg-[color:var(--color-surface-muted)] px-3 py-2 text-base font-medium text-[color:var(--color-text-default)]"
+          data-testid="trust-summary"
+        >
           {trustLine}
         </p>
 
@@ -607,24 +619,24 @@
   </div>
 
   <!--
-    Korean accent strip — 4px gradient bar at the bottom of the hero.
+    Korean accent chip — small flag swatch at the bottom of the hero.
     Triggered ONLY by 🇰🇷 in the operator's own moniker. This is a
-    cosmetic identity-respecting nod, not a locale inference.
+    cosmetic identity-respecting nod (`title` tooltip is explicit
+    about that — WhoEarns is NOT inferring a locale), not a
+    geographic claim. Earlier revision rendered the strip as a
+    full-width 4px hairline that read as a broken `<hr>` rather
+    than a flag; now a 64×8px rounded swatch sits inline below the
+    hero content so it reads as a deliberate accent.
   -->
   {#if showKoreanAccent}
-    <!--
-      South-Korean flag colours, literal hex throughout. Earlier
-      revision used `var(--color-text-default)` for the white
-      middle stripe, which inverts to near-black in light mode
-      (broken) and uses a theme-tinted near-white in dark mode
-      (off-flag). The flag's middle is `#ffffff` regardless of
-      theme; that's what we paint here.
-    -->
-    <div
-      class="mt-4 h-1 w-full rounded-full"
-      style="background: linear-gradient(90deg, #cd2e3a 0%, #cd2e3a 33%, #ffffff 33%, #ffffff 67%, #0047a0 67%, #0047a0 100%);"
-      aria-hidden="true"
-    ></div>
+    <div class="mt-4 inline-flex items-center gap-2">
+      <span
+        class="h-2 w-16 rounded-sm shadow-sm ring-1 ring-black/10"
+        style="background: linear-gradient(90deg, #cd2e3a 0%, #cd2e3a 33%, #ffffff 33%, #ffffff 67%, #0047a0 67%, #0047a0 100%);"
+        title="Mirrors 🇰🇷 from the operator's moniker — WhoEarns does not infer locale."
+        aria-label="Korean flag accent — mirrors the 🇰🇷 emoji in the operator's moniker"
+      ></span>
+    </div>
   {/if}
   <!--
     Sentinel for StickyHubHeader's IntersectionObserver — a zero-
@@ -669,9 +681,17 @@
 {/if}
 
 <!-- ─────────── 2. Tier card + Tenure/Client stack ─────────── -->
+<!--
+  col-7 / col-5 split (was col-8 / col-4). The Tier card is dense
+  (ring + bars + warn chip + reason line + window-detail expander)
+  and reads well at slightly less width; the Tenure/Client stack
+  has roomy badges and a one-line subtext each, so it benefits
+  from the extra ~8% width. Old ratio left the right column
+  looking under-filled relative to the left.
+-->
 <div class="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-12">
-  <!-- Tier card — col-span-8 on desktop. -->
-  <div class="lg:col-span-8">
+  <!-- Tier card — col-span-7 on desktop. -->
+  <div class="lg:col-span-7">
     <Card tone="panel">
       <div class="flex flex-col gap-4">
         <div class="flex items-baseline justify-between gap-2">
@@ -734,17 +754,23 @@
           <summary
             class="inline-flex min-h-11 cursor-pointer items-center text-[color:var(--color-text-muted)] hover:text-[color:var(--color-text-default)]"
           >
-            Window detail
+            Scoring window
           </summary>
+          <!--
+            Plain-English labels. Earlier revision used internal
+            engineering vocabulary ("Cohort size", "Measured epochs",
+            "Cohort window") which a delegator doesn't recognise.
+            The plain labels here are the same scope but readable.
+          -->
           <dl class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[color:var(--color-text-muted)]">
-            <dt>Closed epochs</dt>
+            <dt>Window length (epochs)</dt>
             <dd class="tabular-nums">{tierWindow.epochs}</dd>
-            <dt>Cohort size</dt>
+            <dt>Peers compared</dt>
             <dd class="tabular-nums">{tierWindow.economicCohortSize.toLocaleString()}</dd>
-            <dt>Measured epochs</dt>
+            <dt>Epochs with income</dt>
             <dd class="tabular-nums">{tierWindow.economicMeasuredEpochs}</dd>
             {#if tierWindow.cohortAsOfEpoch}
-              <dt>Cohort window</dt>
+              <dt>Peer-group epoch range</dt>
               <dd class="tabular-nums">
                 {tierWindow.cohortAsOfEpoch.fromEpoch}–{tierWindow.cohortAsOfEpoch.toEpoch}
               </dd>
@@ -755,15 +781,22 @@
     </Card>
   </div>
 
-  <!-- Tenure + Client stack — col-span-4 on desktop. -->
-  <div class="flex flex-col gap-6 lg:col-span-4">
+  <!-- Tenure + Client stack — col-span-5 on desktop. -->
+  <div class="flex flex-col gap-6 lg:col-span-5">
     <Card tone="panel">
       <div class="flex flex-col gap-3">
         <h2 class="text-base font-semibold tracking-tight">Tenure</h2>
         <TenureBadge tenure={scoring.tenure} size="md" />
+        <!--
+          Mainnet epoch ≈ 2 days. Appending the rough day-count
+          makes the epoch-number readable for delegators who don't
+          know Solana's epoch math — same constant as
+          `IncomeSummaryStrip` uses (`epochDurationDaysApprox = 2`).
+        -->
         <p class="text-xs text-[color:var(--color-text-muted)]">
           First seen at epoch <span class="tabular-nums">{scoring.tenure.firstSeenEpoch}</span> ·
-          active <span class="tabular-nums">{scoring.tenure.activeEpochs.toLocaleString()}</span> epochs.
+          active <span class="tabular-nums">{scoring.tenure.activeEpochs.toLocaleString()}</span>
+          epochs (~{(scoring.tenure.activeEpochs * 2).toLocaleString()} days).
         </p>
       </div>
     </Card>
@@ -772,13 +805,19 @@
       <div class="flex flex-col gap-3">
         <h2 class="text-base font-semibold tracking-tight">Client</h2>
         <ClientBadge client={scoring.client} size="md" />
+        <!--
+          "Gossip" is the Solana cluster gossip protocol — to a
+          casual delegator it reads as SNS gossip. Renamed to
+          "Client version last verified" which preserves the
+          technical truth without leaking the protocol name.
+        -->
         {#if scoring.client.updatedAt !== null}
           <p class="text-xs text-[color:var(--color-text-muted)]">
-            Gossip last observed {formatTimestamp(scoring.client.updatedAt)}.
+            Client version last verified {formatTimestamp(scoring.client.updatedAt)}.
           </p>
         {:else}
           <p class="text-xs text-[color:var(--color-text-muted)]">
-            Gossip has not yet observed this validator.
+            Client version not yet verified for this validator.
           </p>
         {/if}
       </div>

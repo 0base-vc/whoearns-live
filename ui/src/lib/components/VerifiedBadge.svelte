@@ -27,7 +27,16 @@
     label?: string;
   }
 
-  let { size = 14, label = 'Verified — operator has claimed this validator' }: Props = $props();
+  // Default label spells out the exact trust scope: this isn't a
+  // Twitter-style "real person" attestation, it's a cryptographic
+  // proof. The shape borrows Twitter's verification iconography
+  // for instant pattern-recognition, but the meaning is strictly
+  // weaker — only the validator-identity-key holder can produce
+  // the signature, not necessarily the named human or org.
+  let {
+    size = 14,
+    label = 'Verified — claim signed with the validator identity key (Ed25519)',
+  }: Props = $props();
 </script>
 
 <span

@@ -71,9 +71,9 @@ export const TIER_LABEL: Record<NodeTier, string> = {
 export const TIER_TAGLINE: Record<NodeTier, string> = {
   forge: 'Top economic productivity, clean block production.',
   anvil: 'Strong on both signals.',
-  hearth: 'Mid-pack, no red flags.',
+  hearth: 'Steady at the hearth — block production sound, economically mid-pack.',
   kindling: 'Bottom of the rated set — see breakdown.',
-  unrated: 'Sample too thin to classify.',
+  unrated: 'Not enough closed epochs yet to assign a tier.',
 };
 
 /**
@@ -162,7 +162,7 @@ export function isReliabilityFloorTriggered(
  *
  * Example outputs:
  *   "Forge • Cycle 1 OG • Firedancer 0.405 • 0.4% skip • ◎0.234 last month"
- *   "Unrated • Recent-Era Operator • Agave 3.1.13 • — skip • — last month"
+ *   "Unrated • Newer Operator • Agave 3.1.13 • — skip • — last month"
  */
 const TRUST_SEPARATOR = ' • ';
 

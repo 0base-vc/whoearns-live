@@ -108,7 +108,12 @@ export function summariseTenure(firstSeenEpoch: number, currentEpoch: number): T
     badge = 'Firedancer-Era Operator';
   } else if (safeFirst <= TENURE_LANDMARKS.RECENT) {
     landmark = 'RECENT';
-    badge = 'Recent-Era Operator';
+    // Other landmarks name an era the operator SURVIVED ("DeFi
+    // Summer Veteran"); this one names the era the operator
+    // STARTED in, which read incoherently ("Recent-Era" + "active
+    // 18 epochs"). `Newer Operator` keeps the bucket honest
+    // without falsely implying era-survivorship.
+    badge = 'Newer Operator';
   } else {
     landmark = 'recent_operator';
     badge = 'New Operator';
