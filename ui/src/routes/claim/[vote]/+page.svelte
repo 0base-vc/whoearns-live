@@ -35,12 +35,19 @@
 -->
 <script lang="ts">
   import type { PageData } from './$types';
-  import { fetchClaimChallenge, updateClaimProfile, verifyClaim, ApiError } from '$lib/api';
+  import {
+    fetchClaimChallenge,
+    updateClaimProfile,
+    verifyClaim,
+    linkGithub,
+    registerOperatorWallet,
+    ApiError,
+  } from '$lib/api';
   import Card from '$lib/components/Card.svelte';
   import AddressDisplay from '$lib/components/AddressDisplay.svelte';
   import EllipsisAddress from '$lib/components/EllipsisAddress.svelte';
   import { shortenPubkey } from '$lib/format';
-  import { SITE_NAME } from '$lib/site';
+  import { SITE_NAME, SITE_URL } from '$lib/site';
 
   let { data }: { data: PageData } = $props();
 
@@ -266,6 +273,395 @@
 
   const shortVote = $derived(shortenPubkey(history.vote, 6, 6));
   const pageTitle = $derived(`Claim ${history.name ?? shortVote} — ${SITE_NAME}`);
+
+  // ──────────────────────────────────────────────────────────────────
+  // GitHub link ceremony (PUT /v1/claims/:vote/github)
+  //
+  // Differs from the v1 claim/profile ceremony above: the signed
+  // payload is a sorted-keys JSON nonce (matches the server's
+  // `canonicaliseNonce` in `github-gist-verification.service.ts`),
+  // the signature lives in a public Gist body, and the submit only
+  // carries the gist URL + the body fields the server uses to
+  // reconstruct + verify the canonical nonce.
+  //
+  // Three states:
+  //   - read: show current githubLink if any (username + verifiedAt +
+  //     expiresAt)
+  //   - draft: operator types a GitHub username, hits "Generate" to
+  //     mint the canonical nonce + timestampMs (kept together so a
+  //     tweak invalidates the envelope), copies the canonical JSON +
+  //     the CLI command, signs offline, publishes a public Gist
+  //     containing `<json>---<base58sig>`, pastes the Gist URL back.
+  //   - submitted: 30-minute TTL on the nonce — the server enforces
+  //     freshness; we just disable the submit if the envelope expired
+  //     locally to avoid a guaranteed 403 round-trip.
+  // ──────────────────────────────────────────────────────────────────
+
+  // svelte-ignore state_referenced_locally
+  let githubUsernameDraft = $state<string>(
+    status.claimed && status.githubLink ? status.githubLink.githubUsername : '',
+  );
+  let githubEnvelope = $state<{
+    nonceJson: string;
+    timestampMs: number;
+    expiresAtMs: number;
+  } | null>(null);
+  let githubGistUrl = $state('');
+  let githubError = $state<string | null>(null);
+  let githubSuccess = $state<string | null>(null);
+  let githubSubmitting = $state(false);
+
+  // svelte-ignore state_referenced_locally
+  const githubLink = $derived(status.claimed ? status.githubLink : null);
+
+  /**
+   * Reconstruct the canonical nonce JSON the server will rebuild on
+   * submit. Key order MUST match `canonicaliseNonce` in
+   * `github-gist-verification.service.ts:122` (alphabetical), and
+   * the surrounding object MUST be a no-whitespace `JSON.stringify`.
+   * A single-byte drift here breaks every signature.
+   */
+  function buildGithubNonceJson(args: {
+    githubUsername: string;
+    identityPubkey: string;
+    votePubkey: string;
+    issuedAtMs: number;
+    expiresAtMs: number;
+  }): string {
+    return JSON.stringify({
+      domain: SITE_URL,
+      expiresAtMs: args.expiresAtMs,
+      githubUsername: args.githubUsername,
+      identityPubkey: args.identityPubkey,
+      issuedAtMs: args.issuedAtMs,
+      purpose: 'github-link',
+      votePubkey: args.votePubkey,
+    });
+  }
+
+  const GITHUB_NONCE_TTL_MS = 30 * 60 * 1000; // mirrors server DEFAULT_NONCE_TTL_MS
+
+  function generateGithubEnvelope() {
+    githubError = null;
+    githubSuccess = null;
+    githubGistUrl = '';
+    const trimmed = githubUsernameDraft.trim();
+    if (trimmed.length === 0) {
+      githubError = 'Enter a GitHub username first.';
+      return;
+    }
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/.test(trimmed)) {
+      githubError = 'That does not look like a valid GitHub username (letters, digits, hyphens).';
+      return;
+    }
+    const timestampMs = Date.now();
+    const expiresAtMs = timestampMs + GITHUB_NONCE_TTL_MS;
+    const nonceJson = buildGithubNonceJson({
+      githubUsername: trimmed,
+      identityPubkey: history.identity,
+      votePubkey: history.vote,
+      issuedAtMs: timestampMs,
+      expiresAtMs,
+    });
+    githubEnvelope = { nonceJson, timestampMs, expiresAtMs };
+  }
+
+  /**
+   * CLI command the operator runs on their validator box. The
+   * canonical nonce JSON is wrapped in single quotes; shell-escape
+   * any embedded single quote so the literal bytes that get signed
+   * exactly match the canonical JSON the server will reconstruct.
+   * Our JSON is all-ASCII (pubkeys + integers + ASCII username),
+   * but the escape stays defensive in case a future field carries
+   * something stranger.
+   */
+  const githubCliCommand = $derived.by<string | null>(() => {
+    if (githubEnvelope === null) return null;
+    const escaped = githubEnvelope.nonceJson.replace(/'/g, "'\\''");
+    return `solana sign-offchain-message --keypair ~/validator-identity.json '${escaped}'`;
+  });
+
+  /**
+   * Reference Gist body — what the operator must publish on GitHub.
+   * `<canonical-nonce-json>` + literal `---` line + `<base58 sig>`.
+   * The operator literally pastes this exact template, replacing
+   * the signature line with their CLI output.
+   */
+  const githubGistTemplate = $derived.by<string | null>(() => {
+    if (githubEnvelope === null) return null;
+    return `${githubEnvelope.nonceJson}\n---\n<paste base58 signature here>`;
+  });
+
+  async function handleSubmitGithub() {
+    if (githubEnvelope === null) {
+      githubError = 'Generate a signable nonce first.';
+      return;
+    }
+    const trimmedUsername = githubUsernameDraft.trim();
+    const trimmedUrl = githubGistUrl.trim();
+    if (trimmedUrl.length === 0) {
+      githubError = 'Paste your public Gist URL first.';
+      return;
+    }
+    try {
+      // Reject obvious shape errors before the round-trip.
+      const parsedUrl = new URL(trimmedUrl);
+      if (parsedUrl.protocol !== 'https:') throw new Error('not https');
+      if (!parsedUrl.hostname.endsWith('gist.github.com')) {
+        throw new Error('not a gist.github.com URL');
+      }
+    } catch {
+      githubError = 'Gist URL must be an https://gist.github.com/... link.';
+      return;
+    }
+    githubSubmitting = true;
+    githubError = null;
+    githubSuccess = null;
+    try {
+      const result = await linkGithub({
+        votePubkey: history.vote,
+        identityPubkey: history.identity,
+        githubUsername: trimmedUsername,
+        gistUrl: trimmedUrl,
+        timestampMs: githubEnvelope.timestampMs,
+      });
+      githubSuccess = `GitHub linked: ${result.link.githubUsername} (expires ${new Date(result.link.expiresAt).toLocaleDateString()})`;
+      // Fold the new link into local status so the read-state shows
+      // the fresh values without a navigation.
+      if (status.claimed) {
+        status = {
+          ...status,
+          githubLink: {
+            githubUsername: result.link.githubUsername,
+            verifiedAt: result.link.verifiedAt,
+            expiresAt: result.link.expiresAt,
+          },
+        };
+      }
+      githubEnvelope = null;
+      githubGistUrl = '';
+    } catch (err) {
+      githubError =
+        err instanceof ApiError
+          ? `${err.code}: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : 'GitHub link failed — try again.';
+    } finally {
+      githubSubmitting = false;
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Operator wallet register ceremony (POST /v1/claims/:vote/wallets)
+  //
+  // Dual-signature + anchor-tx proof. The operator signs the SAME
+  // canonical nonce twice — once with the validator identity key,
+  // once with the wallet key — and supplies any Solana tx signature
+  // the wallet has previously emitted (proves the wallet keypair
+  // holder controls a working wallet that's touched the chain).
+  //
+  // State machine matches the GitHub flow: read (list registered
+  // wallets) + draft (form + envelope + 3 pasted signatures) +
+  // submit. 90-day TTL per wallet; up to 3 per validator.
+  // ──────────────────────────────────────────────────────────────────
+
+  let walletPubkeyDraft = $state('');
+  let walletLabelDraft = $state('');
+  let walletEnvelope = $state<{
+    nonceJson: string;
+    timestampMs: number;
+    expiresAtMs: number;
+  } | null>(null);
+  let walletIdentitySig = $state('');
+  let walletWalletSig = $state('');
+  let walletAnchorSig = $state('');
+  let walletError = $state<string | null>(null);
+  let walletSuccess = $state<string | null>(null);
+  let walletSubmitting = $state(false);
+
+  // svelte-ignore state_referenced_locally
+  const walletsState = $derived(
+    status.claimed
+      ? status.wallets
+      : { count: 0, capReached: false, oldestExpiresAt: null, entries: [] },
+  );
+
+  const WALLET_NONCE_TTL_MS = 30 * 60 * 1000; // mirrors server DEFAULT_NONCE_TTL_MS
+  const WALLET_LABEL_MAX = 32;
+
+  /**
+   * Canonical wallet nonce JSON. Must match
+   * `canonicaliseOperatorNonce` in
+   * `operator-wallet-verification.service.ts:76` byte-for-byte —
+   * key order, value shapes, no whitespace.
+   */
+  function buildWalletNonceJson(args: {
+    identityPubkey: string;
+    votePubkey: string;
+    walletPubkey: string;
+    label: string;
+    issuedAtMs: number;
+    expiresAtMs: number;
+  }): string {
+    return JSON.stringify({
+      domain: SITE_URL,
+      expiresAtMs: args.expiresAtMs,
+      identityPubkey: args.identityPubkey,
+      issuedAtMs: args.issuedAtMs,
+      label: args.label,
+      purpose: 'wallet-register',
+      votePubkey: args.votePubkey,
+      walletPubkey: args.walletPubkey,
+    });
+  }
+
+  function isLikelyPubkey(value: string): boolean {
+    return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
+  }
+
+  function generateWalletEnvelope() {
+    walletError = null;
+    walletSuccess = null;
+    walletIdentitySig = '';
+    walletWalletSig = '';
+    walletAnchorSig = '';
+    const wallet = walletPubkeyDraft.trim();
+    const label = walletLabelDraft.trim();
+    if (!isLikelyPubkey(wallet)) {
+      walletError = 'Wallet pubkey must be a base58 Solana pubkey (32-44 chars).';
+      return;
+    }
+    if (wallet === history.identity || wallet === history.vote) {
+      walletError = 'Wallet pubkey must differ from the validator identity and vote pubkeys.';
+      return;
+    }
+    if (label.length === 0) {
+      walletError = 'Enter a short label (max 32 chars) — appears on the activity heatmap.';
+      return;
+    }
+    if (label.length > WALLET_LABEL_MAX) {
+      walletError = `Label must be ${WALLET_LABEL_MAX} characters or fewer.`;
+      return;
+    }
+    if (/[<>`{}]/.test(label) || /[‎‏‪-‮⁦-⁩]/.test(label)) {
+      walletError =
+        'Label cannot contain angle brackets, backticks, braces, or text-direction-override characters.';
+      return;
+    }
+    if (walletsState.capReached) {
+      walletError = 'This validator has already reached the per-validator wallet cap (3).';
+      return;
+    }
+    const timestampMs = Date.now();
+    const expiresAtMs = timestampMs + WALLET_NONCE_TTL_MS;
+    const nonceJson = buildWalletNonceJson({
+      identityPubkey: history.identity,
+      votePubkey: history.vote,
+      walletPubkey: wallet,
+      label,
+      issuedAtMs: timestampMs,
+      expiresAtMs,
+    });
+    walletEnvelope = { nonceJson, timestampMs, expiresAtMs };
+  }
+
+  /**
+   * Two CLI commands — identity key + wallet key — both signing the
+   * SAME canonical nonce. The operator runs both, pastes both
+   * signatures back into the form alongside any tx signature the
+   * wallet has previously emitted (the "anchor tx").
+   */
+  const walletIdentityCli = $derived.by<string | null>(() => {
+    if (walletEnvelope === null) return null;
+    const escaped = walletEnvelope.nonceJson.replace(/'/g, "'\\''");
+    return `solana sign-offchain-message --keypair ~/validator-identity.json '${escaped}'`;
+  });
+  const walletWalletCli = $derived.by<string | null>(() => {
+    if (walletEnvelope === null) return null;
+    const escaped = walletEnvelope.nonceJson.replace(/'/g, "'\\''");
+    return `solana sign-offchain-message --keypair ~/operator-wallet.json '${escaped}'`;
+  });
+
+  async function handleSubmitWallet() {
+    if (walletEnvelope === null) {
+      walletError = 'Generate a signable nonce first.';
+      return;
+    }
+    const trimmedIdentitySig = walletIdentitySig.trim();
+    const trimmedWalletSig = walletWalletSig.trim();
+    const trimmedAnchor = walletAnchorSig.trim();
+    if (trimmedIdentitySig.length === 0) {
+      walletError = 'Paste the identity-key signature first.';
+      return;
+    }
+    if (trimmedWalletSig.length === 0) {
+      walletError = 'Paste the wallet-key signature first.';
+      return;
+    }
+    if (trimmedAnchor.length < 86 || trimmedAnchor.length > 88) {
+      walletError =
+        'Anchor tx signature should be 86-88 chars (base58 of a 64-byte Solana tx signature).';
+      return;
+    }
+    walletSubmitting = true;
+    walletError = null;
+    walletSuccess = null;
+    try {
+      const result = await registerOperatorWallet({
+        votePubkey: history.vote,
+        identityPubkey: history.identity,
+        walletPubkey: walletPubkeyDraft.trim(),
+        label: walletLabelDraft.trim(),
+        timestampMs: walletEnvelope.timestampMs,
+        identitySignatureB58: trimmedIdentitySig,
+        walletSignatureB58: trimmedWalletSig,
+        anchorTxSignature: trimmedAnchor,
+      });
+      walletSuccess = `Wallet registered: ${shortenPubkey(result.wallet.walletPubkey, 4, 4)} (${result.wallet.label}). Expires ${new Date(result.wallet.expiresAt).toLocaleDateString()}.`;
+      // Fold into local state so the list re-renders.
+      if (status.claimed) {
+        // ClaimStatus's wallet entry shape uses `wallet` (not
+        // `walletPubkey`) — the read endpoint exposes the field that
+        // way for parity with `/v1/operator-wallets/:wallet`. The
+        // write-response shape uses `walletPubkey`; map between them.
+        const newEntry = {
+          wallet: result.wallet.walletPubkey,
+          label: result.wallet.label,
+          registeredAt: result.wallet.registeredAt,
+          expiresAt: result.wallet.expiresAt,
+        };
+        const entries = [...status.wallets.entries, newEntry];
+        status = {
+          ...status,
+          wallets: {
+            count: entries.length,
+            capReached: entries.length >= 3,
+            oldestExpiresAt: entries.reduce(
+              (acc: string | null, e) => (acc === null || e.expiresAt < acc ? e.expiresAt : acc),
+              null,
+            ),
+            entries,
+          },
+        };
+      }
+      walletEnvelope = null;
+      walletPubkeyDraft = '';
+      walletLabelDraft = '';
+      walletIdentitySig = '';
+      walletWalletSig = '';
+      walletAnchorSig = '';
+    } catch (err) {
+      walletError =
+        err instanceof ApiError
+          ? `${err.code}: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : 'Wallet registration failed — try again.';
+    } finally {
+      walletSubmitting = false;
+    }
+  }
 </script>
 
 <svelte:head>
@@ -505,6 +901,374 @@
     </div>
   {/if}
 </Card>
+
+{#if status.claimed}
+  <!--
+    ─────────── GitHub link (`PUT /v1/claims/:vote/github`) ───────────
+
+    Operator publishes a public Gist on github.com containing the
+    canonical nonce + a base58 Ed25519 signature of it, then submits
+    the Gist URL here. The server fetches the Gist, parses, and
+    verifies — the signature path is identical to the v1 claim, just
+    routed through a public proof artifact (the Gist) so the link
+    survives a domain owner change without server-side credential
+    storage.
+  -->
+  <Card class="mt-6">
+    <div class="flex flex-wrap items-baseline justify-between gap-3">
+      <h2 class="text-base font-semibold">GitHub link</h2>
+      {#if githubLink !== null}
+        <span class="text-xs text-[color:var(--color-status-ok-fg)]">
+          ✓ {githubLink.githubUsername} · expires {new Date(
+            githubLink.expiresAt,
+          ).toLocaleDateString()}
+        </span>
+      {/if}
+    </div>
+    <p class="mt-2 text-sm text-[color:var(--color-text-muted)]">
+      Link your operator's GitHub username via a public Gist signed with your validator identity
+      keypair. Surfaces on this validator's hub as a verified-account chip and powers the governance
+      half of the Operator Activity Index.
+    </p>
+
+    <div class="mt-5 grid gap-4">
+      <label class="block">
+        <span
+          class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+        >
+          GitHub username
+        </span>
+        <input
+          type="text"
+          bind:value={githubUsernameDraft}
+          placeholder="alice"
+          maxlength={39}
+          autocomplete="off"
+          spellcheck="false"
+          class="mt-1 w-full max-w-sm rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 font-mono text-base sm:text-sm"
+        />
+        <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
+          Letters, digits, hyphens. Same casing as your GitHub profile URL.
+        </p>
+      </label>
+
+      <button
+        type="button"
+        onclick={generateGithubEnvelope}
+        class="inline-flex min-h-11 w-fit items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1.5 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-500)] hover:text-white"
+      >
+        {githubEnvelope === null ? 'Generate signable nonce' : 'Regenerate'}
+      </button>
+
+      {#if githubEnvelope !== null && githubCliCommand !== null && githubGistTemplate !== null}
+        <div class="grid gap-4">
+          <div>
+            <p
+              class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+            >
+              Step 1 · Sign on your validator box
+            </p>
+            <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
+              <pre
+                class="flex-1 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed"><code
+                  >{githubCliCommand}</code
+                ></pre>
+              <button
+                type="button"
+                onclick={() => copyToClipboard(githubCliCommand)}
+                class="inline-flex min-h-11 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <p
+              class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+            >
+              Step 2 · Publish a public Gist on github.com with this exact body
+            </p>
+            <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
+              <pre
+                class="flex-1 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-all"><code
+                  >{githubGistTemplate}</code
+                ></pre>
+              <button
+                type="button"
+                onclick={() => copyToClipboard(githubGistTemplate)}
+                class="inline-flex min-h-11 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+              >
+                Copy
+              </button>
+            </div>
+            <p class="mt-1.5 text-xs text-[color:var(--color-text-subtle)]">
+              Replace the signature placeholder with the base58 string the CLI printed in Step 1.
+              The Gist file extension does not matter; the body must contain the canonical nonce
+              JSON, a literal <code class="font-mono">---</code> line, and the signature.
+            </p>
+          </div>
+
+          <label class="block">
+            <span
+              class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+            >
+              Step 3 · Paste the Gist URL
+            </span>
+            <input
+              type="url"
+              bind:value={githubGistUrl}
+              placeholder="https://gist.github.com/alice/abc123…"
+              class="mt-1 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 font-mono text-base sm:text-sm"
+            />
+            <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
+              Nonce expires in ~{Math.max(
+                0,
+                Math.floor((githubEnvelope.expiresAtMs - Date.now()) / 60_000),
+              )} minutes.
+            </p>
+          </label>
+
+          <button
+            type="button"
+            onclick={handleSubmitGithub}
+            disabled={githubSubmitting || githubGistUrl.trim().length === 0}
+            class="min-h-11 w-full rounded-lg bg-[color:var(--color-brand-500)] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[color:var(--color-brand-600)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {githubSubmitting ? 'Verifying Gist…' : 'Link GitHub'}
+          </button>
+        </div>
+      {/if}
+
+      {#if githubError}
+        <div
+          role="alert"
+          class="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-300"
+        >
+          {githubError}
+        </div>
+      {/if}
+      {#if githubSuccess}
+        <div
+          role="status"
+          class="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300"
+        >
+          {githubSuccess}
+        </div>
+      {/if}
+    </div>
+  </Card>
+
+  <!--
+    ─────────── Operator wallet register (`POST /v1/claims/:vote/wallets`) ───────────
+
+    Dual-signature ceremony — the SAME canonical nonce is signed by
+    both the validator identity key and the wallet key, plus an
+    "anchor tx signature" the wallet has previously emitted (proves
+    the wallet keypair holder controls a working on-chain wallet).
+    Up to 3 wallets per validator; 90-day TTL per registration.
+  -->
+  <Card class="mt-6">
+    <div class="flex flex-wrap items-baseline justify-between gap-3">
+      <h2 class="text-base font-semibold">Operator wallets</h2>
+      <span class="text-xs text-[color:var(--color-text-muted)]">
+        {walletsState.count} / 3 registered
+      </span>
+    </div>
+    <p class="mt-2 text-sm text-[color:var(--color-text-muted)]">
+      Link wallets your operator controls so their on-chain activity powers the wallet half of the
+      Operator Activity Index. Each registration is good for 90 days; up to 3 wallets per validator.
+      Wallets MUST differ from the validator's identity and vote pubkeys.
+    </p>
+
+    {#if walletsState.entries.length > 0}
+      <ul
+        class="mt-4 divide-y divide-[color:var(--color-border-default)] rounded-lg border border-[color:var(--color-border-default)]"
+      >
+        {#each walletsState.entries as entry (entry.wallet)}
+          <li class="flex flex-wrap items-baseline justify-between gap-2 px-3 py-2">
+            <div class="min-w-0">
+              <div class="text-sm font-semibold">{entry.label}</div>
+              <div class="font-mono text-[11px] text-[color:var(--color-text-subtle)]">
+                {shortenPubkey(entry.wallet, 8, 8)}
+              </div>
+            </div>
+            <div class="text-xs text-[color:var(--color-text-muted)]">
+              expires {new Date(entry.expiresAt).toLocaleDateString()}
+            </div>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+
+    {#if !walletsState.capReached}
+      <div class="mt-5 grid gap-4">
+        <div class="grid gap-3 sm:grid-cols-2">
+          <label class="block">
+            <span
+              class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+            >
+              Wallet pubkey
+            </span>
+            <input
+              type="text"
+              bind:value={walletPubkeyDraft}
+              placeholder="base58 pubkey"
+              maxlength={44}
+              autocomplete="off"
+              spellcheck="false"
+              class="mt-1 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 font-mono text-base sm:text-xs"
+            />
+          </label>
+          <label class="block">
+            <span
+              class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+            >
+              Label
+            </span>
+            <input
+              type="text"
+              bind:value={walletLabelDraft}
+              placeholder="e.g. fee payer"
+              maxlength={WALLET_LABEL_MAX}
+              class="mt-1 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-base sm:text-sm"
+            />
+          </label>
+        </div>
+
+        <button
+          type="button"
+          onclick={generateWalletEnvelope}
+          class="inline-flex min-h-11 w-fit items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1.5 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-500)] hover:text-white"
+        >
+          {walletEnvelope === null ? 'Generate signable nonce' : 'Regenerate'}
+        </button>
+
+        {#if walletEnvelope !== null && walletIdentityCli !== null && walletWalletCli !== null}
+          <div class="grid gap-4">
+            <div>
+              <p
+                class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+              >
+                Step 1 · Sign with the validator identity key
+              </p>
+              <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
+                <pre
+                  class="flex-1 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed"><code
+                    >{walletIdentityCli}</code
+                  ></pre>
+                <button
+                  type="button"
+                  onclick={() => copyToClipboard(walletIdentityCli)}
+                  class="inline-flex min-h-11 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+                >
+                  Copy
+                </button>
+              </div>
+              <textarea
+                bind:value={walletIdentitySig}
+                rows={2}
+                placeholder="Paste identity-key base58 signature"
+                class="mt-2 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-3 font-mono text-base sm:text-xs"
+              ></textarea>
+            </div>
+
+            <div>
+              <p
+                class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+              >
+                Step 2 · Sign with the wallet key (same nonce)
+              </p>
+              <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
+                <pre
+                  class="flex-1 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed"><code
+                    >{walletWalletCli}</code
+                  ></pre>
+                <button
+                  type="button"
+                  onclick={() => copyToClipboard(walletWalletCli)}
+                  class="inline-flex min-h-11 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+                >
+                  Copy
+                </button>
+              </div>
+              <p class="mt-1.5 text-xs text-[color:var(--color-text-subtle)]">
+                Replace <code class="font-mono">~/operator-wallet.json</code> with your wallet's keypair
+                path.
+              </p>
+              <textarea
+                bind:value={walletWalletSig}
+                rows={2}
+                placeholder="Paste wallet-key base58 signature"
+                class="mt-2 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-3 font-mono text-base sm:text-xs"
+              ></textarea>
+            </div>
+
+            <div>
+              <p
+                class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+              >
+                Step 3 · Paste any tx signature the wallet has emitted
+              </p>
+              <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
+                Any base58 tx signature (86-88 chars) — proves the wallet has been used on chain.
+                Solana Explorer's "Transaction" page header has the signature near the top; or run
+                <code class="font-mono">solana transfer --from ~/operator-wallet.json …</code> and copy
+                the signature it prints.
+              </p>
+              <textarea
+                bind:value={walletAnchorSig}
+                rows={2}
+                placeholder="Anchor tx signature (base58)"
+                class="mt-2 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-3 font-mono text-base sm:text-xs"
+              ></textarea>
+              <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
+                Nonce expires in ~{Math.max(
+                  0,
+                  Math.floor((walletEnvelope.expiresAtMs - Date.now()) / 60_000),
+                )} minutes.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onclick={handleSubmitWallet}
+              disabled={walletSubmitting ||
+                walletIdentitySig.trim().length === 0 ||
+                walletWalletSig.trim().length === 0 ||
+                walletAnchorSig.trim().length === 0}
+              class="min-h-11 w-full rounded-lg bg-[color:var(--color-brand-500)] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[color:var(--color-brand-600)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {walletSubmitting ? 'Verifying signatures…' : 'Register wallet'}
+            </button>
+          </div>
+        {/if}
+
+        {#if walletError}
+          <div
+            role="alert"
+            class="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-300"
+          >
+            {walletError}
+          </div>
+        {/if}
+        {#if walletSuccess}
+          <div
+            role="status"
+            class="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300"
+          >
+            {walletSuccess}
+          </div>
+        {/if}
+      </div>
+    {:else}
+      <p class="mt-4 text-sm text-[color:var(--color-text-muted)]">
+        This validator has reached the 3-wallet cap. Existing entries expire on a 90-day rolling
+        window — once the oldest entry expires you can register another.
+      </p>
+    {/if}
+  </Card>
+{/if}
 
 <Card class="mt-6">
   <h2 class="text-base font-semibold">What does claiming do?</h2>

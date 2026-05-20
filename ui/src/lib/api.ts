@@ -338,6 +338,97 @@ function putJson<TResponse>(
   return sendJson<TResponse>('PUT', path, body, fetchFn);
 }
 
+/** POST a JSON body — used for collection-append endpoints (operator wallets). */
+function postJson<TResponse>(
+  path: string,
+  body: unknown,
+  fetchFn: typeof fetch = fetch,
+): Promise<TResponse> {
+  return sendJson<TResponse>('POST', path, body, fetchFn);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Claim v2 — GitHub Gist verification + operator-wallet registration.
+// Both endpoints require an existing claim and re-verify against the
+// validator-identity Ed25519 key bound by the claim.
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * Link a GitHub username to a claimed validator via a signed public
+ * Gist. The Gist body MUST be the canonical-nonce JSON, a literal
+ * `---` delimiter line, and the base58 Ed25519 signature over the
+ * nonce. The server fetches the Gist, parses, and verifies — the UI
+ * just submits the `gistUrl` + the body fields it was built from
+ * (server reconstructs the nonce from these exact fields, so a
+ * tampered submission diverges from the published Gist content).
+ *
+ * Pre-conditions enforced by the route:
+ *   - Validator must already be claimed.
+ *   - `identityPubkey` must match the claim.
+ *   - `timestampMs` must be within ±5 min of server time.
+ *
+ * Throws `ApiError` on any failure — `code` carries the stable
+ * machine id (`fetch_failed` / `bad_signature` / `username_mismatch`
+ * etc.); the call site renders `err.message` (REST-M2 human prose).
+ */
+export function linkGithub(
+  body: {
+    votePubkey: string;
+    identityPubkey: string;
+    githubUsername: string;
+    gistUrl: string;
+    timestampMs: number;
+  },
+  fetchFn: typeof fetch = fetch,
+): Promise<{
+  link: { githubUsername: string; gistUrl: string; verifiedAt: string; expiresAt: string };
+}> {
+  const safe = encodeURIComponent(body.votePubkey);
+  return putJson(`/v1/claims/${safe}/github`, body, fetchFn);
+}
+
+/**
+ * Register an operator wallet via a dual-signature + anchor-tx proof.
+ *
+ * Both signatures cover the SAME canonical nonce JSON (sorted-keys,
+ * no whitespace) — one signature comes from the validator identity
+ * key, the other from the wallet key. The anchor tx signature is any
+ * Solana tx the wallet has signed (proves the wallet keypair holder
+ * is in custody of a working wallet that has touched the chain).
+ *
+ * Pre-conditions enforced by the route:
+ *   - Validator must already be claimed.
+ *   - `identityPubkey` must match the claim.
+ *   - `walletPubkey` must NOT equal the validator's vote or identity
+ *     pubkey, and must NOT be a known other validator's identity.
+ *   - The validator must have fewer than the per-validator wallet
+ *     cap registered (default 3).
+ *   - `timestampMs` must be within ±5 min of server time.
+ *
+ * Returns the newly-registered wallet's metadata (label, registered
+ * + expiry timestamps). The 90-day TTL is set server-side; the
+ * caller can persist these to a local cache or re-fetch
+ * `/v1/claims/:vote` for the canonical list.
+ */
+export function registerOperatorWallet(
+  body: {
+    votePubkey: string;
+    identityPubkey: string;
+    walletPubkey: string;
+    label: string;
+    timestampMs: number;
+    identitySignatureB58: string;
+    walletSignatureB58: string;
+    anchorTxSignature: string;
+  },
+  fetchFn: typeof fetch = fetch,
+): Promise<{
+  wallet: { walletPubkey: string; label: string; registeredAt: string; expiresAt: string };
+}> {
+  const safe = encodeURIComponent(body.votePubkey);
+  return postJson(`/v1/claims/${safe}/wallets`, body, fetchFn);
+}
+
 // ────────────────────────────────────────────────────────────────────
 // Gamification surface — tier, badges, OAI, /scoring, wallet activity,
 // SIMD feed, audit log. All read-only. Same `ApiError` semantics as
