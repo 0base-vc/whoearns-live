@@ -76,6 +76,15 @@
 
   let { wallet, label, entries, endDate, days = 365 }: Props = $props();
 
+  // Unique-per-instance id for the `aria-labelledby` heading pairing.
+  // `$props.id()` — NOT the wallet pubkey — keeps the full operator-
+  // wallet address out of the public DOM as an `id` attribute. The
+  // only wallet text the component renders is the truncated
+  // `truncatedWallet` below. `$props.id()` must be a bare variable
+  // initializer, hence the two-step (uid -> headingId).
+  const uid = $props.id();
+  const headingId = `heatmap-heading-${uid}`;
+
   // Cell geometry — 12 px squares with 2 px gutters reads tight but
   // matches GitHub's grid almost exactly. Total grid width:
   // 53 × (12 + 2) − 2 = 740 px. Mobile container scrolls horizontally
@@ -218,11 +227,11 @@
 
 <section
   class="rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
-  aria-labelledby="heatmap-heading-{wallet}"
+  aria-labelledby={headingId}
 >
   <header class="flex flex-col gap-1 pb-3 sm:flex-row sm:items-baseline sm:justify-between">
     <div class="min-w-0">
-      <h3 id="heatmap-heading-{wallet}" class="text-sm font-semibold tracking-tight">
+      <h3 id={headingId} class="text-sm font-semibold tracking-tight">
         {label}
       </h3>
       <p class="text-xs text-[color:var(--color-text-muted)]">
