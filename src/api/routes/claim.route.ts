@@ -1,38 +1,41 @@
-import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
+import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import type { AppConfig } from '../../core/config.js';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
 import type { ClaimService, ClaimVerifyFailure } from '../../services/claim.service.js';
+import {
+  OPERATOR_WALLET_CAP_PER_VALIDATOR,
+  type OperatorWalletsRepository,
+} from '../../storage/repositories/operator-wallets.repo.js';
+import type {
+  ClaimEventInput,
+  ValidatorClaimEventsRepository,
+} from '../../storage/repositories/validator-claim-events.repo.js';
+import type { ValidatorGithubRepository } from '../../storage/repositories/validator-github.repo.js';
+import { cacheControl } from '../cache-control.js';
+import { sendError } from '../error-handler.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
-
-/**
- * Local Zod-safeParse unwrap, matching the pattern used in
- * `leaderboard.route.ts`. Kept inline (not extracted to a shared
- * helper) because the error-handler middleware reads the thrown
- * `ValidationError` shape and we don't want cross-module coupling
- * on that shape until we have >2 call sites — just duplicating a
- * 10-line function.
- */
-function unwrap<T>(
-  result: { success: true; data: T } | { success: false; error: unknown },
-  context: string,
-): T {
-  if (result.success) return result.data;
-  throw new ValidationError(`${context} failed validation`, {
-    issues: (result.error as { issues?: unknown[] }).issues ?? [result.error],
-  });
-}
+import { unwrap } from '../zod-helpers.js';
 
 /**
  * Claim + profile API routes.
  *
  * Four endpoints, split purposefully:
  *
- *   POST /v1/claim/verify        — first-time claim, no profile changes
- *   POST /v1/claim/profile       — update profile (must already be claimed OR claim in same step)
- *   GET  /v1/claim/:vote/status  — "is this validator claimed? / what's the profile?"
- *   GET  /v1/claim/challenge     — returns a server-issued nonce + current timestamp
- *                                  so the UI doesn't need to crypto-random on the
- *                                  client (cross-browser UUID availability varies).
+ *   PUT  /v1/claims/:vote          — first-time (or re-) claim, no profile changes
+ *                                    (idempotent upsert of the claim instance)
+ *   PUT  /v1/claims/:vote/profile  — update profile (must already be claimed OR claim in same step)
+ *   GET  /v1/claims/:vote          — "is this validator claimed? / what's the profile?"
+ *                                    (the claim-instance representation)
+ *   GET  /v1/claims/challenge      — returns a server-issued nonce + current timestamp
+ *                                    so the UI doesn't need to crypto-random on the
+ *                                    client (cross-browser UUID availability varies).
+ *
+ * The `:vote` mutating endpoints carry the vote pubkey BOTH in the
+ * path and in the signed body. The signed body stays the authoritative
+ * source for the signature; the path is a cheap consistency guard —
+ * a `params.vote !== body.votePubkey` mismatch is rejected `400`
+ * `vote_pubkey_mismatch` before any verification work.
  *
  * All mutating endpoints bind signature + timestamp to the specific
  * operation being requested (`purpose: 'claim' | 'profile'`), so a
@@ -46,7 +49,49 @@ function unwrap<T>(
  */
 
 export interface ClaimRoutesDeps {
+  config: AppConfig;
   claimService: ClaimService;
+  /**
+   * SEC-M4 — append-only audit log. The `verify` and `profile` write
+   * paths record an event here after a successful mutation. Only
+   * `append` (write) + `listByVote` (the `/audit` read) are used.
+   */
+  claimEventsRepo: Pick<ValidatorClaimEventsRepository, 'append' | 'listByVote'>;
+  /**
+   * CROSS-M1 — the `GET /v1/claims/:vote` response now folds in
+   * GitHub-link + operator-wallet state so a dashboard gets the whole
+   * claim picture in ONE fetch instead of three. These are the same
+   * ACTIVE-only reads the OAI route uses (`findActiveByVote` /
+   * `listActiveByVote`). Status is a read-only surface — no mutating
+   * methods are threaded in.
+   */
+  validatorGithubRepo: Pick<ValidatorGithubRepository, 'findActiveByVote'>;
+  operatorWalletsRepo: Pick<OperatorWalletsRepository, 'listActiveByVote'>;
+}
+
+/**
+ * Best-effort audit-log write (SEC-M4).
+ *
+ * Called AFTER a claim-surface mutation has already succeeded. If the
+ * append throws we log a `warn` and swallow it — a failed audit write
+ * must NEVER turn an operator's successful claim into an error
+ * response. (A fully transactional audit log would need the claim
+ * repo + events repo to share a transaction; that's out of scope for
+ * this pass — this is the deliberate best-effort tradeoff.)
+ */
+async function recordClaimEvent(
+  repo: Pick<ValidatorClaimEventsRepository, 'append'>,
+  request: FastifyRequest,
+  event: ClaimEventInput,
+): Promise<void> {
+  try {
+    await repo.append(event);
+  } catch (err) {
+    request.log.warn(
+      { err, vote: event.votePubkey, eventType: event.eventType },
+      'claim.route: audit-log append failed (best-effort, claim still succeeded)',
+    );
+  }
 }
 
 /**
@@ -90,6 +135,14 @@ const ClaimVerifyBodySchema = SignedEnvelopeSchema;
  * code below) so the column distinguishes "operator chose to remove
  * the override" from "operator never set one" — both render the auto
  * fallback, but DB queries can use `IS NULL` cleanly.
+ *
+ * SEC-L3 — the `.refine()` character filter forbids more than just
+ * `<>`: the narrative renders into JSON-LD on the income page, so it
+ * also rejects backticks, braces `{}`, and the Unicode
+ * text-direction-override codepoints (U+202A-U+202E, U+2066-U+2069)
+ * — the same stricter posture the SVG badge already takes. Migration
+ * `0035_widen_profile_narrative_charset.sql` widens the matching DB
+ * CHECK constraint so the storage layer enforces the identical set.
  */
 const NARRATIVE_OVERRIDE_MAX = 280;
 const NarrativeOverrideSchema = z
@@ -97,9 +150,16 @@ const NarrativeOverrideSchema = z
   .max(NARRATIVE_OVERRIDE_MAX, { message: `narrativeOverride > ${NARRATIVE_OVERRIDE_MAX} chars` })
   .nullable()
   .optional()
-  .refine((value) => value === undefined || value === null || !/[<>]/.test(value), {
-    message: 'narrativeOverride must not contain angle brackets',
-  });
+  .refine(
+    (value) =>
+      value === undefined ||
+      value === null ||
+      !/[<>`{}\u200E\u200F\u202A-\u202E\u2066-\u2069]/.test(value),
+    {
+      message:
+        'narrativeOverride must not contain angle brackets, backticks, braces, or text-direction-override characters',
+    },
+  );
 
 const ProfileUpdateBodySchema = SignedEnvelopeSchema.extend({
   profile: z.object({
@@ -111,6 +171,31 @@ const ProfileUpdateBodySchema = SignedEnvelopeSchema.extend({
 });
 
 const VoteParamSchema = z.object({ vote: PubkeySchema });
+
+/**
+ * REST-M7 path/body consistency guard for the `:vote` mutating
+ * endpoints (`PUT /v1/claims/:vote`, `/:vote/profile`). The vote
+ * pubkey now travels in BOTH the path and the signed body; the signed
+ * body remains the authoritative source for the signature, so this is
+ * just a cheap guard against a caller pointing the path at a different
+ * validator than the one they signed for. Returns `true` (and sends
+ * the `400`) when the two disagree; the caller bails on a `true`.
+ */
+function rejectVoteMismatch(
+  reply: FastifyReply,
+  requestId: string,
+  paramVote: string,
+  bodyVote: string,
+): boolean {
+  if (paramVote === bodyVote) return false;
+  sendError(reply, {
+    code: 'vote_pubkey_mismatch',
+    statusCode: 400,
+    message: 'vote pubkey in the path does not match votePubkey in the signed body',
+    requestId,
+  });
+  return true;
+}
 
 /**
  * Map verify failures onto HTTP status codes the client can branch
@@ -142,8 +227,13 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
    * server timestamp. The UI renders these into a signable message
    * template. Pure convenience; a client that generates its own
    * UUID + `Date.now()` can skip this and call verify directly.
+   *
+   * Route ordering note: Fastify matches static path segments before
+   * `:param` segments, so `/v1/claims/challenge` resolves to THIS
+   * route, not `GET /v1/claims/:vote` below — and `challenge` isn't
+   * base58-pubkey-shaped anyway, so the two couldn't collide.
    */
-  app.get('/v1/claim/challenge', async () => {
+  app.get('/v1/claims/challenge', async () => {
     // Crypto-random nonce. Node 18+ has crypto.randomUUID globally.
     const nonce = crypto.randomUUID();
     return {
@@ -157,7 +247,7 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
 
   /**
    * Check claim / profile state for a validator. Public endpoint —
-   * no auth. Returns one of three combinations:
+   * no auth. Returns one of three `claimed`/`profile` combinations:
    *   - `claimed: false, profile: null`               → never claimed
    *   - `claimed: true, profile: null`                → claimed but
    *                                                     no profile
@@ -172,16 +262,50 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
    * earlier version did — meant the operator who claimed but didn't
    * fill any field would re-see the first-claim flow on every visit.
    *
-   * `claim` and `profile` are queried in parallel because they're
-   * independent reads. The two-row trip cost is negligible vs. the
-   * UX win of an accurate `claimed` flag.
+   * CROSS-M1 — the response also folds in `githubLink` and `wallets`
+   * so an operator dashboard renders the whole claim picture from a
+   * SINGLE fetch. Before this it had to chase the claim-status read
+   * with three more un-batched calls (`/operator-activity-index`
+   * read paths, etc.) just to know whether GitHub was linked and how
+   * many wallets were registered. Both are the ACTIVE-only reads —
+   * `githubLink` is `null` when there's no link OR the attestation
+   * lapsed; `wallets.count` counts only not-expired registrations —
+   * matching the OAI route's semantics so the dashboard sees the
+   * same "lapsed = inactive" view everywhere.
+   *
+   * All four reads run in parallel — they're independent, and the
+   * extra two-row trip is negligible against the UX win of a
+   * one-fetch dashboard.
+   *
+   * This is the GET of the claim instance — "status" is just reading
+   * the resource at `/v1/claims/:vote`, no separate sub-path needed.
    */
-  app.get('/v1/claim/:vote/status', async (request) => {
+  app.get('/v1/claims/:vote', async (request, reply) => {
     const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
-    const [claim, profile] = await Promise.all([
+    // SCORING tier — claim status flips on rare operator-initiated
+    // events (claim, profile edit, GitHub link, wallet register), all
+    // of which the operator already accepts a ~5min staleness for.
+    // Without this header the hub's CSR fan-out hits the origin
+    // every page load (4 parallel Postgres reads), which became the
+    // canonical surface in PR3 — leaderboard click-through traffic
+    // would otherwise saturate the DB pool with redundant claim
+    // lookups.
+    void reply.header('cache-control', cacheControl('SCORING'));
+    const [claim, profile, githubLink, activeWallets] = await Promise.all([
       opts.claimService.getClaim(params.vote),
       opts.claimService.getProfile(params.vote),
+      opts.validatorGithubRepo.findActiveByVote(params.vote),
+      opts.operatorWalletsRepo.listActiveByVote(params.vote),
     ]);
+    // Wallet summary derived from the ACTIVE-only list: count,
+    // whether the per-validator cap is hit, and the soonest-expiring
+    // attestation (so a dashboard can nudge "re-attest" before a
+    // wallet silently drops out of scoring). `oldestExpiresAt` is the
+    // MIN expiry across active rows — `null` when none are registered.
+    const oldestExpiresAt = activeWallets.reduce<Date | null>(
+      (oldest, w) => (oldest === null || w.expiresAt < oldest ? w.expiresAt : oldest),
+      null,
+    );
     return {
       claimed: claim !== null,
       profile:
@@ -194,17 +318,100 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
               narrativeOverride: profile.narrativeOverride,
               updatedAt: profile.updatedAt.toISOString(),
             },
+      // `null` when no ACTIVE GitHub link exists (never linked OR the
+      // attestation expired) — same "lapsed = gone" rule as OAI.
+      githubLink:
+        githubLink === null
+          ? null
+          : {
+              githubUsername: githubLink.githubUsername,
+              verifiedAt: githubLink.verifiedAt.toISOString(),
+              expiresAt: githubLink.expiresAt.toISOString(),
+            },
+      wallets: {
+        count: activeWallets.length,
+        capReached: activeWallets.length >= OPERATOR_WALLET_CAP_PER_VALIDATOR,
+        oldestExpiresAt: oldestExpiresAt?.toISOString() ?? null,
+        // Per-wallet entries: pubkey + operator-chosen label +
+        // registration/expiry windows. Public — these are operator-
+        // DECLARED affiliations (registered via the Ed25519 co-sign
+        // flow), so nothing here is information disclosure. The hub
+        // needs the pubkey list to wire the per-wallet 365-day
+        // activity heatmap (`/v1/operator-wallets/:wallet/activity`);
+        // without `entries` the UI would have to scrape the audit
+        // log to discover registered wallets, which couples
+        // unrelated surfaces.
+        entries: activeWallets.map((w) => ({
+          wallet: w.walletPubkey,
+          label: w.label,
+          registeredAt: w.registeredAt.toISOString(),
+          expiresAt: w.expiresAt.toISOString(),
+        })),
+      },
     };
   });
 
   /**
-   * First-time (or re-) claim. Verifies the signature without
-   * touching profile state — useful for operators who want to
-   * "lock in" ownership before editing anything. Idempotent: calling
-   * verify repeatedly with fresh nonces keeps bumping the row.
+   * Public claim-change audit log (SEC-M4). Returns the recent
+   * claim-surface mutations for a vote pubkey, newest first —
+   * claims, re-claims, profile edits, GitHub links, wallet
+   * registrations. Lets an operator notice an identity-key
+   * compromise after the fact (a `reclaim` row with a non-null
+   * `priorIdentityPubkey` is the smoking gun for a silent identity
+   * rotation).
+   *
+   * No auth — like `GET /v1/claims/:vote`, this is a read of
+   * already-public facts. PRIVACY: the forensic `submitted_ip`
+   * column is NOT in the response — IP stays in the DB. Everything
+   * surfaced here (pubkeys, GitHub usernames, wallet pubkeys,
+   * operator-chosen labels) is already public on-chain or
+   * operator-published.
+   *
+   * Cache: SCORING tier (5 min client / 30 min CDN). Audit history
+   * only changes when the operator makes a claim-surface mutation —
+   * a rare, deliberate action — so a short public/CDN cache is
+   * fine and shields the table from scraping. CATALOGUE would also
+   * fit; SCORING is the slightly tighter choice so a freshly-recorded
+   * event surfaces sooner during an active claim flow.
    */
-  app.post('/v1/claim/verify', async (request, reply) => {
+  app.get('/v1/claims/:vote/audit', async (request, reply) => {
+    const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
+    const events = await opts.claimEventsRepo.listByVote(params.vote);
+    void reply.header('cache-control', cacheControl('SCORING'));
+    return {
+      votePubkey: params.vote,
+      // `submittedIp` is intentionally omitted — forensic field, see
+      // the PRIVACY note above.
+      events: events.map((e) => ({
+        eventType: e.eventType,
+        identityPubkey: e.identityPubkey,
+        priorIdentityPubkey: e.priorIdentityPubkey,
+        detail: e.detail,
+        createdAt: e.createdAt.toISOString(),
+      })),
+    };
+  });
+
+  /**
+   * First-time (or re-) claim — an idempotent upsert of the claim
+   * instance at `/v1/claims/:vote`, hence `PUT`. Verifies the
+   * signature without touching profile state — useful for operators
+   * who want to "lock in" ownership before editing anything. Calling
+   * it repeatedly with fresh nonces keeps bumping the row.
+   */
+  app.put('/v1/claims/:vote', async (request, reply) => {
+    const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
     const body = unwrap(ClaimVerifyBodySchema.safeParse(request.body), 'body');
+    // REST-M7 — path/body consistency guard. The signed body is still
+    // authoritative for the signature; this just rejects a path that
+    // points at a different validator than the one signed for.
+    if (rejectVoteMismatch(reply, request.id, params.vote, body.votePubkey)) return reply;
+    // Read the prior claim BEFORE verifying: `verifySigned` upserts
+    // the row, so afterwards we can no longer tell a first-ever claim
+    // from a re-claim, nor recover the previous identity pubkey. This
+    // snapshot is what lets the audit log distinguish `claim` vs
+    // `reclaim` and capture an identity rotation (SEC-M4).
+    const priorClaim = await opts.claimService.getClaim(body.votePubkey);
     const result = await opts.claimService.verifySigned({
       body: {
         purpose: 'claim',
@@ -218,14 +425,28 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
 
     if (!result.ok) {
       const status = statusForFailure(result.reason);
-      return reply.code(status).send({
-        error: {
-          code: result.reason,
-          message: result.detail ?? humanMessageFor(result.reason),
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: result.reason,
+        statusCode: status,
+        message: result.detail ?? humanMessageFor(result.reason),
+        requestId: request.id,
       });
     }
+
+    // SEC-M4 — best-effort audit write AFTER the claim mutation
+    // succeeded. First-ever claim → `claim`; any subsequent claim →
+    // `reclaim`, with `priorIdentityPubkey` populated only when the
+    // identity actually rotated (a same-identity nonce-bump leaves it
+    // null). A throw here is logged + swallowed: see `recordClaimEvent`.
+    const identityRotated =
+      priorClaim !== null && priorClaim.identityPubkey !== result.claim.identityPubkey;
+    await recordClaimEvent(opts.claimEventsRepo, request, {
+      votePubkey: result.claim.votePubkey,
+      eventType: priorClaim === null ? 'claim' : 'reclaim',
+      identityPubkey: result.claim.identityPubkey,
+      priorIdentityPubkey: identityRotated ? priorClaim.identityPubkey : null,
+      submittedIp: request.ip,
+    });
 
     return {
       claimed: true,
@@ -235,13 +456,17 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
   });
 
   /**
-   * Update profile. Same signed envelope, plus the desired profile
-   * state. Verifies + persists atomically; an attacker who swaps the
-   * profile fields between signing and submission breaks the
-   * signature and the request fails.
+   * Update profile — `PUT` of the profile sub-resource of the claim
+   * instance. Same signed envelope, plus the desired profile state.
+   * Verifies + persists atomically; an attacker who swaps the profile
+   * fields between signing and submission breaks the signature and
+   * the request fails.
    */
-  app.post('/v1/claim/profile', async (request, reply) => {
+  app.put('/v1/claims/:vote/profile', async (request, reply) => {
+    const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
     const body = unwrap(ProfileUpdateBodySchema.safeParse(request.body), 'body');
+    // REST-M7 — path/body consistency guard (see `PUT /v1/claims/:vote`).
+    if (rejectVoteMismatch(reply, request.id, params.vote, body.votePubkey)) return reply;
 
     // Normalise twitter handle: "" and null both mean "unset". We
     // DB-store null so queries can use IS NULL checks.
@@ -281,14 +506,24 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
 
     if (!result.ok) {
       const status = statusForFailure(result.reason);
-      return reply.code(status).send({
-        error: {
-          code: result.reason,
-          message: result.detail ?? humanMessageFor(result.reason),
-          requestId: request.id,
-        },
+      return sendError(reply, {
+        code: result.reason,
+        statusCode: status,
+        message: result.detail ?? humanMessageFor(result.reason),
+        requestId: request.id,
       });
     }
+
+    // SEC-M4 — best-effort audit write after the profile mutation
+    // succeeded. `identityPubkey` is the signer's identity (the same
+    // one the signature verified against). A throw is logged +
+    // swallowed; see `recordClaimEvent`.
+    await recordClaimEvent(opts.claimEventsRepo, request, {
+      votePubkey: body.votePubkey,
+      eventType: 'profile_update',
+      identityPubkey: body.identityPubkey,
+      submittedIp: request.ip,
+    });
 
     return {
       profile: {
@@ -331,7 +566,7 @@ function humanMessageFor(reason: ClaimVerifyFailure): string {
 
 // Re-export ValidationError so the API's existing error handler
 // surfaces Zod-rejection messages in the standard envelope.
-// (Referenced via `unwrap` above.)
+// (Thrown by the shared `unwrap` helper in `../zod-helpers.js`.)
 export { ValidationError, NotFoundError };
 
 export default claimRoutes;

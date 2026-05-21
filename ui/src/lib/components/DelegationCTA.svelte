@@ -95,7 +95,7 @@
         </svg>
       </a>
       <a
-        href={`/income/${VOTE_PUBKEY}`}
+        href={`/v/${VOTE_PUBKEY}`}
         class="inline-flex min-h-11 items-center justify-center rounded-lg border border-[color:var(--color-brand-500)] px-4 py-2 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-50)] dark:hover:bg-[color:var(--color-brand-950)]"
       >
         View our metrics

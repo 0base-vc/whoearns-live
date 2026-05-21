@@ -151,9 +151,11 @@ export interface ValidatorProfile {
 }
 
 /**
- * Claim-status payload from `GET /v1/claim/:vote/status`. Light
- * wrapper used by the /claim/:vote page to decide what to render
- * (claim form vs. profile editor).
+ * Claim-status payload from `GET /v1/claims/:vote`. Includes GitHub
+ * link + wallet-registration snapshot so the /v/:id hub can render
+ * the full claim picture in a single fetch (the route was widened in
+ * the cross-cutting MED sweep to surface these alongside the claim
+ * boolean — see `docs/openapi.yaml` ClaimResponse).
  */
 export interface ClaimStatus {
   claimed: boolean;
@@ -162,10 +164,224 @@ export interface ClaimStatus {
         updatedAt: string;
       })
     | null;
+  githubLink: {
+    githubUsername: string;
+    verifiedAt: string;
+    expiresAt: string;
+  } | null;
+  wallets: {
+    count: number;
+    capReached: boolean;
+    oldestExpiresAt: string | null;
+    /**
+     * Per-wallet entries — full pubkey + operator-chosen label +
+     * registration/expiry windows. Surfaced on the response so the
+     * hub can fan-out `/v1/operator-wallets/:wallet/activity` calls
+     * per wallet without scraping the audit log. All fields here
+     * are public (operator-DECLARED affiliations).
+     */
+    entries: ReadonlyArray<{
+      wallet: string;
+      label: string;
+      registeredAt: string;
+      expiresAt: string;
+    }>;
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Gamification surface — Node Tier, badges, OAI, /scoring aggregate
+// ────────────────────────────────────────────────────────────────────
+
+/** Closed-set tier names from the Node Tier composite. */
+export type NodeTier = 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
+
+/** Documented client-kind classifier output. */
+export type ClientKind =
+  | 'agave'
+  | 'jito_solana'
+  | 'firedancer'
+  | 'frankendancer'
+  | 'paladin'
+  | 'sig'
+  | 'unknown';
+
+/** Documented tenure-landmark enum (matches `docs/openapi.yaml`). */
+export type TenureLandmark =
+  | 'MAINNET_BETA_LAUNCH'
+  | 'CYCLE_1_OG'
+  | 'CROSS_CHAIN_ERA'
+  | 'DEFI_2'
+  | 'PRE_FTX'
+  | 'JITO_V2'
+  | 'FIREDANCER_LAUNCH'
+  | 'RECENT'
+  | 'recent_operator';
+
+/**
+ * The window + components block of `/v1/validators/:id/tier`. Matches
+ * `NodeTierBody` in `docs/openapi.yaml`. The breaking refactor in
+ * `6835ae8` + `b726daa` dropped `tvcRatio` / `wilsonSkipRate` /
+ * `voteCredits*` from this shape — vote credits are deliberately
+ * excluded from the public tier (see `docs/scoring.md` Phase 1).
+ */
+export interface NodeTierBody {
+  window: {
+    epochs: number;
+    slotsAssigned: number;
+    slotsSkipped: number;
+    economicCohortSize: number;
+    economicMeasuredEpochs: number;
+    economicMedianLamportsPerSlot: string | null;
+    incomeFreshness: string | null;
+    cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
+  };
+  tier: NodeTier;
+  composite: number | null;
+  components: {
+    reliability: number;
+    economicPercentile: number | null;
+  };
+}
+
+/** `GET /v1/validators/:idOrVote/tier`. */
+export interface NodeTierResponse extends NodeTierBody {
+  vote: string;
+  identity: string;
+}
+
+/** The `tenure` block surfaced by `/badges` and `/scoring`. */
+export interface TenureBlock {
+  firstSeenEpoch: number;
+  activeEpochs: number;
+  landmark: TenureLandmark;
+  badge: string;
+}
+
+/** The `client` block surfaced by `/badges` and `/scoring`. */
+export interface ClientBlock {
+  kind: ClientKind;
+  version: string | null;
+  updatedAt: string | null;
+}
+
+/** `GET /v1/validators/:idOrVote/badges`. */
+export interface BadgesResponse {
+  vote: string;
+  identity: string;
+  tenure: TenureBlock;
+  client: ClientBlock;
+  tier: {
+    tier: NodeTier;
+    composite: number | null;
+    windowEpochs: number;
+  };
+}
+
+/** The OAI body, minus `vote` / `identity`. Matches `OaiBody` in OpenAPI. */
+export interface OaiComponents {
+  composite: number | null;
+  components: {
+    walletScore: number;
+    governance: {
+      score: number | null;
+      commentCount: number;
+      reactionsReceived: number;
+      activeWindowCount: number;
+    };
+  };
+  ingestStatus: {
+    governanceIngestActive: boolean;
+    walletFeesIngestActive: boolean;
+  };
+}
+
+/** `GET /v1/validators/:idOrVote/operator-activity-index`. */
+export interface OaiResponse extends OaiComponents {
+  vote: string;
+  identity: string;
 }
 
 /**
- * `GET /v1/claim/challenge` response. The UI renders the returned
+ * `GET /v1/validators/:idOrVote/scoring` — the REST-M8 aggregate.
+ * One round-trip for tier + tenure + client + OAI. `oai` is `null`
+ * when the validator is known but gated out of the OAI surface
+ * (unclaimed / opted-out / identity-drift); tier/tenure/client are
+ * still fully populated.
+ */
+export interface ScoringResponse {
+  vote: string;
+  identity: string;
+  tier: NodeTierBody;
+  tenure: TenureBlock;
+  client: ClientBlock;
+  oai: OaiComponents | null;
+}
+
+/** `GET /v1/operator-wallets/:wallet`. */
+export interface OperatorWalletResponse {
+  wallet: string;
+  vote: string;
+  label: string;
+  registeredAt: string;
+  expiresAt: string;
+}
+
+/** One sparse-day entry from `/v1/operator-wallets/:wallet/activity`. */
+export interface OperatorWalletActivityEntry {
+  date: string;
+  txCount: number;
+  txFeesLamports: string | null;
+}
+
+/** `GET /v1/operator-wallets/:wallet/activity?days=N`. */
+export interface OperatorWalletActivityResponse {
+  wallet: string;
+  days: number;
+  entries: OperatorWalletActivityEntry[];
+}
+
+/** One curated SIMD proposal from `/v1/simd-proposals`. */
+export interface SimdProposalListItem {
+  simdNumber: number;
+  title: string;
+  status: string;
+  sourceUrl: string;
+  aiSummary: string;
+  aiQuestions: string[];
+  reviewedAt: string;
+}
+
+/** `GET /v1/simd-proposals`. */
+export interface SimdProposalListResponse {
+  count: number;
+  aiModel: string;
+  items: SimdProposalListItem[];
+}
+
+/** One forensic event from `/v1/claims/:vote/audit`. */
+export interface ClaimAuditEvent {
+  eventType:
+    | 'claim'
+    | 'reclaim'
+    | 'profile_update'
+    | 'github_link'
+    | 'wallet_register'
+    | 'wallet_unregister';
+  identityPubkey: string;
+  priorIdentityPubkey: string | null;
+  detail: string | null;
+  createdAt: string;
+}
+
+/** `GET /v1/claims/:vote/audit`. */
+export interface ClaimAuditResponse {
+  votePubkey: string;
+  events: ClaimAuditEvent[];
+}
+
+/**
+ * `GET /v1/claims/challenge` response. The UI renders the returned
  * nonce + timestamp into the message the operator will sign with
  * `solana sign-offchain-message`.
  */

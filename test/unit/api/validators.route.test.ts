@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import validatorsRoutes from '../../../src/api/routes/validators.route.js';
+import { resetTierPercentileCache } from '../../../src/api/tier-cache.js';
 import type { ClaimsRepository } from '../../../src/storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
 import type { ProfilesRepository } from '../../../src/storage/repositories/profiles.repo.js';
@@ -621,5 +622,175 @@ describe('POST /v1/validators/current-epoch/batch', () => {
     expect(body.results).toEqual([]);
     expect(body.missing.sort()).toEqual([VOTE_1, VOTE_2].sort());
     await ctx.app.close();
+  });
+});
+
+describe('GET /v1/validators/:idOrVote/tier', () => {
+  let ctx: Ctx;
+  beforeEach(async () => {
+    // The in-process percentile cache is module-local and TTLed at
+    // 60s; across tests we want a deterministic miss every time so a
+    // stub override seeded in test B isn't shadowed by a cached
+    // result from test A.
+    resetTierPercentileCache();
+    ctx = await makeCtx();
+  });
+
+  it('returns unrated when the validator has no history', async () => {
+    await seedValidator(ctx, VOTE_1, IDENTITY_1);
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      tier: string;
+      window: { epochs: number };
+    };
+    expect(body.tier).toBe('unrated');
+    expect(body.window.epochs).toBe(0);
+  });
+
+  it('classifies a strong validator with enough closed-epoch history', async () => {
+    await seedValidator(ctx, VOTE_1, IDENTITY_1, 505);
+    // Seed 6 epochs. The tier endpoint resolves the running epoch
+    // from `epochsRepo.findCurrent()` and excludes any row whose
+    // `epoch >= current.epoch`. We bump the current epoch to 600 so
+    // all 6 rows are treated as closed and the window picks 5.
+    for (let e = 500; e <= 505; e++) {
+      ctx.stats.rows.set(
+        `${e}:${VOTE_1}`,
+        makeStats(e, VOTE_1, IDENTITY_1, {
+          slotsAssigned: 100,
+          slotsProduced: 100,
+          slotsSkipped: 0,
+          feesUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
+          tipsUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
+        }),
+      );
+    }
+    // Bump the current epoch above the seeded window so all 6
+    // seeded rows count as CLOSED, and the route picks 5 for the
+    // window.
+    await ctx.epochs.upsert({
+      epoch: 600,
+      firstSlot: 0,
+      lastSlot: 100,
+      slotCount: 100,
+      isClosed: false,
+    });
+    // Inject the economic-percentile lookup the production query
+    // would compute from a real cohort. Forge requires: top economic
+    // (1.0 percentile = highest in cohort), a cohort large enough to
+    // matter (≥ MIN_COHORT_FOR_PERCENTILE), and full window
+    // coverage (≥ MIN_MEASURED_EPOCHS_FOR_ECONOMIC measured epochs).
+    ctx.stats.setEconomicLookup(VOTE_1, {
+      percentile: 1.0,
+      cohortSize: 200,
+      measuredEpochs: 5,
+      medianIncomePerSlotLamports: '50000000',
+    });
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      tier: string;
+      composite: number;
+      window: {
+        epochs: number;
+        slotsAssigned: number;
+        economicCohortSize: number;
+        economicMeasuredEpochs: number;
+        cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
+      };
+      components: { reliability: number; economicPercentile: number };
+    };
+    expect(body.tier).toBe('forge');
+    expect(body.window.epochs).toBe(5);
+    expect(body.window.slotsAssigned).toBe(500);
+    expect(body.window.economicCohortSize).toBe(200);
+    expect(body.window.economicMeasuredEpochs).toBe(5);
+    expect(body.components.economicPercentile).toBe(1.0);
+    expect(body.composite).toBeGreaterThanOrEqual(95);
+    // cohortAsOfEpoch reflects the closed-epoch window the percentile
+    // was evaluated against: oldest closed epoch in [500..505] and
+    // newest, with current epoch 600 bumping all six into the closed
+    // set and the route picking the 5 newest (501..505).
+    expect(body.window.cohortAsOfEpoch).toEqual({ fromEpoch: 501, toEpoch: 505 });
+  });
+
+  it('cohortAsOfEpoch is null when the validator has no closed history', async () => {
+    // Validator is known but has zero history rows seeded — same
+    // path as the existing "returns unrated" case but asserting the
+    // null-cohort branch surfaces on the response so a consumer can
+    // distinguish "tier unrated because no window" from "tier unrated
+    // because thin sample within a window".
+    await seedValidator(ctx, VOTE_1, IDENTITY_1);
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      tier: string;
+      window: {
+        epochs: number;
+        cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
+      };
+    };
+    expect(body.tier).toBe('unrated');
+    expect(body.window.epochs).toBe(0);
+    expect(body.window.cohortAsOfEpoch).toBeNull();
+  });
+
+  it('returns 404 for unknown validators', async () => {
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_2}/tier` });
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('GET /v1/validators/:idOrVote/badges', () => {
+  let ctx: Ctx;
+  beforeEach(async () => {
+    resetTierPercentileCache();
+    ctx = await makeCtx();
+  });
+
+  it('returns tenure + client + tier for a tracked validator', async () => {
+    // first_seen_epoch = 100 → predates CYCLE_1_OG (150) → "Cycle 1 OG".
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 100,
+      lastSeenEpoch: 500,
+    });
+    await ctx.epochs.upsert({
+      epoch: 1000,
+      firstSlot: 0,
+      lastSlot: 100,
+      slotCount: 100,
+      isClosed: false,
+    });
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/badges`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      tenure: { firstSeenEpoch: number; landmark: string; badge: string; activeEpochs: number };
+      client: { kind: string; version: string | null };
+      tier: { tier: string; composite: number | null };
+    };
+    expect(body.tenure.firstSeenEpoch).toBe(100);
+    expect(body.tenure.landmark).toBe('CYCLE_1_OG');
+    expect(body.tenure.badge).toBe('Cycle 1 OG');
+    expect(body.tenure.activeEpochs).toBe(900);
+    // Validator was never seen by the cluster-nodes ingester in this test.
+    expect(body.client.kind).toBe('unknown');
+    expect(body.client.version).toBeNull();
+    // No history rows seeded → unrated tier.
+    expect(body.tier.tier).toBe('unrated');
+    expect(body.tier.composite).toBeNull();
+  });
+
+  it('returns 404 for unknown validators', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_2}/badges`,
+    });
+    expect(res.statusCode).toBe(404);
   });
 });

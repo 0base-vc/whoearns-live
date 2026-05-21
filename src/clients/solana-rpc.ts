@@ -5,9 +5,12 @@ import { type TokenBucket } from './token-bucket.js';
 import type {
   RpcBlock,
   RpcBlockProductionValue,
+  RpcClusterNode,
   RpcEpochInfo,
   RpcEpochSchedule,
+  RpcGetSignaturesOptions,
   RpcLeaderSchedule,
+  RpcSignatureInfo,
   RpcValidatorInfoAccount,
   RpcVoteAccounts,
 } from './types.js';
@@ -20,6 +23,10 @@ const UPSTREAM_NAME = 'solana-rpc';
  * payloads can cost more. Providers vary; override via the `methodCosts`
  * constructor option when switching providers.
  */
+/** Hard caps on `getClusterNodes` response shape — see method docstring. */
+const GET_CLUSTER_NODES_MAX_ENTRIES = 8000;
+const GET_CLUSTER_NODES_MAX_VERSION_LEN = 64;
+
 export const DEFAULT_METHOD_COST = 30;
 export const DEFAULT_METHOD_COSTS: Readonly<Record<string, number>> = Object.freeze({
   getSlot: 30,
@@ -33,6 +40,17 @@ export const DEFAULT_METHOD_COSTS: Readonly<Record<string, number>> = Object.fre
   // need full tx payloads.
   getBlock: 30,
   getVoteAccounts: 30,
+  // `getClusterNodes` returns the full gossip member list (~2000
+  // entries, ~250B each, ~500KB response). Comparable to a
+  // `getVoteAccounts` round-trip at our scale; same cost.
+  getClusterNodes: 30,
+  // `getSignaturesForAddress` returns up to 1000 signatures (~120B
+  // each, ~120KB response). Cost similar to a getBlock — set at 30.
+  getSignaturesForAddress: 30,
+  // `getTransaction` returns a single tx with metadata; payload is
+  // typically a few KB. Provider quotas treat it comparably to a
+  // single-slot `getBlock` lookup.
+  getTransaction: 30,
   // `getProgramAccounts` on the Config program (~3k accounts,
   // ~500B each, ~3MB response) is heavier than the per-slot calls.
   // Providers commonly bill this higher depending on response size; we set it
@@ -194,8 +212,19 @@ export class SolanaRpcClient {
    *   4. Exhausted a 5xx / fetch failure → `UpstreamError`.
    *   5. Non-retryable HTTP error → `UpstreamError` immediately.
    *   6. JSON body `error` field → `UpstreamError`.
+   *
+   * `callerSignal` (OPS-L2) is an OPTIONAL abort signal owned by the
+   * caller — e.g. a job's per-tick `AbortSignal` that fires on
+   * SIGTERM. When supplied it is combined with the per-attempt
+   * `AbortSignal.timeout` via `AbortSignal.any`, so a graceful
+   * shutdown aborts the in-flight `fetch` immediately instead of
+   * waiting out the full RPC timeout.
    */
-  private async request<T>(method: string, params?: unknown[]): Promise<T> {
+  private async request<T>(
+    method: string,
+    params?: unknown[],
+    callerSignal?: AbortSignal,
+  ): Promise<T> {
     const id = this.nextRequestId();
     const body: JsonRpcRequest =
       params === undefined
@@ -218,13 +247,22 @@ export class SolanaRpcClient {
         await this.rateLimiter.acquire(creditCost);
       }
 
+      // Per-attempt timeout signal. When the caller passed its own
+      // signal (OPS-L2), combine the two so EITHER the timeout firing
+      // OR the caller aborting (SIGTERM-driven shutdown) tears down
+      // the `fetch`. A fresh timeout signal is minted per attempt so
+      // a retry gets the full timeout budget again.
+      const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
+      const attemptSignal =
+        callerSignal === undefined ? timeoutSignal : AbortSignal.any([timeoutSignal, callerSignal]);
+
       let response: Response;
       try {
         response = await fetch(this.url, {
           method: 'POST',
           headers: { 'content-type': 'application/json', accept: 'application/json' },
           body: payload,
-          signal: AbortSignal.timeout(this.timeoutMs),
+          signal: attemptSignal,
         });
       } catch (err) {
         // AbortError (timeout) and generic network errors both land here.
@@ -365,9 +403,14 @@ export class SolanaRpcClient {
   /**
    * Wrap a request in the shared concurrency limiter. Every public method
    * funnels through this so the `concurrency` ceiling is respected globally.
+   *
+   * `callerSignal` (OPS-L2) is forwarded to `request` so a caller-owned
+   * abort signal reaches the underlying `fetch`. Most methods don't
+   * pass one — the existing per-attempt timeout is unchanged when it's
+   * `undefined`.
    */
-  private enqueue<T>(method: string, params?: unknown[]): Promise<T> {
-    return this.limit(() => this.request<T>(method, params));
+  private enqueue<T>(method: string, params?: unknown[], callerSignal?: AbortSignal): Promise<T> {
+    return this.limit(() => this.request<T>(method, params, callerSignal));
   }
 
   async getSlot(commitment?: Commitment): Promise<number> {
@@ -529,6 +572,188 @@ export class SolanaRpcClient {
   async getVoteAccounts(commitment?: Commitment): Promise<RpcVoteAccounts> {
     const params = commitment !== undefined ? [{ commitment }] : undefined;
     return this.enqueue<RpcVoteAccounts>('getVoteAccounts', params);
+  }
+
+  /**
+   * Fetch signatures originated by `address` in newest-first order.
+   * Returns at most `limit` (default 1000, server cap). Pagination is
+   * via the `before` signature cursor — pass the oldest signature
+   * from the previous page to walk back further.
+   *
+   * Used by Phase 4 wallet-activity ingestion. The fee + landed-day
+   * for each signature is derived downstream via `getTransaction`
+   * (one round-trip per signature). For high-volume wallets the
+   * caller is expected to cap the per-tick batch size.
+   */
+  async getSignaturesForAddress(
+    address: string,
+    options: RpcGetSignaturesOptions = {},
+  ): Promise<RpcSignatureInfo[]> {
+    const params: [string, Record<string, unknown>?] = [address];
+    const opts: Record<string, unknown> = {};
+    if (options.limit !== undefined) opts['limit'] = Math.min(Math.max(options.limit, 1), 1000);
+    if (options.before !== undefined) opts['before'] = options.before;
+    if (options.until !== undefined) opts['until'] = options.until;
+    if (options.commitment !== undefined) opts['commitment'] = options.commitment;
+    if (Object.keys(opts).length > 0) params.push(opts);
+    return this.enqueue<RpcSignatureInfo[]>('getSignaturesForAddress', params);
+  }
+
+  /**
+   * Fetch a single transaction's signer-set, accountKeys, and the
+   * compiled instruction list for the operator-wallet memo-tx
+   * verification.
+   *
+   * The return projection is intentionally MINIMAL: the wallet
+   * verification asks two questions — "did walletPubkey sign this
+   * tx?" (is it one of the first `numRequiredSignatures` entries of
+   * `accountKeys`?) and "does the single SPL Memo instruction carry
+   * the canonical nonce?". The latter needs each instruction's
+   * resolved program id and its raw data, so we project the
+   * `instructions` array as `{ programId, dataBase58 }`. We still
+   * don't surface logs, post-balances, or the 100+ other fields the
+   * full RPC response carries.
+   *
+   * With `encoding: 'json'` the RPC returns instructions as
+   * `{ programIdIndex, accounts, data }` where `data` is base58 of
+   * the raw instruction bytes; we resolve `programIdIndex` against
+   * `accountKeys` so callers get a usable program id without
+   * re-implementing the index lookup.
+   *
+   * Returns `null` when the signature isn't found (provider missed
+   * the slot, archive node not yet caught up, signature is invalid).
+   * Versioned transactions (v0+) are accepted via
+   * `maxSupportedTransactionVersion: 0`; LUT-loaded addresses are
+   * NOT included in `accountKeys` (the lookup-table indirection
+   * lives in a different field) — which is fine for the signer
+   * check because LUT addresses can never be signers, and for the
+   * memo check because the SPL Memo program id is always a static
+   * (non-LUT) account key.
+   */
+  async getTransaction(
+    signature: string,
+    opts?: { commitment?: Commitment },
+  ): Promise<{
+    accountKeys: string[];
+    numRequiredSignatures: number;
+    instructions: Array<{ programId: string; dataBase58: string }>;
+  } | null> {
+    const config: Record<string, unknown> = {
+      encoding: 'json',
+      maxSupportedTransactionVersion: 0,
+    };
+    if (opts?.commitment !== undefined) config['commitment'] = opts.commitment;
+    const raw = await this.enqueue<{
+      transaction?: {
+        message?: {
+          accountKeys?: unknown;
+          header?: { numRequiredSignatures?: unknown };
+          instructions?: unknown;
+        };
+      };
+    } | null>('getTransaction', [signature, config]);
+    if (raw === null) return null;
+    const msg = raw.transaction?.message;
+    const keysRaw = msg?.accountKeys;
+    const numSigners = msg?.header?.numRequiredSignatures;
+    if (!Array.isArray(keysRaw)) return null;
+    const accountKeys: string[] = [];
+    for (const k of keysRaw) {
+      // Versioned txs may serialise an accountKey as `{ pubkey, signer,
+      // writable, source }`. Legacy txs use bare strings. Accept both
+      // shapes; reject anything else.
+      if (typeof k === 'string') {
+        accountKeys.push(k);
+      } else if (
+        k !== null &&
+        typeof k === 'object' &&
+        typeof (k as { pubkey?: unknown }).pubkey === 'string'
+      ) {
+        accountKeys.push((k as { pubkey: string }).pubkey);
+      } else {
+        return null;
+      }
+    }
+    if (typeof numSigners !== 'number' || numSigners < 1 || numSigners > accountKeys.length) {
+      return null;
+    }
+    // Resolve compiled instructions to `{ programId, dataBase58 }`.
+    // A malformed instruction list (non-array, bad index, non-string
+    // data) fails the whole parse — the memo verification must not
+    // run against a partially-understood tx.
+    const instructionsRaw = msg?.instructions;
+    const instructions: Array<{ programId: string; dataBase58: string }> = [];
+    if (instructionsRaw !== undefined) {
+      if (!Array.isArray(instructionsRaw)) return null;
+      for (const ix of instructionsRaw) {
+        if (ix === null || typeof ix !== 'object') return null;
+        const idx = (ix as { programIdIndex?: unknown }).programIdIndex;
+        const data = (ix as { data?: unknown }).data;
+        if (typeof idx !== 'number' || idx < 0 || idx >= accountKeys.length) return null;
+        // `data` can be an empty string for a zero-byte instruction;
+        // anything non-string is malformed.
+        if (typeof data !== 'string') return null;
+        const programId = accountKeys[idx];
+        if (programId === undefined) return null;
+        instructions.push({ programId, dataBase58: data });
+      }
+    }
+    return { accountKeys, numRequiredSignatures: numSigners, instructions };
+  }
+
+  /**
+   * Fetch gossip ContactInfo for every node currently in the cluster.
+   * Used by Phase 2 client-kind indexing to map identity pubkeys to
+   * their advertised version string.
+   *
+   * The full response includes `gossip`, `tpu`, `rpc`, `featureSet`,
+   * and `shredVersion` per node; we project to the minimal
+   * `{pubkey, version}` shape via the response type so downstream
+   * code can't accidentally depend on fields we haven't audited for
+   * stability.
+   *
+   * `signal` (OPS-L2) is an optional caller-owned abort signal. The
+   * cluster-nodes ingester passes its per-tick shutdown signal so a
+   * SIGTERM during a slow ~500 KB fetch aborts the request promptly
+   * rather than waiting out the 30 s RPC timeout and risking a
+   * SIGKILL mid-write.
+   */
+  async getClusterNodes(signal?: AbortSignal): Promise<RpcClusterNode[]> {
+    const raw = await this.enqueue<Array<RpcClusterNode & Record<string, unknown>>>(
+      'getClusterNodes',
+      undefined,
+      signal,
+    );
+    // Upstream sanity caps. Solana mainnet has ~2000 gossip-active
+    // nodes; 8000 is a comfortable upper bound that catches a
+    // malformed / hostile RPC response (e.g. millions of synthetic
+    // entries) before it OOMs the worker. Per-version-string length
+    // is capped at the DB column width (VARCHAR(64)) — anything
+    // longer is almost certainly garbage and would fail the UPDATE
+    // at write time, which is too late.
+    if (!Array.isArray(raw)) {
+      throw new UpstreamError(UPSTREAM_NAME, 'getClusterNodes: expected array');
+    }
+    if (raw.length > GET_CLUSTER_NODES_MAX_ENTRIES) {
+      throw new UpstreamError(
+        UPSTREAM_NAME,
+        `getClusterNodes: ${raw.length} entries exceeds ${GET_CLUSTER_NODES_MAX_ENTRIES} cap`,
+      );
+    }
+    return raw.map((n) => {
+      const rawVersion = typeof n.version === 'string' ? n.version : null;
+      const trimmed = rawVersion === null ? null : rawVersion.trim();
+      const normalised =
+        trimmed === null ||
+        trimmed.length === 0 ||
+        trimmed.length > GET_CLUSTER_NODES_MAX_VERSION_LEN
+          ? null
+          : trimmed;
+      return {
+        pubkey: typeof n.pubkey === 'string' ? n.pubkey : '',
+        version: normalised,
+      };
+    });
   }
 
   /**

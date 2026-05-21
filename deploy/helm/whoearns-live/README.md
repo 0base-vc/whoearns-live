@@ -4,7 +4,7 @@ Runtime chart name: `whoearns-live`. Installing with release name
 `whoearns-live` creates Kubernetes objects with the public runtime slug,
 including StatefulSet `whoearns-live` and pod `whoearns-live-0`.
 
-Chart version: `0.3.0` · App version: `0.3.0`
+Chart version: `0.4.0` · App version: `0.4.0`
 
 Single-pod deployment. The image bundles PostgreSQL 16, so one StatefulSet
 with one replica runs the API, the worker, and Postgres in the same
@@ -12,14 +12,16 @@ container. Migrations run automatically on pod start.
 
 ## Components
 
-| Kind           | Name             | Purpose                                  |
-| -------------- | ---------------- | ---------------------------------------- |
-| StatefulSet    | `<rel>`          | API + worker + Postgres in one container |
-| Service        | `<rel>`          | ClusterIP for the API                    |
-| Service        | `<rel>-headless` | Governing service for the StatefulSet    |
-| ConfigMap      | `<rel>-config`   | Non-secret env vars                      |
-| ServiceAccount | `<rel>`          | Pod identity                             |
-| Ingress        | `<rel>`          | Disabled by default; enable per overlay  |
+| Kind           | Name              | Purpose                                                                                                    |
+| -------------- | ----------------- | ---------------------------------------------------------------------------------------------------------- |
+| StatefulSet    | `<rel>`           | API + worker + Postgres in one container                                                                   |
+| Service        | `<rel>`           | ClusterIP for the API (adds a `metrics` port when `config.metricsPort` > 0)                                |
+| Service        | `<rel>-headless`  | Governing service for the StatefulSet                                                                      |
+| ConfigMap      | `<rel>-config`    | Non-secret env vars                                                                                        |
+| Secret         | `<rel>-anthropic` | Anthropic API key — rendered ONLY when `anthropic.apiKey` is set inline (see below)                        |
+| ServiceMonitor | `<rel>`           | Prometheus Operator scrape target — rendered ONLY when `serviceMonitor.enabled` + `config.metricsPort` > 0 |
+| ServiceAccount | `<rel>`           | Pod identity                                                                                               |
+| Ingress        | `<rel>`           | Disabled by default; enable per overlay                                                                    |
 
 PostgreSQL state lives on the PVC `data-<rel>-0` created by
 `volumeClaimTemplates`.
@@ -124,6 +126,54 @@ See `values.yaml` for the full, commented reference. Highlights:
   `getBlockProduction` or `getBlock`; leave it empty for normal deploys.
   It is retained for one-shot/offline refill scripts.
 - `config.*` flattens onto env vars via the ConfigMap.
+
+### Gamification feature flags (Phases 2-6)
+
+These drive the worker job cadences for the badge / tier / claim /
+wallet-activity / SIMD-curation features. All have safe defaults — a
+deployment that doesn't `--set` any of them still runs every job at
+the documented interval.
+
+| Value                             | Env var                       | Default             | Drives                                                   |
+| --------------------------------- | ----------------------------- | ------------------- | -------------------------------------------------------- |
+| `config.clusterNodesIntervalMs`   | `CLUSTER_NODES_INTERVAL_MS`   | `1800000`           | Phase 2 gossip ContactInfo refresh (client-kind/version) |
+| `config.validatorInfoIntervalMs`  | `VALIDATOR_INFO_INTERVAL_MS`  | `21600000`          | Phase 2 on-chain validator-info refresh (watched set)    |
+| `config.walletActivityIntervalMs` | `WALLET_ACTIVITY_INTERVAL_MS` | `21600000`          | Phase 4 wallet daily-activity indexer                    |
+| `config.simdCurationIntervalMs`   | `SIMD_CURATION_INTERVAL_MS`   | `43200000`          | Phase 5 SIMD AI-curation pass                            |
+| `anthropic.model`                 | `ANTHROPIC_MODEL`             | `claude-sonnet-4-6` | Phase 5 model identifier (non-secret; ConfigMap)         |
+
+> The large interval values are deliberately QUOTED strings in
+> `values.yaml` — Helm widens bare integers to float64, which would
+> render `1800000` as `"1.8e+06"`. Keep the quotes if you override.
+
+### Anthropic API key (Phase 5 — optional)
+
+The SIMD curation pipeline needs an Anthropic API key. When unset the
+pipeline is simply disabled (the public read endpoint still serves
+already-curated rows). The key is **never** placed in the ConfigMap —
+two Secret-based wirings:
+
+- **Inline (dev / fork demo).** `--set anthropic.apiKey=sk-ant-...`
+  — the chart provisions a Secret named `<rel>-anthropic` holding the
+  value and the StatefulSet references it.
+- **External Secret (production).** Pre-create a Secret in the release
+  namespace with key `ANTHROPIC_API_KEY`, then
+  `--set anthropic.existingSecret=<secret-name>`. The chart references
+  it via `secretKeyRef` and does NOT manage it — pairs with
+  external-secrets / sealed-secrets / cloud KMS injection.
+
+`anthropic.apiKey` and `anthropic.existingSecret` are mutually
+exclusive — set one, not both.
+
+### Prometheus ServiceMonitor (optional)
+
+`serviceMonitor.enabled: true` (with `config.metricsPort` > 0) renders
+a `monitoring.coreos.com/v1` ServiceMonitor for selector-based
+Prometheus Operator discovery. It's independent of the
+`prometheus.io/scrape` pod annotations the StatefulSet already emits —
+most clusters use one mechanism or the other. Requires the
+monitoring.coreos.com CRDs. Set `serviceMonitor.labels.release` to
+match your Prometheus Operator's ServiceMonitor selector.
 
 ## Ingress with external-dns + Cloudflare (example)
 

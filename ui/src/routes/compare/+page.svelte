@@ -705,7 +705,7 @@
         {#if slot.history}
           <h2 class="mt-2 inline-flex items-center gap-2 text-2xl font-semibold tracking-tight">
             <a
-              href={`/income/${slot.history.vote}`}
+              href={`/v/${slot.history.vote}`}
               class="hover:text-[color:var(--color-brand-500)] hover:underline"
             >
               {slot.history.name ?? shortenPubkey(slot.history.vote, 8, 8)}

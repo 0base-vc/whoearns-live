@@ -439,17 +439,160 @@ Body validation:
 | 400  | `validation_error` | `votes` missing, empty, oversize, or contains bad entries. |
 | 503  | `not_ready`        | No epoch row yet.                                          |
 
+## `GET /v1/validators/:idOrVote/tier`
+
+Returns the validator's **Node Tier** (Phase 1 release: 2-signal composite
+over the most recent 5 closed epochs). See [`scoring.md`](./scoring.md)
+for the full formula and rationale on why vote credits are excluded.
+
+Response shape:
+
+```json
+{
+  "vote": "5BAi9YGCipHq4ZcXuen5vagRQqRTVTRszXNqBZC6uBPZ",
+  "identity": "IDENTITY_PUBKEY",
+  "window": {
+    "epochs": 5,
+    "slotsAssigned": 432,
+    "slotsSkipped": 3,
+    "economicCohortSize": 1247,
+    "economicMeasuredEpochs": 5,
+    "economicMedianLamportsPerSlot": "8421337",
+    "incomeFreshness": "2026-05-12T08:00:00.000Z",
+    "cohortAsOfEpoch": { "fromEpoch": 820, "toEpoch": 824 }
+  },
+  "tier": "forge | anvil | hearth | kindling | unrated",
+  "composite": 96,
+  "components": {
+    "reliability": 0.988,
+    "economicPercentile": 0.97
+  }
+}
+```
+
+The composite is `0.3 × reliability + 0.7 × economicPercentile`,
+scaled to 0-100. `reliability` is the pessimistic block-production
+success rate (`1 − wilsonInterval(slotsSkipped, slotsAssigned).upper`);
+`economicPercentile` is the cohort rank of this validator's median
+per-leader-slot income (`(blockFeesTotalLamports +
+blockTipsTotalLamports) / slotsAssigned`) across the 5-epoch window,
+computed against the **indexed-validator cohort** (the deployment's
+`WatchMode` set — `top:N`, an explicit list, or `*` for every active
+validator). Tier cutoffs: `forge ≥ 95`, `anvil ≥ 80`, `hearth ≥ 40`,
+`kindling < 40`.
+
+`window.epochs` is the count of closed-epoch rows actually indexed
+for this validator (`≤ 5`) — **not** the configured window, which is
+always 5. A value below 5 is a cold-start state: the indexer has not
+yet backfilled this validator's older epochs. The tier is still
+computed, just over the rows available so far; `economicMeasuredEpochs`
+(epochs with measurable income) is likewise `≤ window.epochs`.
+
+`tier === "unrated"` when the validator has fewer than 10 leader slots
+across the window, OR the cohort had fewer than 10 indexed peers with
+measurable income, OR this validator had measurable income in fewer
+than 4 of the 5 closed epochs in the window, OR
+`economicPercentile === null` — the confidence floors prevent
+tiny-sample validators from being mis-classified. **`composite === null`
+when tier is `unrated`** so a UI cannot accidentally display a
+half-shown score.
+
+**Reliability floor (hard cap).** A validator whose Wilson 95% upper
+bound on `skip_rate` exceeds `0.20` is **tier-capped at `kindling`**
+regardless of `economicPercentile`. This is a hygiene
+check, not a bypassable signal — a top earner who flakes out on a
+fifth of their assigned blocks does not earn a higher tier on the
+strength of their economics alone.
+
+**Cohort scope.** `window.economicCohortSize` is the number of indexed,
+non-opted-out validators the percentile was computed against, NOT the
+full Solana cluster. `window.cohortAsOfEpoch` is the
+`{fromEpoch, toEpoch}` closed-epoch range the cohort was sampled over,
+or `null` when the window had no closed-epoch data (fresh DB or full
+ingest outage). Together these let a consumer detect when a cached
+tier is out of step with a freshly-fetched leaderboard, and ensure
+percentiles from a `top:500` deployment aren't read as percentiles
+"vs all of Solana." See [`scoring.md`](./scoring.md) Phase 1 for the
+full cohort-scope rationale.
+
+`window.incomeFreshness` is the OLDEST of `feesUpdatedAt` /
+`tipsUpdatedAt` across the window's closed-epoch rows; `null` when
+no row in the window has both fees and tips ingested. Lets a UI grey
+out the tier when the income ingester has stalled, without polling a
+separate health surface.
+
+The endpoint draws from `epoch_validator_stats` only — no live RPC.
+`HEAD` is supported and short-circuits after the validator existence
+check, before the history read + tier computation.
+
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier — see `src/api/cache-control.ts`). `tier` and `badges`
+serve the same closed-epoch-derived data class and now share this
+single named tier.
+
+## `GET /v1/validators/:idOrVote/badges`
+
+Returns composite profile-level badges (Phase 2):
+
+```json
+{
+  "vote": "VOTE_PUBKEY",
+  "identity": "IDENTITY_PUBKEY",
+  "tenure": {
+    "firstSeenEpoch": 100,
+    "activeEpochs": 900,
+    "landmark": "CYCLE_1_OG",
+    "badge": "Cycle 1 OG"
+  },
+  "client": {
+    "kind": "firedancer",
+    "version": "0.405.20218",
+    "updatedAt": "2026-05-13T08:00:00.000Z"
+  },
+  "tier": {
+    "tier": "forge",
+    "composite": 96,
+    "windowEpochs": 5
+  }
+}
+```
+
+- `tenure.landmark` is one of `MAINNET_BETA_LAUNCH`, `CYCLE_1_OG`,
+  `CROSS_CHAIN_ERA`, `DEFI_2`, `PRE_FTX`, `JITO_V2`,
+  `FIREDANCER_LAUNCH`, `recent_operator`. The oldest landmark the
+  validator predates wins (no double-counting).
+- `client.kind` enum: `agave`, `jito_solana`, `firedancer`,
+  `frankendancer`, `paladin`, `sig`, `unknown`. Sourced from
+  `getClusterNodes.version`; `unknown` is the neutral default before
+  the cluster-nodes ingester has run.
+- `tier` mirrors `GET /v1/validators/:idOrVote/tier`. Bundled here so
+  a profile page renders the full badge row in one round-trip.
+
+`HEAD` is supported and short-circuits after the validator existence
+check, before the history read.
+
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier — see `src/api/cache-control.ts`; the same tier
+`/tier` uses, so the two can no longer drift). All three sub-objects
+update on independent cadences: `tenure.activeEpochs` ticks each
+epoch (~2 days), `client.kind` ticks on operator upgrade cycles,
+`tier` ticks on epoch close.
+
 ## Claim/profile endpoints
 
 Validator operators can prove ownership by signing a short message with the
 validator identity key. No account, cookie, or password is created.
 
-| Method | Path                     | Purpose                                            |
-| ------ | ------------------------ | -------------------------------------------------- |
-| GET    | `/v1/claim/challenge`    | Returns `{ nonce, timestampSec, expiresInSec }`.   |
-| GET    | `/v1/claim/:vote/status` | Public claim/profile state for a vote pubkey.      |
-| POST   | `/v1/claim/verify`       | Verify a signed claim without editing profile.     |
-| POST   | `/v1/claim/profile`      | Verify signature and update public profile fields. |
+| Method | Path                       | Purpose                                            |
+| ------ | -------------------------- | -------------------------------------------------- |
+| GET    | `/v1/claims/challenge`     | Returns `{ nonce, timestampSec, expiresInSec }`.   |
+| GET    | `/v1/claims/:vote`         | Public claim/profile state for a vote pubkey.      |
+| GET    | `/v1/claims/:vote/audit`   | Public, append-only claim-change audit log.        |
+| PUT    | `/v1/claims/:vote`         | Verify a signed claim without editing profile.     |
+| PUT    | `/v1/claims/:vote/profile` | Verify signature and update public profile fields. |
+
+`GET /v1/claims/:vote` is the claim instance — "status" is just the GET of
+the resource. The two mutating endpoints are idempotent upserts, hence `PUT`.
 
 Mutation bodies include:
 
@@ -459,7 +602,13 @@ Mutation bodies include:
 - `timestampSec`
 - `signatureBase58`
 
-`/v1/claim/profile` also includes `profile`:
+The mutating `:vote` endpoints carry the vote pubkey in **both** the path and
+the signed body. The signed body stays authoritative (the signature is bound
+to its fields); the path is a cheap consistency guard — a `params.vote` that
+disagrees with `votePubkey` is rejected `400 vote_pubkey_mismatch` before any
+verification work.
+
+`PUT /v1/claims/:vote/profile` also includes `profile`:
 
 ```json
 {
@@ -474,14 +623,583 @@ The signed payload binds the purpose (`claim` or `profile`), timestamp, nonce,
 pubkeys, and profile fields, so a profile signature cannot be replayed as a
 different operation.
 
+### `GET /v1/claims/:vote`
+
+Public, unauthenticated. The GET of the claim instance — "status" is just
+reading the resource. The whole-claim picture for a vote pubkey in a
+**single** fetch — a dashboard does not have to chase this with separate
+GitHub-link and operator-wallet reads.
+
+```json
+{
+  "claimed": true,
+  "profile": {
+    "twitterHandle": "validator_name",
+    "hideFooterCta": false,
+    "optedOut": false,
+    "narrativeOverride": null,
+    "updatedAt": "2026-05-10T12:00:00.000Z"
+  },
+  "githubLink": {
+    "githubUsername": "alice",
+    "verifiedAt": "2026-02-01T00:00:00.000Z",
+    "expiresAt": "2026-05-01T00:00:00.000Z"
+  },
+  "wallets": {
+    "count": 2,
+    "capReached": false,
+    "oldestExpiresAt": "2026-04-15T00:00:00.000Z"
+  }
+}
+```
+
+- `claimed` / `profile` — `profile` is `null` when the validator is claimed
+  but has no profile edits yet, and also when never claimed (`claimed: false`).
+- `githubLink` — the ACTIVE linked GitHub identity, or `null` when there is no
+  link **or** the attestation has lapsed. Same "lapsed = inactive" rule the
+  OAI route applies.
+- `wallets` — summary of the ACTIVE (not-expired) registered operator wallets:
+  `count`, whether the per-validator cap (3) is `capReached`, and
+  `oldestExpiresAt` (the soonest-expiring attestation, or `null` when none are
+  registered) so a dashboard can nudge "re-attest" before a wallet drops out
+  of scoring.
+
+### Claim endpoints: v1 vs v2 signing
+
+The four claim-surface mutation endpoints split into **two signing ceremonies
+with different parameters** — a library author writing one signer for all four
+needs to know this up front:
+
+| Endpoints                                                       | Timestamp field | Unit                  | Freshness window                          | Replay guard                                                   |
+| --------------------------------------------------------------- | --------------- | --------------------- | ----------------------------------------- | -------------------------------------------------------------- |
+| **v1** — `PUT /v1/claims/:vote`, `PUT /v1/claims/:vote/profile` | `timestampSec`  | Unix seconds          | ±5 min (symmetric)                        | Per-claim `lastNonceUsed` (the service rejects a reused nonce) |
+| **v2** — `PUT /v1/claims/:vote/github`, `POST .../wallets`      | `timestampMs`   | Unix **milliseconds** | 5 min past / **60 s future** (asymmetric) | `signed_nonce` UNIQUE index (migration 0025)                   |
+
+Why the asymmetry exists:
+
+- **Unit.** v1 predates v2; v2's canonical nonce embeds `expiresAtMs =
+timestampMs + TTL`, so it works in milliseconds end-to-end. The units are
+  **not** interchangeable — sending seconds where milliseconds are expected
+  (or vice versa) fails freshness, not validation.
+- **Window.** v2's future-skew is deliberately tight (60 s vs v1's 5 min):
+  a future timestamp asks the server to extend a signature's verifiable
+  lifetime, and combined with `expiresAtMs` a generous future-skew would push
+  the effective replay window out to ~35 min. v1 has no `expiresAtMs`
+  derivation, so a symmetric ±5 min is safe there.
+- **Replay mechanism.** v1 tracks the last nonce per claim row; v2 stores
+  every canonical nonce under a UNIQUE index. Both reject resubmission within
+  the freshness window — v1 with the service's nonce check, v2 with HTTP 403
+  `nonce_replay` from the constraint.
+
+This subsection is documentation only — the endpoints' behaviour is unchanged.
+
+### `GET /v1/claims/:vote/audit`
+
+An immutable, append-only log of every claim-surface mutation for a vote
+pubkey — claims, re-claims, profile edits, GitHub links, and operator-wallet
+registrations — newest first. The point is forensic: if a validator identity
+key is compromised an attacker can silently re-claim, re-link GitHub, and
+register a wallet, and without this log the real operator would have no way to
+notice. A `reclaim` event whose `priorIdentityPubkey` is non-null is the
+signal that the validator identity was rotated.
+
+Public and unauthenticated, like `GET /v1/claims/:vote` — every field
+returned is already public on-chain or operator-published. The `submitted_ip`
+recorded with each event (the request IP at write time) is a forensic field
+that stays in the database and is **not** included in the response. Cache:
+`public, max-age=300, s-maxage=1800` (5 min browser, 30 min CDN) — audit
+history only changes on a deliberate claim-surface mutation.
+
+```json
+{
+  "votePubkey": "Vote111111111111111111111111111111111111111",
+  "events": [
+    {
+      "eventType": "reclaim",
+      "identityPubkey": "Node222222222222222222222222222222222222222",
+      "priorIdentityPubkey": "Node111111111111111111111111111111111111111",
+      "detail": null,
+      "createdAt": "2026-05-14T12:00:00.000Z"
+    },
+    {
+      "eventType": "github_link",
+      "identityPubkey": "Node111111111111111111111111111111111111111",
+      "priorIdentityPubkey": null,
+      "detail": { "githubUsername": "alice", "priorGithubUsername": null },
+      "createdAt": "2026-05-10T09:30:00.000Z"
+    }
+  ]
+}
+```
+
+`detail` is event-specific: `{ githubUsername, priorGithubUsername }` for
+`github_link`, `{ walletPubkey, label }` for `wallet_register`, and `null` for
+`claim` / `reclaim` / `profile_update`. The audit write is best-effort — it
+happens after the underlying mutation commits, so a transient audit-write
+failure never fails the operator's claim (and, by the same token, is not yet
+transactional with it).
+
+## Image surfaces
+
+These are public, unauthenticated, cacheable image endpoints designed to
+be embedded by third parties (operator websites, GitHub READMEs, social
+share previews). All three share a "latest closed epoch only" data model
+— they never show running-epoch numbers, so a CDN-cached asset cannot be
+caught lying when the epoch closes mid-cache.
+
+| Method | Path               | Returns | Purpose                                                           |
+| ------ | ------------------ | ------- | ----------------------------------------------------------------- |
+| GET    | `/og/default.png`  | PNG     | Static brand OG card (also at `/og-default.png` for back-compat). |
+| GET    | `/og/:vote.png`    | PNG     | 1200×630 per-validator OG card (vote OR identity pubkey).         |
+| GET    | `/badge/:vote.svg` | SVG     | 440×76 embeddable performance badge for operator websites.        |
+
+The SVG badge ships `<title>` + `<desc>` accessibility metadata containing
+the validator name + closed-epoch summary so screen readers and search
+engines can announce content the satori-rendered vector paths otherwise
+hide. Cache: `public, max-age=3600, s-maxage=86400` (1 h browser, 1 day
+CDN).
+
+Embedding example:
+
+```html
+<a href="https://whoearns.live/v/VOTE">
+  <img
+    src="https://whoearns.live/badge/VOTE.svg"
+    alt="WhoEarns live performance for VOTE"
+    width="440"
+    height="76"
+  />
+</a>
+```
+
+## Claim v2 endpoints (Phase 3)
+
+Two additional flows on top of `PUT /v1/claims/:vote`. Both carry the vote
+pubkey in **both** the path and the request body; a mismatch is rejected
+`400 vote_pubkey_mismatch` (the request body stays authoritative for the
+cryptographic proof).
+
+### `PUT /v1/claims/:vote/github`
+
+Links a GitHub identity to a claimed validator via a Keybase-style
+public Gist. No OAuth token is retained. Idempotent — a re-link replaces,
+hence `PUT`.
+
+Request body:
+
+```json
+{
+  "votePubkey": "...",
+  "identityPubkey": "...",
+  "githubUsername": "alice",
+  "gistUrl": "https://gist.github.com/alice/<gistId>",
+  "timestampMs": 1715670000000
+}
+```
+
+The Gist body must contain (and only contain) the canonical nonce
+serialised by WhoEarns plus the operator's Ed25519 signature:
+
+```
+---
+{"domain":"...","expiresAtMs":...,"githubUsername":"alice","identityPubkey":"...","issuedAtMs":...,"votePubkey":"..."}
+---
+signature: <base58 Ed25519 sig>
+```
+
+Status codes: 200 on success, 403 for nonce/sig/policy failures, 502
+for upstream Gist fetch errors, 503 when the P3 feature deps are not
+wired in.
+
+### `POST /v1/claims/:vote/wallets`
+
+Registers (appends) an operator-day-to-day wallet, co-signed by validator
+identity AND wallet keys, anchored by a Solana memo transaction. The
+wallets are a bounded collection (≤3 per validator), so this is a `POST`
+to the plural `wallets` sub-path.
+
+Request body:
+
+```json
+{
+  "votePubkey": "...",
+  "identityPubkey": "...",
+  "walletPubkey": "...",
+  "label": "cold",
+  "timestampMs": 1715670000000,
+  "identitySignatureB58": "...",
+  "walletSignatureB58": "...",
+  "anchorTxSignature": "..."
+}
+```
+
+- Cap of 3 wallets per validator (HTTP 409 `wallet_cap_reached`).
+- `label` is operator-chosen (≤32 chars).
+- `anchorTxSignature` is the Solana tx signature of the
+  operationally-alive memo transaction the wallet published.
+
+**Anchor tx semantics — Phase 3 scope.** The current release validates
+`anchorTxSignature` for base58 shape and exactly 64 decoded bytes (a
+real Solana tx signature). It does **not** yet fetch the transaction
+on-chain. Full on-chain verification — `getTransaction`, memo-program
+ID assertion, memo content equal to a hash of the canonical nonce, tx
+signer equal to `walletPubkey` — is a planned hardening pass (see
+`docs/roadmap.md`). Until that lands, the anchor functions as an
+operator-side commitment + crypto-shape filter rather than a proof
+of on-chain activity. Co-signed identity + wallet Ed25519 signatures
+remain the primary defense.
+
+**Replay defense.** Both endpoints store the canonical nonce under a
+UNIQUE index (migration 0025). Resubmission within the freshness
+window returns HTTP 403 `nonce_replay`. Future-dated `timestampMs` is
+rejected with `stale_timestamp` (the freshness window is asymmetric
+— 5 min past, 60 s future — so a captured request cannot extend its
+own usable lifetime).
+
+## `GET /v1/operator-wallets/:wallet`
+
+Parent resource for the `/activity` sub-path. Returns the wallet's
+registration metadata.
+
+```json
+{
+  "wallet": "Wallet11...",
+  "vote": "Vote111...",
+  "label": "cold",
+  "registeredAt": "2026-02-01T00:00:00.000Z",
+  "expiresAt": "2026-05-01T00:00:00.000Z"
+}
+```
+
+Gated identically to `/activity` — only ACTIVE (not-expired)
+registered wallets are exposed. An unregistered or
+expired-registration pubkey returns HTTP 404 (`not_found`), so the
+route is not a public existence oracle for arbitrary pubkeys. The
+forensic `signedNonce` / `anchorTxSignature` columns are deliberately
+omitted; everything returned is operator-published or derivable from
+the on-chain registration. `HEAD` is supported and short-circuits
+after the existence gate.
+
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier — registration metadata only changes on a deliberate
+claim-surface mutation).
+
+## `GET /v1/operator-wallets/:wallet/activity`
+
+Phase 4 read endpoint. Returns the daily on-chain activity entries
+the worker has indexed for a registered operator wallet.
+
+Query parameters:
+
+- `days` — 1-365, default 365. Window of UTC dates to return.
+
+Response:
+
+```json
+{
+  "wallet": "Wallet11...",
+  "days": 365,
+  "entries": [
+    { "date": "2026-05-13", "txCount": 12, "txFeesLamports": null },
+    { "date": "2026-05-12", "txCount": 4, "txFeesLamports": null }
+  ]
+}
+```
+
+Days with zero activity are omitted; clients zero-fill at render
+time. Newest-first. `txFeesLamports` is the per-day sum of tx fees
+the wallet paid as `feePayer`. Phase 4 ships counts only — the
+field is `null` today (not `"0"`) so a client summing fees can
+detect the unavailable-data state. Backfill ships in a follow-up
+indexer pass (see `docs/roadmap.md`).
+
+The endpoint is gated on registered-wallet membership. Probes for
+unregistered or expired-registration wallets return HTTP 404
+(`not_found`) — the route is not a public existence oracle for
+arbitrary pubkeys. `HEAD` is supported and short-circuits after the
+existence gate, before the activity DB read.
+
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier — see `src/api/cache-control.ts`).
+
+## `GET /v1/simd-proposals`
+
+Phase 5 read endpoint for the Pending SIMD widget. Returns AI-curated
+SIMD proposals that a human reviewer has signed off on.
+
+Query parameters:
+
+- `limit` — 1-25, default 20. Number of reviewed proposals to return.
+
+Response:
+
+```json
+{
+  "count": 1,
+  "aiModel": "claude-sonnet-4-6",
+  "items": [
+    {
+      "simdNumber": 228,
+      "title": "Example SIMD title",
+      "status": "Review",
+      "sourceUrl": "https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0228-example.md",
+      "aiSummary": "Neutral ~50-word plain-text summary of what the SIMD changes.",
+      "aiQuestions": [
+        "How does this change a validator's per-slot hardware load?",
+        "What second-order effects on commission economics could land first?",
+        "Which operator tiers take the asymmetric cost?"
+      ],
+      "reviewedAt": "2026-05-10T12:00:00.000Z"
+    }
+  ]
+}
+```
+
+The list field is `items` (with a sibling `count`) — the same
+envelope shape as every other list endpoint (`/v1/validators/search`,
+`/v1/leaderboard`). Only `reviewed_at IS NOT NULL` rows surface —
+AI-generated curation that hasn't been spot-checked stays hidden.
+Newest-reviewed first. The curation system prompt is published
+verbatim at `prompts/simd-curation.md` (byte-equality enforced
+against the runtime constant by a unit test). The internal
+`reviewer_note` audit field is **not** included in the response.
+
+`aiModel` is the Anthropic model the curation pipeline is _currently
+configured_ to use (the `ANTHROPIC_MODEL` config value) — a
+response-level field so a consumer pinning expected curation
+behaviour can detect a model migration. It is **not** per-row
+attribution: it reflects the model configured right now, not the
+model each individual row was curated by. True per-row attribution
+would need an `ai_model` column on the proposals table and is
+deferred until the curation pipeline ships. `aiSummary` is capped at
+~50 words (temperature 0 minimises variance but is not a determinism
+guarantee — Anthropic models drift slightly even at temp 0);
+`aiQuestions` carries 2-5 questions — a trivial SIMD may yield only
+two genuine operator-facing trade-offs rather than padded filler.
+
+`HEAD` is supported and short-circuits after `limit` validation but
+before the DB read.
+
+Cache-Control: `public, max-age=600, s-maxage=3600,
+stale-while-revalidate=86400` (the shared `CATALOGUE` tier plus a
+24 h stale-while-revalidate window — reviewed SIMDs change on an
+hours-scale human-review cadence, so a CDN edge can serve the
+slightly-stale list instantly while it revalidates in the
+background).
+
+## `GET /v1/validators/:idOrVote/operator-activity-index`
+
+Phase 6 read endpoint. Returns the Operator Activity Index (OAI) — a
+0-100 composite blending governance participation (50%) with wallet
+liveness (50%). See `docs/scoring.md` for the formula.
+
+Accepts a vote OR identity pubkey. Gated on three conditions, all of
+which 404 on failure (the cases are collapsed to avoid leaking claim
+/ opt-out state):
+
+- the validator is known to the indexer;
+- the validator is **claimed** (Phase 3) — no claim, no public OAI;
+- the validator has **not opted out** of public scoring.
+
+Response:
+
+```json
+{
+  "vote": "Vote111...",
+  "identity": "Node111...",
+  "composite": null,
+  "components": {
+    "walletScore": 70,
+    "governance": {
+      "score": null,
+      "commentCount": 0,
+      "reactionsReceived": 0,
+      "activeWindowCount": 0
+    }
+  },
+  "ingestStatus": {
+    "governanceIngestActive": false,
+    "walletFeesIngestActive": false
+  }
+}
+```
+
+The example above is the shape **every linked validator sees today**:
+the GitHub Discussions ingest that feeds the governance half is
+unshipped, so `simd_discussion_comments` is empty in every real
+deployment. While that ingest is inactive
+(`ingestStatus.governanceIngestActive: false`), `governance.score`
+is `null` — "we genuinely don't know yet" — **not** `0`. A real `0`
+would be indistinguishable from "linked but has no comments", which
+would silently exclude every linked validator from a `score >= N`
+delegation filter. Because an honest 50/50 blend can't be reported
+with one half unknowable, `composite` is `null` too. Once the ingest
+ships and produces rows, `governanceIngestActive` flips to `true`
+and `governance.score` / `composite` become real numbers.
+
+The governance sub-component counts (`commentCount`,
+`reactionsReceived`, `activeWindowCount`) are always the real values
+(all `0` today) regardless of ingest status. `components.walletScore`
+is always populated, so a consumer who only wants wallet liveness can
+read it even when `governance.score` is `null`.
+
+`ingestStatus` self-documents the Phase 6+7 partial release:
+
+- `governanceIngestActive` — has the GitHub Discussions ingest
+  produced data? `false` until that worker job ships.
+- `walletFeesIngestActive` — does per-day `txFeesLamports` data
+  exist? P4 ships tx-counts only (`txFeesLamports` is structurally
+  `null` everywhere), so `false` until the fee backfill ships.
+
+`composite` is also `null` in the genuine cold-start case where
+neither half has any signal — clients should render an empty state
+rather than a half-shown score either way. Only ACTIVE (non-expired)
+Phase 3 registrations contribute signal; lapsed GitHub links /
+operator wallets silently drop out. `HEAD` is supported and
+short-circuits before the scoring queries (`ingestStatus` does not
+change `HEAD` behaviour).
+
+**Rate limit.** This endpoint runs 5-7 DB queries per request — ~5×
+the per-request DB cost of a typical `/v1/*` read — so it carries a
+tighter per-route cap of **30 requests/min/IP** (half the global
+60/min). A normal UI consumer rendering one OAI panel per profile
+view stays well under it.
+
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier).
+
+## `GET /v1/validators/:idOrVote/scoring`
+
+REST-M8 aggregate endpoint — the profile-page **one round-trip**.
+`/tier`, `/badges`, and `/operator-activity-index` each repeat the
+same validator lookup; `/scoring` does that lookup once and returns
+all three. Accepts a vote OR identity pubkey; no query params.
+
+**Additive, not a replacement.** `/tier`, `/badges`, and
+`/operator-activity-index` all stay live and unchanged — they are
+kept as granular routes so a consumer wanting one component still
+gets that component's own CDN cache. `/scoring` serves the
+profile-page case where one fetch beats three.
+
+Response — a union of the three sibling payloads with **no
+duplication**:
+
+```json
+{
+  "vote": "VOTE_PUBKEY",
+  "identity": "IDENTITY_PUBKEY",
+  "tier": {
+    "window": {
+      "epochs": 5,
+      "slotsAssigned": 432,
+      "slotsSkipped": 3,
+      "economicCohortSize": 1247,
+      "economicMeasuredEpochs": 5,
+      "economicMedianLamportsPerSlot": "8421337",
+      "incomeFreshness": "2026-05-12T08:00:00.000Z",
+      "cohortAsOfEpoch": { "fromEpoch": 820, "toEpoch": 824 }
+    },
+    "tier": "forge",
+    "composite": 96,
+    "components": { "reliability": 0.988, "economicPercentile": 0.97 }
+  },
+  "tenure": {
+    "firstSeenEpoch": 100,
+    "activeEpochs": 900,
+    "landmark": "CYCLE_1_OG",
+    "badge": "Cycle 1 OG"
+  },
+  "client": {
+    "kind": "firedancer",
+    "version": "0.405.20218",
+    "updatedAt": "2026-05-13T08:00:00.000Z"
+  },
+  "oai": {
+    "composite": null,
+    "components": {
+      "walletScore": 70,
+      "governance": {
+        "score": null,
+        "commentCount": 0,
+        "reactionsReceived": 0,
+        "activeWindowCount": 0
+      }
+    },
+    "ingestStatus": {
+      "governanceIngestActive": false,
+      "walletFeesIngestActive": false
+    }
+  }
+}
+```
+
+- `tier` — the **full** `GET /tier` body (`window` + `tier` +
+  `composite` + `components`), minus the top-level `vote` /
+  `identity`. The `/badges` payload also nests a `tier` _summary_,
+  but `/scoring` carries the full object here, so that summary is
+  deliberately omitted — it would be a strict subset of this.
+- `tenure` / `client` — the tenure + client blocks of `GET /badges`,
+  byte-identical to that endpoint.
+- `oai` — the `GET /operator-activity-index` body minus `vote` /
+  `identity`, **or `null`**.
+
+**404 vs `oai: null`.** `/scoring` returns `404` **only** when the
+validator pubkey is unknown to the indexer — the same 404 `/tier`
+returns today. When the validator **is** known but is unclaimed /
+opted-out / identity-drifted — the cases the OAI route 404s —
+`/scoring` returns `200` with `oai: null`; `tier` + `tenure` +
+`client` are still fully populated. `oai: null` means "OAI not
+available for this validator", distinct from a broken endpoint.
+
+| HTTP | `code`             | When                                        |
+| ---- | ------------------ | ------------------------------------------- |
+| 200  | —                  | Validator is known (`oai` may be `null`).   |
+| 400  | `validation_error` | Invalid pubkey.                             |
+| 404  | `not_found`        | Validator pubkey is unknown to the indexer. |
+
+`HEAD` is supported and short-circuits after the validator existence
+check, before the tier history read + OAI repo fan-out.
+
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier). `/scoring` bundles the OAI — the shortest-lived of
+the three components — so the whole aggregate pins to the `SCORING`
+tier. A consumer that needs the longer-lived `/tier` or `/badges`
+caching should hit those granular routes directly.
+
+## UI integration map
+
+Where each gamification endpoint (Phase 1-6) is intended to render in
+a future WhoEarns UI. This is a planning aid — the endpoints are live
+and usable today regardless of UI status; the surfaces below are not
+all built yet.
+
+| Endpoint                                           | Intended UI surface                                                    |
+| -------------------------------------------------- | ---------------------------------------------------------------------- |
+| `/v1/validators/:idOrVote/scoring`                 | Profile page — the one-shot fetch backing tier + badges + OAI together |
+| `/v1/validators/:idOrVote/tier`                    | Profile header — Node Tier badge + composite breakdown (granular)      |
+| `/v1/validators/:idOrVote/badges`                  | Profile header — tenure + client + tier badge row (granular)           |
+| `/v1/validators/:idOrVote/operator-activity-index` | Profile scoring panel — OAI composite + sub-component bars (granular)  |
+| `/v1/claims/:vote`                                 | Operator dashboard — claim-progress / re-attest reminders              |
+| `/v1/claims/:vote/audit`                           | Operator dashboard — claim-change forensic timeline                    |
+| `/v1/operator-wallets/:wallet`                     | Profile wallet panel — wallet registration metadata header             |
+| `/v1/operator-wallets/:wallet/activity`            | Profile wallet panel — 365-day activity heatmap grid                   |
+| `/v1/simd-proposals`                               | Governance widget / leaderboard sidebar — pending SIMDs                |
+
+The profile page uses `/scoring` for its initial render; `/tier`,
+`/badges`, and `/operator-activity-index` remain available for any
+consumer that wants a single component with its own CDN cache.
+
 ## `POST /mcp`
 
-Streamable HTTP MCP endpoint for AI agents. The server exposes four read-only
-tools: `get_current_epoch`, `get_leaderboard`, `get_validator`, and
-`get_validator_leader_slots`. `get_leaderboard` supports the same window
+Streamable HTTP MCP endpoint for AI agents. The server exposes six read-only
+tools: `get_current_epoch`, `get_leaderboard`, `get_validator`,
+`get_validator_leader_slots`, `get_validator_tier`, and
+`get_validator_badges`. `get_leaderboard` supports the same window
 model as `/v1/leaderboard`, including `decade_epoch`, and includes
 `decadeEpochStart`, `decadeEpochEnd`, and `decadeRank` on rows when relevant.
-MCP calls use the same public per-IP rate limit.
+`get_validator_tier` and `get_validator_badges` return the same data as
+`GET /v1/validators/:idOrVote/tier` and `/badges` respectively — both take a
+vote OR identity pubkey and respect operator opt-out. MCP calls use the same
+public per-IP rate limit as `/v1/*`; tool schemas also cap response sizes.
 The public stateless transport accepts POST only; GET/DELETE return 405 to
 avoid unauthenticated long-lived stream connections.
-as `/v1/*`; tool schemas also cap response sizes.

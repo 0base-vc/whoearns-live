@@ -325,6 +325,136 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /v1/validators/{idOrVote}/tier:
+    get:
+      summary: Node Tier (block-production reliability + economic percentile)
+      description: |
+        Returns the validator's Node Tier (Forge / Anvil / Hearth /
+        Kindling / Unrated) derived from the most recent 5 closed
+        epochs. Composite is `0.3 × reliability + 0.7 ×
+        economicPercentile`, scaled to 0-100. See `docs/scoring.md`
+        Phase 1 for the public formula and the rationale for excluding
+        vote credits (SIMD-0033 TVC) from the public tier.
+
+        `composite` is `null` when `tier === "unrated"` — no
+        half-shown scores. `incomeFreshness` on the `window` block
+        surfaces the worst-case staleness of the underlying income
+        data so clients can detect ingestion lag.
+      parameters:
+        - $ref: '#/components/parameters/IdOrVotePath'
+      responses:
+        '200':
+          description: Node Tier and component breakdown.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeTier'
+        '400':
+          description: Invalid pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Validator not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/validators/{idOrVote}/badges:
+    get:
+      summary: Composite profile badges (Phase 2)
+      description: |
+        Returns tenure landmark, client kind/version, and Node Tier
+        for one validator. Designed for a single-round-trip profile
+        page render.
+      parameters:
+        - $ref: '#/components/parameters/IdOrVotePath'
+      responses:
+        '200':
+          description: Tenure + client + tier badges.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Badges'
+        '400':
+          description: Invalid pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Validator not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/validators/{idOrVote}/scoring:
+    get:
+      summary: Aggregate scoring bundle — tier + badges + OAI in one round-trip (REST-M8)
+      description: |
+        The profile-page one-shot. `/tier`, `/badges`, and
+        `/operator-activity-index` each repeat the same validator
+        lookup; `/scoring` does that lookup ONCE and returns all
+        three: the full Node Tier, the tenure + client badges, and
+        the Operator Activity Index.
+
+        ADDITIVE — `/tier`, `/badges`, and
+        `/operator-activity-index` all stay live and unchanged. They
+        are kept as granular routes so a consumer wanting one
+        component still gets that component's own CDN cache;
+        `/scoring` serves the profile-page "one fetch" case.
+
+        Composition (no duplication):
+        - `tier` — the full `/tier` body (`window`, `tier`,
+          `composite`, `components`), minus the top-level `vote` /
+          `identity`.
+        - `tenure` / `client` — the tenure + client blocks of
+          `/badges`. The `/badges` payload also nests a `tier`
+          summary, but `/scoring` already carries the FULL tier
+          object, so that summary is deliberately omitted.
+        - `oai` — the `/operator-activity-index` payload minus
+          `vote` / `identity`, OR `null`.
+
+        Gate handling — `/scoring` 404s ONLY when the validator
+        pubkey is unknown to the indexer (the same 404 `/tier`
+        returns). When the validator IS known but is unclaimed /
+        opted-out / identity-drifted — the cases the OAI route 404s
+        — `/scoring` returns `200` with `oai: null` (tier + tenure +
+        client still populated). `oai: null` means "OAI not
+        available for this validator", distinct from a broken
+        endpoint.
+
+        Caches at the shared `SCORING` tier (`Cache-Control:
+        public, max-age=300, s-maxage=1800`) — `/scoring` bundles
+        the OAI, the shortest-lived component, so the whole
+        aggregate pins to that tier. A consumer needing the
+        longer-lived tier/badges caching should hit `/tier` or
+        `/badges` directly. `HEAD` is supported and short-circuits
+        after the validator existence check.
+      parameters:
+        - $ref: '#/components/parameters/IdOrVotePath'
+      responses:
+        '200':
+          description: |
+            Aggregate scoring bundle. `tier` + `tenure` + `client`
+            are always populated for a known validator; `oai` is the
+            OAI payload, or `null` when the validator is gated out
+            of the OAI surface (unclaimed / opted-out /
+            identity-drift).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidatorScoring'
+        '400':
+          description: Invalid pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Validator pubkey unknown to the indexer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /v1/validators/current-epoch/batch:
     post:
       summary: Bulk lookup for the current epoch
@@ -352,9 +482,13 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
-  /v1/claim/challenge:
+  /v1/claims/challenge:
     get:
       summary: Issue a short-lived nonce for validator ownership claims
+      description: |
+        Route ordering note: `challenge` is a static path segment, so
+        it resolves ahead of `/v1/claims/{vote}` — and it is not
+        base58-pubkey-shaped, so the two cannot collide regardless.
       responses:
         '200':
           description: Challenge payload to include in the signed message.
@@ -362,9 +496,14 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ClaimChallenge' }
 
-  /v1/claim/{vote}/status:
+  /v1/claims/{vote}:
     get:
       summary: Public claim/profile status for a validator vote pubkey
+      description: |
+        The GET of the claim instance — "status" is just reading the
+        resource. Public claim/profile state for a vote pubkey in a
+        single fetch (also folds in GitHub-link + operator-wallet
+        state, CROSS-M1).
       parameters:
         - $ref: '#/components/parameters/VotePath'
       responses:
@@ -378,10 +517,16 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
-
-  /v1/claim/verify:
-    post:
+    put:
       summary: Verify validator ownership without changing profile fields
+      description: |
+        Idempotent upsert of the claim instance — re-verifying with a
+        fresh nonce keeps bumping the row. The vote pubkey travels in
+        BOTH the path and the signed body; the signed body stays
+        authoritative for the signature, and a `params.vote` ≠
+        `votePubkey` mismatch is rejected `400 vote_pubkey_mismatch`.
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
       requestBody:
         required: true
         content:
@@ -394,7 +539,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ClaimVerifyResponse' }
         '400':
-          description: Malformed body or signature.
+          description: Malformed body or signature, or `vote_pubkey_mismatch` (path ≠ body).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -409,9 +554,49 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
-  /v1/claim/profile:
-    post:
+  /v1/claims/{vote}/audit:
+    get:
+      summary: Public claim-change audit log for a validator vote pubkey
+      description: |
+        SEC-M4 — an immutable, append-only log of claim-surface
+        mutations for this vote pubkey, newest first: claims,
+        re-claims, profile edits, GitHub links, operator-wallet
+        registrations. Lets an operator notice an identity-key
+        compromise after the fact — a `reclaim` event with a non-null
+        `priorIdentityPubkey` is the signal that the validator
+        identity was silently rotated.
+
+        No auth, like `GET /v1/claims/{vote}` — every field returned
+        is already public (on-chain pubkeys, operator-published GitHub
+        usernames, operator-chosen wallet labels). The forensic
+        `submitted_ip` recorded with each event is deliberately NOT in
+        the response. Cache: `public, max-age=300, s-maxage=1800`.
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
+      responses:
+        '200':
+          description: Recent claim-surface events, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidatorClaimEventList' }
+        '400':
+          description: Invalid vote pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/claims/{vote}/profile:
+    put:
       summary: Verify validator ownership and update public profile fields
+      description: |
+        `PUT` of the profile sub-resource of the claim instance. Same
+        signed envelope as the claim verify, plus the desired profile
+        fields. The vote pubkey travels in BOTH the path and the
+        signed body; the signed body stays authoritative, and a
+        `params.vote` ≠ `votePubkey` mismatch is rejected
+        `400 vote_pubkey_mismatch`.
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
       requestBody:
         required: true
         content:
@@ -424,7 +609,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ProfileUpdateResponse' }
         '400':
-          description: Malformed body or signature.
+          description: Malformed body or signature, or `vote_pubkey_mismatch` (path ≠ body).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -435,6 +620,397 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '404':
           description: Vote pubkey is unknown.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/claims/{vote}/github:
+    put:
+      summary: Verify a Keybase-style GitHub Gist linking a vote pubkey to a GitHub username
+      description: |
+        Phase 3 Claim v2 — the operator publishes a public Gist
+        containing a canonical nonce signed by the validator identity
+        key. The server fetches the Gist, verifies the Ed25519
+        signature against the identity pubkey on file for the claim,
+        and records the (vote, githubUsername) link with a 90-day
+        expiry. Lapsed links stop contributing scoring signal (e.g.
+        SIMD-comment governance) until re-attested. Idempotent — a
+        re-link replaces, hence `PUT`.
+
+        The vote pubkey travels in BOTH the path and the request body;
+        the body stays authoritative and a `params.vote` ≠
+        `votePubkey` mismatch is rejected `400 vote_pubkey_mismatch`.
+        The flow is gated behind an existing claim — `403 not_claimed`
+        if the validator hasn't been claimed yet via
+        `PUT /v1/claims/{vote}`. Replay defense: a per-Gist nonce can
+        only be redeemed once across all validators (the `signed_nonce`
+        is DB-UNIQUE; same-vote replay also rejected at the route layer).
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaimGithubVerifyRequest' }
+      responses:
+        '200':
+          description: GitHub link recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaimGithubVerifyResponse' }
+        '400':
+          description: Malformed body, or `vote_pubkey_mismatch` (path ≠ body).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: |
+            Rejected — typically one of:
+            `not_claimed` (validator has no claim),
+            `identity_mismatch` (claim identity differs from request),
+            `stale_timestamp`, `signature_invalid`, `nonce_replay`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502':
+          description: |
+            Upstream Gist fetch failed or the Gist payload exceeded the
+            safety cap. The operator can retry once the Gist is reachable.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: |
+            Feature disabled in this deployment (Phase 3 dependencies
+            not configured — typically the upstream GitHub client).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/claims/{vote}/wallets:
+    post:
+      summary: Register an operator-controlled wallet against a claimed validator
+      description: |
+        Phase 3 Claim v2 — the operator co-signs a canonical nonce
+        with BOTH the validator identity key AND the wallet key, and
+        anchors the registration with a 0-lamport memo transaction
+        whose signature is supplied as `anchorTxSignature`. The
+        server verifies both Ed25519 signatures against the nonce
+        bytes (which carry both pubkeys, preventing rebinding) and
+        records the (vote, wallet) tuple with a 90-day expiry.
+        Appends to a bounded collection (≤3 wallets), hence `POST` +
+        the plural `wallets` path.
+
+        The vote pubkey travels in BOTH the path and the request body;
+        the body stays authoritative and a `params.vote` ≠
+        `votePubkey` mismatch is rejected `400 vote_pubkey_mismatch`.
+        Per-validator cap: **3 wallets** (cold / warm / multisig).
+        Re-attestation is required every 90 days; lapsed wallets stop
+        contributing scoring signal until re-registered. Self-
+        registration (wallet pubkey equal to vote/identity) is
+        rejected with `400 pubkey_role_collision` since it pollutes
+        downstream activity analytics.
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaimWalletVerifyRequest' }
+      responses:
+        '200':
+          description: Wallet registration recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaimWalletVerifyResponse' }
+        '400':
+          description: Malformed body, `pubkey_role_collision`, or `vote_pubkey_mismatch` (path ≠ body).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: |
+            Rejected — typically one of:
+            `not_claimed`, `identity_mismatch`, `stale_timestamp`,
+            `signature_invalid`, `anchor_tx_invalid`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            `wallet_cap_reached` — validator already has the maximum
+            number of registered wallets, OR a same-nonce replay was
+            caught at the DB UNIQUE constraint.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: |
+            Feature disabled (Phase 3 dependencies not configured).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/operator-wallets/{wallet}:
+    get:
+      summary: Registration metadata for a registered operator wallet
+      description: |
+        Parent resource for the `/activity` sub-path. Returns the
+        wallet's registration metadata — which validator it belongs
+        to, the operator-chosen label, and the registration / expiry
+        timestamps.
+
+        **Existence-oracle defense.** Gated identically to
+        `/activity`: only ACTIVE (not-expired) registered wallets are
+        exposed. An unregistered or expired-registration pubkey
+        returns 404, so the route cannot be used to enumerate the
+        registered-wallet set.
+
+        The forensic `signedNonce` / `anchorTxSignature` columns are
+        deliberately omitted — everything returned is already
+        operator-published or derivable from the on-chain
+        registration.
+      parameters:
+        - $ref: '#/components/parameters/WalletPath'
+      responses:
+        '200':
+          description: Wallet registration metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperatorWalletResponse' }
+        '400':
+          description: Invalid wallet pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Wallet is not a currently-registered operator wallet.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/operator-wallets/{wallet}/activity:
+    get:
+      summary: Daily on-chain activity for a registered operator wallet
+      description: |
+        Phase 4 wallet heatmap source. Returns up to `days` (1-365)
+        of UTC-bucketed daily transaction counts for the wallet. Days
+        with zero activity are **omitted** from the response — clients
+        zero-fill at draw time, keeping the payload tight for sparse
+        wallets.
+
+        **Existence-oracle defense.** Only ACTIVE (not-expired)
+        registered wallets are exposed. An unregistered or expired
+        pubkey returns 404 to prevent enumeration of the registered
+        wallet set.
+
+        `txFeesLamports` is `null` in the Phase 4 release — the
+        ingester ships tx counts only. The field is reserved for a
+        future backfill that adds per-day fee totals. `null` is
+        intentional (not `"0"`) so a consumer summing fees can detect
+        the unavailable-data case.
+      parameters:
+        - $ref: '#/components/parameters/WalletPath'
+        - name: days
+          in: query
+          required: false
+          description: Number of trailing days to return. Clamped to [1, 365]. Default 365.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 365
+            default: 365
+      responses:
+        '200':
+          description: Daily activity entries (newest first).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WalletActivityResponse' }
+        '400':
+          description: Invalid wallet pubkey or query parameter.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Wallet is not a currently-registered operator wallet.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/simd-proposals:
+    get:
+      summary: Reviewed SIMD curation feed (for the Pending SIMD widget)
+      description: |
+        Phase 5 — returns AI-curated SIMD proposals that a human
+        reviewer has spot-checked (`reviewed_at IS NOT NULL`). Each
+        entry ships a neutral 50-word summary and 2-5 discussion
+        questions designed to surface trade-offs without telling
+        operators how to vote.
+
+        Pre-review rows are intentionally hidden. The curation prompt
+        is published at `prompts/simd-curation.md` and is byte-for-
+        byte identical to the system prompt the model receives at
+        runtime (parity is test-enforced).
+
+        Hard cap of 25 entries per request. The full set is small
+        enough that pagination isn't yet needed; if it grows beyond
+        ~100 a `cursor` parameter will be added.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Number of reviewed proposals to return. Clamped to [1, 25]. Default 20.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 25
+            default: 20
+      responses:
+        '200':
+          description: Reviewed proposals, newest reviewedAt first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SimdProposalListResponse' }
+        '400':
+          description: Invalid limit.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/validators/{idOrVote}/operator-activity-index:
+    get:
+      summary: Operator Activity Index (OAI) composite for a claimed validator
+      description: |
+        Phase 6 — a 0-100 composite that blends governance
+        participation (SIMD discussion comments + reactions received +
+        active-window count, weighted 50%) with wallet liveness
+        (active-days last 90, weighted 50%). The math is documented
+        in `docs/scoring.md`.
+
+        Gates (all must pass before the composite is computed):
+        - Validator is known to the indexer (else 404).
+        - Validator is CLAIMED via Phase 3 (else 404 — no claim, no
+          public OAI surface).
+        - Validator has NOT opted out of public scoring (else 404,
+          mirroring leaderboard / history suppression).
+
+        Only ACTIVE Phase 3 registrations (non-expired `validator_github`
+        / `operator_wallets`) contribute signal — lapsed attestations
+        silently drop out. `composite` is **`null`** when neither
+        signal half has data (the cold-start case); UIs should render
+        an empty state rather than displaying a half-shown score.
+
+        Caches: `Cache-Control: public, max-age=300, s-maxage=1800`.
+      parameters:
+        - $ref: '#/components/parameters/IdOrVotePath'
+      responses:
+        '200':
+          description: OAI composite + per-component breakdown.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperatorActivityIndex' }
+        '400':
+          description: Invalid idOrVote pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: |
+            Validator not found, not claimed, or has opted out of
+            public scoring. The three cases collapse to one error to
+            avoid leaking claim / opt-out state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /og/default.png:
+    get:
+      summary: Default OG (Open Graph) card
+      description: |
+        Brand-only fallback rendered when no validator context exists.
+        Returns a 1200×630 PNG cached for 1 hour client-side / 1 day
+        on the CDN. Also reachable at `/og-default.png` for back-compat.
+      responses:
+        '200':
+          description: PNG image.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        '503':
+          description: Renderer unavailable (font assets missing).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /og/{vote}.png:
+    get:
+      summary: Per-validator OG image
+      description: |
+        1200×630 PNG with the validator's latest **closed** epoch
+        income + skip rate. Cache-Control: `public, max-age=3600,
+        s-maxage=86400`. The `:vote` path parameter accepts vote OR
+        identity pubkeys (same dual lookup as the income page).
+        Surfaces only closed-epoch numbers so a CDN-cached image
+        never lies mid-epoch.
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
+      responses:
+        '200':
+          description: PNG image.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        '400':
+          description: Invalid vote pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Validator not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Renderer unavailable (font assets missing).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /badge/{vote}.svg:
+    get:
+      summary: Embeddable SVG performance badge
+      description: |
+        Compact 440×76 vector badge with the validator's latest closed
+        epoch summary (name, income, skip rate, epoch number). Designed
+        for embedding on operator websites + GitHub READMEs:
+
+            <img src="https://whoearns.live/badge/VOTE.svg"
+                 alt="WhoEarns badge for VOTE"
+                 width="440" height="76" />
+
+        Ships `<title>` + `<desc>` accessibility metadata since satori
+        rasterises text glyphs to vector paths. Same closed-epoch-only
+        data model as `/og/{vote}.png`.
+      parameters:
+        - $ref: '#/components/parameters/VotePath'
+      responses:
+        '200':
+          description: SVG image.
+          content:
+            image/svg+xml:
+              schema: { type: string, format: binary }
+        '400':
+          description: Invalid vote pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Validator not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Renderer unavailable (font assets missing).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -479,7 +1055,247 @@ components:
         maxLength: 44
         pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
 
+    WalletPath:
+      name: wallet
+      in: path
+      required: true
+      description: Solana base58 wallet pubkey.
+      schema:
+        type: string
+        minLength: 32
+        maxLength: 44
+        pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
+
   schemas:
+    # --- Shared scoring sub-objects ---------------------------------------
+    # Extracted so `Badges`, `NodeTier`, `OperatorActivityIndex`, and the
+    # `ValidatorScoring` aggregate (REST-M8) all reference ONE definition
+    # per block instead of re-inlining it. Editing a block here updates
+    # every endpoint that carries it.
+
+    TenureBadge:
+      type: object
+      required: [firstSeenEpoch, activeEpochs, landmark, badge]
+      properties:
+        firstSeenEpoch: { type: integer, minimum: 0 }
+        activeEpochs: { type: integer, minimum: 0 }
+        landmark:
+          type: string
+          enum:
+            - MAINNET_BETA_LAUNCH
+            - CYCLE_1_OG
+            - CROSS_CHAIN_ERA
+            - DEFI_2
+            - PRE_FTX
+            - JITO_V2
+            - FIREDANCER_LAUNCH
+            - RECENT
+            - recent_operator
+        badge: { type: string }
+
+    ClientBadge:
+      type: object
+      required: [kind, version, updatedAt]
+      properties:
+        kind:
+          type: string
+          enum: [agave, jito_solana, firedancer, frankendancer, paladin, sig, unknown]
+        version:
+          type: string
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    # The full `/tier` payload MINUS `vote` / `identity` — the
+    # `{ window, tier, composite, components }` block. `NodeTier` adds
+    # `vote` / `identity` on top; `ValidatorScoring` nests this under
+    # its `tier` key.
+    NodeTierBody:
+      type: object
+      required: [window, tier, composite, components]
+      description: |
+        Node Tier composite. Built from two on-chain-anchored signals
+        only — block-production reliability and economic productivity
+        percentile vs the indexed cohort. Vote credits (SIMD-0033 TVC)
+        are deliberately EXCLUDED from this surface because credit
+        accrual is operator-controlled (client mods, vote-tx send-side
+        patches, networking proximity) and therefore reflects capital
+        and engineering investment more than service quality to
+        delegators. See `docs/scoring.md` Phase 1 for the full rationale.
+
+        **Reliability floor.** A validator with `skip_rate > 0.20`
+        across the window is tier-capped at `kindling` regardless of
+        `economicPercentile`. A top earner who lets a fifth of their
+        assigned blocks drop is not a top-tier operator.
+
+        **Cohort scope.** The `economicPercentile` cohort is the
+        INDEXED-VALIDATOR set (the deployment's `WatchMode` — `top:N`,
+        an explicit list, or `*`), NOT the full Solana cluster. The
+        `window.economicCohortSize` field carries the cohort size; the
+        `window.cohortAsOfEpoch` field carries the closed-epoch range
+        the cohort was sampled over. Percentiles from a `top:500`
+        deployment should NOT be read as percentiles "vs all of Solana."
+      properties:
+        window:
+          type: object
+          required:
+            [
+              epochs,
+              slotsAssigned,
+              slotsSkipped,
+              economicCohortSize,
+              economicMeasuredEpochs,
+              economicMedianLamportsPerSlot,
+              incomeFreshness,
+              cohortAsOfEpoch,
+            ]
+          properties:
+            epochs:
+              type: integer
+              minimum: 0
+              maximum: 5
+              description: |
+                Count of closed-epoch rows actually indexed for this
+                validator (≤ 5) — NOT the configured scoring window,
+                which is always 5. A value below 5 is a cold-start
+                state: the indexer has not yet backfilled this
+                validator's older epochs. The tier is still computed
+                over the rows available so far.
+            slotsAssigned: { type: integer, minimum: 0 }
+            slotsSkipped: { type: integer, minimum: 0 }
+            economicCohortSize:
+              type: integer
+              minimum: 0
+              description: |
+                Number of indexed, non-opted-out validators that had
+                measurable income in the window — the cohort the
+                economic percentile was ranked against. Zero when no
+                cohort could be assembled (fresh DB, full ingest
+                outage). Below `10` the percentile is treated as
+                null and the tier falls to `unrated`.
+            economicMeasuredEpochs:
+              type: integer
+              minimum: 0
+              maximum: 5
+              description: |
+                How many closed epochs in the 5-epoch window had
+                measurable income for THIS validator. Below `4` the
+                per-validator median is too noisy and the tier falls
+                to `unrated`.
+            economicMedianLamportsPerSlot:
+              type: string
+              nullable: true
+              description: |
+                This validator's median income per leader slot across
+                the window, in lamports as a decimal string. Income
+                here is `blockFeesTotalLamports + blockTipsTotalLamports`
+                (post-burn fee share + on-chain Jito tips). Stringified
+                because lamport-scale numbers exceed JSON safe-integer
+                range. `null` when this validator has no measurable
+                income in the window.
+            incomeFreshness:
+              type: string
+              format: date-time
+              nullable: true
+              description: |
+                Oldest of `feesUpdatedAt` / `tipsUpdatedAt` across the
+                window's closed-epoch rows — the worst-case staleness
+                of the underlying income data. `null` when no row in
+                the window has both fees and tips ingested. Lets a UI
+                grey out the tier when the income ingester has
+                stalled, without polling a separate health surface.
+            cohortAsOfEpoch:
+              type: object
+              nullable: true
+              required: [fromEpoch, toEpoch]
+              properties:
+                fromEpoch: { type: integer, minimum: 0 }
+                toEpoch: { type: integer, minimum: 0 }
+              description: |
+                The closed-epoch range the cohort percentile was
+                computed against. `null` when the window had no
+                closed-epoch data (fresh DB or full outage). Lets a
+                consumer detect when a cached tier may be out of step
+                with a freshly-fetched leaderboard.
+        tier:
+          type: string
+          enum: [forge, anvil, hearth, kindling, unrated]
+        composite:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+          description: |
+            `0.3 × reliability + 0.7 × economicPercentile`, scaled to
+            0-100. `null` when `tier === "unrated"` — no half-shown
+            scores. Cutoffs: forge ≥ 95, anvil ≥ 80, hearth ≥ 40,
+            kindling < 40. **Tier-capped at `kindling` when
+            `skip_rate > 0.20`** regardless of `economicPercentile` —
+            see the schema-level description for the reliability-floor
+            rationale.
+        components:
+          type: object
+          required: [reliability, economicPercentile]
+          properties:
+            reliability:
+              type: number
+              minimum: 0
+              maximum: 1
+              description: |
+                Pessimistic block-production reliability =
+                `1 − wilsonInterval(slotsSkipped, slotsAssigned).upper`.
+                Small-sample validators with 0 measured skips get a
+                meaningfully sub-1.0 value here (e.g. ~0.75 at 11
+                leader slots), preventing reliability inflation.
+            economicPercentile:
+              type: number
+              nullable: true
+              minimum: 0
+              maximum: 1
+              description: |
+                Percentile rank of this validator's median income per
+                leader slot vs the indexed cohort in the same window.
+                `null` when the cohort is too small
+                (`< economicCohortSize`) or this validator had too
+                few measured epochs (`< economicMeasuredEpochs`),
+                in which case `tier === "unrated"`. Income medians
+                are computed across the closed-epoch window per
+                validator, then ranked with PostgreSQL's
+                `PERCENT_RANK()` — 0 = lowest in cohort, 1 = highest.
+
+    Badges:
+      type: object
+      required: [vote, identity, tenure, client, tier]
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+        tenure: { $ref: '#/components/schemas/TenureBadge' }
+        client: { $ref: '#/components/schemas/ClientBadge' }
+        tier:
+          type: object
+          required: [tier, composite, windowEpochs]
+          properties:
+            tier:
+              type: string
+              enum: [forge, anvil, hearth, kindling, unrated]
+            composite:
+              type: integer
+              nullable: true
+              minimum: 0
+              maximum: 100
+            windowEpochs: { type: integer, minimum: 0 }
+
+    NodeTier:
+      type: object
+      required: [vote, identity, window, tier, composite, components]
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+      allOf:
+        - $ref: '#/components/schemas/NodeTierBody'
+
     Error:
       type: object
       required: [error]
@@ -965,7 +1781,12 @@ components:
 
     ClaimStatus:
       type: object
-      required: [claimed, profile]
+      required: [claimed, profile, githubLink, wallets]
+      description: |
+        Whole-claim picture for a vote pubkey in one fetch (CROSS-M1).
+        Beyond `claimed` + `profile`, the response folds in the
+        ACTIVE-only GitHub-link and operator-wallet state a dashboard
+        would otherwise need three more requests to assemble.
       properties:
         claimed: { type: boolean }
         profile:
@@ -977,6 +1798,135 @@ components:
                   properties:
                     updatedAt: { type: string, format: date-time }
             - type: 'null'
+        githubLink:
+          description: |
+            The validator's ACTIVE linked GitHub identity, or `null`
+            when there is no link OR the attestation has lapsed (same
+            "lapsed = inactive" rule the OAI route applies).
+          anyOf:
+            - type: object
+              required: [githubUsername, verifiedAt, expiresAt]
+              properties:
+                githubUsername: { type: string }
+                verifiedAt: { type: string, format: date-time }
+                expiresAt: { type: string, format: date-time }
+            - type: 'null'
+        wallets:
+          type: object
+          required: [count, capReached, oldestExpiresAt, entries]
+          description: Summary + per-wallet list of the validator's ACTIVE (not-expired) registered operator wallets.
+          properties:
+            count:
+              type: integer
+              minimum: 0
+              description: Number of ACTIVE registered operator wallets.
+            capReached:
+              type: boolean
+              description: True once `count` has reached the per-validator wallet cap (3).
+            oldestExpiresAt:
+              type: [string, 'null']
+              format: date-time
+              description: |
+                Soonest-expiring ACTIVE wallet attestation — lets a
+                dashboard nudge "re-attest" before a wallet drops out
+                of scoring. `null` when no wallets are registered.
+            entries:
+              type: array
+              description: |
+                Per-wallet entries surfacing the full pubkey + operator-
+                chosen label + registration window. Used by the hub
+                page to fan-out `/v1/operator-wallets/:wallet/activity`
+                calls per wallet without having to scrape the audit
+                log. All fields are public (operator-DECLARED
+                affiliations registered via the Ed25519 co-sign flow).
+
+                Ordering: `registeredAt ASC`, with `wallet` ascending
+                as a tiebreaker. Stable across identical-timestamp
+                edge cases so CDN-cached responses don't flap.
+              example:
+                - wallet: WALL111111111111111111111111111111111111111
+                  label: hot
+                  registeredAt: '2026-02-01T00:00:00.000Z'
+                  expiresAt: '2026-05-01T00:00:00.000Z'
+                - wallet: WALL222222222222222222222222222222222222222
+                  label: operations
+                  registeredAt: '2026-02-15T00:00:00.000Z'
+                  expiresAt: '2026-05-15T00:00:00.000Z'
+              items:
+                type: object
+                required: [wallet, label, registeredAt, expiresAt]
+                properties:
+                  wallet:
+                    type: string
+                    minLength: 32
+                    maxLength: 44
+                    description: Wallet pubkey (base58 ed25519, 32-44 chars).
+                  label:
+                    type: string
+                    maxLength: 32
+                    description: |
+                      Operator-chosen label (e.g. "Hot wallet",
+                      "Operations"). Rejects angle brackets,
+                      backticks, braces, and Unicode text-direction-
+                      override codepoints — the same charset
+                      narrativeOverride uses.
+                  registeredAt:
+                    type: string
+                    format: date-time
+                  expiresAt:
+                    type: string
+                    format: date-time
+                    description: |
+                      Attestation expiry — once past, the wallet
+                      drops out of `count` and `entries` until the
+                      operator re-attests.
+
+    ValidatorClaimEvent:
+      type: object
+      required: [eventType, identityPubkey, priorIdentityPubkey, detail, createdAt]
+      description: |
+        One immutable claim-surface mutation (SEC-M4). The forensic
+        `submitted_ip` stored with each event is NOT included here.
+      properties:
+        eventType:
+          type: string
+          enum: [claim, reclaim, profile_update, github_link, wallet_register]
+          description: |
+            `claim` — first-ever claim of this vote pubkey.
+            `reclaim` — a subsequent claim (nonce-bump or identity rotation).
+            `profile_update` — operator edited the public profile.
+            `github_link` — a GitHub username was linked.
+            `wallet_register` — an operator wallet was registered.
+        identityPubkey:
+          type: [string, 'null']
+          description: Identity pubkey as of this event.
+        priorIdentityPubkey:
+          type: [string, 'null']
+          description: |
+            The previous identity pubkey — populated ONLY for a
+            `reclaim` where the identity actually rotated. Non-null
+            here is the smoking gun for an identity-key-compromise
+            re-claim.
+        detail:
+          type: [object, 'null']
+          additionalProperties: true
+          description: |
+            Event-specific extras. Shape varies by `eventType`:
+            `github_link` → `{ githubUsername, priorGithubUsername }`;
+            `wallet_register` → `{ walletPubkey, label }`; null for
+            `claim` / `reclaim` / `profile_update`. All values are
+            already-public.
+        createdAt: { type: string, format: date-time }
+
+    ValidatorClaimEventList:
+      type: object
+      required: [votePubkey, events]
+      properties:
+        votePubkey: { type: string }
+        events:
+          type: array
+          description: Recent claim-surface events, newest first.
+          items: { $ref: '#/components/schemas/ValidatorClaimEvent' }
 
     ProfileUpdateRequest:
       allOf:
@@ -1224,3 +2174,388 @@ components:
             sampleValidators: { type: integer, minimum: 0 }
             medianBlockFeeLamports: { type: [string, 'null'] }
             medianBlockTipLamports: { type: [string, 'null'] }
+
+    # --- Phase 3 Claim v2 -------------------------------------------------
+
+    ClaimGithubVerifyRequest:
+      type: object
+      required: [votePubkey, identityPubkey, githubUsername, gistUrl, timestampMs]
+      properties:
+        votePubkey:
+          type: string
+          minLength: 32
+          maxLength: 44
+          pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
+        identityPubkey:
+          type: string
+          minLength: 32
+          maxLength: 44
+          pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
+        githubUsername:
+          type: string
+          minLength: 1
+          maxLength: 39
+          description: |
+            GitHub username (max 39 chars, alphanumeric + hyphens, no
+            leading/trailing hyphen — matches GitHub's own rules).
+        gistUrl:
+          type: string
+          format: uri
+          maxLength: 500
+          description: |
+            Public Gist URL. The Gist body must contain the canonical
+            nonce + Ed25519 signature in the documented envelope.
+        timestampMs:
+          type: integer
+          minimum: 1
+          description: Issue time of the signed nonce, in epoch milliseconds.
+
+    ClaimGithubVerifyResponse:
+      type: object
+      required: [link]
+      properties:
+        link:
+          type: object
+          required: [githubUsername, gistUrl, verifiedAt, expiresAt]
+          properties:
+            githubUsername: { type: string }
+            gistUrl: { type: string, format: uri }
+            verifiedAt: { type: string, format: date-time }
+            expiresAt:
+              type: string
+              format: date-time
+              description: |
+                90 days from `verifiedAt`. Lapsed links stop
+                contributing scoring signal until re-attested.
+
+    ClaimWalletVerifyRequest:
+      type: object
+      required:
+        - votePubkey
+        - identityPubkey
+        - walletPubkey
+        - timestampMs
+        - identitySignatureB58
+        - walletSignatureB58
+        - anchorTxSignature
+      properties:
+        votePubkey:
+          type: string
+          minLength: 32
+          maxLength: 44
+          pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
+        identityPubkey:
+          type: string
+          minLength: 32
+          maxLength: 44
+          pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
+        walletPubkey:
+          type: string
+          minLength: 32
+          maxLength: 44
+          pattern: '^[1-9A-HJ-NP-Za-km-z]+$'
+        label:
+          type: string
+          maxLength: 32
+          default: ''
+          description: |
+            Operator-chosen short label (cold / warm / multisig / ...).
+
+            Rejected characters (400 `validation_error`): angle
+            brackets (`<`, `>`), backticks, braces (`{`, `}`), and
+            Unicode bidirectional-control codepoints (U+200E,
+            U+200F, U+202A-U+202E, U+2066-U+2069). The label
+            renders into a public hub surface, so these are
+            blocked to prevent stored-XSS / RTL-override
+            phishing of surrounding chrome.
+        timestampMs: { type: integer, minimum: 1 }
+        identitySignatureB58:
+          type: string
+          minLength: 64
+          maxLength: 128
+          description: Base58 Ed25519 signature by the validator identity key over the canonical nonce.
+        walletSignatureB58:
+          type: string
+          minLength: 64
+          maxLength: 128
+          description: Base58 Ed25519 signature by the wallet key over the same canonical nonce.
+        anchorTxSignature:
+          type: string
+          minLength: 64
+          maxLength: 96
+          description: |
+            Solana transaction signature for the operationally-alive
+            memo (0-lamport self-transfer with a memo containing the
+            nonce hash).
+
+    ClaimWalletVerifyResponse:
+      type: object
+      required: [wallet]
+      properties:
+        wallet:
+          type: object
+          required: [walletPubkey, label, registeredAt, expiresAt]
+          properties:
+            walletPubkey: { type: string }
+            label: { type: string }
+            registeredAt: { type: string, format: date-time }
+            expiresAt:
+              type: string
+              format: date-time
+              description: 90 days from registration. Lapsed wallets drop out of activity scoring.
+
+    # --- Phase 4 Wallet activity ------------------------------------------
+
+    OperatorWalletResponse:
+      type: object
+      required: [wallet, vote, label, registeredAt, expiresAt]
+      description: |
+        Registration metadata for one ACTIVE operator wallet. The
+        forensic `signedNonce` / `anchorTxSignature` columns are NOT
+        included.
+      properties:
+        wallet:
+          type: string
+          description: The operator wallet's base58 pubkey.
+        vote:
+          type: string
+          description: Vote pubkey of the validator this wallet is registered under.
+        label:
+          type: string
+          description: Operator-chosen label (≤32 chars), e.g. "hot" / "cold".
+        registeredAt:
+          type: string
+          format: date-time
+          description: When the wallet registration was verified.
+        expiresAt:
+          type: string
+          format: date-time
+          description: |
+            When the registration attestation lapses. Past this the
+            wallet drops out of scoring and this endpoint 404s.
+
+    WalletActivityResponse:
+      type: object
+      required: [wallet, days, entries]
+      properties:
+        wallet: { type: string }
+        days:
+          type: integer
+          minimum: 1
+          maximum: 365
+          description: Number of trailing days requested (after server-side clamp).
+        entries:
+          type: array
+          description: |
+            Newest-first daily activity rows. Days with zero activity
+            are OMITTED — clients zero-fill at draw time.
+          items:
+            type: object
+            required: [date, txCount, txFeesLamports]
+            properties:
+              date:
+                type: string
+                pattern: '^\d{4}-\d{2}-\d{2}$'
+                description: UTC date (YYYY-MM-DD).
+              txCount: { type: integer, minimum: 0 }
+              txFeesLamports:
+                type: [string, 'null']
+                description: |
+                  Per-day fee total in lamports as a decimal string.
+                  `null` in the Phase 4 release — the ingester ships
+                  tx counts only. Reserved for a future backfill.
+
+    # --- Phase 5 SIMD curation feed ---------------------------------------
+
+    SimdProposalItem:
+      type: object
+      required: [simdNumber, title, status, sourceUrl, aiSummary, aiQuestions, reviewedAt]
+      properties:
+        simdNumber: { type: integer, minimum: 0 }
+        title: { type: string }
+        status:
+          type: string
+          description: |
+            Upstream SIMD status string as reported by
+            `solana-foundation/solana-improvement-documents` (e.g.
+            `Draft`, `Review`, `Living`, `Final`, `Stagnant`,
+            `Withdrawn`).
+        sourceUrl: { type: string, format: uri }
+        aiSummary:
+          type: string
+          maxLength: 450
+          description: |
+            Neutral plain-text summary, ~50 words, produced by the
+            curation pipeline at temperature 0 (temp 0 minimises
+            variance — it is not a determinism guarantee). Always
+            non-empty when this entry surfaces (the pipeline rejects
+            empty/malformed output before the row reaches `reviewed`).
+        aiQuestions:
+          type: array
+          minItems: 2
+          maxItems: 5
+          items:
+            type: string
+            maxLength: 300
+          description: |
+            2-5 discussion questions designed to surface trade-offs.
+            Each question is answerable honestly by both a supporter
+            and an opponent of the SIMD without compromising their
+            position. No "should this pass?" framings. A trivial SIMD
+            may yield only two genuine questions rather than padded
+            filler.
+        reviewedAt:
+          type: string
+          format: date-time
+          description: |
+            Timestamp a human reviewer spot-checked the curation
+            against the proposal text. Only reviewed rows surface here.
+
+    SimdProposalListResponse:
+      type: object
+      required: [count, aiModel, items]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+          description: Number of entries in `items` (envelope parity with the other list endpoints).
+        aiModel:
+          type: string
+          example: claude-sonnet-4-6
+          description: |
+            The Anthropic model the curation pipeline is *currently
+            configured* to use (`ANTHROPIC_MODEL`). Lets a consumer
+            pinning expected curation behaviour detect a model
+            migration. Response-level, not per-row: this is the model
+            configured right now, not the model each individual row
+            was curated by. True per-row attribution would need an
+            `ai_model` column on the proposals table.
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SimdProposalItem' }
+
+    # --- Phase 6 Operator Activity Index ----------------------------------
+
+    # The OAI payload MINUS `vote` / `identity`. `OperatorActivityIndex`
+    # adds `vote` / `identity` on top; `ValidatorScoring` (REST-M8)
+    # carries this (or `null`) under its `oai` key.
+    OaiBody:
+      type: object
+      required: [composite, components, ingestStatus]
+      properties:
+        composite:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 100
+          description: |
+            0-100 OAI composite (50% wallet score, 50% governance
+            score). `null` when neither half has data (cold start), OR
+            when the governance ingest is inactive
+            (`ingestStatus.governanceIngestActive: false`) — an honest
+            50/50 blend cannot be reported with one half unknowable.
+            UIs should render an empty state rather than a half-shown
+            score.
+        components:
+          type: object
+          required: [walletScore, governance]
+          properties:
+            walletScore:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: |
+                Saturating sigmoid of distinct active days in the last
+                90 across all ACTIVE registered wallets, scaled to
+                100. Lapsed wallets do not contribute. Always
+                populated — a wallet-only consumer can read this even
+                when `governance.score` is `null`.
+            governance:
+              type: object
+              required: [score, commentCount, reactionsReceived, activeWindowCount]
+              properties:
+                score:
+                  type: [integer, 'null']
+                  minimum: 0
+                  maximum: 100
+                  description: |
+                    Composite of comment count, reactions received,
+                    and active-window count for the validator's
+                    ACTIVE-linked GitHub username. Lapsed GitHub
+                    links do not contribute. `null` while the GitHub
+                    Discussions ingest is inactive
+                    (`ingestStatus.governanceIngestActive: false`) —
+                    "we genuinely don't know yet", distinct from a
+                    real `0`. The sub-component counts below stay as
+                    their real (currently all-`0`) values regardless.
+                commentCount: { type: integer, minimum: 0 }
+                reactionsReceived: { type: integer, minimum: 0 }
+                activeWindowCount: { type: integer, minimum: 0 }
+        ingestStatus:
+          type: object
+          required: [governanceIngestActive, walletFeesIngestActive]
+          description: |
+            Self-documents the Phase 6+7 partial release so a consumer
+            can tell a `null` score / composite apart from a broken
+            endpoint.
+          properties:
+            governanceIngestActive:
+              type: boolean
+              description: |
+                True once the GitHub Discussions ingest has produced
+                data (`simd_discussion_comments` is non-empty). `false`
+                in every deployment until that job ships — while
+                `false`, `governance.score` and `composite` are
+                `null`.
+            walletFeesIngestActive:
+              type: boolean
+              description: |
+                True once per-day `txFeesLamports` data exists. P4
+                ships tx-counts only and `txFeesLamports` is
+                structurally `null` everywhere, so this is `false`
+                until the fee backfill ships.
+
+    OperatorActivityIndex:
+      type: object
+      required: [vote, identity, composite, components, ingestStatus]
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+      allOf:
+        - $ref: '#/components/schemas/OaiBody'
+
+    # --- REST-M8 aggregate scoring bundle ---------------------------------
+
+    ValidatorScoring:
+      type: object
+      description: |
+        The `/v1/validators/{idOrVote}/scoring` aggregate — the
+        profile-page one-shot. A UNION of the `/tier`, `/badges`, and
+        `/operator-activity-index` payloads with NO duplication: the
+        full Node Tier body, the tenure + client badges, and the OAI
+        body. The `/badges` tier summary is deliberately omitted —
+        `tier` below carries the FULL Node Tier object instead.
+      required: [vote, identity, tier, tenure, client, oai]
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+        tier:
+          allOf:
+            - $ref: '#/components/schemas/NodeTierBody'
+          description: |
+            The full `/tier` body (`window`, `tier`, `composite`,
+            `components`), minus the top-level `vote` / `identity`.
+        tenure: { $ref: '#/components/schemas/TenureBadge' }
+        client: { $ref: '#/components/schemas/ClientBadge' }
+        oai:
+          oneOf:
+            - $ref: '#/components/schemas/OaiBody'
+            - type: 'null'
+          description: |
+            The `/operator-activity-index` body (minus `vote` /
+            `identity`), OR `null` when the validator is known but
+            gated out of the OAI surface — unclaimed, opted out, or
+            its on-chain identity has drifted from the claimed
+            identity. `null` means "OAI not available for this
+            validator", distinct from a broken endpoint. `tier` /
+            `tenure` / `client` are still fully populated when `oai`
+            is `null`.

@@ -20,12 +20,25 @@
       wants more context (e.g. "0base.vc · verified").
 -->
 <script lang="ts">
+  import { STAR_8_PATH_D } from '$lib/icons/star';
+
   interface Props {
     size?: number;
     label?: string;
   }
 
-  let { size = 14, label = 'Verified — operator has claimed this validator' }: Props = $props();
+  // Default label is the SHORT form — appropriate for list-surface
+  // uses (leaderboard rows, search dropdown, compare table) where
+  // the badge is one of many things and a 60-char tooltip would be
+  // noise. Surfaces that want to make the cryptographic scope
+  // explicit (the hub hero, the income hero) override the prop
+  // with the longer "claim signed with the validator identity key
+  // (Ed25519)" form. The shape borrows Twitter's verification
+  // iconography for instant pattern-recognition, but the meaning
+  // is strictly weaker — only the validator-identity-key holder
+  // can produce the signature, not necessarily the named human
+  // or org.
+  let { size = 14, label = 'Operator-claimed (Ed25519 signature)' }: Props = $props();
 </script>
 
 <span
@@ -44,14 +57,11 @@
     <!--
       8-point star ring — drawn as a single filled path so it
       composes cleanly when the parent flips text colour on hover
-      (e.g. table-row hover state). Coordinates hand-tuned in
-      Figma so the star reads symmetric at 14px without the
-      anti-alias halos that you'd get from a math-perfect
-      rasteriser at this size.
+      (e.g. table-row hover state). Path geometry lives in
+      `$lib/icons/star` so TierBadge can reuse the same silhouette
+      with a different fill scheme.
     -->
-    <path
-      d="M8 0L9.8 1.5L12 1.2L13 3.3L15 4.2L14.7 6.5L16 8L14.7 9.5L15 11.8L13 12.7L12 14.8L9.8 14.5L8 16L6.2 14.5L4 14.8L3 12.7L1 11.8L1.3 9.5L0 8L1.3 6.5L1 4.2L3 3.3L4 1.2L6.2 1.5L8 0Z"
-    />
+    <path d={STAR_8_PATH_D} />
     <!--
       White checkmark inside the star. Stroke-only (no fill) so the
       brand colour beneath shows through; rounded line caps soften

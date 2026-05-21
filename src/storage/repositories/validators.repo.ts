@@ -1,11 +1,19 @@
 import type pg from 'pg';
-import type { IdentityPubkey, Validator, ValidatorInfo, VotePubkey } from '../../types/domain.js';
+import type {
+  IdentityPubkey,
+  Validator,
+  ValidatorClientUpsertInput,
+  ValidatorInfo,
+  ValidatorUpsertInput,
+  VotePubkey,
+} from '../../types/domain.js';
 
 interface ValidatorRow {
   vote_pubkey: string;
   identity_pubkey: string;
   first_seen_epoch: string;
   last_seen_epoch: string;
+  genesis_epoch: string | null;
   updated_at: Date;
   name: string | null;
   details: string | null;
@@ -13,11 +21,15 @@ interface ValidatorRow {
   keybase_username: string | null;
   icon_url: string | null;
   info_updated_at: Date | null;
+  client_kind: string;
+  client_version: string | null;
+  client_updated_at: Date | null;
 }
 
 /** Column list shared by every SELECT so new info columns stay in sync. */
 const VALIDATOR_COLS = `vote_pubkey, identity_pubkey, first_seen_epoch, last_seen_epoch,
-  updated_at, name, details, website, keybase_username, icon_url, info_updated_at`;
+  genesis_epoch, updated_at, name, details, website, keybase_username, icon_url, info_updated_at,
+  COALESCE(client_kind, 'unknown') AS client_kind, client_version, client_updated_at`;
 
 function rowToValidator(row: ValidatorRow): Validator {
   return {
@@ -25,6 +37,13 @@ function rowToValidator(row: ValidatorRow): Validator {
     identityPubkey: row.identity_pubkey,
     firstSeenEpoch: Number(row.first_seen_epoch),
     lastSeenEpoch: Number(row.last_seen_epoch),
+    // Treat both `null` and `undefined` as "no genesis epoch" — a
+    // partial-projection SELECT that omits the column yields
+    // `undefined`, which must map to `null`, not `NaN`.
+    genesisEpoch:
+      row.genesis_epoch === null || row.genesis_epoch === undefined
+        ? null
+        : Number(row.genesis_epoch),
     updatedAt: row.updated_at,
     name: row.name,
     details: row.details,
@@ -32,6 +51,9 @@ function rowToValidator(row: ValidatorRow): Validator {
     keybaseUsername: row.keybase_username,
     iconUrl: row.icon_url,
     infoUpdatedAt: row.info_updated_at,
+    clientKind: row.client_kind,
+    clientVersion: row.client_version,
+    clientUpdatedAt: row.client_updated_at,
   };
 }
 
@@ -50,12 +72,7 @@ export class ValidatorsRepository {
    * validator upsert (every vote-accounts refresh) from stomping on
    * moniker data that may have just been written by the info job.
    */
-  async upsert(
-    v: Omit<
-      Validator,
-      'updatedAt' | 'name' | 'details' | 'website' | 'keybaseUsername' | 'iconUrl' | 'infoUpdatedAt'
-    >,
-  ): Promise<void> {
+  async upsert(v: ValidatorUpsertInput): Promise<void> {
     await this.pool.query(
       `INSERT INTO validators (vote_pubkey, identity_pubkey, first_seen_epoch, last_seen_epoch, updated_at)
        VALUES ($1, $2, $3, $4, NOW())
@@ -65,6 +82,42 @@ export class ValidatorsRepository {
          updated_at = NOW()`,
       [v.votePubkey, v.identityPubkey, v.firstSeenEpoch, v.lastSeenEpoch],
     );
+  }
+
+  /**
+   * Bulk-set `genesis_epoch` for the supplied (vote, epoch) pairs.
+   *
+   * Driven by the `stakewiz-tenure-ingester` job. Only rows that
+   * ALREADY exist in `validators` are touched — stakewiz returns the
+   * whole mainnet set but we only carry rows for validators we've
+   * indexed, and an `UPDATE … FROM (VALUES …)` naturally no-ops the
+   * non-matching pairs. The `IS DISTINCT FROM` guard skips a write
+   * when the stored value already matches (genesis epoch is
+   * immutable once known — most ticks are pure no-ops).
+   *
+   * Returns the number of rows actually changed. Empty input is a
+   * no-op. Done in one statement so a ~1-2k-pair refresh is a single
+   * round-trip.
+   */
+  async setGenesisEpochs(
+    entries: ReadonlyArray<{ votePubkey: string; genesisEpoch: number }>,
+  ): Promise<{ updated: number }> {
+    if (entries.length === 0) return { updated: 0 };
+    const votes = entries.map((e) => e.votePubkey);
+    const epochs = entries.map((e) => e.genesisEpoch);
+    const { rowCount } = await this.pool.query(
+      `UPDATE validators v
+          SET genesis_epoch = data.epoch,
+              updated_at    = NOW()
+         FROM (
+           SELECT UNNEST($1::text[])    AS vote,
+                  UNNEST($2::integer[]) AS epoch
+         ) AS data
+        WHERE v.vote_pubkey = data.vote
+          AND v.genesis_epoch IS DISTINCT FROM data.epoch`,
+      [votes, epochs],
+    );
+    return { updated: rowCount ?? 0 };
   }
 
   /**
@@ -107,6 +160,76 @@ export class ValidatorsRepository {
       updated += rowCount ?? 0;
     }
     return { updated };
+  }
+
+  /**
+   * Batch-write client classification + version + freshness for many
+   * identities in one statement. UNNEST-driven so a 2000-validator
+   * refresh is one round-trip.
+   *
+   * Identity is the natural key (a validator may rotate vote
+   * accounts, but identity is stable). Rows whose identity_pubkey
+   * isn't in the `validators` table are silently no-op'd by the
+   * `UPDATE ... FROM` no-match — the cluster-nodes refresh runs
+   * alongside the vote-accounts refresh, but if a node is in gossip
+   * without a corresponding vote account, it's not a validator we
+   * care about for the badge surface.
+   *
+   * Return shape (DB-M2): `{ updated, attempted }`.
+   *   - `attempted` = `entries.length` — every identity we tried to
+   *     classify this tick.
+   *   - `updated` = the rowCount, i.e. rows whose client_kind OR
+   *     client_version actually CHANGED. This is intentionally NOT
+   *     "rows matched" — the `IS DISTINCT FROM` guard means an
+   *     unchanged row contributes 0.
+   * The repo has no logger, so it surfaces both numbers and lets the
+   * caller decide what to log. `attempted - updated` conflates two
+   * cases the caller can disambiguate with context: (a) identities
+   * already at their current classification (the steady-state, the
+   * vast majority) and (b) gossip identities with no `validators`
+   * row at all (gossip/validators divergence). The cluster-nodes
+   * ingester logs the gap at `debug` so the divergence is observable
+   * without spamming the steady-state.
+   *
+   * DB-M3: `client_kind` is `NOT NULL DEFAULT 'unknown'` at the DB
+   * layer. `COALESCE(src.client_kind, 'unknown')` degrades a missing
+   * kind to `'unknown'` rather than tripping the NOT NULL constraint
+   * if a caller ever passes `null`/`undefined`.
+   */
+  async upsertClientBatch(
+    entries: ReadonlyArray<ValidatorClientUpsertInput>,
+  ): Promise<{ updated: number; attempted: number }> {
+    if (entries.length === 0) return { updated: 0, attempted: 0 };
+    const identities = entries.map((e) => e.identityPubkey);
+    const kinds = entries.map((e) => e.clientKind);
+    const versions = entries.map((e) => e.clientVersion);
+    // DB-M7: UNNEST silently truncates to the shortest array, so a
+    // length mismatch would corrupt the batch. All three arrays are
+    // `.map()`-derived from the same `entries` list — a mismatch is a
+    // programming error, so fail fast with a clear message rather
+    // than writing a silently-truncated batch.
+    if (identities.length !== kinds.length || identities.length !== versions.length) {
+      throw new Error(
+        `upsertClientBatch: array length mismatch ` +
+          `(identities=${identities.length}, kinds=${kinds.length}, versions=${versions.length})`,
+      );
+    }
+
+    const { rowCount } = await this.pool.query(
+      `UPDATE validators v
+          SET client_kind       = COALESCE(src.client_kind, 'unknown'),
+              client_version    = src.client_version,
+              client_updated_at = NOW()
+         FROM UNNEST($1::text[], $2::text[], $3::text[])
+              AS src(identity_pubkey, client_kind, client_version)
+        WHERE v.identity_pubkey = src.identity_pubkey
+          AND (
+            v.client_kind     IS DISTINCT FROM COALESCE(src.client_kind, 'unknown') OR
+            v.client_version  IS DISTINCT FROM src.client_version
+          )`,
+      [identities, kinds, versions],
+    );
+    return { updated: rowCount ?? 0, attempted: entries.length };
   }
 
   async findByVote(vote: VotePubkey): Promise<Validator | null> {
@@ -286,8 +409,8 @@ export class ValidatorsRepository {
       const namePattern = matchMode === 'prefix' ? prefix : like;
       const { rows } = await this.pool.query<ValidatorRow>(
         `SELECT v.vote_pubkey, v.identity_pubkey, v.first_seen_epoch, v.last_seen_epoch,
-                v.updated_at, v.name, v.details, v.website, v.keybase_username, v.icon_url,
-                v.info_updated_at,
+                v.genesis_epoch, v.updated_at, v.name, v.details, v.website,
+                v.keybase_username, v.icon_url, v.info_updated_at,
                 CASE
                   WHEN lower(v.vote_pubkey) LIKE $3 ESCAPE '\\' THEN 0
                   WHEN lower(v.identity_pubkey) LIKE $3 ESCAPE '\\' THEN 1

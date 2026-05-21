@@ -11,19 +11,26 @@ import { FeeService } from '../services/fee.service.js';
 import { GrpcBlockSubscriber } from '../services/grpc-block-subscriber.service.js';
 import { SlotService } from '../services/slot.service.js';
 import { ValidatorService } from '../services/validator.service.js';
+import { WalletActivityIndexerService } from '../services/wallet-activity-indexer.service.js';
 import { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
 import { CursorsRepository } from '../storage/repositories/cursors.repo.js';
 import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
+import { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
 import { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
 import { StatsRepository } from '../storage/repositories/stats.repo.js';
 import { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
+import { WalletActivityRepository } from '../storage/repositories/wallet-activity.repo.js';
 import { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
 import { createAggregatesComputerJob } from '../jobs/aggregates-computer.job.js';
 import { createEpochWatcherJob } from '../jobs/epoch-watcher.job.js';
 import { createFeeIngesterJob } from '../jobs/fee-ingester.job.js';
 import { createIncomeReconcilerJob } from '../jobs/income-reconciler.job.js';
+import { createClusterNodesIngesterJob } from '../jobs/cluster-nodes-ingester.job.js';
 import { createValidatorInfoRefreshJob } from '../jobs/validator-info-refresh.job.js';
 import { createSlotIngesterJob } from '../jobs/slot-ingester.job.js';
+import { createWalletActivityIngesterJob } from '../jobs/wallet-activity-ingester.job.js';
+import { createStakewizTenureIngesterJob } from '../jobs/stakewiz-tenure-ingester.job.js';
+import { StakewizClient } from '../clients/stakewiz.js';
 import { withRpcFallback } from '../jobs/rpc-fallback.js';
 import { Scheduler } from '../jobs/scheduler.js';
 import { runMigrations } from '../storage/migrations/runner.js';
@@ -65,9 +72,11 @@ export async function startWorker(): Promise<void> {
   // so validators tracked on-demand from the API start flowing through
   // without a worker restart.
   const watchedDynamicRepo = new WatchedDynamicRepository(pool);
-  // CursorsRepository is instantiated for future use by jobs that checkpoint
-  // progress through longer pipelines. Not consumed directly here yet.
-  new CursorsRepository(pool);
+  // Per-job ingest checkpoint store. Consumed by the wallet-activity
+  // indexer (per-wallet "newest signature seen" cursor — SOL-M1
+  // backward pagination); available for any future job that needs to
+  // checkpoint progress through a longer pipeline.
+  const cursorsRepo = new CursorsRepository(pool);
 
   // Cost-aware upstream rate limit, keyed off env. When
   // `SOLANA_RPC_CREDITS_PER_SEC` is 0 (default), we skip the bucket
@@ -135,6 +144,11 @@ export async function startWorker(): Promise<void> {
   const validatorService = new ValidatorService({
     validatorsRepo,
     watchedDynamicRepo,
+    // Wired in worker only — drives the per-(epoch, vote) vote-credits
+    // index on every `refreshFromRpc` tick. The API entrypoint
+    // intentionally skips this dep because its on-demand validator
+    // lookups go through a different code path and must not write.
+    statsRepo,
     rpc,
     logger,
   });
@@ -169,6 +183,16 @@ export async function startWorker(): Promise<void> {
     logger.info({ topN }, 'worker: watch mode is "top:N" (stake-ranked sample)');
   }
 
+  // Cold-start stagger (OPS-M2/M3). `runLoop` runs each job's first
+  // tick immediately unless `initialDelayMs` is set, so without these
+  // offsets every RPC-bursty job — slot/fee ingest, the ~500 KB
+  // `getClusterNodes` poll, the hundreds-of-`getSignaturesForAddress`
+  // wallet-activity sweep — hammers RPC at second 0 of a boot and
+  // 429s a public endpoint while `/healthz` is still `degraded`.
+  // Fixed per-job offsets (no jitter — single replica, deterministic
+  // is easier to reason about). The epoch watcher stays immediate:
+  // it's the readiness gate and is one cheap `getEpochInfo` call. The
+  // aggregates job stays immediate too — pure SQL, no RPC.
   scheduler.register(
     createEpochWatcherJob({
       epochService,
@@ -177,8 +201,8 @@ export async function startWorker(): Promise<void> {
       logger,
     }),
   );
-  scheduler.register(
-    createSlotIngesterJob({
+  scheduler.register({
+    ...createSlotIngesterJob({
       epochService,
       validatorService,
       slotService,
@@ -191,9 +215,12 @@ export async function startWorker(): Promise<void> {
       finalityBuffer: config.SLOT_FINALITY_BUFFER,
       logger,
     }),
-  );
-  scheduler.register(
-    createFeeIngesterJob({
+    // +2s: let the epoch watcher's first tick land before slot ingest
+    // starts reading the schedule.
+    initialDelayMs: 2_000,
+  });
+  scheduler.register({
+    ...createFeeIngesterJob({
       epochService,
       epochsRepo,
       validatorService,
@@ -210,7 +237,10 @@ export async function startWorker(): Promise<void> {
       finalityBuffer: config.SLOT_FINALITY_BUFFER,
       logger,
     }),
-  );
+    // +6s: the heaviest steady-state RPC consumer (`getBlock` batches);
+    // give it room after slot ingest.
+    initialDelayMs: 6_000,
+  });
   scheduler.register(
     createAggregatesComputerJob({
       epochService,
@@ -224,8 +254,8 @@ export async function startWorker(): Promise<void> {
       logger,
     }),
   );
-  scheduler.register(
-    createIncomeReconcilerJob({
+  scheduler.register({
+    ...createIncomeReconcilerJob({
       epochService,
       epochsRepo,
       validatorService,
@@ -240,10 +270,13 @@ export async function startWorker(): Promise<void> {
       batchSize: config.FEE_INGEST_BATCH_SIZE,
       logger,
     }),
-  );
+    // +12s: closed-epoch backfill, also `getBlock`-heavy but not
+    // latency-sensitive — happy to wait out the live-path jobs.
+    initialDelayMs: 12_000,
+  });
 
-  scheduler.register(
-    createValidatorInfoRefreshJob({
+  scheduler.register({
+    ...createValidatorInfoRefreshJob({
       epochService,
       validatorService,
       validatorsRepo,
@@ -253,14 +286,70 @@ export async function startWorker(): Promise<void> {
       intervalMs: config.VALIDATOR_INFO_INTERVAL_MS,
       logger,
     }),
-  );
+    // +20s: one RPC per watched validator; off the cold-start path.
+    initialDelayMs: 20_000,
+  });
+
+  scheduler.register({
+    ...createClusterNodesIngesterJob({
+      rpc,
+      validatorsRepo,
+      intervalMs: config.CLUSTER_NODES_INTERVAL_MS,
+      logger,
+    }),
+    // +30s: single ~500 KB `getClusterNodes` response; pull it well
+    // clear of the boot RPC burst.
+    initialDelayMs: 30_000,
+  });
+
+  // Phase 4 — wallet-activity indexer. Runs alongside the validator
+  // jobs because it reads `operator_wallets` (a worker-owned writeable
+  // table) and writes `wallet_daily_activity`. Read by the API
+  // process via the `/v1/operator-wallets/:wallet/activity` endpoint.
+  const operatorWalletsRepo = new OperatorWalletsRepository(pool);
+  const walletActivityRepo = new WalletActivityRepository(pool);
+  const walletActivityIndexer = new WalletActivityIndexerService({
+    rpc,
+    repo: walletActivityRepo,
+    cursors: cursorsRepo,
+    logger,
+  });
+  scheduler.register({
+    ...createWalletActivityIngesterJob({
+      operatorWalletsRepo,
+      indexer: walletActivityIndexer,
+      intervalMs: config.WALLET_ACTIVITY_INTERVAL_MS,
+      logger,
+    }),
+    // +45s: the burstiest cold-start job — one
+    // `getSignaturesForAddress` per registered operator wallet
+    // (hundreds at scale). Last in the stagger so the live-path
+    // ingest jobs get RPC headroom first.
+    initialDelayMs: 45_000,
+  });
+
+  // Tenure true-age — pulls stakewiz `first_epoch_with_stake` into
+  // `validators.genesis_epoch` so the hub Tenure card shows real
+  // on-chain age, not indexer-relative age. One bulk HTTP call per
+  // tick; off the RPC path entirely.
+  scheduler.register({
+    ...createStakewizTenureIngesterJob({
+      stakewizClient: new StakewizClient({ logger }),
+      validatorsRepo,
+      intervalMs: config.STAKEWIZ_TENURE_INTERVAL_MS,
+      logger,
+    }),
+    // +60s: not on the RPC path and not latency-sensitive (genesis
+    // epoch is immutable) — last in the stagger.
+    initialDelayMs: 60_000,
+  });
 
   shutdown.register('scheduler', async () => {
     await scheduler.stop();
   });
 
   scheduler.start();
-  logger.info({ jobs: 6 }, 'worker:scheduler-started');
+  logger.info({ jobs: scheduler.size }, 'worker:scheduler-started');
 
   // Optional Yellowstone gRPC block subscriber. Runs alongside the
   // polling-path fee-ingester rather than replacing it — gRPC handles

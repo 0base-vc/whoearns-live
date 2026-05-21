@@ -11,9 +11,17 @@ import type pg from 'pg';
 import type { AppConfig } from '../core/config.js';
 import type { Logger } from '../core/logger.js';
 import type { ClaimService } from '../services/claim.service.js';
+import type { GithubGistVerificationService } from '../services/github-gist-verification.service.js';
+import type { OperatorWalletVerificationService } from '../services/operator-wallet-verification.service.js';
 import type { ValidatorService } from '../services/validator.service.js';
+import type { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
+import type { ValidatorGithubRepository } from '../storage/repositories/validator-github.repo.js';
+import type { SimdDiscussionsRepository } from '../storage/repositories/simd-discussions.repo.js';
+import type { SimdProposalsRepository } from '../storage/repositories/simd-proposals.repo.js';
+import type { WalletActivityRepository } from '../storage/repositories/wallet-activity.repo.js';
 import type { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../storage/repositories/claims.repo.js';
+import type { ValidatorClaimEventsRepository } from '../storage/repositories/validator-claim-events.repo.js';
 import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import type { ProfilesRepository } from '../storage/repositories/profiles.repo.js';
 import type { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
@@ -22,7 +30,13 @@ import type { ValidatorsRepository } from '../storage/repositories/validators.re
 import type { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
 import { setErrorHandler } from './error-handler.js';
 import { registerRequestId } from './request-id.js';
+import badgeRoutes from './routes/badge.route.js';
 import claimRoutes from './routes/claim.route.js';
+import claimV2Routes from './routes/claim-v2.route.js';
+import oaiRoutes from './routes/operator-activity-index.route.js';
+import operatorWalletsRoutes from './routes/operator-wallets.route.js';
+import scoringRoutes from './routes/scoring.route.js';
+import simdProposalsRoutes from './routes/simd-proposals.route.js';
 import epochsRoutes from './routes/epochs.route.js';
 import healthRoutes from './routes/health.route.js';
 import leaderboardRoutes from './routes/leaderboard.route.js';
@@ -71,6 +85,25 @@ export interface BuildServerDeps {
      * through `services.claim`.
      */
     claims: ClaimsRepository;
+    /**
+     * SEC-M4 — immutable, append-only audit log of claim-surface
+     * mutations. Written best-effort by the v1 + v2 claim routes
+     * after each successful mutation; read by the public
+     * `GET /v1/claims/:vote/audit` endpoint.
+     */
+    validatorClaimEvents: ValidatorClaimEventsRepository;
+    /**
+     * Phase 3 Claim v2 — GitHub Gist link + operator wallet
+     * registration.
+     */
+    validatorGithub: ValidatorGithubRepository;
+    operatorWallets: OperatorWalletsRepository;
+    /** Phase 4 — wallet daily activity (read surface). */
+    walletActivity: WalletActivityRepository;
+    /** Phase 5 — SIMD proposals + AI curation. */
+    simdProposals: SimdProposalsRepository;
+    /** Phase 6 — GitHub Discussions comments mirror. */
+    simdDiscussions: SimdDiscussionsRepository;
   };
   services: {
     validator: ValidatorService;
@@ -80,6 +113,9 @@ export interface BuildServerDeps {
      * orthogonal to the validator-tracking lifecycle.
      */
     claim: ClaimService;
+    /** Phase 3 Claim v2 helpers — see repos.{validatorGithub,operatorWallets}. */
+    githubGist: GithubGistVerificationService;
+    operatorWallet: OperatorWalletVerificationService;
   };
   /**
    * Override path to the SvelteKit build. When undefined we try a few
@@ -173,7 +209,21 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     // /metrics is no longer on this listener — see the
     // dedicated-port block at the end of buildServer for the
     // separate Fastify instance bound to METRICS_PORT.
-    allowList: (req) => req.url === '/healthz',
+    //
+    // Image surfaces (`/og/...`, `/og-default.png`, `/badge/*.svg`) are
+    // exempt because they are deliberately CDN-fronted and embedded in
+    // third-party HTML — a single viral page loading hundreds of badges
+    // hits the origin as the CDN edge (one IP) and would otherwise
+    // exhaust the per-IP budget. The in-memory LRU + single-flight
+    // de-dup is the throttle for the render path; render cost ceilings
+    // are bounded by the closed-epoch-only data model.
+    allowList: (req) => {
+      if (req.url === '/healthz') return true;
+      if (req.url === '/og-default.png') return true;
+      if (req.url.startsWith('/og/')) return true;
+      if (req.url.startsWith('/badge/') && req.url.endsWith('.svg')) return true;
+      return false;
+    },
   });
 
   registerRequestId(app);
@@ -262,7 +312,76 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       claimsRepo: deps.repos.claims,
     });
     await scope.register(claimRoutes, {
+      config: deps.config,
       claimService: deps.services.claim,
+      // SEC-M4 — best-effort audit log for claim/profile mutations.
+      claimEventsRepo: deps.repos.validatorClaimEvents,
+      // CROSS-M1 — `GET /v1/claims/:vote` folds in GitHub-link +
+      // operator-wallet state so a dashboard needs one fetch, not
+      // four. Same repos the OAI route reads.
+      validatorGithubRepo: deps.repos.validatorGithub,
+      operatorWalletsRepo: deps.repos.operatorWallets,
+    });
+    // Phase 3 — Claim v2: GitHub Gist link + operator wallet
+    // registration. Split into its own plugin from the v1 claim
+    // surface (see claim-v2.route.ts) — the two share only the
+    // `/v1/claims/*` prefix, not behaviour.
+    await scope.register(claimV2Routes, {
+      config: deps.config,
+      claimsRepo: deps.repos.claims,
+      // SEC-L4 — `POST /v1/claims/:vote/wallets` rejects a walletPubkey
+      // that is some other validator's identity pubkey via `findByIdentity`.
+      validatorsRepo: deps.repos.validators,
+      validatorGithubRepo: deps.repos.validatorGithub,
+      operatorWalletsRepo: deps.repos.operatorWallets,
+      githubGistService: deps.services.githubGist,
+      operatorWalletService: deps.services.operatorWallet,
+      // SEC-M4 — best-effort audit log for github-link / wallet-register.
+      claimEventsRepo: deps.repos.validatorClaimEvents,
+    });
+    // Phase 4 — wallet activity read endpoint. The worker writes the
+    // table; the API just reads.
+    await scope.register(operatorWalletsRoutes, {
+      walletActivityRepo: deps.repos.walletActivity,
+      operatorWalletsRepo: deps.repos.operatorWallets,
+    });
+    // Phase 5 — Pending SIMD widget read endpoint. The curation
+    // pipeline is worker-owned. `aiModel` is wired from config so the
+    // response carries the currently-configured curation model as a
+    // migration signal for consumers.
+    await scope.register(simdProposalsRoutes, {
+      repo: deps.repos.simdProposals,
+      aiModel: deps.config.ANTHROPIC_MODEL,
+    });
+    // Phase 6 — Operator Activity Index. Reads the validator,
+    // github-link, operator-wallet, wallet-activity, and
+    // simd-discussions repos.
+    await scope.register(oaiRoutes, {
+      validatorsRepo: deps.repos.validators,
+      claimsRepo: deps.repos.claims,
+      profilesRepo: deps.repos.profiles,
+      validatorGithubRepo: deps.repos.validatorGithub,
+      operatorWalletsRepo: deps.repos.operatorWallets,
+      walletActivityRepo: deps.repos.walletActivity,
+      simdDiscussionsRepo: deps.repos.simdDiscussions,
+    });
+    // REST-M8 — `/scoring` aggregate. The profile-page one-shot:
+    // does the validator lookup ONCE and returns tier + tenure +
+    // client + OAI together. ADDITIVE — `/tier`, `/badges`, and
+    // `/operator-activity-index` stay live and unchanged for
+    // consumers wanting one component with its own CDN cache. Its
+    // deps are the UNION of the validators-route + OAI-route repos,
+    // all of which `repos` already exposes.
+    await scope.register(scoringRoutes, {
+      validatorsRepo: deps.repos.validators,
+      statsRepo: deps.repos.stats,
+      epochsRepo: deps.repos.epochs,
+      claimsRepo: deps.repos.claims,
+      profilesRepo: deps.repos.profiles,
+      validatorGithubRepo: deps.repos.validatorGithub,
+      operatorWalletsRepo: deps.repos.operatorWallets,
+      walletActivityRepo: deps.repos.walletActivity,
+      simdDiscussionsRepo: deps.repos.simdDiscussions,
     });
     // SEO + AI-discovery surfaces. Registered BEFORE `fastifyStatic`
     // (below, outside this register scope) so dynamic /sitemap.xml,
@@ -279,6 +398,18 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       config: deps.config,
       validatorsRepo: deps.repos.validators,
       statsRepo: deps.repos.stats,
+    });
+    // SVG badge endpoint. Validators embed `<img
+    // src="/badge/<vote>.svg">` on their own websites / READMEs to
+    // surface live performance flair. Same data-freshness model as OG
+    // (latest closed-epoch only) so the CDN-cached badge can't lie
+    // mid-epoch.
+    await scope.register(badgeRoutes, {
+      config: deps.config,
+      validatorsRepo: deps.repos.validators,
+      statsRepo: deps.repos.stats,
+      // PR #11 review finding P1-4 — opt-out gate. See `badge.route.ts`.
+      profilesRepo: deps.repos.profiles,
     });
     // MCP server. Streamable-HTTP transport, stateless mode. Four
     // read-only tools backed by the same repos the v1/* routes use

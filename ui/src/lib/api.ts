@@ -1,10 +1,15 @@
 import type {
+  ClaimAuditResponse,
   ClaimChallenge,
   ClaimStatus,
   CurrentEpoch,
   Leaderboard,
   LeaderboardSort,
   LeaderboardWindow,
+  OperatorWalletActivityResponse,
+  OperatorWalletResponse,
+  ScoringResponse,
+  SimdProposalListResponse,
   ValidatorEpochRecord,
   ValidatorEpochLeaderSlots,
   ValidatorHistory,
@@ -45,26 +50,75 @@ export class ApiError extends Error {
   }
 }
 
-async function call<T>(path: string, fetchFn: typeof fetch = fetch): Promise<T> {
+/**
+ * Optional per-call controls — every public fetcher accepts these so a
+ * caller can wire abort + timeout without rewriting the shared `call`.
+ * `signal` chains through to the underlying `fetch`; passing one from
+ * an `AbortController` that's aborted on component teardown is the
+ * canonical "don't poison the next page" pattern for hub-style CSR
+ * fan-outs (see `routes/v/[idOrVote]/+page.svelte`).
+ */
+export interface CallOptions {
+  fetchFn?: typeof fetch;
+  signal?: AbortSignal;
+  /** Hard timeout in ms; client-side AbortController fires when reached. */
+  timeoutMs?: number;
+}
+
+/** Same default everywhere — 15s feels generous on slow 4G without holding sockets forever. */
+const DEFAULT_TIMEOUT_MS = 15_000;
+
+async function call<T>(
+  path: string,
+  // Backward-compat: the legacy positional was just `fetchFn`. New
+  // callers pass `CallOptions` so we can wire signal + timeout. Pure
+  // typeof discrimination — a function arg routes to the legacy
+  // shape, an object arg to the new one.
+  arg: typeof fetch | CallOptions = {},
+): Promise<T> {
+  const options: CallOptions = typeof arg === 'function' ? { fetchFn: arg } : arg;
+  const { fetchFn = fetch, signal, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
   const url = `${getApiBase()}${path}`;
-  const res = await fetchFn(url, {
-    headers: { accept: 'application/json' },
-  });
-  if (!res.ok) {
-    let code = 'upstream_error';
-    let message = `${res.status} ${res.statusText}`;
-    try {
-      const body = (await res.json()) as { error?: { code?: string; message?: string } };
-      if (body?.error) {
-        code = body.error.code ?? code;
-        message = body.error.message ?? message;
-      }
-    } catch {
-      // body wasn't JSON — keep the defaults
-    }
-    throw new ApiError(res.status, code, message);
+
+  // Wire a local timeout that ALSO honours the caller's signal — when
+  // either fires, we abort. AbortSignal.any is a 2024+ spec helper but
+  // widely shipped; fall back to a manual chain when absent so the
+  // call doesn't crash older runtimes.
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const localCtrl = new AbortController();
+  const onAbort = () => localCtrl.abort(signal?.reason);
+  if (signal) {
+    if (signal.aborted) localCtrl.abort(signal.reason);
+    else signal.addEventListener('abort', onAbort, { once: true });
   }
-  return (await res.json()) as T;
+  if (timeoutMs > 0) {
+    timeoutId = setTimeout(() => localCtrl.abort(new Error('timeout')), timeoutMs);
+  }
+
+  try {
+    const res = await fetchFn(url, {
+      headers: { accept: 'application/json' },
+      signal: localCtrl.signal,
+    });
+    if (!res.ok) {
+      let code = 'upstream_error';
+      let message = `${res.status} ${res.statusText}`;
+      try {
+        const body = (await res.json()) as { error?: { code?: string; message?: string } };
+        if (body?.error) {
+          code = body.error.code ?? code;
+          message = body.error.message ?? message;
+        }
+      } catch {
+        // body wasn't JSON — keep the defaults
+      }
+      throw new ApiError(res.status, code, message);
+    }
+    return (await res.json()) as T;
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+    if (signal) signal.removeEventListener('abort', onAbort);
+  }
 }
 
 /** History endpoint accepts either a vote or an identity pubkey. */
@@ -155,20 +209,21 @@ export function fetchValidatorLeaderSlots(
  * first-party surface minimal.
  */
 export function fetchClaimChallenge(fetchFn: typeof fetch = fetch): Promise<ClaimChallenge> {
-  return call<ClaimChallenge>('/v1/claim/challenge', fetchFn);
+  return call<ClaimChallenge>('/v1/claims/challenge', fetchFn);
 }
 
 /**
  * Read-only status check. Used by both the /income page ("should we
  * show an Edit Profile button?") and the /claim page ("is this
- * already claimed, and if so what are the current values?").
+ * already claimed, and if so what are the current values?"). This is
+ * a plain GET of the claim instance — `/v1/claims/:vote`.
  */
 export function fetchClaimStatus(
   vote: string,
-  fetchFn: typeof fetch = fetch,
+  opts: CallOptions | typeof fetch = {},
 ): Promise<ClaimStatus> {
   const safe = encodeURIComponent(vote);
-  return call<ClaimStatus>(`/v1/claim/${safe}/status`, fetchFn);
+  return call<ClaimStatus>(`/v1/claims/${safe}`, opts);
 }
 
 /**
@@ -177,6 +232,12 @@ export function fetchClaimStatus(
  * `validator_claims` row on success. Throws `ApiError` on any
  * verification failure — inspect `err.code` for the specific reason
  * (`stale_timestamp`, `nonce_replay`, `bad_signature`, etc.).
+ *
+ * Idempotent upsert of the claim instance, so this is a `PUT` to
+ * `/v1/claims/:vote`. The vote pubkey rides in the path AND the
+ * signed body; the server rejects a mismatch (`vote_pubkey_mismatch`)
+ * — but since we derive the path straight from `body.votePubkey` they
+ * are the same value by construction.
  */
 export function verifyClaim(
   body: {
@@ -188,7 +249,8 @@ export function verifyClaim(
   },
   fetchFn: typeof fetch = fetch,
 ): Promise<{ claimed: true; votePubkey: string; claimedAt: string }> {
-  return postJson('/v1/claim/verify', body, fetchFn);
+  const safe = encodeURIComponent(body.votePubkey);
+  return putJson(`/v1/claims/${safe}`, body, fetchFn);
 }
 
 /**
@@ -197,6 +259,11 @@ export function verifyClaim(
  * reconstructs the canonical message from these exact fields and
  * verifies — an attacker who swaps the profile state between the
  * operator's sign step and the submission breaks the signature.
+ *
+ * `PUT` of the profile sub-resource of the claim instance —
+ * `/v1/claims/:vote/profile`. The vote pubkey rides in the path AND
+ * the signed body (server rejects a mismatch); the path is derived
+ * from `body.votePubkey` so they always agree.
  */
 export function updateClaimProfile(
   body: {
@@ -218,22 +285,30 @@ export function updateClaimProfile(
   },
   fetchFn: typeof fetch = fetch,
 ): Promise<{ profile: ValidatorProfile & { updatedAt: string } }> {
-  return postJson('/v1/claim/profile', body, fetchFn);
+  const safe = encodeURIComponent(body.votePubkey);
+  return putJson(`/v1/claims/${safe}/profile`, body, fetchFn);
 }
 
 /**
- * Shared POST-JSON helper. Mirrors `call()` for errors but sets the
- * method + Content-Type header. Kept local because the API is
- * mostly read-only; only the claim routes POST.
+ * Shared JSON-body helper. Mirrors `call()` for errors but sets the
+ * HTTP method + Content-Type header. Kept local because the API is
+ * mostly read-only; only the claim routes carry a request body.
+ *
+ * `putJson` is the only method-bound wrapper the UI needs today — the
+ * claim verify + profile flows are both idempotent upserts (`PUT`).
+ * The wallet-append endpoint (`POST /v1/claims/:vote/wallets`) is not
+ * called from the UI; a `postJson` wrapper can be added back the day
+ * it is, mirroring `putJson`.
  */
-async function postJson<TResponse>(
+async function sendJson<TResponse>(
+  method: 'POST' | 'PUT' | 'DELETE',
   path: string,
   body: unknown,
   fetchFn: typeof fetch = fetch,
 ): Promise<TResponse> {
   const url = `${getApiBase()}${path}`;
   const res = await fetchFn(url, {
-    method: 'POST',
+    method,
     headers: { accept: 'application/json', 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
@@ -252,4 +327,224 @@ async function postJson<TResponse>(
     throw new ApiError(res.status, code, message);
   }
   return (await res.json()) as TResponse;
+}
+
+/** PUT a JSON body — used for idempotent upserts (claim verify, profile). */
+function putJson<TResponse>(
+  path: string,
+  body: unknown,
+  fetchFn: typeof fetch = fetch,
+): Promise<TResponse> {
+  return sendJson<TResponse>('PUT', path, body, fetchFn);
+}
+
+/** POST a JSON body — used for collection-append endpoints (operator wallets). */
+function postJson<TResponse>(
+  path: string,
+  body: unknown,
+  fetchFn: typeof fetch = fetch,
+): Promise<TResponse> {
+  return sendJson<TResponse>('POST', path, body, fetchFn);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Claim v2 — GitHub Gist verification + operator-wallet registration.
+// Both endpoints require an existing claim and re-verify against the
+// validator-identity Ed25519 key bound by the claim.
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * Link a GitHub username to a claimed validator via a signed public
+ * Gist. The Gist body MUST be the canonical-nonce JSON, a literal
+ * `---` delimiter line, and the base58 Ed25519 signature over the
+ * nonce. The server fetches the Gist, parses, and verifies — the UI
+ * just submits the `gistUrl` + the body fields it was built from
+ * (server reconstructs the nonce from these exact fields, so a
+ * tampered submission diverges from the published Gist content).
+ *
+ * Pre-conditions enforced by the route:
+ *   - Validator must already be claimed.
+ *   - `identityPubkey` must match the claim.
+ *   - `timestampMs` must be within ±5 min of server time.
+ *
+ * Throws `ApiError` on any failure — `code` carries the stable
+ * machine id (`fetch_failed` / `bad_signature` / `username_mismatch`
+ * etc.); the call site renders `err.message` (REST-M2 human prose).
+ */
+export function linkGithub(
+  body: {
+    votePubkey: string;
+    identityPubkey: string;
+    githubUsername: string;
+    gistUrl: string;
+    timestampMs: number;
+  },
+  fetchFn: typeof fetch = fetch,
+): Promise<{
+  link: { githubUsername: string; gistUrl: string; verifiedAt: string; expiresAt: string };
+}> {
+  const safe = encodeURIComponent(body.votePubkey);
+  return putJson(`/v1/claims/${safe}/github`, body, fetchFn);
+}
+
+/**
+ * Register an operator wallet via a validator identity CLI signature
+ * + a browser-wallet memo transaction.
+ *
+ * `identitySignatureB58` is the validator identity key's CLI
+ * signature over the canonical nonce JSON (sorted-keys, no
+ * whitespace). `memoTxSignature` is the signature of a memo-only
+ * Solana transaction the operator's connected wallet signed AND sent
+ * — its single SPL Memo instruction carries that exact canonical
+ * nonce. The backend fetches the memo transaction and confirms the
+ * wallet is in the signer set and the memo content equals the nonce.
+ *
+ * Pre-conditions enforced by the route:
+ *   - Validator must already be claimed.
+ *   - `identityPubkey` must match the claim.
+ *   - `walletPubkey` must NOT equal the validator's vote or identity
+ *     pubkey, and must NOT be a known other validator's identity.
+ *   - The validator must have fewer than the per-validator wallet
+ *     cap registered (default 3).
+ *   - `timestampMs` must be within ±5 min of server time.
+ *
+ * Returns the newly-registered wallet's metadata (label, registered
+ * + expiry timestamps). The 90-day TTL is set server-side; the
+ * caller can persist these to a local cache or re-fetch
+ * `/v1/claims/:vote` for the canonical list.
+ */
+export function registerOperatorWallet(
+  body: {
+    votePubkey: string;
+    identityPubkey: string;
+    walletPubkey: string;
+    label: string;
+    timestampMs: number;
+    identitySignatureB58: string;
+    memoTxSignature: string;
+  },
+  fetchFn: typeof fetch = fetch,
+): Promise<{
+  wallet: { walletPubkey: string; label: string; registeredAt: string; expiresAt: string };
+}> {
+  const safe = encodeURIComponent(body.votePubkey);
+  return postJson(`/v1/claims/${safe}/wallets`, body, fetchFn);
+}
+
+/**
+ * Unregister (delete) a previously-registered operator wallet.
+ *
+ * Single-signature ceremony — the validator identity key alone is
+ * sufficient. The endpoint exists to give an operator a way out of
+ * the 3-wallet cap when they registered an incorrect wallet (typo'd
+ * pubkey, lost-key wallet) without waiting the 90-day TTL.
+ *
+ * Path is `/v1/claims/:vote/wallets/:wallet`; body carries the
+ * signed nonce + identity signature. Server-side rejects (a)
+ * (vote, wallet) miss as 404, (b) signature/freshness failures as
+ * 403, (c) auth role mismatches as 403, and (d) mismatch between
+ * path :wallet and body.walletPubkey as 400.
+ *
+ * Throws `ApiError` on any failure — `code` carries the stable
+ * machine id, `message` the human-readable sentence.
+ */
+export function unregisterOperatorWallet(
+  body: {
+    votePubkey: string;
+    identityPubkey: string;
+    walletPubkey: string;
+    timestampMs: number;
+    identitySignatureB58: string;
+  },
+  fetchFn: typeof fetch = fetch,
+): Promise<{ unregistered: { walletPubkey: string } }> {
+  const safeVote = encodeURIComponent(body.votePubkey);
+  const safeWallet = encodeURIComponent(body.walletPubkey);
+  return sendJson<{ unregistered: { walletPubkey: string } }>(
+    'DELETE',
+    `/v1/claims/${safeVote}/wallets/${safeWallet}`,
+    body,
+    fetchFn,
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Gamification surface — tier, badges, OAI, /scoring, wallet activity,
+// SIMD feed, audit log. All read-only. Same `ApiError` semantics as
+// the other read endpoints.
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * REST-M8 aggregate: tier + tenure + client + OAI in one round-trip.
+ * Primary fetch for the `/v/:idOrVote` hub. `oai` is `null` when the
+ * validator is known but gated out of the OAI surface (unclaimed /
+ * opted-out / identity-drift); the rest stays populated.
+ */
+export function fetchScoring(
+  idOrVote: string,
+  opts: CallOptions | typeof fetch = {},
+): Promise<ScoringResponse> {
+  const safe = encodeURIComponent(idOrVote);
+  return call<ScoringResponse>(`/v1/validators/${safe}/scoring`, opts);
+}
+
+/**
+ * Parent-resource metadata for a registered operator wallet. 404s
+ * when no active registration exists (expired attestations are
+ * filtered server-side).
+ */
+export function fetchOperatorWallet(
+  wallet: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<OperatorWalletResponse> {
+  const safe = encodeURIComponent(wallet);
+  return call<OperatorWalletResponse>(`/v1/operator-wallets/${safe}`, fetchFn);
+}
+
+/**
+ * Per-day tx activity for a registered operator wallet. The response
+ * is sparse — days with zero activity are omitted; clients zero-fill
+ * at draw time. `txFeesLamports` is `null` everywhere today (Phase 4
+ * ships tx counts only; fee anchoring planned).
+ *
+ * `days` is clamped server-side to 1-365.
+ */
+export function fetchOperatorWalletActivity(
+  wallet: string,
+  days = 365,
+  opts: CallOptions | typeof fetch = {},
+): Promise<OperatorWalletActivityResponse> {
+  const safe = encodeURIComponent(wallet);
+  const safeDays = Math.max(1, Math.min(Math.floor(days), 365));
+  return call<OperatorWalletActivityResponse>(
+    `/v1/operator-wallets/${safe}/activity?days=${safeDays}`,
+    opts,
+  );
+}
+
+/**
+ * AI-curated SIMD proposals (Phase 5 — only `reviewed_at IS NOT NULL`
+ * rows surface). Empty list today in every deployment until the
+ * GitHub-Discussions mirror job ships.
+ */
+export function fetchSimdProposals(
+  opts: { limit?: number } = {},
+  callOpts: CallOptions | typeof fetch = {},
+): Promise<SimdProposalListResponse> {
+  const qs = opts.limit !== undefined ? `?limit=${opts.limit}` : '';
+  return call<SimdProposalListResponse>(`/v1/simd-proposals${qs}`, callOpts);
+}
+
+/**
+ * Append-only forensic audit log for a validator's claim surface.
+ * Used by the hub's Audit panel to surface identity-rotation events
+ * (when `priorIdentityPubkey` is non-null on a `reclaim` event, the
+ * operator should investigate).
+ */
+export function fetchClaimAudit(
+  vote: string,
+  opts: CallOptions | typeof fetch = {},
+): Promise<ClaimAuditResponse> {
+  const safe = encodeURIComponent(vote);
+  return call<ClaimAuditResponse>(`/v1/claims/${safe}/audit`, opts);
 }

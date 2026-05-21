@@ -31,6 +31,10 @@ interface StatsRow {
   median_tip_lamports: string | null;
   median_total_lamports: string | null;
   activated_stake_lamports: string | null;
+  /** Cumulative vote credits this epoch. NOT NULL DEFAULT 0 since 0021. */
+  vote_credits: string;
+  prev_epoch_vote_credits: string;
+  vote_credits_updated_at: Date | null;
   slots_updated_at: Date | null;
   slot_window_last_slot: string | null;
   slot_window_updated_at: Date | null;
@@ -78,6 +82,9 @@ function rowToStats(row: StatsRow): EpochValidatorStats {
       row.median_total_lamports === null ? null : toLamports(row.median_total_lamports),
     activatedStakeLamports:
       row.activated_stake_lamports === null ? null : toLamports(row.activated_stake_lamports),
+    voteCredits: toLamports(row.vote_credits ?? '0'),
+    prevEpochVoteCredits: toLamports(row.prev_epoch_vote_credits ?? '0'),
+    voteCreditsUpdatedAt: row.vote_credits_updated_at,
     slotsUpdatedAt: row.slots_updated_at,
     slotWindowLastSlot:
       row.slot_window_last_slot === null ? null : Number(row.slot_window_last_slot),
@@ -179,6 +186,9 @@ const STATS_COLS = `epoch, vote_pubkey, identity_pubkey,
   COALESCE(block_tips_total_lamports, 0) AS block_tips_total_lamports,
   median_tip_lamports, median_total_lamports,
   activated_stake_lamports,
+  COALESCE(vote_credits, 0) AS vote_credits,
+  COALESCE(prev_epoch_vote_credits, 0) AS prev_epoch_vote_credits,
+  vote_credits_updated_at,
   slots_updated_at, slot_window_last_slot, slot_window_updated_at,
   fees_updated_at, median_fee_updated_at,
   median_base_fee_updated_at, median_priority_fee_updated_at,
@@ -273,6 +283,79 @@ interface IndexedIncomePerSlotBenchmarkRow {
   sample_validators: number;
   sample_slots: string;
   median_income_lamports_per_slot: string;
+}
+
+/**
+ * Result of `findEconomicPercentile` — the per-validator economic
+ * percentile lookup the Node Tier composite consumes. The repo
+ * returns RAW values (percentile + cohort context); the caller
+ * (`computeTier`) decides whether the cohort is large enough or this
+ * validator has enough measured epochs to be classifiable.
+ */
+export interface EconomicPercentileLookup {
+  /**
+   * Percentile rank in [0, 1] of this validator's median income per
+   * leader slot vs the indexed cohort. `null` when:
+   *   - the vote pubkey has no measurable income in the window; or
+   *   - the cohort returned zero peers (no validator has measurable
+   *     income in the window, which is implausible in production but
+   *     possible in a fresh dev DB).
+   *
+   * 0 = lowest in cohort. 1 = highest in cohort. Computed by
+   * PostgreSQL's `PERCENT_RANK()` over the median per-slot income
+   * distribution, which is well-defined for cohort size ≥ 2.
+   */
+  percentile: number | null;
+  /**
+   * Size of the comparison cohort: how many indexed, non-opted-out
+   * validators had measurable income in the window. Surfaced so the
+   * caller can reject ranks computed against a tiny cohort. Zero
+   * when no peer in the window has measurable income.
+   */
+  cohortSize: number;
+  /**
+   * How many epochs in the window had measurable income for THIS
+   * validator. Zero when the target validator is absent from the
+   * cohort. Surfaced so the caller can reject percentiles drawn from
+   * too few epochs.
+   */
+  measuredEpochs: number;
+  /**
+   * The target validator's own median income per slot (lamports), as
+   * a decimal-precision string. `null` when the validator is absent
+   * from the cohort. Surfaced for transparency — a UI can show
+   * "your median: X SOL/slot, cluster median: Y SOL/slot."
+   */
+  medianIncomePerSlotLamports: string | null;
+}
+
+/**
+ * Canonical "no measurable cohort" lookup result. Used by the route
+ * layer (validators.route.ts + mcp.route.ts) when the closed-epoch
+ * window for a validator is empty so we skip the cohort query entirely
+ * — `computeTier` receives a well-formed input that correctly drops to
+ * `unrated` without a second DB round-trip. Exported here (rather than
+ * synthesised at each call site) so the shape stays a single source of
+ * truth: if `EconomicPercentileLookup` ever gains a field, the empty
+ * literal updates with it, not three.
+ */
+export const EMPTY_ECONOMIC_LOOKUP: EconomicPercentileLookup = {
+  percentile: null,
+  cohortSize: 0,
+  measuredEpochs: 0,
+  medianIncomePerSlotLamports: null,
+};
+
+interface EconomicPercentileRow {
+  // `pct` and `median_income_per_slot` are NULL when the target vote
+  // is absent from the cohort (LEFT JOIN target_row ON TRUE in the
+  // consolidated query). `cohort_size` is a `::bigint`-cast count
+  // that pg emits as a decimal string, parsed via `Number(...)` on
+  // the TS side. Cohort size is always populated.
+  pct: string | null;
+  cohort_size: string;
+  measured_epochs: number;
+  median_income_per_slot: string | null;
 }
 
 export interface WindowedLeaderboardStats {
@@ -519,6 +602,72 @@ export class StatsRepository {
         args.tipDeltaLamports.toString(),
       ],
     );
+  }
+
+  /**
+   * Batch-write vote credits + previous-epoch credits into the
+   * `(epoch, vote)` rows. Source is `getVoteAccounts.epochCredits`
+   * which returns up to 5 epochs of cumulative credits per validator.
+   *
+   * Uses `INSERT … ON CONFLICT` so a vote without a slot row yet
+   * (validator has stake but no leader slots in the epoch) still
+   * gets credits recorded — the rest of the columns stay at their
+   * NOT NULL DEFAULT 0 / NULL values until the slot or fee ingesters
+   * fill them. `last_seen_epoch` on the parent validator row is
+   * touched separately by `validatorsRepo.upsert`.
+   *
+   * Single-statement batch via `unnest()` so a 2000-validator batch
+   * is one round-trip.
+   */
+  async upsertVoteCreditsBatch(
+    epoch: Epoch,
+    entries: ReadonlyArray<{
+      votePubkey: VotePubkey;
+      identityPubkey: IdentityPubkey;
+      voteCredits: bigint;
+      prevEpochVoteCredits: bigint;
+    }>,
+  ): Promise<number> {
+    if (entries.length === 0) return 0;
+    const votes = entries.map((e) => e.votePubkey);
+    const identities = entries.map((e) => e.identityPubkey);
+    const credits = entries.map((e) => e.voteCredits.toString());
+    const prevCredits = entries.map((e) => e.prevEpochVoteCredits.toString());
+    // DB-M7: UNNEST silently truncates to the SHORTEST array, so a
+    // length mismatch would write a partial, corrupt batch with no
+    // error. All four arrays are `.map()`-derived from the same
+    // `entries` list — a mismatch is a programming error, so fail
+    // fast with a clear message instead of issuing the query.
+    if (
+      votes.length !== identities.length ||
+      votes.length !== credits.length ||
+      votes.length !== prevCredits.length
+    ) {
+      throw new Error(
+        `upsertVoteCreditsBatch: array length mismatch ` +
+          `(votes=${votes.length}, identities=${identities.length}, ` +
+          `credits=${credits.length}, prevCredits=${prevCredits.length})`,
+      );
+    }
+
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO epoch_validator_stats
+         (epoch, vote_pubkey, identity_pubkey,
+          slots_assigned, slots_produced, slots_skipped,
+          vote_credits, prev_epoch_vote_credits, vote_credits_updated_at)
+       SELECT $1::bigint,
+              v.vote_pubkey, v.identity_pubkey,
+              0, 0, 0,
+              v.vote_credits::numeric, v.prev_epoch_vote_credits::numeric, NOW()
+         FROM UNNEST($2::text[], $3::text[], $4::text[], $5::text[])
+              AS v(vote_pubkey, identity_pubkey, vote_credits, prev_epoch_vote_credits)
+       ON CONFLICT (epoch, vote_pubkey) DO UPDATE
+            SET vote_credits = EXCLUDED.vote_credits,
+                prev_epoch_vote_credits = EXCLUDED.prev_epoch_vote_credits,
+                vote_credits_updated_at = NOW()`,
+      [epoch, votes, identities, credits, prevCredits],
+    );
+    return rowCount ?? 0;
   }
 
   /**
@@ -832,6 +981,146 @@ export class StatsRepository {
       [vote, safe],
     );
     return rows.map(rowToStats);
+  }
+
+  /**
+   * Economic-productivity percentile lookup for the Node Tier
+   * composite. Replaces the previous TVC-based denominator —
+   * vote credits are operator-controlled (client mods, networking
+   * proximity) so the public tier no longer uses them; this query
+   * provides the unfakeable on-chain replacement.
+   *
+   * Returns the target validator's percentile rank against the
+   * indexed-validator cohort, where the per-validator score is the
+   * median across the window of:
+   *
+   *   incomePerSlot = (blockFeesTotalLamports + blockTipsTotalLamports)
+   *                   / slotsAssigned
+   *
+   * `blockFeesTotalLamports` already aggregates the leader's post-
+   * burn share of base + priority fees (see `EpochValidatorStats`
+   * docstring), so adding tips gives total leader income.
+   *
+   * Median rather than mean defends against a single lucky-MEV epoch
+   * dominating the score; `PERCENT_RANK()` gives 0 to the lowest peer
+   * and 1 to the highest.
+   *
+   * Cohort filters mirror `findIndexedIncomePerSlotBenchmarks`:
+   * non-zero `slotsAssigned`, slot data ingested, at least one of
+   * fees/tips ingested, opt-out respected. Per-validator inclusion
+   * also requires at least one epoch with measured income — the
+   * caller checks `measuredEpochs >= MIN_MEASURED_EPOCHS_FOR_ECONOMIC`
+   * (4 of 5 by default) before trusting the percentile.
+   *
+   * @param vote          Target validator's vote pubkey.
+   * @param fromEpoch     Inclusive lower bound of the epoch window.
+   * @param toEpoch       Inclusive upper bound (typically the most
+   *                      recent CLOSED epoch).
+   */
+  async findEconomicPercentile(
+    vote: VotePubkey,
+    fromEpoch: Epoch,
+    toEpoch: Epoch,
+  ): Promise<EconomicPercentileLookup> {
+    // Single query: window the relevant rows, compute per-validator
+    // median, `PERCENT_RANK()` across the cohort, then LEFT JOIN the
+    // target so we always emit exactly one row — cohort metadata
+    // plus optional target columns (NULL when the target is absent).
+    // `block_fees_total_lamports` and `block_tips_total_lamports` are
+    // NOT NULL DEFAULT 0 (migrations 0001 / 0009), so the bare
+    // addition below is safe — no COALESCE needed.
+    //
+    // We require BOTH `fees_updated_at` AND `tips_updated_at` to be
+    // present: a row with only one timestamp means partial ingest,
+    // which would undercount `(fees + tips)` by exactly the missing
+    // half and bias the percentile.
+    const sql = `
+      WITH per_validator_per_epoch AS (
+        SELECT
+          evs.vote_pubkey,
+          evs.epoch,
+          (
+            evs.block_fees_total_lamports
+            + evs.block_tips_total_lamports
+          )::numeric / evs.slots_assigned::numeric AS income_per_slot
+        FROM epoch_validator_stats evs
+        WHERE evs.epoch BETWEEN $1::bigint AND $2::bigint
+          AND evs.slots_assigned > 0
+          AND evs.slots_updated_at IS NOT NULL
+          AND evs.fees_updated_at IS NOT NULL
+          AND evs.tips_updated_at IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+              FROM validator_profiles vp
+             WHERE vp.vote_pubkey = evs.vote_pubkey
+               AND vp.opted_out = TRUE
+          )
+      ),
+      median_per_validator AS (
+        SELECT
+          vote_pubkey,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY income_per_slot) AS median_income_per_slot,
+          COUNT(*)::int AS measured_epochs
+        FROM per_validator_per_epoch
+        GROUP BY vote_pubkey
+      ),
+      ranked AS (
+        SELECT
+          vote_pubkey,
+          median_income_per_slot,
+          measured_epochs,
+          PERCENT_RANK() OVER (ORDER BY median_income_per_slot) AS pct,
+          COUNT(*) OVER ()::bigint AS cohort_size
+        FROM median_per_validator
+      ),
+      target_row AS (
+        SELECT pct, median_income_per_slot, measured_epochs
+        FROM ranked
+        WHERE vote_pubkey = $3
+      ),
+      cohort AS (
+        SELECT COUNT(*)::bigint AS cohort_size FROM median_per_validator
+      )
+      -- LEFT JOIN ON TRUE: emit cohort metadata once, attach the
+      -- optional target columns (NULL when the target vote is not in
+      -- the cohort). Always returns exactly one row.
+      SELECT
+        cohort.cohort_size::text                       AS cohort_size,
+        COALESCE(target_row.measured_epochs, 0)::int   AS measured_epochs,
+        target_row.pct::text                           AS pct,
+        target_row.median_income_per_slot::text        AS median_income_per_slot
+      FROM cohort
+      LEFT JOIN target_row ON TRUE
+    `;
+
+    const { rows } = await this.pool.query<EconomicPercentileRow>(sql, [fromEpoch, toEpoch, vote]);
+
+    // `cohort_size` arrives as a decimal string from the `::bigint`
+    // cast. Cohort size is bounded by the indexed validator set
+    // (~thousands), well within safe-int range.
+    const row = rows[0] as EconomicPercentileRow;
+    const cohortSize = Number(row.cohort_size);
+
+    // Target absent from the cohort: pct and median are both NULL.
+    if (row.pct === null && row.median_income_per_slot === null) {
+      return {
+        percentile: null,
+        cohortSize,
+        measuredEpochs: 0,
+        medianIncomePerSlotLamports: null,
+      };
+    }
+
+    const pct = row.pct === null ? Number.NaN : Number(row.pct);
+    return {
+      // `PERCENT_RANK` returns 0 for a cohort of size 1 (no other
+      // peers to rank against). We still pass that through — the
+      // caller's `MIN_COHORT_FOR_PERCENTILE` guard catches it.
+      percentile: Number.isFinite(pct) ? pct : null,
+      cohortSize,
+      measuredEpochs: row.measured_epochs,
+      medianIncomePerSlotLamports: row.median_income_per_slot,
+    };
   }
 
   async findIndexedIncomePerSlotBenchmarks(

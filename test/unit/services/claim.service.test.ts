@@ -194,6 +194,7 @@ class FakeValidatorsRepo implements Pick<ValidatorsRepository, 'findByVote' | 'f
       identityPubkey: identity,
       firstSeenEpoch: 950,
       lastSeenEpoch: 960,
+      genesisEpoch: null,
       updatedAt: new Date(),
       name: null,
       details: null,
@@ -201,6 +202,9 @@ class FakeValidatorsRepo implements Pick<ValidatorsRepository, 'findByVote' | 'f
       keybaseUsername: null,
       iconUrl: null,
       infoUpdatedAt: null,
+      clientKind: 'unknown',
+      clientVersion: null,
+      clientUpdatedAt: null,
     });
   }
 }
@@ -319,39 +323,60 @@ describe('canonicaliseSignedPayload', () => {
 });
 
 describe('buildOffchainMessage', () => {
-  // Empirically-verified Solana offchain-message envelope (Agave CLI 3.0.13):
+  // Solana offchain-message envelope (Agave `solana sign-offchain-message`):
   //   0x00 + 16  prefix  (0xFF + "solana offchain")
   //   0x10 +  1  version (= 0)
-  //   0x11 +  1  format  (1 = UTF-8 — we use this so `\n` is allowed)
+  //   0x11 +  1  format  (0 = RestrictedAscii, 1 = LimitedUtf8)
   //   0x12 +  2  msgLen  (u16 LE)
   //   0x14 +  N  message
   // Total header = 20 bytes.
   //
-  // The Anza spec page describes a richer "future-ready" form (with
-  // 32-byte appDomain + signer_count + signers fields, header total
-  // 85 bytes), but the current CLI does NOT serialise those fields.
-  // See service file docstring for the full discrepancy notes and
-  // the probe procedure in case the spec gets implemented later.
+  // The format byte is content-dependent: the CLI picks 0 when every
+  // byte is printable ASCII (0x20-0x7e) and 1 otherwise. The verifier
+  // MUST reproduce that choice — a hardcoded byte rejected every
+  // single-line-JSON nonce (github-link / operator-wallet) as
+  // `bad_signature`.
   const HEADER_LEN = 20;
 
-  it('produces the spec-compliant 20-byte header for a "hello" message', () => {
+  it('produces the spec-compliant 20-byte header', () => {
     const out = buildOffchainMessage('hello');
-
-    // 0xFF + b"solana offchain"
     expect(out[0]).toBe(0xff);
     expect(String.fromCharCode(...out.slice(1, 16))).toBe('solana offchain');
-    // version = 0
-    expect(out[16]).toBe(0);
-    // format = 1 (UTF-8). NOT 0 (ASCII) — `\n` in our payload would be
-    // out-of-range for ASCII format, AND the CLI auto-picks UTF-8 for
-    // any input with non-printable bytes, so we match its choice.
-    expect(out[17]).toBe(1);
-    // message_length = 5 (u16 LE)
-    expect(out[18]).toBe(5);
-    expect(out[19]).toBe(0);
-    // message bytes
+    expect(out[16]).toBe(0); // version
+    expect(out[18]).toBe(5); // message_length lo (u16 LE)
+    expect(out[19]).toBe(0); // message_length hi
     expect(String.fromCharCode(...out.slice(20, 25))).toBe('hello');
     expect(out.length).toBe(HEADER_LEN + 5);
+  });
+
+  it('uses format 0 (RestrictedAscii) for a pure-ASCII message', () => {
+    // 'hello' is all printable ASCII → the CLI signs it as format 0.
+    expect(buildOffchainMessage('hello')[17]).toBe(0);
+  });
+
+  it('uses format 0 for a single-line JSON nonce', () => {
+    // Regression guard for the bad_signature bug: canonicalised
+    // github-link / operator-wallet nonces are `JSON.stringify`
+    // output — single-line, pure printable ASCII — so the CLI signs
+    // them as format 0. A hardcoded format-1 byte rejected every one.
+    const nonce = JSON.stringify({ domain: 'https://whoearns.live', purpose: 'github-link' });
+    expect(buildOffchainMessage(nonce)[17]).toBe(0);
+  });
+
+  it('uses format 1 (LimitedUtf8) when the message contains newlines', () => {
+    // The v1 claim payload is newline-joined; `\n` (0x0a) is below
+    // the printable-ASCII floor, so the CLI picks format 1.
+    const out = buildOffchainMessage('a\nb\nc');
+    expect(out[17]).toBe(1);
+    expect(out[18]).toBe(5); // length lo — 5 bytes: a \n b \n c
+    expect(out[19]).toBe(0);
+    expect(out.length).toBe(HEADER_LEN + 5);
+  });
+
+  it('uses format 1 for a non-ASCII (multi-byte UTF-8) message', () => {
+    // A narrative override with CJK / emoji is valid UTF-8 but not
+    // printable ASCII → format 1.
+    expect(buildOffchainMessage('안녕')[17]).toBe(1);
   });
 
   it('handles the empty string without trailing garbage', () => {
@@ -361,25 +386,10 @@ describe('buildOffchainMessage', () => {
     expect(out.length).toBe(HEADER_LEN);
   });
 
-  it('encodes a UTF-8 message containing newlines without truncation', () => {
-    // Our canonical signed payload uses `\n` as a separator. Format 0
-    // (ASCII) would reject that range; we use format 1 (UTF-8) so the
-    // envelope passes through cleanly. The CLI does the same auto-
-    // selection — verified empirically (see service docstring).
-    const msg = 'a\nb\nc';
-    const out = buildOffchainMessage(msg);
-    expect(out[17]).toBe(1); // format = UTF-8
-    // Length is 5 bytes (a, \n, b, \n, c).
-    expect(out[18]).toBe(5);
-    expect(out[19]).toBe(0);
-    expect(out.length).toBe(HEADER_LEN + 5);
-  });
-
   it('encodes a multi-byte length correctly (u16 LE)', () => {
     // 256 bytes triggers the high byte of the length header — checks
     // we got LE byte order right (lo first, then hi).
-    const msg = 'x'.repeat(256);
-    const out = buildOffchainMessage(msg);
+    const out = buildOffchainMessage('x'.repeat(256));
     expect(out[18]).toBe(0); // low byte = 0
     expect(out[19]).toBe(1); // high byte = 1 (256 = 0x0100)
     expect(out.length).toBe(HEADER_LEN + 256);

@@ -30,6 +30,63 @@ describe('Scheduler', () => {
     await sched.stop();
   });
 
+  it('waits initialDelayMs before the first tick when set', async () => {
+    vi.useFakeTimers();
+    const tick = vi.fn(async () => {});
+    const job: Job = { name: 'delayed', intervalMs: 1_000, initialDelayMs: 5_000, tick };
+    const sched = new Scheduler({ logger: silent });
+    sched.register(job);
+    sched.start();
+    await flushMicrotasks();
+    // Nothing yet — still inside the initial delay.
+    expect(tick).toHaveBeenCalledTimes(0);
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(tick).toHaveBeenCalledTimes(0);
+
+    // First tick fires once the initial delay elapses.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(tick).toHaveBeenCalledTimes(1);
+
+    // Then the regular interval takes over.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(tick).toHaveBeenCalledTimes(2);
+    await sched.stop();
+  });
+
+  it('staggered jobs do not delay an immediate-first-tick sibling', async () => {
+    vi.useFakeTimers();
+    const immediateTick = vi.fn(async () => {});
+    const delayedTick = vi.fn(async () => {});
+    const sched = new Scheduler({ logger: silent });
+    sched.register({ name: 'immediate', intervalMs: 1_000, tick: immediateTick });
+    sched.register({
+      name: 'delayed',
+      intervalMs: 1_000,
+      initialDelayMs: 3_000,
+      tick: delayedTick,
+    });
+    sched.start();
+    await flushMicrotasks();
+    // The job that opted out of staggering still ticks at second 0.
+    expect(immediateTick).toHaveBeenCalledTimes(1);
+    expect(delayedTick).toHaveBeenCalledTimes(0);
+    await sched.stop();
+  });
+
+  it('stop during the initial delay exits cleanly without ticking', async () => {
+    vi.useFakeTimers();
+    const tick = vi.fn(async () => {});
+    const sched = new Scheduler({ logger: silent });
+    sched.register({ name: 'delayed', intervalMs: 1_000, initialDelayMs: 10_000, tick });
+    sched.start();
+    await flushMicrotasks();
+    await sched.stop();
+    // Even after time well past the initial delay, the tick never ran.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(tick).toHaveBeenCalledTimes(0);
+  });
+
   it('runs subsequent ticks on interval', async () => {
     vi.useFakeTimers();
     const tick = vi.fn(async () => {});

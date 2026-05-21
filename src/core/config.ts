@@ -179,7 +179,15 @@ export const ConfigSchema = z.object({
   SOLANA_RPC_BURST_CREDITS: NonNegativeInt.default(0),
 
   POSTGRES_URL: NonEmptyString,
-  POSTGRES_POOL_SIZE: PositiveInt.default(10),
+  /**
+   * Max connections in the `pg` pool. Bumped 10 → 20 (DB-M6): routes
+   * like the Operator Activity Index now fan several independent
+   * reads out concurrently via `Promise.all`, so a single in-flight
+   * request can hold more than one connection at once. 20 keeps
+   * headroom for a handful of concurrent fan-out requests without
+   * starving the pool; raise further for high-concurrency deploys.
+   */
+  POSTGRES_POOL_SIZE: PositiveInt.default(20),
   POSTGRES_STATEMENT_TIMEOUT_MS: PositiveInt.default(10_000),
 
   VALIDATORS_WATCH_LIST: WatchListSchema,
@@ -196,6 +204,29 @@ export const ConfigSchema = z.object({
   // = 16 calls/day, and validators rarely rename faster than that.
   // `watchMode=all` deployments see a proportionally larger burst.
   VALIDATOR_INFO_INTERVAL_MS: PositiveInt.default(6 * 60 * 60 * 1000),
+  // Periodic gossip ContactInfo refresh — drives Phase 2 client-kind
+  // and client-version indexing on the full cluster (~2000 entries).
+  // 30 minutes balances "fresh enough for Firedancer-Pioneer badges
+  // around a release" against ~500 KB of payload per tick.
+  CLUSTER_NODES_INTERVAL_MS: PositiveInt.default(30 * 60 * 1000),
+  // Phase 4 — wallet-activity indexer cadence. 6 hours is enough
+  // resolution for a daily-bucketed heatmap; cuts RPC pressure by
+  // ~4x vs hourly. Operators expecting near-real-time can lower
+  // this; the indexer is idempotent so partial runs are safe.
+  WALLET_ACTIVITY_INTERVAL_MS: PositiveInt.default(6 * 60 * 60 * 1000),
+  // Phase 5 — Anthropic Claude API key for SIMD curation. When
+  // unset, the SIMD curation pipeline is disabled (the route still
+  // serves already-curated rows, but new SIMDs stay pre-review
+  // until an operator manually populates them).
+  ANTHROPIC_API_KEY: z.string().optional(),
+  ANTHROPIC_MODEL: z.string().default('claude-sonnet-4-6'),
+  SIMD_CURATION_INTERVAL_MS: PositiveInt.default(12 * 60 * 60 * 1000),
+  // Tenure true-age refresh — pulls `first_epoch_with_stake` from the
+  // stakewiz API into `validators.genesis_epoch`. 24 h is generous:
+  // a genesis epoch is immutable once known, so the only reason to
+  // re-run is to pick up validators newly added to our watched set.
+  // One bulk HTTP call per tick regardless of watched-set size.
+  STAKEWIZ_TENURE_INTERVAL_MS: PositiveInt.default(24 * 60 * 60 * 1000),
 
   SLOT_FINALITY_BUFFER: NonNegativeInt.default(32),
 
