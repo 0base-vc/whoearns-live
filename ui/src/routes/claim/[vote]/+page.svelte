@@ -1039,19 +1039,19 @@
         identitySignatureB58: trimmedIdentitySig,
         memoTxSignature: walletMemoSignature,
       });
-      walletSuccess = `Wallet registered: ${shortenPubkey(result.wallet.walletPubkey, 4, 4)} (${result.wallet.label}). Expires ${new Date(result.wallet.expiresAt).toLocaleDateString()}.`;
+      walletSuccess = `Wallet registered: ${result.wallet.walletAddressShort} (${result.wallet.label}). Expires ${new Date(result.wallet.expiresAt).toLocaleDateString()}.`;
       // Fold into local state so the list re-renders.
       if (status.claimed) {
-        // ClaimStatus's wallet entry shape carries only a DISPLAY
-        // truncated address (`walletAddressShort`) — the full
-        // operator-wallet pubkey is never surfaced by `GET
-        // /v1/claims/:vote`. The write-response shape uses the full
-        // `walletPubkey`; truncate it to the same `FXfD…PsJ5` form
-        // the read endpoint emits. `?includeActivity` is not passed
+        // Both `ClaimStatus`'s wallet entry and the write response
+        // carry only the DISPLAY truncated address
+        // (`walletAddressShort`, `FXfD…PsJ5`) — the full
+        // operator-wallet pubkey is never surfaced by any `/v1/*`
+        // response. Use the server's `walletAddressShort` verbatim;
+        // no client-side truncation. `?includeActivity` is not passed
         // here (the claim page renders no heatmap), so `activity` is
         // null — matching the read response for that case.
         const newEntry = {
-          walletAddressShort: shortenPubkey(result.wallet.walletPubkey, 4, 4),
+          walletAddressShort: result.wallet.walletAddressShort,
           label: result.wallet.label,
           registeredAt: result.wallet.registeredAt,
           expiresAt: result.wallet.expiresAt,
@@ -1194,17 +1194,18 @@
     unregisterError = null;
     unregisterSuccess = null;
     try {
-      await unregisterOperatorWallet({
+      const result = await unregisterOperatorWallet({
         votePubkey: history.vote,
         identityPubkey: history.identity,
         walletPubkey: unregisterEnvelope.submittedPubkey,
         timestampMs: unregisterEnvelope.timestampMs,
         identitySignatureB58: trimmedSig,
       });
-      const removed = unregisterEnvelope.submittedPubkey;
-      // The list entries carry only the truncated address — match on
-      // the same `FXfD…PsJ5` truncation of the just-removed pubkey.
-      const removedShort = shortenPubkey(removed, 4, 4);
+      // The response carries only the truncated `walletAddressShort`
+      // (`FXfD…PsJ5`) — the full operator-wallet pubkey is never
+      // surfaced by any `/v1/*` response. The list entries are keyed
+      // on the same truncated form, so this matches them directly.
+      const removedShort = result.unregistered.walletAddressShort;
       unregisterSuccess = `Wallet ${removedShort} removed.`;
       // Fold the deletion into local state so the list re-renders
       // without re-fetching `/v1/claims/:vote`.

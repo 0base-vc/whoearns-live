@@ -167,11 +167,15 @@ export class OperatorWalletsRepository {
   }
 
   /**
-   * Existence check for the public `/v1/operator-wallets/:wallet/...`
-   * read endpoints. Returns true when the wallet is currently
-   * registered AND not expired. Used to gate the route against an
-   * existence oracle — the unregistered-wallet path now returns 404
-   * rather than an empty response.
+   * Existence check — true when the wallet is currently registered
+   * AND not expired (same `expires_at > NOW()` gate as the other
+   * ACTIVE reads).
+   *
+   * NOTE: the public per-wallet read endpoints this once backed were
+   * removed (a URL keyed on the full operator-wallet pubkey is itself
+   * information disclosure — wallet activity is now served inline on
+   * `GET /v1/claims/:vote?includeActivity=1`). This method has no
+   * remaining caller.
    */
   async existsActive(wallet: string): Promise<boolean> {
     const { rows } = await this.pool.query<{ exists: boolean }>(
@@ -186,13 +190,16 @@ export class OperatorWalletsRepository {
   }
 
   /**
-   * Registration metadata for a single ACTIVE (not-expired) wallet —
-   * backs `GET /v1/operator-wallets/:wallet`. Returns `null` when the
-   * wallet is unregistered OR its attestation has lapsed, so the
-   * public route can collapse both into one 404 and stay off the
-   * existence-oracle surface (same `expires_at > NOW()` gate as
-   * `existsActive`). A wallet pubkey is UNIQUE per registration in
-   * practice; `LIMIT 1` is belt-and-braces.
+   * Registration metadata for a single ACTIVE (not-expired) wallet.
+   * Returns `null` when the wallet is unregistered OR its attestation
+   * has lapsed (same `expires_at > NOW()` gate as `existsActive`). A
+   * wallet pubkey is UNIQUE per registration in practice; `LIMIT 1`
+   * is belt-and-braces.
+   *
+   * NOTE: the public `GET /v1/operator-wallets/:wallet` endpoint this
+   * once backed was removed (a URL keyed on the full operator-wallet
+   * pubkey is itself information disclosure). This method has no
+   * remaining caller.
    */
   async findActiveByWallet(wallet: string): Promise<OperatorWallet | null> {
     const { rows } = await this.pool.query<OperatorWalletRow>(

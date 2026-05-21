@@ -91,6 +91,12 @@ function buildDeps(
     walletVerify?: Awaited<ReturnType<OperatorWalletVerificationService['verify']>>;
     walletCount?: number;
     walletInsert?: OperatorWalletInsertResult;
+    /** DELETE `/wallets/:wallet` — the unregister-ceremony sig check. */
+    walletUnregisterVerify?: Awaited<
+      ReturnType<OperatorWalletVerificationService['verifyUnregister']>
+    >;
+    /** DELETE `/wallets/:wallet` — repo `delete` result (false = miss). */
+    walletDelete?: boolean;
     /**
      * SEC-L4 — when set, `validatorsRepo.findByIdentity` resolves to a
      * validator (i.e. the submitted `walletPubkey` collides with some
@@ -133,12 +139,16 @@ function buildDeps(
     operatorWalletsRepo: {
       countByVote: async () => overrides.walletCount ?? 0,
       insert: async () => overrides.walletInsert ?? { ok: true },
+      // DELETE `/wallets/:wallet` — `true` = a row was hard-deleted.
+      delete: async () => overrides.walletDelete ?? true,
     } as unknown as OperatorWalletsRepository,
     githubGistService: {
       verify: async () => overrides.gistVerify ?? { ok: true, link: makeLink() },
     } as unknown as GithubGistVerificationService,
     operatorWalletService: {
       verify: async () => overrides.walletVerify ?? { ok: true, wallet: makeWallet() },
+      // The unregister ceremony's identity-signature check.
+      verifyUnregister: async () => overrides.walletUnregisterVerify ?? { ok: true },
     } as unknown as OperatorWalletVerificationService,
     claimEventsRepo: {
       append: async (e: unknown) => {
@@ -314,8 +324,14 @@ describe('POST /v1/claims/:vote/wallets', () => {
       payload: walletBody(),
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json().wallet.walletPubkey).toBe(WALLET_1);
     expect(appended).toHaveLength(1);
+    // SEC — the response carries only the truncated `walletAddressShort`
+    // (`WALL…1111` for `WALLET_1`). The full operator-wallet pubkey
+    // must NOT appear on the `wallet` object, nor anywhere in the body.
+    const body = res.json();
+    expect(body.wallet).not.toHaveProperty('walletPubkey');
+    expect(body.wallet.walletAddressShort).toBe('WALL…1111');
+    expect(JSON.stringify(body)).not.toContain(WALLET_1);
     await app.close();
   });
 
@@ -533,6 +549,51 @@ describe('POST /v1/claims/:vote/wallets', () => {
     });
     expect(res.statusCode).toBe(502);
     expect(res.json().error.code).toBe('memo_tx_rpc_unavailable');
+    await app.close();
+  });
+});
+
+const unregisterBody = (over: Record<string, unknown> = {}) => ({
+  votePubkey: VOTE_1,
+  identityPubkey: IDENTITY_1,
+  walletPubkey: WALLET_1,
+  timestampMs: Date.now(),
+  identitySignatureB58: SIG_B58,
+  ...over,
+});
+
+describe('DELETE /v1/claims/:vote/wallets/:wallet', () => {
+  it('unregisters a wallet on the happy path and serves only the truncated address', async () => {
+    // SEC — the success response is `{ unregistered: { walletAddressShort } }`
+    // — only the truncated `WALL…1111` form. The full operator-wallet
+    // pubkey must NOT appear on the `unregistered` object, nor anywhere
+    // in the response body.
+    const { deps, appended } = buildDeps();
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/claims/${VOTE_1}/wallets/${WALLET_1}`,
+      payload: unregisterBody(),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(appended).toHaveLength(1);
+    const body = res.json();
+    expect(body.unregistered).not.toHaveProperty('walletPubkey');
+    expect(body.unregistered.walletAddressShort).toBe('WALL…1111');
+    expect(JSON.stringify(body)).not.toContain(WALLET_1);
+    await app.close();
+  });
+
+  it('returns 404 wallet_not_registered when no (vote, wallet) row matches', async () => {
+    const { deps } = buildDeps({ walletDelete: false });
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/claims/${VOTE_1}/wallets/${WALLET_1}`,
+      payload: unregisterBody(),
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe('wallet_not_registered');
     await app.close();
   });
 });

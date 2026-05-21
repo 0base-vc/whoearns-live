@@ -419,6 +419,10 @@ export function linkGithub(
  * + expiry timestamps). The 90-day TTL is set server-side; the
  * caller can persist these to a local cache or re-fetch
  * `/v1/claims/:vote` for the canonical list.
+ *
+ * SEC — the response carries only the DISPLAY-ONLY truncated address
+ * (`walletAddressShort`, `FXfD…PsJ5`); the full operator-wallet
+ * pubkey is never surfaced by any `/v1/*` response body.
  */
 export function registerOperatorWallet(
   body: {
@@ -432,7 +436,7 @@ export function registerOperatorWallet(
   },
   fetchFn: typeof fetch = fetch,
 ): Promise<{
-  wallet: { walletPubkey: string; label: string; registeredAt: string; expiresAt: string };
+  wallet: { walletAddressShort: string; label: string; registeredAt: string; expiresAt: string };
 }> {
   const safe = encodeURIComponent(body.votePubkey);
   return postJson(`/v1/claims/${safe}/wallets`, body, fetchFn);
@@ -454,6 +458,10 @@ export function registerOperatorWallet(
  *
  * Throws `ApiError` on any failure — `code` carries the stable
  * machine id, `message` the human-readable sentence.
+ *
+ * SEC — the response carries only the DISPLAY-ONLY truncated address
+ * (`walletAddressShort`, `FXfD…PsJ5`); the full operator-wallet
+ * pubkey is never surfaced by any `/v1/*` response body.
  */
 export function unregisterOperatorWallet(
   body: {
@@ -464,10 +472,10 @@ export function unregisterOperatorWallet(
     identitySignatureB58: string;
   },
   fetchFn: typeof fetch = fetch,
-): Promise<{ unregistered: { walletPubkey: string } }> {
+): Promise<{ unregistered: { walletAddressShort: string } }> {
   const safeVote = encodeURIComponent(body.votePubkey);
   const safeWallet = encodeURIComponent(body.walletPubkey);
-  return sendJson<{ unregistered: { walletPubkey: string } }>(
+  return sendJson<{ unregistered: { walletAddressShort: string } }>(
     'DELETE',
     `/v1/claims/${safeVote}/wallets/${safeWallet}`,
     body,

@@ -427,6 +427,91 @@ describe('GET /v1/claims/:vote/audit', () => {
     expect(body.events[0]).not.toHaveProperty('submittedIp');
     await app.close();
   });
+
+  it('redacts the full operator-wallet pubkey from a wallet_register detail', async () => {
+    // SEC — the `wallet_register` event's stored `detail` is
+    // `{ walletPubkey: <FULL>, label }`. The public + unauthenticated
+    // `/audit` endpoint must serve only the truncated form: the
+    // `walletPubkey` key is dropped, replaced by `walletAddressShort`,
+    // and the full pubkey string must appear NOWHERE in the response.
+    const fullWalletPubkey = 'FXfDcwH93dXf9PsJ5xH3qkq9wnq9PXMcd4bXz2k7PsJ5';
+    const event: ValidatorClaimEvent = {
+      id: 2,
+      votePubkey: VOTE_1,
+      eventType: 'wallet_register',
+      identityPubkey: IDENTITY_1,
+      priorIdentityPubkey: null,
+      detail: { walletPubkey: fullWalletPubkey, label: 'hot' },
+      submittedIp: '203.0.113.7',
+      createdAt: new Date('2026-01-02T00:00:00Z'),
+    };
+    const { deps } = buildDeps({ auditEvents: [event] });
+    const app = await makeApp(deps);
+    const res = await app.inject({ method: 'GET', url: `/v1/claims/${VOTE_1}/audit` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.events).toHaveLength(1);
+    const served = body.events[0].detail;
+    // `walletPubkey` is dropped; `walletAddressShort` is the truncated
+    // `FXfD…PsJ5` form; the operator-chosen `label` passes through.
+    expect(served).not.toHaveProperty('walletPubkey');
+    expect(served.walletAddressShort).toBe('FXfD…PsJ5');
+    expect(served.label).toBe('hot');
+    // The full pubkey must not leak via ANY surface of the response.
+    expect(JSON.stringify(body)).not.toContain(fullWalletPubkey);
+    await app.close();
+  });
+
+  it('redacts the full operator-wallet pubkey from a wallet_unregister detail', async () => {
+    // `wallet_unregister`'s stored `detail` is `{ walletPubkey: <FULL> }`
+    // — same redaction as `wallet_register`, just no `label`.
+    const fullWalletPubkey = 'WALL11111111111111111111111111111111111PsJ5';
+    const event: ValidatorClaimEvent = {
+      id: 3,
+      votePubkey: VOTE_1,
+      eventType: 'wallet_unregister',
+      identityPubkey: IDENTITY_1,
+      priorIdentityPubkey: null,
+      detail: { walletPubkey: fullWalletPubkey },
+      submittedIp: '203.0.113.7',
+      createdAt: new Date('2026-01-03T00:00:00Z'),
+    };
+    const { deps } = buildDeps({ auditEvents: [event] });
+    const app = await makeApp(deps);
+    const res = await app.inject({ method: 'GET', url: `/v1/claims/${VOTE_1}/audit` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    const served = body.events[0].detail;
+    expect(served).not.toHaveProperty('walletPubkey');
+    expect(served.walletAddressShort).toBe('WALL…PsJ5');
+    expect(JSON.stringify(body)).not.toContain(fullWalletPubkey);
+    await app.close();
+  });
+
+  it('passes a non-wallet event detail through unchanged', async () => {
+    // A `github_link` detail carries no `walletPubkey` — it must
+    // survive the redaction pass byte-for-byte (GitHub usernames are
+    // already-public, not operator-wallet pubkeys).
+    const event: ValidatorClaimEvent = {
+      id: 4,
+      votePubkey: VOTE_1,
+      eventType: 'github_link',
+      identityPubkey: IDENTITY_1,
+      priorIdentityPubkey: null,
+      detail: { githubUsername: 'operator-gh', priorGithubUsername: null },
+      submittedIp: '203.0.113.7',
+      createdAt: new Date('2026-01-04T00:00:00Z'),
+    };
+    const { deps } = buildDeps({ auditEvents: [event] });
+    const app = await makeApp(deps);
+    const res = await app.inject({ method: 'GET', url: `/v1/claims/${VOTE_1}/audit` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().events[0].detail).toEqual({
+      githubUsername: 'operator-gh',
+      priorGithubUsername: null,
+    });
+    await app.close();
+  });
 });
 
 describe('PUT /v1/claims/:vote', () => {

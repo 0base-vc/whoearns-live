@@ -86,19 +86,48 @@ export interface ClaimRoutesDeps {
  * body; the hub renders this truncated string verbatim (the same form
  * `ActivityHeatmap.svelte` already used internally). The full pubkey
  * stays server-side for the truncation input + the activity query.
+ *
+ * Exported so the claim-v2 route (the `/wallets` write surface) can
+ * reuse the identical truncation when redacting its responses.
  */
-function truncatePubkey(pubkey: string): string {
+export function truncatePubkey(pubkey: string): string {
   return `${pubkey.slice(0, 4)}…${pubkey.slice(-4)}`;
+}
+
+/**
+ * Redact an audit event's served `detail` so a full operator-wallet
+ * pubkey never leaves the API. The `wallet_register` event's `detail`
+ * is `{ walletPubkey: <FULL>, label }` and `wallet_unregister`'s is
+ * `{ walletPubkey: <FULL> }`; the public + unauthenticated `/audit`
+ * endpoint would otherwise serve those verbatim.
+ *
+ * When `detail` is a non-null object carrying a string `walletPubkey`,
+ * that key is DROPPED and replaced with
+ * `walletAddressShort: truncatePubkey(walletPubkey)`; every other
+ * detail field passes through unchanged. Any other detail shape
+ * (other event types, `null`, non-object) is returned as-is.
+ *
+ * This redacts only the SERVED response — the DB row keeps the full
+ * pubkey as a forensic record (see the `/audit` route's PRIVACY note).
+ */
+function redactEventDetail(detail: unknown): unknown {
+  if (detail === null || typeof detail !== 'object') return detail;
+  const { walletPubkey, ...rest } = detail as Record<string, unknown>;
+  if (typeof walletPubkey !== 'string') return detail;
+  return { ...rest, walletAddressShort: truncatePubkey(walletPubkey) };
 }
 
 /**
  * Per-wallet 365-day activity window surfaced inline on
  * `GET /v1/claims/:vote?includeActivity=1`. `days` is the requested
  * window; `entries` are the sparse daily rows (zero-activity days
- * omitted — clients zero-fill at draw time). Entry shape matches the
- * activity rows the (now-deleted) `/v1/operator-wallets/:wallet/activity`
- * endpoint returned. `txFeesLamports` is `null` in this release — the
- * indexer ships tx counts only; fee backfill lands in a later pass.
+ * omitted — clients zero-fill at draw time). `txFeesLamports` is
+ * `null` in this release — the indexer ships tx counts only; fee
+ * backfill lands in a later pass.
+ *
+ * Inline activity here is the ONLY public activity surface — there is
+ * no per-wallet activity endpoint keyed on the full operator-wallet
+ * pubkey (such a URL would itself disclose the full pubkey).
  */
 const ACTIVITY_WINDOW_DAYS = 365;
 
@@ -345,6 +374,13 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
     // canonical surface in PR3 — leaderboard click-through traffic
     // would otherwise saturate the DB pool with redundant claim
     // lookups.
+    //
+    // CACHE KEYING: the response body varies by the `?includeActivity`
+    // query param (each wallet entry's `activity` is `null` without
+    // it, populated with it). Correctness therefore relies on the
+    // CDN/cache keying on the full query string — the standard
+    // default, so no `Vary` header is needed, but the route MUST NOT
+    // be restructured in a way that drops the query from the cache key.
     void reply.header('cache-control', cacheControl('SCORING'));
     const [claim, profile, githubLink, activeWallets] = await Promise.all([
       opts.claimService.getClaim(params.vote),
@@ -458,10 +494,14 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
    *
    * No auth — like `GET /v1/claims/:vote`, this is a read of
    * already-public facts. PRIVACY: the forensic `submitted_ip`
-   * column is NOT in the response — IP stays in the DB. Everything
-   * surfaced here (pubkeys, GitHub usernames, wallet pubkeys,
-   * operator-chosen labels) is already public on-chain or
-   * operator-published.
+   * column is NOT in the response — IP stays in the DB. The
+   * validator vote/identity pubkeys, GitHub usernames, and
+   * operator-chosen labels surfaced here are already public on-chain
+   * or operator-published. Operator-wallet pubkeys are the one
+   * exception: `wallet_register` / `wallet_unregister` details carry
+   * the full wallet pubkey in the DB row, so the served `detail` is
+   * redacted to the truncated `walletAddressShort` form (see
+   * `redactEventDetail`) — the full wallet pubkey never leaves the API.
    *
    * Cache: SCORING tier (5 min client / 30 min CDN). Audit history
    * only changes when the operator makes a claim-surface mutation —
@@ -482,7 +522,13 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
         eventType: e.eventType,
         identityPubkey: e.identityPubkey,
         priorIdentityPubkey: e.priorIdentityPubkey,
-        detail: e.detail,
+        // SEC — `wallet_register` / `wallet_unregister` details carry
+        // the FULL operator-wallet pubkey in `detail.walletPubkey`.
+        // This endpoint is public + unauthenticated, so the served
+        // detail is redacted: `walletPubkey` → truncated
+        // `walletAddressShort`. The stored DB row keeps the full
+        // pubkey (forensic record); only the response is redacted.
+        detail: redactEventDetail(e.detail),
         createdAt: e.createdAt.toISOString(),
       })),
     };

@@ -304,8 +304,10 @@ export async function startWorker(): Promise<void> {
 
   // Phase 4 — wallet-activity indexer. Runs alongside the validator
   // jobs because it reads `operator_wallets` (a worker-owned writeable
-  // table) and writes `wallet_daily_activity`. Read by the API
-  // process via the `/v1/operator-wallets/:wallet/activity` endpoint.
+  // table) and writes `wallet_daily_activity`. The API process serves
+  // this data inline on `GET /v1/claims/:vote?includeActivity=1` —
+  // there is no per-wallet activity endpoint (such a URL would
+  // disclose the full operator-wallet pubkey).
   const operatorWalletsRepo = new OperatorWalletsRepository(pool);
   const walletActivityRepo = new WalletActivityRepository(pool);
   const walletActivityIndexer = new WalletActivityIndexerService({

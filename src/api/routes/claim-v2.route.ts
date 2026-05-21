@@ -31,6 +31,7 @@ import type { ValidatorsRepository } from '../../storage/repositories/validators
 import { sendError } from '../error-handler.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
 import { unwrap } from '../zod-helpers.js';
+import { truncatePubkey } from './claim.route.js';
 
 /**
  * Best-effort audit-log write (SEC-M4). Mirrors `recordClaimEvent` in
@@ -644,9 +645,14 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
       },
       submittedIp: request.ip,
     });
+    // SEC — the response carries only the DISPLAY-ONLY truncated
+    // address (`walletAddressShort`, `FXfD…PsJ5`). The full
+    // operator-wallet pubkey must never reach a `/v1/*` response body;
+    // the caller already knows the pubkey it submitted and re-reads
+    // `GET /v1/claims/:vote` for the canonical (truncated) list.
     return {
       wallet: {
-        walletPubkey: result.wallet.walletPubkey,
+        walletAddressShort: truncatePubkey(result.wallet.walletPubkey),
         label: result.wallet.label,
         registeredAt: result.wallet.registeredAt.toISOString(),
         expiresAt: result.wallet.expiresAt.toISOString(),
@@ -766,7 +772,10 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
       detail: { walletPubkey: body.walletPubkey },
       submittedIp: request.ip,
     });
-    return { unregistered: { walletPubkey: body.walletPubkey } };
+    // SEC — like the register response, this carries only the
+    // truncated `walletAddressShort`; the full operator-wallet pubkey
+    // never reaches a `/v1/*` response body.
+    return { unregistered: { walletAddressShort: truncatePubkey(body.walletPubkey) } };
   });
 };
 

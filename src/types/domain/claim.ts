@@ -126,9 +126,13 @@ export type ValidatorClaimEventType =
  * See migration 0034 for the data-model rationale.
  *
  * `submittedIp` is a forensic field captured from `request.ip`. It is
- * NOT surfaced by the public `GET /v1/claims/:vote/audit` endpoint —
- * everything else here is already-public (on-chain pubkeys,
- * operator-chosen labels, public GitHub usernames).
+ * NOT surfaced by the public `GET /v1/claims/:vote/audit` endpoint.
+ * The vote/identity pubkeys, operator-chosen labels, and GitHub
+ * usernames here are already-public. The one redacted field is the
+ * `wallet_register` / `wallet_unregister` `detail.walletPubkey`: the
+ * full operator-wallet pubkey is stored here as a forensic record but
+ * the `/audit` route serves it only in truncated `walletAddressShort`
+ * form (see `redactEventDetail` in `claim.route.ts`).
  */
 export interface ValidatorClaimEvent {
   id: number;
@@ -144,9 +148,12 @@ export interface ValidatorClaimEvent {
   priorIdentityPubkey: IdentityPubkey | null;
   /**
    * Event-specific extras. Shape varies by `eventType`:
-   *   github_link     → { githubUsername, priorGithubUsername }
-   *   wallet_register → { walletPubkey, label }
-   * All values are already-public, so this IS surfaced publicly.
+   *   github_link       → { githubUsername, priorGithubUsername }
+   *   wallet_register   → { walletPubkey, label }
+   *   wallet_unregister → { walletPubkey }
+   * This stored shape carries the FULL `walletPubkey`. The public
+   * `/audit` route redacts it to `walletAddressShort` before serving
+   * (see `redactEventDetail`); every other field is already-public.
    */
   detail: Record<string, unknown> | null;
   /** `request.ip` at write time. Forensic — NOT publicly surfaced. */
