@@ -2,11 +2,11 @@
   OaiPanel — Operator Activity Index display.
 
   The OAI is a Phase 6+7 composite of two halves:
-    - Governance score: 0-1, derived from peer-reaction-weighted
+    - Governance score: 0-100, derived from peer-reaction-weighted
       GitHub SIMD discussion comments. NULL today in every real
       deployment because the SIMD-discussions data feed isn't
       live yet.
-    - Wallet score: 0-1, derived from registered-wallet daily
+    - Wallet score: 0-100, derived from registered-wallet daily
       activity over the last 90 days.
 
   Honesty in the partial release. Because the governance half is
@@ -53,13 +53,18 @@
   const walletFeesActive = $derived(oai?.ingestStatus?.walletFeesIngestActive ?? false);
 
   /**
-   * Format a 0-1 score as a 0-100 integer string. `null` renders as
-   * an em-dash so we never display a fake number — same policy as
-   * `TierRing`'s composite label.
+   * Format an OAI score for display. The `/scoring` OAI scores —
+   * `walletScore`, `governance.score`, `composite` — are ALREADY
+   * 0-100 integers (`OaiResult` in `src/types/domain/oai.ts`:
+   * `walletScore` is `Math.round(100 * saturate(...))`). An earlier
+   * revision multiplied by 100 again here, assuming a 0-1 input —
+   * that rendered a real walletScore of 17 as "1700 / 100". This
+   * only guards the null case (em-dash, never a fake number — same
+   * policy as `TierRing`'s composite label) and rounds defensively.
    */
   function formatScore(score: number | null | undefined): string {
     if (score === null || score === undefined) return '—';
-    return `${(score * 100).toFixed(0)}`;
+    return `${Math.round(score)}`;
   }
 </script>
 
