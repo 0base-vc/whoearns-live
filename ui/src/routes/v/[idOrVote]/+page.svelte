@@ -536,6 +536,14 @@
   // upgrades to the truth as soon as the CSR fetch resolves.
   const isClaimed = $derived(claimStatus !== null ? claimStatus.claimed : scoring.oai !== null);
 
+  // Verified GitHub account — surfaced as a chip in the identity
+  // hero. `/v1/claims/:vote` returns a non-null `githubLink` ONLY for
+  // a current (non-expired) link, so presence alone means
+  // "cryptographically verified via the Ed25519-signed Gist + still
+  // live". CSR-fetched as part of `claimStatus`, so the chip appears
+  // once Wave 1 resolves — same timing as the audit / wallet panels.
+  const githubLink = $derived(claimStatus?.githubLink ?? null);
+
   // External website — operator-supplied, treat untrusted. HTTPS
   // only (was previously http: OR https:, but mixed content on a
   // delegator-trust surface is the wrong default; a delegator
@@ -646,6 +654,41 @@
             class="font-mono text-xs text-[color:var(--color-text-subtle)]"
           />
         </p>
+
+        <!--
+          Verified GitHub-account chip. Renders once the CSR claim
+          fetch resolves — `/v1/claims/:vote` returns `githubLink`
+          only for a current, non-expired link, so its mere presence
+          means "verified + live". Links out to the operator's GitHub
+          profile. The username is backend-validated (alphanumerics +
+          single hyphens, ≤39 chars), so the interpolated profile URL
+          needs no extra escaping.
+        -->
+        {#if githubLink}
+          <p class="mt-2">
+            <a
+              href="https://github.com/{githubLink.githubUsername}"
+              target="_blank"
+              rel="noopener noreferrer nofollow"
+              class="inline-flex items-center gap-1.5 rounded-full border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] py-1 pr-2.5 pl-2 text-xs font-medium text-[color:var(--color-text-default)] transition-colors hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+              aria-label="Verified GitHub account {githubLink.githubUsername} — opens github.com in a new tab"
+            >
+              <svg
+                viewBox="0 0 16 16"
+                width="13"
+                height="13"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <path
+                  d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"
+                />
+              </svg>
+              <span>{githubLink.githubUsername}</span>
+              <span class="text-[color:var(--color-status-ok-fg)]" aria-hidden="true">✓</span>
+            </a>
+          </p>
+        {/if}
 
         <!--
           Trust summary one-liner — the hub's scannable hero line.
