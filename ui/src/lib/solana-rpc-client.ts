@@ -10,15 +10,20 @@
  * This is intentionally NOT `@solana/web3.js` — three JSON-RPC POSTs
  * do not justify a multi-hundred-KB dependency in the SPA bundle.
  *
- * The endpoint is `PUBLIC_SOLANA_RPC_URL`; when unset it falls back
- * to the public mainnet endpoint. Operators with a dedicated RPC
- * should override it (the public endpoint is rate-limited).
+ * The endpoint is `PUBLIC_SOLANA_RPC_URL`; when unset it falls back to
+ * a keyless, CORS-enabled public RPC (PublicNode). Operators expecting
+ * heavier use can override it with a dedicated RPC. The official
+ * api.mainnet-beta.solana.com endpoint returns HTTP 403 to browser
+ * requests, so it is NOT a usable fallback here.
  */
 
 import { PUBLIC_SOLANA_RPC_URL } from '$env/static/public';
 import { pollUntilConfirmed, type MemoTxCommitment } from './operator-wallet-memo-tx.js';
 
-const FALLBACK_RPC_URL = 'https://api.mainnet-beta.solana.com';
+// Keyless, CORS-enabled public RPC — works from the browser, unlike
+// api.mainnet-beta.solana.com (which 403s browser requests). Override
+// via PUBLIC_SOLANA_RPC_URL for higher rate limits.
+const FALLBACK_RPC_URL = 'https://solana-rpc.publicnode.com';
 
 // Per-request fetch timeout. A hung RPC must not wedge the register
 // flow forever — `AbortSignal.timeout` aborts the `fetch`, and the

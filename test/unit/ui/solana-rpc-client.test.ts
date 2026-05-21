@@ -36,9 +36,9 @@ function rpcFetch(responders: Record<string, unknown | (() => unknown)>): {
 const SIGNATURE = '5'.repeat(88);
 
 describe('getSolanaRpcUrl', () => {
-  it('falls back to the public mainnet endpoint when PUBLIC_SOLANA_RPC_URL is unset', () => {
+  it('falls back to the keyless public RPC when PUBLIC_SOLANA_RPC_URL is unset', () => {
     // The test stub for `$env/static/public` exports an empty string.
-    expect(getSolanaRpcUrl()).toBe('https://api.mainnet-beta.solana.com');
+    expect(getSolanaRpcUrl()).toBe('https://solana-rpc.publicnode.com');
   });
 });
 
