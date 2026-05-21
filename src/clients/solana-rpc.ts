@@ -600,17 +600,25 @@ export class SolanaRpcClient {
   }
 
   /**
-   * Fetch a single transaction's signer-set + accountKeys for the
-   * operator-wallet anchor-tx verification.
+   * Fetch a single transaction's signer-set, accountKeys, and the
+   * compiled instruction list for the operator-wallet memo-tx
+   * verification.
    *
-   * The return projection is intentionally MINIMAL: the only thing
-   * the wallet verification cares about is "did walletPubkey sign
-   * this tx?" which reduces to "is walletPubkey one of the first
-   * `numRequiredSignatures` entries of `accountKeys`?". We don't
-   * need any of the instruction data, logs, post-balances, or other
-   * metadata. Returning the narrow shape keeps the surface small
-   * and stops downstream code from accidentally depending on the
-   * 100+ fields the full RPC response carries.
+   * The return projection is intentionally MINIMAL: the wallet
+   * verification asks two questions — "did walletPubkey sign this
+   * tx?" (is it one of the first `numRequiredSignatures` entries of
+   * `accountKeys`?) and "does the single SPL Memo instruction carry
+   * the canonical nonce?". The latter needs each instruction's
+   * resolved program id and its raw data, so we project the
+   * `instructions` array as `{ programId, dataBase58 }`. We still
+   * don't surface logs, post-balances, or the 100+ other fields the
+   * full RPC response carries.
+   *
+   * With `encoding: 'json'` the RPC returns instructions as
+   * `{ programIdIndex, accounts, data }` where `data` is base58 of
+   * the raw instruction bytes; we resolve `programIdIndex` against
+   * `accountKeys` so callers get a usable program id without
+   * re-implementing the index lookup.
    *
    * Returns `null` when the signature isn't found (provider missed
    * the slot, archive node not yet caught up, signature is invalid).
@@ -618,12 +626,18 @@ export class SolanaRpcClient {
    * `maxSupportedTransactionVersion: 0`; LUT-loaded addresses are
    * NOT included in `accountKeys` (the lookup-table indirection
    * lives in a different field) — which is fine for the signer
-   * check because LUT addresses can never be signers.
+   * check because LUT addresses can never be signers, and for the
+   * memo check because the SPL Memo program id is always a static
+   * (non-LUT) account key.
    */
   async getTransaction(
     signature: string,
     opts?: { commitment?: Commitment },
-  ): Promise<{ accountKeys: string[]; numRequiredSignatures: number } | null> {
+  ): Promise<{
+    accountKeys: string[];
+    numRequiredSignatures: number;
+    instructions: Array<{ programId: string; dataBase58: string }>;
+  } | null> {
     const config: Record<string, unknown> = {
       encoding: 'json',
       maxSupportedTransactionVersion: 0,
@@ -634,6 +648,7 @@ export class SolanaRpcClient {
         message?: {
           accountKeys?: unknown;
           header?: { numRequiredSignatures?: unknown };
+          instructions?: unknown;
         };
       };
     } | null>('getTransaction', [signature, config]);
@@ -662,7 +677,28 @@ export class SolanaRpcClient {
     if (typeof numSigners !== 'number' || numSigners < 1 || numSigners > accountKeys.length) {
       return null;
     }
-    return { accountKeys, numRequiredSignatures: numSigners };
+    // Resolve compiled instructions to `{ programId, dataBase58 }`.
+    // A malformed instruction list (non-array, bad index, non-string
+    // data) fails the whole parse — the memo verification must not
+    // run against a partially-understood tx.
+    const instructionsRaw = msg?.instructions;
+    const instructions: Array<{ programId: string; dataBase58: string }> = [];
+    if (instructionsRaw !== undefined) {
+      if (!Array.isArray(instructionsRaw)) return null;
+      for (const ix of instructionsRaw) {
+        if (ix === null || typeof ix !== 'object') return null;
+        const idx = (ix as { programIdIndex?: unknown }).programIdIndex;
+        const data = (ix as { data?: unknown }).data;
+        if (typeof idx !== 'number' || idx < 0 || idx >= accountKeys.length) return null;
+        // `data` can be an empty string for a zero-byte instruction;
+        // anything non-string is malformed.
+        if (typeof data !== 'string') return null;
+        const programId = accountKeys[idx];
+        if (programId === undefined) return null;
+        instructions.push({ programId, dataBase58: data });
+      }
+    }
+    return { accountKeys, numRequiredSignatures: numSigners, instructions };
   }
 
   /**

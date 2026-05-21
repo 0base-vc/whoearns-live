@@ -98,6 +98,9 @@ function humanMessageForGistFailure(reason: GistFailureReason): string {
  * REST-M2 — same as `humanMessageForGistFailure` but for the
  * `OperatorWalletVerificationService` failure reasons. `code` keeps
  * the stable machine id; `message` carries this readable sentence.
+ * Exhaustive over the memo-tx failure union — a new failure reason
+ * fails the build rather than silently shipping a machine id as
+ * prose.
  */
 function humanMessageForWalletFailure(reason: WalletFailureReason): string {
   switch (reason) {
@@ -105,16 +108,20 @@ function humanMessageForWalletFailure(reason: WalletFailureReason): string {
       return 'The signed nonce has expired. Generate a fresh one and re-sign.';
     case 'bad_identity_signature':
       return 'The validator identity signature did not verify against the nonce.';
-    case 'bad_wallet_signature':
-      return 'The wallet signature did not verify against the nonce.';
-    case 'invalid_anchor_signature':
-      return 'The anchor transaction signature is not a valid Solana transaction signature.';
-    case 'anchor_tx_not_found':
-      return 'The anchor transaction was not found on chain. Verify the signature is correct and the transaction has landed and been finalised.';
-    case 'anchor_tx_wallet_not_signer':
-      return 'The anchor transaction exists, but the wallet pubkey did not sign it. The anchor must be a transaction the wallet itself signed.';
-    case 'anchor_tx_rpc_unavailable':
-      return 'The Solana RPC was unavailable while verifying the anchor transaction. This is usually transient — retry in a few seconds.';
+    case 'invalid_memo_signature':
+      return 'The memo transaction signature is not a valid Solana transaction signature.';
+    case 'memo_tx_not_found':
+      return 'The memo transaction was not found on chain. Wait for it to confirm, then retry — or re-sign a fresh memo transaction.';
+    case 'memo_tx_wallet_not_signer':
+      return 'The memo transaction exists, but the connected wallet did not sign it. Reconnect the correct wallet and re-sign.';
+    case 'memo_tx_no_memo_instruction':
+      return 'The transaction contains no SPL Memo instruction. Re-sign the registration so the memo transaction is rebuilt.';
+    case 'memo_tx_not_memo_only':
+      return 'The transaction is not a memo-only transaction; it must contain only the single SPL Memo instruction.';
+    case 'memo_mismatch':
+      return 'The memo transaction does not carry this registration nonce. Re-sign so a fresh memo transaction is built for the current nonce.';
+    case 'memo_tx_rpc_unavailable':
+      return 'The Solana RPC was unavailable while verifying the memo transaction. This is usually transient — retry in a few seconds.';
     case 'malformed_pubkey':
       return 'One of the supplied pubkeys is not a valid base58 Solana pubkey.';
   }
@@ -161,13 +168,14 @@ function rejectVoteMismatch(
  *                                    signed Gist proof (idempotent
  *                                    re-link → replaces, hence PUT)
  *   POST /v1/claims/:vote/wallets  — append an operator wallet via a
- *                                    dual-signature + anchor-tx proof
+ *                                    validator identity CLI signature
+ *                                    + a browser-wallet memo-tx proof
  *                                    (a ≤3-entry collection, hence
  *                                    POST + plural)
  *
  * Split out of `claim.route.ts` (the v1 claim/profile surface): the
  * two plugins share only the `/v1/claims/*` URL prefix, not behaviour
- * — v2 verifies external attestations (Gists, on-chain anchor txs)
+ * — v2 verifies external attestations (Gists, on-chain memo txs)
  * rather than the bare offchain-message signatures v1 deals in. The
  * `claim-v2` file name is a code-organization split, not a URL
  * version — both files serve under `/v1/claims/*`.
@@ -437,9 +445,9 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
    *   1. Operator must already have a CLAIM.
    *   2. timestampMs within freshness.
    *   3. Wallet count under the cap (3 per validator).
-   *   4. BOTH signatures verify against the canonical nonce.
-   *   5. `anchorTxSignature` is a well-formed Solana tx signature
-   *      (full on-chain verification deferred — see service docstring).
+   *   4. Validator identity signature verifies against the canonical nonce.
+   *   5. `memoTxSignature` is a well-formed Solana tx signature
+   *      (full memo transaction verification lives in the service).
    */
   /**
    * Wallet `label` is operator-controlled and renders into the public
@@ -492,21 +500,21 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     label: LabelSchema,
     timestampMs: z.number().int().positive(),
     identitySignatureB58: z.string().min(64).max(128),
-    walletSignatureB58: z.string().min(64).max(128),
     // SEC-L1 — base58 of a 64-byte Solana tx signature is 86-88 chars.
     // The service (`operator-wallet-verification.service.ts`) already
     // base58-decodes and asserts the 64-byte length inside [86,88];
     // the schema bound is tightened to match so a future
     // refactor-by-schema can't silently re-widen this surface.
-    anchorTxSignature: z.string().min(86).max(88),
+    memoTxSignature: z.string().min(86).max(88),
   });
 
   app.post('/v1/claims/:vote/wallets', async (request, reply) => {
     const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
     const body = unwrap(WalletVerifyBodySchema.safeParse(request.body), 'body');
-    // REST-M7 — path/body consistency guard. The dual-signature proof
-    // is still authoritative; this just rejects a path pointing at a
-    // different validator than the body.
+    // REST-M7 — path/body consistency guard. The signed proof
+    // (identity CLI signature + memo tx) is still authoritative; this
+    // just rejects a path pointing at a different validator than the
+    // body.
     if (rejectVoteMismatch(reply, request.id, params.vote, body.votePubkey)) return reply;
     if (!freshnessOk(body.timestampMs)) {
       return sendError(reply, {
@@ -585,16 +593,15 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
     const result = await opts.operatorWalletService.verify({
       issuedNonce,
       identitySignatureB58: body.identitySignatureB58,
-      walletSignatureB58: body.walletSignatureB58,
-      anchorTxSignature: body.anchorTxSignature,
+      memoTxSignature: body.memoTxSignature,
     });
     if (!result.ok) {
       // `code` stays the stable machine id; `message` is human prose
       // (REST-M2) — previously both were the bare `result.reason`.
       // Status code is 502 for the transient RPC-availability case
       // (operator should retry) and 403 for the proof-failed family
-      // (operator must regenerate or re-anchor).
-      const statusCode = result.reason === 'anchor_tx_rpc_unavailable' ? 502 : 403;
+      // (operator must regenerate, re-sign, or wait for confirmation).
+      const statusCode = result.reason === 'memo_tx_rpc_unavailable' ? 502 : 403;
       return sendError(reply, {
         code: result.reason,
         statusCode,

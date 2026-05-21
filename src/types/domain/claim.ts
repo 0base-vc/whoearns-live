@@ -27,18 +27,21 @@ export interface ValidatorGithubLink {
  * for marketing surfaces; operator wallets are normal Solana keypairs
  * the operator uses for DeFi/NFT/governance.
  *
- * Verification: identity key AND wallet key both sign a single
- * canonical message containing BOTH pubkeys. The wallet also publishes
- * an on-chain memo transaction so we know it's operationally alive
- * at registration time (rules out dormant keys swapped in from a
- * marketplace).
+ * Verification: the validator identity key signs a single canonical
+ * nonce via the CLI. The operator's browser wallet then signs AND
+ * sends a memo-only Solana transaction whose single SPL Memo
+ * instruction carries that exact canonical nonce — one transaction
+ * that simultaneously proves wallet custody (the wallet pubkey is in
+ * the tx signer set) and binds the registration to the nonce (the
+ * memo content equals the canonical nonce). `memoTxSignature` is that
+ * transaction's signature.
  */
 export interface OperatorWallet {
   votePubkey: VotePubkey;
   walletPubkey: string;
   label: string;
   signedNonce: string;
-  anchorTxSignature: string;
+  memoTxSignature: string;
   registeredAt: Date;
   expiresAt: Date;
 }

@@ -59,24 +59,30 @@ export type VerifyOperatorWalletUnregisterResult =
   | VerifyOperatorWalletUnregisterFailure;
 
 /**
- * Nonce payload signed by BOTH the validator identity key and the
- * operator wallet key. Inclusion of both pubkeys inside the signed
- * message prevents a third party from re-binding a half-signed
- * message to a different counterparty.
+ * Registration-challenge nonce. Two artefacts bind to it:
+ *   - the validator identity key signs the canonical form via the
+ *     Solana CLI (`solana sign-offchain-message`); and
+ *   - the operator's browser wallet sends a memo-only transaction
+ *     whose single SPL Memo instruction carries the canonical form
+ *     verbatim.
+ * Inclusion of both the identity and wallet pubkeys inside the
+ * canonical form prevents a third party from re-binding either
+ * artefact to a different counterparty.
  *
- * The canonical form is wrapped in Solana's `buildOffchainMessage`
- * envelope (the same one `claim.service.ts` uses) before each
- * Ed25519 verification — so the operator's `solana
- * sign-offchain-message` invocation produces signatures this
- * service accepts, and the P3 ceremonies stay byte-consistent with
- * the v1 claim ceremony.
+ * For the identity signature the canonical form is wrapped in
+ * Solana's `buildOffchainMessage` envelope (the same one
+ * `claim.service.ts` uses) before Ed25519 verification — so the
+ * operator's `solana sign-offchain-message` invocation produces a
+ * signature this service accepts, and the P3 ceremonies stay
+ * byte-consistent with the v1 claim ceremony. For the memo
+ * transaction the canonical form is matched as a raw UTF-8 string.
  */
 export interface OperatorWalletNonce {
   /**
    * Domain-separation tag — always `OPERATOR_WALLET_NONCE_PURPOSE`.
-   * Lives inside the signed bytes so both signatures are bound to
-   * the wallet-registration purpose and can't be replayed into
-   * another ceremony.
+   * Lives inside the canonical form so both the identity signature
+   * and the memo content are bound to the wallet-registration
+   * purpose and can't be replayed into another ceremony.
    */
   purpose: typeof OPERATOR_WALLET_NONCE_PURPOSE;
   votePubkey: VotePubkey;
@@ -130,14 +136,66 @@ export function canonicaliseOperatorNonce(n: OperatorWalletNonce): string {
   });
 }
 
+/**
+ * Canonical bytes the validator identity CLI signature covers for an
+ * operator-wallet registration. The backend must verify the identity
+ * key against this Solana offchain-message envelope, not raw JSON.
+ */
+export function buildOperatorWalletIdentityVerificationMessage(n: OperatorWalletNonce): Uint8Array {
+  return buildOffchainMessage(canonicaliseOperatorNonce(n));
+}
+
+export type VerifyOperatorWalletIdentitySignatureResult =
+  | { ok: true }
+  | { ok: false; reason: 'bad_identity_signature' | 'malformed_pubkey' };
+
+/**
+ * Verify the validator identity CLI signature for an operator-wallet
+ * registration nonce. The CLI signs the Solana offchain-message
+ * envelope around the canonical nonce, never the raw JSON string.
+ */
+export async function verifyOperatorWalletIdentitySignature(args: {
+  issuedNonce: OperatorWalletNonce;
+  identitySignatureB58: string;
+}): Promise<VerifyOperatorWalletIdentitySignatureResult> {
+  let identitySig: Uint8Array;
+  let identityBytes: Uint8Array;
+  try {
+    identitySig = bs58.decode(args.identitySignatureB58);
+    identityBytes = bs58.decode(args.issuedNonce.identityPubkey);
+  } catch {
+    return { ok: false, reason: 'malformed_pubkey' };
+  }
+  if (identitySig.length !== 64 || identityBytes.length !== 32) {
+    return { ok: false, reason: 'malformed_pubkey' };
+  }
+
+  const signedBytes = buildOperatorWalletIdentityVerificationMessage(args.issuedNonce);
+  const identityOk = await ed25519VerifyAsync(identitySig, signedBytes, identityBytes);
+  if (!identityOk) {
+    return { ok: false, reason: 'bad_identity_signature' };
+  }
+  return { ok: true };
+}
+
+/**
+ * SPL Memo program id. The memo-tx verification identifies the single
+ * memo instruction by this program id, then asserts its UTF-8 data
+ * equals the canonical nonce. Same constant the UI uses to build the
+ * memo instruction — they MUST agree.
+ */
+export const SPL_MEMO_PROGRAM_ID = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr';
+
 export type VerifyOperatorWalletFailure =
   | { ok: false; reason: 'expired' }
   | { ok: false; reason: 'bad_identity_signature' }
-  | { ok: false; reason: 'bad_wallet_signature' }
-  | { ok: false; reason: 'invalid_anchor_signature' }
-  | { ok: false; reason: 'anchor_tx_not_found' }
-  | { ok: false; reason: 'anchor_tx_wallet_not_signer' }
-  | { ok: false; reason: 'anchor_tx_rpc_unavailable' }
+  | { ok: false; reason: 'invalid_memo_signature' }
+  | { ok: false; reason: 'memo_tx_not_found' }
+  | { ok: false; reason: 'memo_tx_wallet_not_signer' }
+  | { ok: false; reason: 'memo_tx_no_memo_instruction' }
+  | { ok: false; reason: 'memo_tx_not_memo_only' }
+  | { ok: false; reason: 'memo_mismatch' }
+  | { ok: false; reason: 'memo_tx_rpc_unavailable' }
   | { ok: false; reason: 'malformed_pubkey' };
 
 export type VerifyOperatorWalletResult =
@@ -145,21 +203,39 @@ export type VerifyOperatorWalletResult =
   | VerifyOperatorWalletFailure;
 
 /**
+ * One compiled instruction of a fetched transaction — the resolved
+ * program id plus the raw instruction bytes base58-encoded. Enough to
+ * locate the SPL Memo instruction and read its UTF-8 data.
+ */
+export interface OperatorWalletRpcInstruction {
+  programId: string;
+  dataBase58: string;
+}
+
+/**
  * Minimal RPC capability surface the wallet verification needs.
  * Carved out as a dependency-injection point so the service can be
  * unit-tested with a tiny stub instead of the full SolanaRpcClient.
+ *
+ * `instructions` carries the compiled instruction list so the memo
+ * verification can find the single SPL Memo instruction and decode
+ * its UTF-8 data.
  */
 export interface OperatorWalletRpc {
   getTransaction(
     signature: string,
     opts?: { commitment?: 'processed' | 'confirmed' | 'finalized' },
-  ): Promise<{ accountKeys: string[]; numRequiredSignatures: number } | null>;
+  ): Promise<{
+    accountKeys: string[];
+    numRequiredSignatures: number;
+    instructions: OperatorWalletRpcInstruction[];
+  } | null>;
 }
 
 export interface OperatorWalletVerificationServiceDeps {
   logger: Logger;
   /**
-   * RPC client used for the anchor-tx chain check. Must implement
+   * RPC client used for the memo-tx chain check. Must implement
    * `getTransaction`. Today this is the shared `SolanaRpcClient` —
    * type-narrowed to `OperatorWalletRpc` so tests can pass a stub.
    */
@@ -168,27 +244,55 @@ export interface OperatorWalletVerificationServiceDeps {
 }
 
 /**
- * Verifies a co-signed operator-wallet registration.
+ * Decode the UTF-8 string carried by an SPL Memo instruction. The
+ * memo program stores its argument as raw UTF-8 bytes; the RPC hands
+ * us those bytes base58-encoded. Returns `null` when the base58 is
+ * malformed or the bytes are not valid UTF-8 — either way the memo
+ * cannot match the canonical nonce.
+ */
+function decodeMemoUtf8(dataBase58: string): string | null {
+  let bytes: Uint8Array;
+  try {
+    bytes = bs58.decode(dataBase58);
+  } catch {
+    return null;
+  }
+  try {
+    // `fatal: true` rejects invalid UTF-8 instead of substituting
+    // U+FFFD — a memo that isn't valid UTF-8 can never equal the
+    // canonical nonce, and a silent substitution could mask that.
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verifies an operator-wallet registration backed by a memo-only
+ * Solana transaction.
  *
  * Steps:
  *   1. Reject if `issuedNonce.expiresAtMs` is in the past.
- *   2. Validate that `anchorTxSignature` is a well-formed Solana tx
- *      signature (base58 → 64 bytes).
- *   3. Decode both pubkeys (identity, wallet) from base58 → 32 bytes.
- *   4. Verify the identity-key signature against the canonical nonce.
- *   5. Verify the wallet-key signature against the canonical nonce.
- *      Both signatures must clear.
- *   6. Resolve the anchor tx via `getTransaction` and confirm
- *      `walletPubkey` is one of the first `numRequiredSignatures`
- *      entries of `accountKeys` — i.e. the wallet actually signed
- *      a real on-chain transaction. This is the load-bearing
- *      "wallet has working on-chain custody" check; earlier
- *      revisions deferred it to a follow-up pass and the UI was
- *      lying about the property. RPC errors are demoted to
- *      `anchor_tx_rpc_unavailable` (transient, retryable) so the
- *      operator gets actionable feedback instead of a 500.
+ *   2. Validate that `memoTxSignature` is a well-formed Solana tx
+ *      signature (base58 → 64 bytes) and decode the wallet pubkey.
+ *   3. Verify the validator identity-key CLI signature against the
+ *      canonical nonce (Solana offchain-message envelope).
+ *   4. Resolve the memo tx via `getTransaction` at `confirmed`
+ *      commitment and confirm `walletPubkey` is one of the first
+ *      `numRequiredSignatures` entries of `accountKeys` — i.e. the
+ *      operator wallet actually signed the transaction.
+ *   5. Enforce that the transaction is memo-ONLY — exactly one
+ *      instruction, the SPL Memo (by program id) — and confirm its
+ *      UTF-8 data equals the canonical nonce byte-for-byte. A tx that
+ *      smuggles a transfer (or any other instruction) alongside the
+ *      memo is rejected `memo_tx_not_memo_only`. This single
+ *      transaction simultaneously proves wallet custody (step 4) and
+ *      binds the registration to the nonce (step 5) — it replaces the
+ *      legacy wallet-key signMessage + separate anchor transaction.
  *
- * The label is captured verbatim (truncated to 32 chars at the
+ * RPC errors are demoted to `memo_tx_rpc_unavailable` (transient,
+ * retryable) so the operator gets actionable feedback instead of a
+ * 500. The label is captured verbatim (truncated to 32 chars at the
  * route layer to match the DB CHECK).
  */
 export class OperatorWalletVerificationService {
@@ -205,87 +309,100 @@ export class OperatorWalletVerificationService {
   async verify(args: {
     issuedNonce: OperatorWalletNonce;
     identitySignatureB58: string;
-    walletSignatureB58: string;
-    anchorTxSignature: string;
+    memoTxSignature: string;
   }): Promise<VerifyOperatorWalletResult> {
     if (Date.now() > args.issuedNonce.expiresAtMs) {
       return { ok: false, reason: 'expired' };
     }
-    if (!isLikelySolanaTxSignature(args.anchorTxSignature)) {
-      return { ok: false, reason: 'invalid_anchor_signature' };
+    if (!isLikelySolanaTxSignature(args.memoTxSignature)) {
+      return { ok: false, reason: 'invalid_memo_signature' };
     }
 
-    let identitySig: Uint8Array;
-    let walletSig: Uint8Array;
-    let identityBytes: Uint8Array;
+    // The wallet pubkey is matched as a base58 STRING against the
+    // tx signer set below, but decode it here as a 32-byte sanity
+    // gate — a `walletPubkey` that isn't a valid 32-byte pubkey can
+    // never be a legitimate signer and is rejected up front.
     let walletBytes: Uint8Array;
     try {
-      identitySig = bs58.decode(args.identitySignatureB58);
-      walletSig = bs58.decode(args.walletSignatureB58);
-      identityBytes = bs58.decode(args.issuedNonce.identityPubkey);
       walletBytes = bs58.decode(args.issuedNonce.walletPubkey);
     } catch {
       return { ok: false, reason: 'malformed_pubkey' };
     }
-    if (
-      identitySig.length !== 64 ||
-      walletSig.length !== 64 ||
-      identityBytes.length !== 32 ||
-      walletBytes.length !== 32
-    ) {
+    if (walletBytes.length !== 32) {
       return { ok: false, reason: 'malformed_pubkey' };
     }
 
     const canonical = canonicaliseOperatorNonce(args.issuedNonce);
-    // Wrap the canonical nonce in Solana's offchain-message envelope
-    // before verifying — the SAME envelope `claim.service.ts` uses.
-    // Both the identity key and the wallet key sign that envelope via
-    // `solana sign-offchain-message`; verifying against raw UTF-8
-    // bytes would be a second, incompatible signing ceremony.
-    const signedBytes = buildOffchainMessage(canonical);
 
-    const identityOk = await ed25519VerifyAsync(identitySig, signedBytes, identityBytes);
-    if (!identityOk) {
-      return { ok: false, reason: 'bad_identity_signature' };
-    }
-    const walletOk = await ed25519VerifyAsync(walletSig, signedBytes, walletBytes);
-    if (!walletOk) {
-      return { ok: false, reason: 'bad_wallet_signature' };
+    // Step 3 — validator identity-key CLI signature. The CLI signs
+    // the canonical nonce wrapped in Solana's offchain-message
+    // envelope (the SAME envelope `claim.service.ts` uses); this
+    // mechanism is UNCHANGED from the legacy dual-signature flow.
+    const identityResult = await verifyOperatorWalletIdentitySignature({
+      issuedNonce: args.issuedNonce,
+      identitySignatureB58: args.identitySignatureB58,
+    });
+    if (!identityResult.ok) {
+      return identityResult;
     }
 
-    // Anchor-tx chain check. Resolve the operator-supplied signature
-    // via `getTransaction` and assert the wallet pubkey is one of the
-    // first `numRequiredSignatures` entries of `accountKeys`. The
-    // ordering invariant is from the Solana tx wire format: the
-    // first N keys of a message are its signers, in the same order
-    // as the `signatures` array. If the wallet isn't in that prefix,
-    // the wallet keypair did NOT sign this transaction — the
-    // dual-signature passed but the chain-custody claim hasn't.
+    // Step 4 — memo-tx chain check. Resolve the operator-supplied
+    // signature via `getTransaction` at `confirmed` commitment (a
+    // seed constraint — the UI also waits for `confirmed` before
+    // submitting). Assert the wallet pubkey is one of the first
+    // `numRequiredSignatures` entries of `accountKeys`: the ordering
+    // invariant is from the Solana tx wire format — the first N keys
+    // of a message are its signers, in the same order as the
+    // `signatures` array. If the wallet isn't in that prefix, the
+    // wallet keypair did NOT sign this transaction.
     //
     // RPC failures (provider unreachable, archive node behind, 5xx)
-    // surface as `anchor_tx_rpc_unavailable` — a retryable transient
-    // distinct from `anchor_tx_not_found` (the signature really is
+    // surface as `memo_tx_rpc_unavailable` — a retryable transient
+    // distinct from `memo_tx_not_found` (the signature really is
     // unknown, e.g. invalid or never landed). The route layer maps
     // unavailable → 502 and not-found → 403 so the operator can tell
     // "we're flaky, retry" apart from "your signature is fake".
-    let chainResult: { accountKeys: string[]; numRequiredSignatures: number } | null;
+    let chainResult: {
+      accountKeys: string[];
+      numRequiredSignatures: number;
+      instructions: OperatorWalletRpcInstruction[];
+    } | null;
     try {
-      chainResult = await this.solanaRpc.getTransaction(args.anchorTxSignature, {
-        commitment: 'finalized',
+      chainResult = await this.solanaRpc.getTransaction(args.memoTxSignature, {
+        commitment: 'confirmed',
       });
     } catch (err) {
       this.logger.warn(
-        { err, signature: args.anchorTxSignature },
-        'operator-wallet: anchor-tx getTransaction failed',
+        { err, signature: args.memoTxSignature },
+        'operator-wallet: memo-tx getTransaction failed',
       );
-      return { ok: false, reason: 'anchor_tx_rpc_unavailable' };
+      return { ok: false, reason: 'memo_tx_rpc_unavailable' };
     }
     if (chainResult === null) {
-      return { ok: false, reason: 'anchor_tx_not_found' };
+      return { ok: false, reason: 'memo_tx_not_found' };
     }
     const signerSet = chainResult.accountKeys.slice(0, chainResult.numRequiredSignatures);
     if (!signerSet.includes(args.issuedNonce.walletPubkey)) {
-      return { ok: false, reason: 'anchor_tx_wallet_not_signer' };
+      return { ok: false, reason: 'memo_tx_wallet_not_signer' };
+    }
+
+    // Step 5 — memo-only enforcement + memo-content binding. The seed
+    // mandates a memo-ONLY transaction: exactly one instruction, the
+    // SPL Memo, carrying the canonical nonce. Enforcing it here closes
+    // the door on a tx that smuggles a transfer or any other
+    // instruction alongside the memo.
+    if (chainResult.instructions.length === 0) {
+      return { ok: false, reason: 'memo_tx_no_memo_instruction' };
+    }
+    if (chainResult.instructions.length > 1) {
+      return { ok: false, reason: 'memo_tx_not_memo_only' };
+    }
+    const memoIx = chainResult.instructions[0];
+    if (memoIx === undefined || memoIx.programId !== SPL_MEMO_PROGRAM_ID) {
+      return { ok: false, reason: 'memo_tx_no_memo_instruction' };
+    }
+    if (decodeMemoUtf8(memoIx.dataBase58) !== canonical) {
+      return { ok: false, reason: 'memo_mismatch' };
     }
 
     const now = new Date();
@@ -296,7 +413,7 @@ export class OperatorWalletVerificationService {
         walletPubkey: args.issuedNonce.walletPubkey,
         label: args.issuedNonce.label,
         signedNonce: canonical,
-        anchorTxSignature: args.anchorTxSignature,
+        memoTxSignature: args.memoTxSignature,
         registeredAt: now,
         expiresAt: new Date(now.getTime() + this.walletTtlMs),
       },

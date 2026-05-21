@@ -478,17 +478,19 @@ errors, 503 when the feature deps are not wired in. Replayed nonces
 return 403 nonce_replay.
 
 ### POST /v1/claims/{vote}/wallets
-Registers (appends) an operator day-to-day wallet, co-signed by the
-validator identity AND wallet keys and anchored by a Solana memo
-transaction. The vote pubkey is in the path AND the body — they must
-match (400 vote_pubkey_mismatch otherwise). Body: { votePubkey,
-identityPubkey, walletPubkey, label, timestampMs,
-identitySignatureB58, walletSignatureB58, anchorTxSignature }. Cap of
-3 wallets per validator (409 wallet_cap_reached). The validator must
-already be CLAIMED. anchorTxSignature is currently shape-validated
-(base58, 64 bytes) — full on-chain verification is a planned
-hardening pass. Replayed nonces return 403 nonce_replay; future-
-dated timestamps return 403 stale_timestamp.
+Registers (appends) an operator day-to-day wallet. The validator
+identity key signs the canonical nonce via the CLI; the operator's
+browser wallet signs AND sends a memo-only Solana transaction whose
+single SPL Memo instruction carries that exact canonical nonce. The
+vote pubkey is in the path AND the body — they must match (400
+vote_pubkey_mismatch otherwise). Body: { votePubkey, identityPubkey,
+walletPubkey, label, timestampMs, identitySignatureB58,
+memoTxSignature }. Cap of 3 wallets per validator (409
+wallet_cap_reached). The validator must already be CLAIMED. The
+backend fetches the memo transaction via getTransaction at confirmed
+commitment and verifies the wallet pubkey is in the signer set and
+the memo content equals the canonical nonce. Replayed nonces return
+403 nonce_replay; future-dated timestamps return 403 stale_timestamp.
 
 ## Rate limit
 

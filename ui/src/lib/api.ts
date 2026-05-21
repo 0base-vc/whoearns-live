@@ -388,13 +388,16 @@ export function linkGithub(
 }
 
 /**
- * Register an operator wallet via a dual-signature + anchor-tx proof.
+ * Register an operator wallet via a validator identity CLI signature
+ * + a browser-wallet memo transaction.
  *
- * Both signatures cover the SAME canonical nonce JSON (sorted-keys,
- * no whitespace) — one signature comes from the validator identity
- * key, the other from the wallet key. The anchor tx signature is any
- * Solana tx the wallet has signed (proves the wallet keypair holder
- * is in custody of a working wallet that has touched the chain).
+ * `identitySignatureB58` is the validator identity key's CLI
+ * signature over the canonical nonce JSON (sorted-keys, no
+ * whitespace). `memoTxSignature` is the signature of a memo-only
+ * Solana transaction the operator's connected wallet signed AND sent
+ * — its single SPL Memo instruction carries that exact canonical
+ * nonce. The backend fetches the memo transaction and confirms the
+ * wallet is in the signer set and the memo content equals the nonce.
  *
  * Pre-conditions enforced by the route:
  *   - Validator must already be claimed.
@@ -418,8 +421,7 @@ export function registerOperatorWallet(
     label: string;
     timestampMs: number;
     identitySignatureB58: string;
-    walletSignatureB58: string;
-    anchorTxSignature: string;
+    memoTxSignature: string;
   },
   fetchFn: typeof fetch = fetch,
 ): Promise<{

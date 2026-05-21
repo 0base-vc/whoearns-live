@@ -34,6 +34,7 @@
   to know the crypto rules.
 -->
 <script lang="ts">
+  import { browser } from '$app/environment';
   import type { PageData } from './$types';
   import {
     fetchClaimChallenge,
@@ -47,7 +48,28 @@
   import Card from '$lib/components/Card.svelte';
   import AddressDisplay from '$lib/components/AddressDisplay.svelte';
   import EllipsisAddress from '$lib/components/EllipsisAddress.svelte';
+  import OperatorWalletConnectionStatus from '$lib/components/OperatorWalletConnectionStatus.svelte';
   import { shortenPubkey } from '$lib/format';
+  import {
+    connectSelectedOperatorWallet,
+    createOperatorWalletSelectionState,
+    discoverSupportedOperatorWallets,
+    sendMemoTransaction,
+    type ConnectedOperatorWallet,
+    type SupportedOperatorWallet,
+    type WalletStandardRegistry,
+  } from '$lib/operator-wallet-discovery';
+  import {
+    buildMemoTransaction,
+    canAffordMemoFee,
+    CONFIRM_TIMEOUT_SECONDS,
+    FEE_THRESHOLD_LAMPORTS,
+  } from '$lib/operator-wallet-memo-tx';
+  import {
+    awaitMemoTxConfirmation,
+    getBalanceLamports,
+    getLatestBlockhash,
+  } from '$lib/solana-rpc-client';
   import { SITE_NAME, SITE_URL } from '$lib/site';
 
   let { data }: { data: PageData } = $props();
@@ -558,25 +580,33 @@
   // ──────────────────────────────────────────────────────────────────
   // Operator wallet register ceremony (POST /v1/claims/:vote/wallets)
   //
-  // Dual-signature + anchor-tx proof. The operator signs the SAME
-  // canonical nonce twice — once with the validator identity key,
-  // once with the wallet key — and supplies any Solana tx signature
-  // the wallet has previously emitted (proves the wallet keypair
-  // holder controls a working wallet that's touched the chain).
+  // Validator identity CLI signature + browser-wallet memo
+  // transaction. The operator signs the canonical nonce ONCE with the
+  // validator identity key via the CLI, then connects a browser
+  // wallet (Wallet Standard) that signs AND sends a memo-only Solana
+  // transaction carrying that exact canonical nonce in its single SPL
+  // Memo instruction. That one transaction replaces the legacy
+  // wallet-key signMessage + separate anchor tx.
   //
-  // State machine matches the GitHub flow: read (list registered
-  // wallets) + draft (form + envelope + 3 pasted signatures) +
-  // submit. 90-day TTL per wallet; up to 3 per validator.
+  // State machine: read (list registered wallets) + draft (connect
+  // wallet, generate nonce, paste identity CLI signature) +
+  // memo-tx (balance gate → build → sign+send → confirm) + submit.
+  // 90-day TTL per wallet; up to 3 per validator.
   // ──────────────────────────────────────────────────────────────────
 
-  let walletPubkeyDraft = $state('');
   let walletLabelDraft = $state('');
+  // `walletPubkeyDraft` is the CONNECTED wallet's pubkey — set by
+  // `connectOperatorWallet`, never typed by hand. The memo
+  // transaction is signed by the connected wallet, and the backend
+  // verifies that wallet is the signer, so a free-text pubkey field
+  // would only invite a mismatch.
+  let walletPubkeyDraft = $state('');
   // Captures the inputs that produced the canonical nonce. See the
   // matching note on `githubEnvelope` above — the body sent at
   // submit-time is the SAME shape the server reconstructs the
   // canonical nonce from, so any drift between submit-time inputs
   // and the captured-at-generate inputs produces a cryptic
-  // `bad_signature` 403. We block on drift.
+  // `bad_identity_signature` 403. We block on drift.
   let walletEnvelope = $state<{
     nonceJson: string;
     timestampMs: number;
@@ -585,11 +615,51 @@
     submittedLabel: string;
   } | null>(null);
   let walletIdentitySig = $state('');
-  let walletWalletSig = $state('');
-  let walletAnchorSig = $state('');
   let walletError = $state<string | null>(null);
   let walletSuccess = $state<string | null>(null);
   let walletSubmitting = $state(false);
+  let detectedOperatorWallets = $state<SupportedOperatorWallet[]>([]);
+  let selectedOperatorWalletId = $state<string | null>(null);
+  let walletConnecting = $state(false);
+  let walletConnectError = $state<string | null>(null);
+  // The full connected-wallet handle — carries the Wallet Standard
+  // features needed to sign+send the memo transaction. `null` until
+  // a wallet is connected.
+  let connectedOperatorWallet = $state<ConnectedOperatorWallet | null>(null);
+  const connectedOperatorWalletPubkey = $derived(connectedOperatorWallet?.walletPubkey ?? null);
+  const connectedOperatorWalletName = $derived(connectedOperatorWallet?.wallet.name ?? null);
+  const walletSelection = $derived(
+    createOperatorWalletSelectionState(detectedOperatorWallets, selectedOperatorWalletId),
+  );
+
+  // Memo-transaction lifecycle for the register flow.
+  //   idle         — no memo tx attempted yet
+  //   checking     — fetching the connected wallet's SOL balance
+  //   insufficient — balance below FEE_THRESHOLD_LAMPORTS; blocked
+  //   signing      — memo tx built, waiting on the wallet to sign+send
+  //   confirming   — tx sent, polling for `confirmed` commitment
+  //   timeout      — 30s elapsed without confirmation; recovery offered
+  //   confirmed    — tx reached `confirmed`; ready for API submit
+  //   failed       — balance check / sign / send / RPC error
+  type WalletMemoPhase =
+    | 'idle'
+    | 'checking'
+    | 'insufficient'
+    | 'signing'
+    | 'confirming'
+    | 'timeout'
+    | 'confirmed'
+    | 'failed';
+  let walletMemoPhase = $state<WalletMemoPhase>('idle');
+  let walletMemoSignature = $state<string | null>(null);
+  let walletMemoError = $state<string | null>(null);
+  let walletBalanceLamports = $state<number | null>(null);
+  // Concurrency guard for the memo-tx drivers. The `timeout` phase can
+  // surface a re-check action and a re-send action at the same time;
+  // this flag (held across `runMemoTransaction` / `retryMemoConfirmation`)
+  // makes a racing second invocation a no-op so an in-flight poll can
+  // never be overwritten by a racing re-send.
+  let walletMemoBusy = $state(false);
 
   // svelte-ignore state_referenced_locally
   const walletsState = $derived(
@@ -602,10 +672,72 @@
   const WALLET_LABEL_MAX = 32;
 
   /**
+   * Enumerate browser wallets via Wallet Standard's `getWallets()`.
+   * Lazily imported — `@wallet-standard/app` reads `window`, so the
+   * chunk is only pulled in client-side. A failure (module missing,
+   * no `window`) degrades to "no wallets detected" rather than
+   * throwing.
+   */
+  async function loadWalletStandardRegistry(): Promise<WalletStandardRegistry | null> {
+    try {
+      const walletStandard = await import('@wallet-standard/app');
+      return walletStandard.getWallets() as unknown as WalletStandardRegistry;
+    } catch {
+      return null;
+    }
+  }
+
+  async function refreshDetectedOperatorWallets() {
+    if (!browser) return;
+    const registry = await loadWalletStandardRegistry();
+    detectedOperatorWallets = registry === null ? [] : discoverSupportedOperatorWallets(registry);
+  }
+
+  $effect(() => {
+    void refreshDetectedOperatorWallets();
+  });
+
+  async function connectOperatorWallet() {
+    walletConnectError = null;
+    walletError = null;
+    walletSuccess = null;
+    const selectedWallet = walletSelection.selectedWallet;
+    if (selectedWallet === null) {
+      walletConnectError =
+        'Install or unlock Phantom, Backpack, or another supported Wallet Standard wallet.';
+      return;
+    }
+
+    walletConnecting = true;
+    connectedOperatorWallet = null;
+    try {
+      const connected = await connectSelectedOperatorWallet(selectedWallet);
+      connectedOperatorWallet = connected;
+      // The connected wallet pubkey IS the operator wallet pubkey —
+      // feed it into the envelope inputs. Any in-flight nonce /
+      // memo-tx state from a previously-connected wallet is stale.
+      walletPubkeyDraft = connected.walletPubkey;
+      walletEnvelope = null;
+      walletIdentitySig = '';
+      resetWalletMemoState();
+      selectedOperatorWalletId = walletSelection.selectedOption?.id ?? selectedOperatorWalletId;
+    } catch (err) {
+      walletConnectError =
+        err instanceof Error
+          ? err.message
+          : 'Wallet connection failed. Unlock the wallet and try again.';
+    } finally {
+      walletConnecting = false;
+    }
+  }
+
+  /**
    * Canonical wallet nonce JSON. Must match
    * `canonicaliseOperatorNonce` in
-   * `operator-wallet-verification.service.ts:76` byte-for-byte —
-   * key order, value shapes, no whitespace.
+   * `operator-wallet-verification.service.ts` byte-for-byte — key
+   * order, value shapes, no whitespace. This EXACT string is both
+   * (a) signed by the identity CLI and (b) placed into the memo
+   * instruction the connected wallet sends.
    */
   function buildWalletNonceJson(args: {
     identityPubkey: string;
@@ -627,25 +759,28 @@
     });
   }
 
-  function isLikelyPubkey(value: string): boolean {
-    return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
+  /** Reset every memo-transaction field back to the idle baseline. */
+  function resetWalletMemoState() {
+    walletMemoPhase = 'idle';
+    walletMemoSignature = null;
+    walletMemoError = null;
+    walletBalanceLamports = null;
   }
 
   function generateWalletEnvelope() {
-    // Clear ONLY banners up front. Pasted signatures are preserved
-    // until validation passes — losing 3 hand-pasted base58 strings
-    // because of a label typo would be cruel. Signatures clear only
-    // when a NEW envelope replaces the old one (see end of function).
     walletError = null;
     walletSuccess = null;
     const wallet = walletPubkeyDraft.trim();
     const label = walletLabelDraft.trim();
-    if (!isLikelyPubkey(wallet)) {
-      walletError = 'Wallet pubkey must be a base58 Solana pubkey (32-44 chars).';
+    // The wallet pubkey is the connected wallet's — `connectedOperatorWallet`
+    // being null means the operator skipped the connect step.
+    if (connectedOperatorWallet === null || wallet.length === 0) {
+      walletError = 'Connect a browser wallet first — its pubkey is the operator wallet.';
       return;
     }
     if (wallet === history.identity || wallet === history.vote) {
-      walletError = 'Wallet pubkey must differ from the validator identity and vote pubkeys.';
+      walletError =
+        'The connected wallet is the validator identity or vote account. Connect a separate operator wallet.';
       return;
     }
     if (label.length === 0) {
@@ -658,10 +793,7 @@
     }
     // Mirror of the server LabelSchema (`claim-v2.route.ts`) and
     // migration 0038 — HTML trio + C0/DEL/C1 + invisible/ZW family
-    // + BiDi override + isolate codepoints + BOM. Earlier client
-    // regex only covered U+200E/U+200F + U+202A-U+202E + U+2066-
-    // U+2069, leaving NUL/TAB/ZWSP/BOM as accepted-but-server-
-    // rejected friction.
+    // + BiDi override + isolate codepoints + BOM.
     if (
       // eslint-disable-next-line no-control-regex
       /[<>`{}\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/.test(label)
@@ -691,15 +823,16 @@
       submittedPubkey: wallet,
       submittedLabel: label,
     };
-    // New envelope minted → any old pasted signatures are stale.
+    // A new envelope mints a new nonce → the old identity signature
+    // and any prior memo transaction no longer cover it.
     walletIdentitySig = '';
-    walletWalletSig = '';
-    walletAnchorSig = '';
+    resetWalletMemoState();
   }
 
   /**
-   * True when the operator generated an envelope, then edited the
-   * pubkey or label. See the matching `githubInputsDrifted` note.
+   * True when the operator generated an envelope, then changed the
+   * label or reconnected a different wallet. See the matching
+   * `githubInputsDrifted` note.
    */
   const walletInputsDrifted = $derived(
     walletEnvelope !== null &&
@@ -708,21 +841,164 @@
   );
 
   /**
-   * Two CLI commands — identity key + wallet key — both signing the
-   * SAME canonical nonce. The operator runs both, pastes both
-   * signatures back into the form alongside any tx signature the
-   * wallet has previously emitted (the "anchor tx").
+   * The single CLI command — the validator identity key signs the
+   * canonical nonce. UNCHANGED from the legacy flow: the identity
+   * key never touches the browser. (The operator-wallet half is now
+   * the browser memo transaction below, not a second CLI command.)
    */
   const walletIdentityCli = $derived.by<string | null>(() => {
     if (walletEnvelope === null) return null;
     const escaped = walletEnvelope.nonceJson.replace(/'/g, "'\\''");
     return `solana sign-offchain-message --keypair ~/validator-identity.json '${escaped}'`;
   });
-  const walletWalletCli = $derived.by<string | null>(() => {
-    if (walletEnvelope === null) return null;
-    const escaped = walletEnvelope.nonceJson.replace(/'/g, "'\\''");
-    return `solana sign-offchain-message --keypair ~/operator-wallet.json '${escaped}'`;
-  });
+
+  /** Lamports rendered as a SOL string for funding guidance. */
+  function lamportsToSol(lamports: number): string {
+    return (lamports / 1_000_000_000).toLocaleString(undefined, { maximumFractionDigits: 9 });
+  }
+
+  /**
+   * Build, sign, send, and confirm the memo transaction. Drives the
+   * `walletMemoPhase` state machine:
+   *   checking → (insufficient | signing) → confirming → (confirmed | timeout)
+   * On timeout the UI offers `retryMemoConfirmation` (re-query the
+   * same signature) and `resignMemoTransaction` (build a fresh one).
+   */
+  async function runMemoTransaction() {
+    // Concurrency guard — a racing call (e.g. the re-send button
+    // clicked while a re-check poll is still in flight) is a no-op.
+    if (walletMemoBusy) return;
+    walletMemoBusy = true;
+    try {
+      await runMemoTransactionInner();
+    } finally {
+      walletMemoBusy = false;
+    }
+  }
+
+  async function runMemoTransactionInner() {
+    walletMemoError = null;
+    walletError = null;
+    walletSuccess = null;
+    if (connectedOperatorWallet === null) {
+      walletMemoError = 'Connect a browser wallet first.';
+      walletMemoPhase = 'failed';
+      return;
+    }
+    if (walletEnvelope === null) {
+      walletMemoError = 'Generate a signable nonce first.';
+      walletMemoPhase = 'failed';
+      return;
+    }
+    if (walletInputsDrifted) {
+      walletMemoError = 'The label or connected wallet changed. Regenerate the nonce first.';
+      walletMemoPhase = 'failed';
+      return;
+    }
+
+    // Fee affordability gate — BEFORE building or sending anything.
+    walletMemoPhase = 'checking';
+    walletMemoSignature = null;
+    let balance: number;
+    try {
+      balance = await getBalanceLamports(connectedOperatorWallet.walletPubkey);
+    } catch (err) {
+      walletMemoError =
+        err instanceof Error ? err.message : 'Could not check the wallet balance. Retry shortly.';
+      walletMemoPhase = 'failed';
+      return;
+    }
+    walletBalanceLamports = balance;
+    if (!canAffordMemoFee(balance)) {
+      // Block: no memo transaction is sent. The operator must fund
+      // the wallet above the fee threshold and retry.
+      walletMemoPhase = 'insufficient';
+      return;
+    }
+
+    await signSendAndConfirmMemo();
+  }
+
+  /**
+   * Build a fresh memo transaction, ask the connected wallet to
+   * sign+send it, then wait up to 30s for `confirmed`. Shared by the
+   * first attempt and the re-sign recovery path.
+   */
+  async function signSendAndConfirmMemo() {
+    if (connectedOperatorWallet === null || walletEnvelope === null) return;
+    walletMemoError = null;
+    walletMemoPhase = 'signing';
+    walletMemoSignature = null;
+    let signature: string;
+    try {
+      const recentBlockhash = await getLatestBlockhash();
+      const transaction = buildMemoTransaction({
+        feePayerPubkey: connectedOperatorWallet.walletPubkey,
+        recentBlockhash,
+        memo: walletEnvelope.nonceJson,
+      });
+      signature = await sendMemoTransaction({ connected: connectedOperatorWallet, transaction });
+    } catch (err) {
+      walletMemoError =
+        err instanceof Error
+          ? err.message
+          : 'The memo transaction could not be signed or sent. Try again.';
+      walletMemoPhase = 'failed';
+      return;
+    }
+    walletMemoSignature = signature;
+    await waitForMemoConfirmation();
+  }
+
+  /**
+   * Poll for `confirmed` commitment on `walletMemoSignature`. Sets
+   * `confirmed` on success and `timeout` after 30s — the timeout
+   * branch keeps the signature so both recovery actions can use it.
+   */
+  async function waitForMemoConfirmation() {
+    if (walletMemoSignature === null) return;
+    walletMemoPhase = 'confirming';
+    walletMemoError = null;
+    try {
+      const confirmed = await awaitMemoTxConfirmation(walletMemoSignature, {
+        timeoutMs: CONFIRM_TIMEOUT_SECONDS * 1000,
+      });
+      walletMemoPhase = confirmed ? 'confirmed' : 'timeout';
+    } catch (err) {
+      // An on-chain failure (the tx landed but errored) — re-signing
+      // is the only recovery, so surface it as a failed phase.
+      walletMemoError =
+        err instanceof Error ? err.message : 'The memo transaction failed on chain.';
+      walletMemoPhase = 'failed';
+    }
+  }
+
+  /**
+   * Timeout recovery #1 — re-query `getSignatureStatuses` for the
+   * SAME memo-tx signature. Handles a merely-slow confirmation.
+   */
+  async function retryMemoConfirmation() {
+    if (walletMemoBusy) return;
+    if (walletMemoSignature === null) {
+      walletMemoError = 'No memo transaction to re-check.';
+      return;
+    }
+    walletMemoBusy = true;
+    try {
+      await waitForMemoConfirmation();
+    } finally {
+      walletMemoBusy = false;
+    }
+  }
+
+  /**
+   * Timeout recovery #2 — build and send a FRESH memo transaction.
+   * Handles a dropped transaction. Re-runs the balance gate too in
+   * case the earlier attempt or another spend changed the balance.
+   */
+  async function resignMemoTransaction() {
+    await runMemoTransaction();
+  }
 
   async function handleSubmitWallet() {
     if (walletEnvelope === null) {
@@ -731,23 +1007,18 @@
     }
     if (walletInputsDrifted) {
       walletError =
-        'Wallet pubkey or label changed after the nonce was generated. Click Regenerate so the signatures cover the new values.';
+        'The label or connected wallet changed after the nonce was generated. Click Regenerate so the proof covers the new values.';
       return;
     }
     const trimmedIdentitySig = walletIdentitySig.trim();
-    const trimmedWalletSig = walletWalletSig.trim();
-    const trimmedAnchor = walletAnchorSig.trim();
     if (trimmedIdentitySig.length === 0) {
-      walletError = 'Paste the identity-key signature first.';
+      walletError = 'Paste the validator identity-key signature first.';
       return;
     }
-    if (trimmedWalletSig.length === 0) {
-      walletError = 'Paste the wallet-key signature first.';
-      return;
-    }
-    if (trimmedAnchor.length < 86 || trimmedAnchor.length > 88) {
-      walletError =
-        'Anchor tx signature should be 86-88 chars (base58 of a 64-byte Solana tx signature).';
+    // The memo transaction must have reached `confirmed` — the API
+    // submit is gated on it (a seed constraint).
+    if (walletMemoPhase !== 'confirmed' || walletMemoSignature === null) {
+      walletError = 'Send the memo transaction and wait for it to confirm before registering.';
       return;
     }
     walletSubmitting = true;
@@ -755,10 +1026,10 @@
     walletSuccess = null;
     try {
       // Submit using the captured-at-generate values, NOT the live
-      // drafts — `walletInputsDrifted` check above ensures they agree,
-      // but using the envelope's captured values defensively guarantees
-      // the body bytes match the canonical nonce the server will
-      // reconstruct + verify against.
+      // drafts — `walletInputsDrifted` above ensures they agree, but
+      // using the envelope's captured values defensively guarantees
+      // the body bytes match the canonical nonce the server
+      // reconstructs + verifies against.
       const result = await registerOperatorWallet({
         votePubkey: history.vote,
         identityPubkey: history.identity,
@@ -766,8 +1037,7 @@
         label: walletEnvelope.submittedLabel,
         timestampMs: walletEnvelope.timestampMs,
         identitySignatureB58: trimmedIdentitySig,
-        walletSignatureB58: trimmedWalletSig,
-        anchorTxSignature: trimmedAnchor,
+        memoTxSignature: walletMemoSignature,
       });
       walletSuccess = `Wallet registered: ${shortenPubkey(result.wallet.walletPubkey, 4, 4)} (${result.wallet.label}). Expires ${new Date(result.wallet.expiresAt).toLocaleDateString()}.`;
       // Fold into local state so the list re-renders.
@@ -800,8 +1070,8 @@
       walletPubkeyDraft = '';
       walletLabelDraft = '';
       walletIdentitySig = '';
-      walletWalletSig = '';
-      walletAnchorSig = '';
+      connectedOperatorWallet = null;
+      resetWalletMemoState();
     } catch (err) {
       walletError =
         err instanceof ApiError
@@ -1545,23 +1815,66 @@
 
     {#if !walletsState.capReached}
       <div class="mt-5 grid grid-cols-1 gap-4">
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
           <label class="block">
             <span
               class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
             >
-              Wallet pubkey
+              Browser wallet
             </span>
-            <input
-              type="text"
-              bind:value={walletPubkeyDraft}
-              placeholder="base58 pubkey"
-              maxlength={44}
-              autocomplete="off"
-              spellcheck="false"
-              class="mt-1 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 font-mono text-base sm:text-xs"
-            />
+            <select
+              value={walletSelection.selectedOption?.id ?? ''}
+              onchange={(event) => {
+                selectedOperatorWalletId = event.currentTarget.value;
+              }}
+              disabled={detectedOperatorWallets.length === 0 || walletConnecting}
+              class="mt-1 min-h-11 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-base sm:text-sm disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {#if detectedOperatorWallets.length === 0}
+                <option value="">No supported wallet detected</option>
+              {:else}
+                {#each walletSelection.options as option (option.id)}
+                  <option value={option.id}>{option.label} ({option.detail})</option>
+                {/each}
+              {/if}
+            </select>
           </label>
+          <button
+            type="button"
+            onclick={connectOperatorWallet}
+            disabled={walletConnecting || walletSelection.selectedWallet === null}
+            class="inline-flex min-h-11 items-center justify-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1.5 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-500)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {walletConnecting ? 'Connecting…' : 'Connect wallet'}
+          </button>
+        </div>
+        {#if walletConnectError}
+          <p
+            role="alert"
+            class="rounded-md border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-xs text-[color:var(--color-status-warn-fg)]"
+          >
+            {walletConnectError}
+          </p>
+        {/if}
+        <OperatorWalletConnectionStatus
+          connecting={walletConnecting}
+          walletName={connectedOperatorWalletName ?? walletSelection.selectedOption?.label ?? null}
+          walletPubkey={connectedOperatorWalletPubkey}
+        />
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div class="block">
+            <span
+              class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+            >
+              Operator wallet pubkey
+            </span>
+            <p
+              class="mt-1 min-h-11 break-all rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] px-3 py-2 font-mono text-base sm:text-xs"
+              data-testid="operator-wallet-pubkey"
+            >
+              {connectedOperatorWalletPubkey ?? 'Connect a browser wallet above'}
+            </p>
+          </div>
           <label class="block">
             <span
               class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
@@ -1581,18 +1894,22 @@
         <button
           type="button"
           onclick={generateWalletEnvelope}
-          class="inline-flex min-h-11 w-fit items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1.5 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-500)] hover:text-white"
+          disabled={connectedOperatorWalletPubkey === null}
+          class="inline-flex min-h-11 w-fit items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1.5 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-500)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
         >
           {walletEnvelope === null ? 'Generate signable nonce' : 'Regenerate'}
         </button>
 
-        {#if walletEnvelope !== null && walletIdentityCli !== null && walletWalletCli !== null}
+        {#if walletEnvelope !== null && walletIdentityCli !== null}
           <div class="grid grid-cols-1 gap-4">
             <div>
               <p
                 class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
               >
                 Step 1 · Sign with the validator identity key
+              </p>
+              <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
+                Run this in your shell — the identity key never touches the browser.
               </p>
               <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
                 <pre
@@ -1615,88 +1932,155 @@
               ></textarea>
             </div>
 
-            <div>
+            <div data-testid="operator-wallet-memo-step">
               <p
                 class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
               >
-                Step 2 · Sign with the wallet key (same nonce)
-              </p>
-              <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
-                <pre
-                  class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-all"><code
-                    >{walletWalletCli}</code
-                  ></pre>
-                <button
-                  type="button"
-                  onclick={() => copyToClipboard(walletWalletCli)}
-                  class="inline-flex min-h-11 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
-                >
-                  Copy
-                </button>
-              </div>
-              <p class="mt-1.5 text-xs text-[color:var(--color-text-subtle)]">
-                Replace <code class="font-mono">~/operator-wallet.json</code> with your wallet's keypair
-                path.
-              </p>
-              <textarea
-                bind:value={walletWalletSig}
-                rows={2}
-                placeholder="Paste wallet-key base58 signature"
-                class="mt-2 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-3 font-mono text-base sm:text-xs"
-              ></textarea>
-            </div>
-
-            <div>
-              <p
-                class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
-              >
-                Step 3 · Paste any tx signature the wallet has emitted
+                Step 2 · Send the memo transaction from your connected wallet
               </p>
               <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
-                Any finalised base58 tx signature (86-88 chars) the wallet has signed. The server
-                fetches the transaction via
-                <code class="font-mono">getTransaction</code> and verifies the wallet pubkey is in
-                the tx's signer set — proves the wallet keypair has working on-chain custody. Solana
-                Explorer's "Transaction" page header has the signature near the top; or run
-                <code class="font-mono">solana transfer --from ~/operator-wallet.json …</code> and copy
-                the signature it prints.
-              </p>
-              <textarea
-                bind:value={walletAnchorSig}
-                rows={2}
-                placeholder="Anchor tx signature (base58)"
-                class="mt-2 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-3 font-mono text-base sm:text-xs"
-              ></textarea>
-              <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
-                Nonce expires in ~{Math.max(
+                Your connected wallet signs and sends a memo-only Solana transaction carrying this
+                exact nonce. Network fee is ~0.000005 SOL (one signature). Nonce expires in ~{Math.max(
                   0,
                   Math.floor((walletEnvelope.expiresAtMs - nowMs) / 60_000),
                 )} minutes.
               </p>
+
+              {#if walletInputsDrifted}
+                <p
+                  role="alert"
+                  class="mt-2 rounded-md border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-xs text-[color:var(--color-status-warn-fg)]"
+                >
+                  The label or connected wallet changed. The current nonce covers
+                  <code class="font-mono"
+                    >{shortenPubkey(walletEnvelope.submittedPubkey, 4, 4)}</code
+                  >
+                  / <code class="font-mono">{walletEnvelope.submittedLabel}</code> — click Regenerate
+                  above to mint a fresh nonce for the new values.
+                </p>
+              {/if}
+
+              {#if walletMemoPhase === 'insufficient'}
+                <div
+                  role="alert"
+                  data-testid="operator-wallet-insufficient-funds"
+                  class="mt-2 rounded-md border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-xs text-[color:var(--color-status-warn-fg)]"
+                >
+                  <p class="font-semibold">Not enough SOL to send the memo transaction.</p>
+                  <p class="mt-1">
+                    The connected wallet holds
+                    {walletBalanceLamports === null
+                      ? 'too little SOL'
+                      : `${lamportsToSol(walletBalanceLamports)} SOL`}, below the
+                    {lamportsToSol(FEE_THRESHOLD_LAMPORTS)} SOL needed (5000-lamport base fee + a 5000-lamport
+                    buffer). Fund this wallet, then check the balance again.
+                  </p>
+                </div>
+              {:else if walletMemoPhase === 'signing'}
+                <p
+                  role="status"
+                  class="mt-2 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] px-3 py-2 text-xs text-[color:var(--color-text-subtle)]"
+                >
+                  Approve the memo transaction in your wallet…
+                </p>
+              {:else if walletMemoPhase === 'confirming'}
+                <p
+                  role="status"
+                  data-testid="operator-wallet-confirming"
+                  class="mt-2 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] px-3 py-2 text-xs text-[color:var(--color-text-subtle)]"
+                >
+                  Confirming the memo transaction on chain (up to {CONFIRM_TIMEOUT_SECONDS}s)…
+                </p>
+              {:else if walletMemoPhase === 'timeout'}
+                <div
+                  role="alert"
+                  data-testid="operator-wallet-confirm-timeout"
+                  class="mt-2 rounded-md border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-xs text-[color:var(--color-status-warn-fg)]"
+                >
+                  <p class="font-semibold">
+                    The memo transaction has not confirmed within {CONFIRM_TIMEOUT_SECONDS}s.
+                  </p>
+                  <p class="mt-1">
+                    It may just be slow — check again — or it may have been dropped — re-sign a
+                    fresh one.
+                  </p>
+                  <div class="mt-2 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      data-testid="operator-wallet-confirm-retry"
+                      onclick={retryMemoConfirmation}
+                      class="inline-flex min-h-9 items-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-semibold hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+                    >
+                      Check confirmation again
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="operator-wallet-resign"
+                      onclick={resignMemoTransaction}
+                      class="inline-flex min-h-9 items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1 text-xs font-semibold text-[color:var(--color-brand-500)] hover:bg-[color:var(--color-brand-500)] hover:text-white"
+                    >
+                      Re-sign a new memo transaction
+                    </button>
+                  </div>
+                </div>
+              {:else if walletMemoPhase === 'confirmed'}
+                <p
+                  role="status"
+                  data-testid="operator-wallet-confirmed"
+                  class="mt-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300"
+                >
+                  Memo transaction confirmed.
+                  {#if walletMemoSignature}
+                    <span class="font-mono">{shortenPubkey(walletMemoSignature, 6, 6)}</span>
+                  {/if}
+                </p>
+              {:else if walletMemoPhase === 'failed' && walletMemoError}
+                <p
+                  role="alert"
+                  class="mt-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300"
+                >
+                  {walletMemoError}
+                </p>
+              {/if}
+
+              {#if walletMemoPhase !== 'confirmed'}
+                <button
+                  type="button"
+                  data-testid="operator-wallet-send-memo"
+                  onclick={runMemoTransaction}
+                  disabled={walletConnecting ||
+                    walletInputsDrifted ||
+                    walletMemoBusy ||
+                    walletMemoPhase === 'checking' ||
+                    walletMemoPhase === 'signing' ||
+                    walletMemoPhase === 'confirming'}
+                  class="mt-2 inline-flex min-h-11 w-fit items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1.5 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-500)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {#if walletMemoPhase === 'checking'}
+                    Checking wallet balance…
+                  {:else if walletMemoPhase === 'signing' || walletMemoPhase === 'confirming'}
+                    Working…
+                  {:else if walletMemoPhase === 'insufficient'}
+                    Check balance again
+                  {:else if walletMemoPhase === 'timeout' || walletMemoPhase === 'failed'}
+                    Re-send memo transaction
+                  {:else}
+                    Send memo transaction
+                  {/if}
+                </button>
+              {/if}
             </div>
 
-            {#if walletInputsDrifted}
-              <p
-                role="alert"
-                class="rounded-md border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-xs text-[color:var(--color-status-warn-fg)]"
-              >
-                Wallet pubkey or label changed. The current signatures cover
-                <code class="font-mono">{shortenPubkey(walletEnvelope.submittedPubkey, 4, 4)}</code>
-                / <code class="font-mono">{walletEnvelope.submittedLabel}</code> — click Regenerate above
-                to mint a fresh nonce for the new values.
-              </p>
-            {/if}
             <button
               type="button"
               onclick={handleSubmitWallet}
               disabled={walletSubmitting ||
                 walletIdentitySig.trim().length === 0 ||
-                walletWalletSig.trim().length === 0 ||
-                walletAnchorSig.trim().length === 0 ||
+                walletMemoPhase !== 'confirmed' ||
                 walletInputsDrifted}
               class="min-h-11 w-full rounded-lg bg-[color:var(--color-brand-500)] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[color:var(--color-brand-600)] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {walletSubmitting ? 'Verifying signatures…' : 'Register wallet'}
+              {walletSubmitting ? 'Registering…' : 'Register wallet'}
             </button>
           </div>
         {/if}

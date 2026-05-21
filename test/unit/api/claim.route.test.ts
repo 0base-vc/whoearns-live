@@ -68,7 +68,7 @@ function makeWallet(over: Partial<OperatorWallet> = {}): OperatorWallet {
     walletPubkey: 'WALL111111111111111111111111111111111111111',
     label: 'hot',
     signedNonce: 'wallet-nonce',
-    anchorTxSignature: 'z'.repeat(88),
+    memoTxSignature: 'z'.repeat(88),
     registeredAt: new Date('2026-02-01T00:00:00Z'),
     expiresAt: new Date('2026-05-01T00:00:00Z'),
     ...over,

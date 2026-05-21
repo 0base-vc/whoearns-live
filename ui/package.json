@@ -30,6 +30,7 @@
     "vite": "^8.0.7"
   },
   "dependencies": {
+    "@wallet-standard/app": "^1.1.0",
     "layerchart": "^1.0.13"
   },
   "pnpm": {

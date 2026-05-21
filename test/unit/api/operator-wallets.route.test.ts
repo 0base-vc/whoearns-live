@@ -29,7 +29,7 @@ function makeWallet(over: Partial<OperatorWallet> = {}): OperatorWallet {
     walletPubkey: WALLET_1,
     label: 'hot',
     signedNonce: 'wallet-nonce',
-    anchorTxSignature: 'z'.repeat(88),
+    memoTxSignature: 'z'.repeat(88),
     registeredAt: new Date('2026-02-01T00:00:00Z'),
     expiresAt: new Date('2026-05-01T00:00:00Z'),
     ...over,
@@ -185,7 +185,7 @@ describe('GET /v1/operator-wallets/:wallet', () => {
     });
     // Forensic columns must not leak.
     expect(body).not.toHaveProperty('signedNonce');
-    expect(body).not.toHaveProperty('anchorTxSignature');
+    expect(body).not.toHaveProperty('memoTxSignature');
     await app.close();
   });
 

@@ -6,7 +6,7 @@ interface OperatorWalletRow {
   wallet_pubkey: string;
   label: string;
   signed_nonce: string;
-  anchor_tx_signature: string;
+  memo_tx_signature: string;
   registered_at: Date;
   expires_at: Date;
 }
@@ -17,14 +17,14 @@ function rowToWallet(row: OperatorWalletRow): OperatorWallet {
     walletPubkey: row.wallet_pubkey,
     label: row.label,
     signedNonce: row.signed_nonce,
-    anchorTxSignature: row.anchor_tx_signature,
+    memoTxSignature: row.memo_tx_signature,
     registeredAt: row.registered_at,
     expiresAt: row.expires_at,
   };
 }
 
 const COLS = `vote_pubkey, wallet_pubkey, label, signed_nonce,
-  anchor_tx_signature, registered_at, expires_at`;
+  memo_tx_signature, registered_at, expires_at`;
 
 export const OPERATOR_WALLET_CAP_PER_VALIDATOR = 3;
 
@@ -61,14 +61,14 @@ export class OperatorWalletsRepository {
       await this.pool.query(
         `INSERT INTO operator_wallets
            (vote_pubkey, wallet_pubkey, label, signed_nonce,
-            anchor_tx_signature, registered_at, expires_at)
+            memo_tx_signature, registered_at, expires_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
           wallet.votePubkey,
           wallet.walletPubkey,
           wallet.label,
           wallet.signedNonce,
-          wallet.anchorTxSignature,
+          wallet.memoTxSignature,
           wallet.registeredAt,
           wallet.expiresAt,
         ],

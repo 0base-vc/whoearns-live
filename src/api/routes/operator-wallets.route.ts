@@ -56,7 +56,7 @@ interface ActivityResponse {
  * subset of the `OperatorWallet` row that's already public
  * (everything here is either operator-published or derivable from the
  * on-chain registration); the forensic `signedNonce` /
- * `anchorTxSignature` columns are deliberately omitted.
+ * `memoTxSignature` columns are deliberately omitted.
  */
 interface WalletResponse {
   wallet: string;

@@ -29,9 +29,9 @@ const silent = pino({ level: 'silent' });
 
 // 88-char base58 string — satisfies the wallet route's signature
 // length bounds (min 64 / max 128 for sigs, min 86 / max 88 for the
-// anchor tx — SEC-L1 tightened the anchor bound to match the service).
+// memo tx — SEC-L1 tightened the memo-tx bound to match the service).
 const SIG_B58 = 'z'.repeat(88);
-const ANCHOR_B58 = 'z'.repeat(88);
+const MEMO_TX_B58 = 'y'.repeat(88);
 const WALLET_1 = 'WALL111111111111111111111111111111111111111';
 
 function makeConfig(): AppConfig {
@@ -69,7 +69,7 @@ function makeWallet(overrides: Partial<OperatorWallet> = {}): OperatorWallet {
     walletPubkey: WALLET_1,
     label: 'hot',
     signedNonce: 'wallet-nonce-1',
-    anchorTxSignature: ANCHOR_B58,
+    memoTxSignature: MEMO_TX_B58,
     registeredAt: new Date(),
     expiresAt: new Date(Date.now() + 86_400_000),
     ...overrides,
@@ -172,8 +172,7 @@ const walletBody = (over: Record<string, unknown> = {}) => ({
   label: 'hot',
   timestampMs: Date.now(),
   identitySignatureB58: SIG_B58,
-  walletSignatureB58: SIG_B58,
-  anchorTxSignature: ANCHOR_B58,
+  memoTxSignature: MEMO_TX_B58,
   ...over,
 });
 
@@ -320,6 +319,32 @@ describe('POST /v1/claims/:vote/wallets', () => {
     await app.close();
   });
 
+  it('ignores legacy walletSignatureB58 on the memo transaction path', async () => {
+    const verifyCalls: unknown[] = [];
+    const { deps } = buildDeps();
+    deps.operatorWalletService = {
+      verify: async (args: unknown) => {
+        verifyCalls.push(args);
+        return { ok: true, wallet: makeWallet() };
+      },
+    } as unknown as OperatorWalletVerificationService;
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/claims/${VOTE_1}/wallets`,
+      payload: walletBody({ walletSignatureB58: 'legacy-wallet-signature-must-be-ignored' }),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(verifyCalls).toHaveLength(1);
+    expect(verifyCalls[0]).toMatchObject({
+      identitySignatureB58: SIG_B58,
+      memoTxSignature: MEMO_TX_B58,
+    });
+    expect(verifyCalls[0]).not.toHaveProperty('walletSignatureB58');
+    expect(verifyCalls[0]).not.toHaveProperty('anchorTxSignature');
+    await app.close();
+  });
+
   it('returns 400 on a malformed body (signature too short)', async () => {
     const { deps } = buildDeps();
     const app = await makeApp(deps);
@@ -463,9 +488,9 @@ describe('POST /v1/claims/:vote/wallets', () => {
     await app.close();
   });
 
-  it('returns 403 when the dual-signature verification fails', async () => {
+  it('returns 403 when the identity CLI signature verification fails', async () => {
     const { deps } = buildDeps({
-      walletVerify: { ok: false, reason: 'bad_wallet_signature' },
+      walletVerify: { ok: false, reason: 'bad_identity_signature' },
     });
     const app = await makeApp(deps);
     const res = await app.inject({
@@ -474,7 +499,40 @@ describe('POST /v1/claims/:vote/wallets', () => {
       payload: walletBody(),
     });
     expect(res.statusCode).toBe(403);
-    expect(res.json().error.code).toBe('bad_wallet_signature');
+    expect(res.json().error.code).toBe('bad_identity_signature');
+    await app.close();
+  });
+
+  it('returns 403 when the memo transaction does not carry the canonical nonce', async () => {
+    const { deps } = buildDeps({
+      walletVerify: { ok: false, reason: 'memo_mismatch' },
+    });
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/claims/${VOTE_1}/wallets`,
+      payload: walletBody(),
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('memo_mismatch');
+    await app.close();
+  });
+
+  it('returns 502 when the Solana RPC is unavailable during memo-tx verification', async () => {
+    // `memo_tx_rpc_unavailable` is the lone transient failure — the
+    // route maps it to 502 (retry) rather than the 403 proof-failed
+    // family.
+    const { deps } = buildDeps({
+      walletVerify: { ok: false, reason: 'memo_tx_rpc_unavailable' },
+    });
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/claims/${VOTE_1}/wallets`,
+      payload: walletBody(),
+    });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error.code).toBe('memo_tx_rpc_unavailable');
     await app.close();
   });
 });
