@@ -1123,7 +1123,7 @@
         </p>
         <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
           <pre
-            class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed"><code
+            class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-all"><code
               >{cliCommand}</code
             ></pre>
           <button
@@ -1280,7 +1280,7 @@
             </p>
             <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
               <pre
-                class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed"><code
+                class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-all"><code
                   >{githubCliCommand}</code
                 ></pre>
               <button
@@ -1494,7 +1494,7 @@
                 {#if unregisterCliCommand !== null}
                   <div class="mt-3 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
                     <pre
-                      class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed"><code
+                      class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-all"><code
                         >{unregisterCliCommand}</code
                       ></pre>
                     <button
@@ -1596,7 +1596,7 @@
               </p>
               <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
                 <pre
-                  class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed"><code
+                  class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-all"><code
                     >{walletIdentityCli}</code
                   ></pre>
                 <button
@@ -1623,7 +1623,7 @@
               </p>
               <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
                 <pre
-                  class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed"><code
+                  class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-all"><code
                     >{walletWalletCli}</code
                   ></pre>
                 <button

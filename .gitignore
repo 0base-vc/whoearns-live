@@ -47,3 +47,8 @@ marketing/
 .playwright-cli/
 .playwright-mcp/
 /*.png
+
+# Ouroboros `ooo setup` generates a per-project CLAUDE.md as local
+# dev tooling (command reference), not project source — keep it
+# untracked.
+/CLAUDE.md
