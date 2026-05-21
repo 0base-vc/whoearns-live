@@ -35,10 +35,21 @@ export interface ValidatorGithubLink {
  * the tx signer set) and binds the registration to the nonce (the
  * memo content equals the canonical nonce). `memoTxSignature` is that
  * transaction's signature.
+ *
+ * `publicRef` is an opaque, stable, per-row token (migration 0042 —
+ * `public_ref`, a UUID string). It is the ONLY wallet identifier the
+ * `/v1/*` surface exposes for the unregister flow: `GET
+ * /v1/claims/:vote` serves it as `walletRef`, the unregister nonce
+ * binds it (not the full pubkey), and `DELETE
+ * /v1/claims/:vote/wallets/:walletRef` is keyed by it — the server
+ * resolves the ref back to `walletPubkey` internally. Keeping the
+ * full operator-wallet pubkey out of every response body and URL.
  */
 export interface OperatorWallet {
   votePubkey: VotePubkey;
   walletPubkey: string;
+  /** Opaque per-registration token — see the interface docstring. */
+  publicRef: string;
   label: string;
   signedNonce: string;
   memoTxSignature: string;

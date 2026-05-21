@@ -260,6 +260,7 @@ GET unless noted. Full descriptions + query params in /llms-full.txt.
 - ${SITE_URL}/v1/validators/current-epoch/batch: POST — bulk current-epoch lookup
 - ${SITE_URL}/v1/claims/{vote}/github: PUT — link a GitHub identity via a signed Gist
 - ${SITE_URL}/v1/claims/{vote}/wallets: POST — register an operator wallet via dual-signature proof
+- ${SITE_URL}/v1/claims/{vote}/wallets/{walletRef}: DELETE — unregister an operator wallet by its opaque ref
 
 ## AI-assisted operations
 
@@ -490,6 +491,21 @@ backend fetches the memo transaction via getTransaction at confirmed
 commitment and verifies the wallet pubkey is in the signer set and
 the memo content equals the canonical nonce. Replayed nonces return
 403 nonce_replay; future-dated timestamps return 403 stale_timestamp.
+
+### DELETE /v1/claims/{vote}/wallets/{walletRef}
+Unregisters (removes) a previously-registered operator wallet. The
+wallet is identified by its opaque {walletRef} — the per-registration
+token surfaced as wallets.entries[].walletRef on GET /v1/claims/{vote}
+— NOT its full pubkey, so no operator-wallet pubkey appears in the
+URL. Single-signature ceremony: the validator identity key signs a
+canonical wallet-unregister nonce (which binds the walletRef); the
+wallet keypair is not required. The vote pubkey is in the path AND
+the body — they must match (400 vote_pubkey_mismatch otherwise).
+Body: { votePubkey, identityPubkey, timestampMs,
+identitySignatureB58 }. A walletRef that resolves to no active
+registration returns 404 wallet_not_registered. The validator must
+already be CLAIMED. The success response carries only the truncated
+walletAddressShort — the full pubkey is never returned.
 
 ## Rate limit
 

@@ -182,8 +182,15 @@ export interface ClaimStatus {
      * populated only when the claim-status fetch is made with
      * `includeActivity: true` (the hub does this so it renders the
      * heatmaps from one fetch); `null` otherwise.
+     *
+     * `walletRef` is the opaque per-registration token. The claim
+     * page's unregister flow keys on it — it binds the signed
+     * unregister nonce and rides in the `DELETE
+     * /v1/claims/:vote/wallets/:walletRef` URL — so the full
+     * operator-wallet pubkey never leaves the server.
      */
     entries: ReadonlyArray<{
+      walletRef: string;
       walletAddressShort: string;
       label: string;
       registeredAt: string;

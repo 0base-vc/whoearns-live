@@ -33,6 +33,10 @@ const silent = pino({ level: 'silent' });
 const SIG_B58 = 'z'.repeat(88);
 const MEMO_TX_B58 = 'y'.repeat(88);
 const WALLET_1 = 'WALL111111111111111111111111111111111111111';
+// Opaque per-registration ref (`operator_wallets.public_ref`,
+// migration 0042 — a UUID string). The DELETE route's `:walletRef`
+// path param is validated as a UUID, NOT a pubkey.
+const WALLET_REF_1 = '11111111-2222-4333-8444-555555555555';
 
 function makeConfig(): AppConfig {
   // The route only reads `config.SITE_URL` (folded into the canonical
@@ -67,6 +71,7 @@ function makeWallet(overrides: Partial<OperatorWallet> = {}): OperatorWallet {
   return {
     votePubkey: VOTE_1,
     walletPubkey: WALLET_1,
+    publicRef: WALLET_REF_1,
     label: 'hot',
     signedNonce: 'wallet-nonce-1',
     memoTxSignature: MEMO_TX_B58,
@@ -91,11 +96,17 @@ function buildDeps(
     walletVerify?: Awaited<ReturnType<OperatorWalletVerificationService['verify']>>;
     walletCount?: number;
     walletInsert?: OperatorWalletInsertResult;
-    /** DELETE `/wallets/:wallet` — the unregister-ceremony sig check. */
+    /** DELETE `/wallets/:walletRef` — the unregister-ceremony sig check. */
     walletUnregisterVerify?: Awaited<
       ReturnType<OperatorWalletVerificationService['verifyUnregister']>
     >;
-    /** DELETE `/wallets/:wallet` — repo `delete` result (false = miss). */
+    /**
+     * DELETE `/wallets/:walletRef` — what `findActiveByVoteAndRef`
+     * resolves the opaque ref to. `undefined` = a wallet resolves
+     * (default `makeWallet()`); explicit `null` = no active row → 404.
+     */
+    walletResolve?: OperatorWallet | null;
+    /** DELETE `/wallets/:walletRef` — repo `delete` result (false = miss). */
     walletDelete?: boolean;
     /**
      * SEC-L4 — when set, `validatorsRepo.findByIdentity` resolves to a
@@ -139,7 +150,11 @@ function buildDeps(
     operatorWalletsRepo: {
       countByVote: async () => overrides.walletCount ?? 0,
       insert: async () => overrides.walletInsert ?? { ok: true },
-      // DELETE `/wallets/:wallet` — `true` = a row was hard-deleted.
+      // DELETE `/wallets/:walletRef` — `findActiveByVoteAndRef`
+      // resolves the opaque ref → the wallet row (or `null` → 404).
+      findActiveByVoteAndRef: async () =>
+        overrides.walletResolve === undefined ? makeWallet() : overrides.walletResolve,
+      // DELETE `/wallets/:walletRef` — `true` = a row was hard-deleted.
       delete: async () => overrides.walletDelete ?? true,
     } as unknown as OperatorWalletsRepository,
     githubGistService: {
@@ -553,26 +568,29 @@ describe('POST /v1/claims/:vote/wallets', () => {
   });
 });
 
+// The unregister body no longer carries `walletPubkey` — the wallet
+// is identified by the `:walletRef` path param (the opaque ref).
 const unregisterBody = (over: Record<string, unknown> = {}) => ({
   votePubkey: VOTE_1,
   identityPubkey: IDENTITY_1,
-  walletPubkey: WALLET_1,
   timestampMs: Date.now(),
   identitySignatureB58: SIG_B58,
   ...over,
 });
 
-describe('DELETE /v1/claims/:vote/wallets/:wallet', () => {
-  it('unregisters a wallet on the happy path and serves only the truncated address', async () => {
-    // SEC — the success response is `{ unregistered: { walletAddressShort } }`
-    // — only the truncated `WALL…1111` form. The full operator-wallet
-    // pubkey must NOT appear on the `unregistered` object, nor anywhere
-    // in the response body.
+describe('DELETE /v1/claims/:vote/wallets/:walletRef', () => {
+  it('unregisters a wallet by its opaque ref and serves only the truncated address', async () => {
+    // SEC — the wallet is identified by the opaque `:walletRef`, the
+    // route resolves it → the real pubkey internally, and the success
+    // response is `{ unregistered: { walletAddressShort } }` — only
+    // the truncated `WALL…1111` form. The full operator-wallet pubkey
+    // must NOT appear on the response body NOR in the request URL.
     const { deps, appended } = buildDeps();
     const app = await makeApp(deps);
+    const url = `/v1/claims/${VOTE_1}/wallets/${WALLET_REF_1}`;
     const res = await app.inject({
       method: 'DELETE',
-      url: `/v1/claims/${VOTE_1}/wallets/${WALLET_1}`,
+      url,
       payload: unregisterBody(),
     });
     expect(res.statusCode).toBe(200);
@@ -580,20 +598,89 @@ describe('DELETE /v1/claims/:vote/wallets/:wallet', () => {
     const body = res.json();
     expect(body.unregistered).not.toHaveProperty('walletPubkey');
     expect(body.unregistered.walletAddressShort).toBe('WALL…1111');
+    // The full operator-wallet pubkey leaks in NO `/v1/*` surface —
+    // not the response body, and not the DELETE request URL (which
+    // carries only the opaque ref).
     expect(JSON.stringify(body)).not.toContain(WALLET_1);
+    expect(url).not.toContain(WALLET_1);
+    expect(url).toContain(WALLET_REF_1);
     await app.close();
   });
 
-  it('returns 404 wallet_not_registered when no (vote, wallet) row matches', async () => {
-    const { deps } = buildDeps({ walletDelete: false });
+  it('resolves the opaque ref to the real pubkey for the repo delete + audit detail', async () => {
+    // The repo `delete` stays keyed by the REAL pubkey (resolved from
+    // the ref); the `wallet_unregister` audit `detail` records the
+    // FULL resolved pubkey (the `/audit` route redacts it on serve).
+    const deleteArgs: unknown[] = [];
+    const { deps, appended } = buildDeps();
+    deps.operatorWalletsRepo = {
+      findActiveByVoteAndRef: async () => makeWallet(),
+      delete: async (vote: string, wallet: string) => {
+        deleteArgs.push([vote, wallet]);
+        return true;
+      },
+    } as unknown as OperatorWalletsRepository;
     const app = await makeApp(deps);
     const res = await app.inject({
       method: 'DELETE',
-      url: `/v1/claims/${VOTE_1}/wallets/${WALLET_1}`,
+      url: `/v1/claims/${VOTE_1}/wallets/${WALLET_REF_1}`,
+      payload: unregisterBody(),
+    });
+    expect(res.statusCode).toBe(200);
+    // The repo delete was keyed by the resolved REAL pubkey.
+    expect(deleteArgs).toEqual([[VOTE_1, WALLET_1]]);
+    // The audit event's stored detail keeps the full resolved pubkey.
+    expect(appended).toHaveLength(1);
+    expect(appended[0]).toMatchObject({
+      eventType: 'wallet_unregister',
+      detail: { walletPubkey: WALLET_1 },
+    });
+    await app.close();
+  });
+
+  it('returns 404 wallet_not_registered when the ref resolves to no active row', async () => {
+    // `findActiveByVoteAndRef` returns `null` — the opaque ref matches
+    // no live registration for this vote.
+    const { deps } = buildDeps({ walletResolve: null });
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/claims/${VOTE_1}/wallets/${WALLET_REF_1}`,
       payload: unregisterBody(),
     });
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe('wallet_not_registered');
+    await app.close();
+  });
+
+  it('returns 400 when :walletRef is not a UUID', async () => {
+    // The `:walletRef` param is validated as a UUID — a non-UUID
+    // (e.g. a pubkey-shaped string) is a 400 validation_error before
+    // any resolution work.
+    const { deps } = buildDeps();
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/claims/${VOTE_1}/wallets/${WALLET_1}`, // pubkey-shaped, not a UUID
+      payload: unregisterBody(),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('validation_error');
+    await app.close();
+  });
+
+  it('returns 403 when the identity-key unregister signature fails', async () => {
+    const { deps } = buildDeps({
+      walletUnregisterVerify: { ok: false, reason: 'bad_identity_signature' },
+    });
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/claims/${VOTE_1}/wallets/${WALLET_REF_1}`,
+      payload: unregisterBody(),
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('bad_identity_signature');
     await app.close();
   });
 });

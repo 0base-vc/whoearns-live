@@ -38,6 +38,7 @@
   import type { PageData } from './$types';
   import {
     fetchClaimChallenge,
+    fetchClaimStatus,
     updateClaimProfile,
     verifyClaim,
     linkGithub,
@@ -1040,36 +1041,22 @@
         memoTxSignature: walletMemoSignature,
       });
       walletSuccess = `Wallet registered: ${result.wallet.walletAddressShort} (${result.wallet.label}). Expires ${new Date(result.wallet.expiresAt).toLocaleDateString()}.`;
-      // Fold into local state so the list re-renders.
+      // Re-fetch the canonical claim status so the new wallet row
+      // picks up its server-issued `walletRef` (the opaque
+      // per-registration token). The write response carries only the
+      // truncated `walletAddressShort` — NOT a ref — so a folded
+      // local entry could not be unregistered until a reload. A fresh
+      // `GET /v1/claims/:vote` gives every entry its `walletRef`,
+      // keeping the just-registered wallet immediately removable.
+      // Resilient: on a re-fetch failure the prior `status` stands
+      // (the register itself still succeeded).
       if (status.claimed) {
-        // Both `ClaimStatus`'s wallet entry and the write response
-        // carry only the DISPLAY truncated address
-        // (`walletAddressShort`, `FXfD…PsJ5`) — the full
-        // operator-wallet pubkey is never surfaced by any `/v1/*`
-        // response. Use the server's `walletAddressShort` verbatim;
-        // no client-side truncation. `?includeActivity` is not passed
-        // here (the claim page renders no heatmap), so `activity` is
-        // null — matching the read response for that case.
-        const newEntry = {
-          walletAddressShort: result.wallet.walletAddressShort,
-          label: result.wallet.label,
-          registeredAt: result.wallet.registeredAt,
-          expiresAt: result.wallet.expiresAt,
-          activity: null,
-        };
-        const entries = [...status.wallets.entries, newEntry];
-        status = {
-          ...status,
-          wallets: {
-            count: entries.length,
-            capReached: entries.length >= 3,
-            oldestExpiresAt: entries.reduce(
-              (acc: string | null, e) => (acc === null || e.expiresAt < acc ? e.expiresAt : acc),
-              null,
-            ),
-            entries,
-          },
-        };
+        try {
+          status = await fetchClaimStatus(history.vote);
+        } catch {
+          // Keep the pre-register status; the operator can reload to
+          // see the new row. The registration is already committed.
+        }
       }
       walletEnvelope = null;
       walletPubkeyDraft = '';
@@ -1091,7 +1078,7 @@
 
   // ──────────────────────────────────────────────────────────────────
   // Operator wallet UNREGISTER ceremony
-  // (DELETE /v1/claims/:vote/wallets/:wallet)
+  // (DELETE /v1/claims/:vote/wallets/:walletRef)
   //
   // Single-signature flow — operator signs an unregister nonce with
   // their identity key only (the wallet keypair isn't required, see
@@ -1099,9 +1086,16 @@
   // wallet so the operator isn't trapped by a typo'd pubkey or a
   // lost-key wallet sitting in one of the 3 cap slots for 90 days.
   //
+  // SEC — the wallet is identified by its opaque `walletRef` (the
+  // per-registration token from `wallets.entries[].walletRef`), NOT
+  // its full pubkey. `GET /v1/claims/:vote` no longer surfaces the
+  // full operator-wallet pubkey, so the whole flow — the signed nonce
+  // AND the DELETE URL — keys on the ref. The server resolves it back
+  // to the real pubkey internally.
+  //
   // The unregister flow is targeted: only one wallet entry is being
-  // unregistered at a time. `unregisterTarget` carries the wallet
-  // pubkey the flow is currently scoped to (null = no flow open).
+  // unregistered at a time. `unregisterTarget` carries the `walletRef`
+  // the flow is currently scoped to (null = no flow open).
   // ──────────────────────────────────────────────────────────────────
 
   let unregisterTarget = $state<string | null>(null);
@@ -1109,7 +1103,7 @@
     nonceJson: string;
     timestampMs: number;
     expiresAtMs: number;
-    submittedPubkey: string;
+    walletRef: string;
   } | null>(null);
   let unregisterSig = $state('');
   let unregisterError = $state<string | null>(null);
@@ -1119,13 +1113,13 @@
   function buildUnregisterNonceJson(args: {
     identityPubkey: string;
     votePubkey: string;
-    walletPubkey: string;
+    walletRef: string;
     issuedAtMs: number;
     expiresAtMs: number;
   }): string {
     // Sorted keys — must match `canonicaliseOperatorUnregisterNonce`
     // in `src/services/operator-wallet-verification.service.ts`
-    // byte-for-byte.
+    // byte-for-byte. `walletRef` sorts last (after `votePubkey`).
     return JSON.stringify({
       domain: SITE_URL,
       expiresAtMs: args.expiresAtMs,
@@ -1133,12 +1127,12 @@
       issuedAtMs: args.issuedAtMs,
       purpose: 'wallet-unregister',
       votePubkey: args.votePubkey,
-      walletPubkey: args.walletPubkey,
+      walletRef: args.walletRef,
     });
   }
 
-  function startUnregister(walletPubkey: string): void {
-    unregisterTarget = walletPubkey;
+  function startUnregister(walletRef: string): void {
+    unregisterTarget = walletRef;
     unregisterEnvelope = null;
     unregisterSig = '';
     unregisterError = null;
@@ -1161,7 +1155,7 @@
     const nonceJson = buildUnregisterNonceJson({
       identityPubkey: history.identity,
       votePubkey: history.vote,
-      walletPubkey: unregisterTarget,
+      walletRef: unregisterTarget,
       issuedAtMs: timestampMs,
       expiresAtMs,
     });
@@ -1169,7 +1163,7 @@
       nonceJson,
       timestampMs,
       expiresAtMs,
-      submittedPubkey: unregisterTarget,
+      walletRef: unregisterTarget,
     };
     unregisterSig = '';
   }
@@ -1193,24 +1187,25 @@
     unregisterSubmitting = true;
     unregisterError = null;
     unregisterSuccess = null;
+    const removedRef = unregisterEnvelope.walletRef;
     try {
-      const result = await unregisterOperatorWallet({
+      const result = await unregisterOperatorWallet(removedRef, {
         votePubkey: history.vote,
         identityPubkey: history.identity,
-        walletPubkey: unregisterEnvelope.submittedPubkey,
         timestampMs: unregisterEnvelope.timestampMs,
         identitySignatureB58: trimmedSig,
       });
       // The response carries only the truncated `walletAddressShort`
       // (`FXfD…PsJ5`) — the full operator-wallet pubkey is never
-      // surfaced by any `/v1/*` response. The list entries are keyed
-      // on the same truncated form, so this matches them directly.
+      // surfaced by any `/v1/*` response. Surface it in the success
+      // copy; the list entries are dropped by `walletRef` (the stable
+      // opaque key) below.
       const removedShort = result.unregistered.walletAddressShort;
       unregisterSuccess = `Wallet ${removedShort} removed.`;
       // Fold the deletion into local state so the list re-renders
       // without re-fetching `/v1/claims/:vote`.
       if (status.claimed) {
-        const entries = status.wallets.entries.filter((e) => e.walletAddressShort !== removedShort);
+        const entries = status.wallets.entries.filter((e) => e.walletRef !== removedRef);
         status = {
           ...status,
           wallets: {
@@ -1696,7 +1691,7 @@
       <ul
         class="mt-4 divide-y divide-[color:var(--color-border-default)] rounded-lg border border-[color:var(--color-border-default)]"
       >
-        {#each sortedWallets as entry (entry.walletAddressShort)}
+        {#each sortedWallets as entry (entry.walletRef)}
           {@const exp = formatExpiry(entry.expiresAt)}
           <li class="flex flex-col gap-2 px-3 py-2">
             <div class="flex flex-wrap items-baseline justify-between gap-2">
@@ -1727,7 +1722,7 @@
                   any in-progress removal for a different wallet
                   (only one removal can be in flight at a time).
                 -->
-                {#if unregisterTarget === entry.walletAddressShort}
+                {#if unregisterTarget === entry.walletRef}
                   <button
                     type="button"
                     onclick={cancelUnregister}
@@ -1738,7 +1733,7 @@
                 {:else}
                   <button
                     type="button"
-                    onclick={() => startUnregister(entry.walletAddressShort)}
+                    onclick={() => startUnregister(entry.walletRef)}
                     class="text-xs text-red-600 hover:underline dark:text-red-400"
                   >
                     Remove
@@ -1747,7 +1742,7 @@
               </div>
             </div>
 
-            {#if unregisterTarget === entry.walletAddressShort}
+            {#if unregisterTarget === entry.walletRef}
               <!--
                 Inline single-signature removal flow.
 

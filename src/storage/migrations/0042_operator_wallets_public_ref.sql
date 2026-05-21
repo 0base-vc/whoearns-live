@@ -1,0 +1,36 @@
+-- 0042_operator_wallets_public_ref.sql
+--
+-- Opaque per-registration `public_ref` for the operator-wallet
+-- UNREGISTER flow.
+--
+-- A prior privacy redesign stopped surfacing the full operator-wallet
+-- pubkey: `GET /v1/claims/:vote` now serves only a truncated
+-- `walletAddressShort` per wallet. That broke the claim-page
+-- unregister flow — the UI fed the truncated string into the
+-- unregister nonce and the `DELETE /v1/claims/:vote/wallets/:wallet`
+-- URL, and the server's `PubkeySchema` rejected the truncation (400).
+--
+-- The fix introduces an opaque, stable, per-row token. The claim
+-- response returns it per wallet (`walletRef`); the unregister nonce
+-- binds the REF (not the full pubkey), so the client can build the
+-- canonical nonce without ever holding the full pubkey, and no
+-- server "challenge" round-trip is needed. The DELETE endpoint is
+-- keyed by `:walletRef`; the server resolves the ref back to the
+-- full pubkey internally (`findActiveByVoteAndRef`). The full
+-- operator-wallet pubkey then appears in NO `/v1/*` response body or
+-- URL.
+--
+-- `gen_random_uuid()::text` is a VOLATILE default: it is re-evaluated
+-- per inserted row, so adding the column with this default backfills
+-- every existing operator_wallets row with a distinct value in a
+-- single statement — the table has no rows where the ref is null or
+-- shared. `NOT NULL UNIQUE` makes the ref a stable opaque key the
+-- DELETE route can resolve a wallet by. `gen_random_uuid()` ships in
+-- core Postgres 13+ (no `pgcrypto` extension required).
+--
+-- Migrations are forward-only and applied exactly once (see
+-- runner.ts); the `operator_wallets` table is guaranteed to exist
+-- here (migration 0024) so `ADD COLUMN` needs no IF EXISTS guard.
+
+ALTER TABLE operator_wallets
+  ADD COLUMN public_ref TEXT NOT NULL UNIQUE DEFAULT gen_random_uuid()::text;

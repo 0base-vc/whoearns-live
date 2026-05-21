@@ -467,7 +467,15 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
         // its heatmaps directly from this; there is no longer a
         // per-wallet activity endpoint to fan out to. `activity` is
         // `null` when `?includeActivity` is absent.
+        //
+        // `walletRef` is the opaque per-registration token
+        // (`operator_wallets.public_ref`). It is what the claim-page
+        // unregister flow keys on — the signed nonce binds it and the
+        // `DELETE /v1/claims/:vote/wallets/:walletRef` URL carries it,
+        // so the full operator-wallet pubkey stays out of every
+        // request/response. The full pubkey is still NOT surfaced.
         entries: activeWallets.map((w) => ({
+          walletRef: w.publicRef,
           walletAddressShort: truncatePubkey(w.walletPubkey),
           label: w.label,
           registeredAt: w.registeredAt.toISOString(),

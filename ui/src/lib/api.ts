@@ -450,11 +450,15 @@ export function registerOperatorWallet(
  * the 3-wallet cap when they registered an incorrect wallet (typo'd
  * pubkey, lost-key wallet) without waiting the 90-day TTL.
  *
- * Path is `/v1/claims/:vote/wallets/:wallet`; body carries the
- * signed nonce + identity signature. Server-side rejects (a)
- * (vote, wallet) miss as 404, (b) signature/freshness failures as
- * 403, (c) auth role mismatches as 403, and (d) mismatch between
- * path :wallet and body.walletPubkey as 400.
+ * SEC — the wallet is identified by its opaque `walletRef` (the
+ * per-registration token surfaced on `ClaimStatus.wallets.entries[]`),
+ * NOT its full pubkey: the path is `/v1/claims/:vote/wallets/:walletRef`
+ * and no operator-wallet pubkey appears in the URL. `walletRef` is
+ * passed separately from `body` because it rides in the path; `body`
+ * carries the signed nonce + identity signature (which itself binds
+ * the ref). Server-side rejects (a) a `walletRef` resolving to no
+ * active registration as 404, (b) signature/freshness failures as
+ * 403, and (c) auth role mismatches as 403.
  *
  * Throws `ApiError` on any failure — `code` carries the stable
  * machine id, `message` the human-readable sentence.
@@ -464,20 +468,20 @@ export function registerOperatorWallet(
  * pubkey is never surfaced by any `/v1/*` response body.
  */
 export function unregisterOperatorWallet(
+  walletRef: string,
   body: {
     votePubkey: string;
     identityPubkey: string;
-    walletPubkey: string;
     timestampMs: number;
     identitySignatureB58: string;
   },
   fetchFn: typeof fetch = fetch,
 ): Promise<{ unregistered: { walletAddressShort: string } }> {
   const safeVote = encodeURIComponent(body.votePubkey);
-  const safeWallet = encodeURIComponent(body.walletPubkey);
+  const safeWalletRef = encodeURIComponent(walletRef);
   return sendJson<{ unregistered: { walletAddressShort: string } }>(
     'DELETE',
-    `/v1/claims/${safeVote}/wallets/${safeWallet}`,
+    `/v1/claims/${safeVote}/wallets/${safeWalletRef}`,
     body,
     fetchFn,
   );

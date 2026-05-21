@@ -674,36 +674,40 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
    * typo) — they had to wait the full 90-day TTL before the slot
    * freed up. With this endpoint, a mistake costs nothing.
    *
-   * 404 on (vote, wallet) miss: the resource never existed for this
-   * operator, so "delete" is undefined. 403 on signature failure to
-   * match the path/body wallet — same posture as the register
-   * route.
+   * SEC — the wallet is identified by its opaque `:walletRef` (the
+   * `operator_wallets.public_ref` token), NOT its full pubkey: the
+   * full operator-wallet pubkey appears in no `/v1/*` URL. The route
+   * resolves the ref → the real pubkey internally via
+   * `findActiveByVoteAndRef`; the signed nonce likewise binds the
+   * ref, so the client never needs the pubkey to build it.
+   *
+   * 404 (`wallet_not_registered`) when the `(vote, walletRef)` pair
+   * resolves to no ACTIVE registration: the resource doesn't exist
+   * for this operator, so "delete" is undefined. 403 on signature /
+   * freshness / auth failure — same posture as the register route.
    */
   const UnregisterBodySchema = z.object({
     votePubkey: PubkeySchema,
     identityPubkey: PubkeySchema,
-    walletPubkey: PubkeySchema,
+    // The wallet is identified by the `:walletRef` path param — the
+    // body no longer carries `walletPubkey` (the client never holds
+    // the full pubkey).
     timestampMs: z.number().int().positive(),
     identitySignatureB58: z.string().min(64).max(128),
   });
 
-  const VoteAndWalletParamSchema = z.object({
+  // `:walletRef` is the opaque `operator_wallets.public_ref` token
+  // (migration 0042 — `gen_random_uuid()::text`), NOT a pubkey, so it
+  // is validated as a UUID string rather than with `PubkeySchema`.
+  const VoteAndWalletRefParamSchema = z.object({
     vote: PubkeySchema,
-    wallet: PubkeySchema,
+    walletRef: z.string().uuid(),
   });
 
-  app.delete('/v1/claims/:vote/wallets/:wallet', async (request, reply) => {
-    const params = unwrap(VoteAndWalletParamSchema.safeParse(request.params), 'path parameter');
+  app.delete('/v1/claims/:vote/wallets/:walletRef', async (request, reply) => {
+    const params = unwrap(VoteAndWalletRefParamSchema.safeParse(request.params), 'path parameter');
     const body = unwrap(UnregisterBodySchema.safeParse(request.body), 'body');
     if (rejectVoteMismatch(reply, request.id, params.vote, body.votePubkey)) return reply;
-    if (params.wallet !== body.walletPubkey) {
-      return sendError(reply, {
-        code: 'wallet_pubkey_mismatch',
-        statusCode: 400,
-        message: 'wallet pubkey in the path does not match walletPubkey in the signed body',
-        requestId: request.id,
-      });
-    }
     if (!freshnessOk(body.timestampMs)) {
       return sendError(reply, {
         code: 'stale_timestamp',
@@ -729,11 +733,28 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
         requestId: request.id,
       });
     }
+    // Resolve the opaque `:walletRef` → the ACTIVE registration row.
+    // `null` = the ref matches no live registration for this vote →
+    // 404; this is also where a stale/expired ref drops out.
+    const resolvedWallet = await opts.operatorWalletsRepo.findActiveByVoteAndRef(
+      body.votePubkey,
+      params.walletRef,
+    );
+    if (resolvedWallet === null) {
+      return sendError(reply, {
+        code: 'wallet_not_registered',
+        statusCode: 404,
+        message: 'no wallet registration matches the supplied (vote, walletRef) pair',
+        requestId: request.id,
+      });
+    }
     const issuedNonce: OperatorWalletUnregisterNonce = {
       purpose: OPERATOR_WALLET_UNREGISTER_NONCE_PURPOSE,
       votePubkey: body.votePubkey,
       identityPubkey: body.identityPubkey,
-      walletPubkey: body.walletPubkey,
+      // The nonce binds the OPAQUE ref, not the full pubkey — the
+      // client built it from the same `walletRef`.
+      walletRef: params.walletRef,
       issuedAtMs: body.timestampMs,
       expiresAtMs: body.timestampMs + DEFAULT_NONCE_TTL_MS,
       domain: opts.config.SITE_URL,
@@ -756,26 +777,37 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
         requestId: request.id,
       });
     }
-    const deleted = await opts.operatorWalletsRepo.delete(body.votePubkey, body.walletPubkey);
+    // The repo `delete` stays keyed by the REAL pubkey — the server
+    // holds it (resolved above). The `(vote, walletRef)` resolution
+    // already proved the row is live, so a `false` here would be a
+    // delete/delete race; still surface it as 404 for safety.
+    const deleted = await opts.operatorWalletsRepo.delete(
+      body.votePubkey,
+      resolvedWallet.walletPubkey,
+    );
     if (!deleted) {
       return sendError(reply, {
         code: 'wallet_not_registered',
         statusCode: 404,
-        message: 'no wallet registration matches the supplied (vote, wallet) pair',
+        message: 'no wallet registration matches the supplied (vote, walletRef) pair',
         requestId: request.id,
       });
     }
+    // SEC-M4 — the audit `detail` keeps the FULL resolved pubkey as a
+    // forensic record; the `/audit` route redacts it to
+    // `walletAddressShort` on serve (`redactEventDetail`).
     await recordClaimEvent(opts.claimEventsRepo, request, {
       votePubkey: body.votePubkey,
       eventType: 'wallet_unregister',
       identityPubkey: existingClaim.identityPubkey,
-      detail: { walletPubkey: body.walletPubkey },
+      detail: { walletPubkey: resolvedWallet.walletPubkey },
       submittedIp: request.ip,
     });
     // SEC — like the register response, this carries only the
-    // truncated `walletAddressShort`; the full operator-wallet pubkey
-    // never reaches a `/v1/*` response body.
-    return { unregistered: { walletAddressShort: truncatePubkey(body.walletPubkey) } };
+    // truncated `walletAddressShort` (truncating the resolved
+    // pubkey); the full operator-wallet pubkey never reaches a
+    // `/v1/*` response body.
+    return { unregistered: { walletAddressShort: truncatePubkey(resolvedWallet.walletPubkey) } };
   });
 };
 

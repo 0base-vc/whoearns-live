@@ -68,6 +68,7 @@ function makeWallet(over: Partial<OperatorWallet> = {}): OperatorWallet {
   return {
     votePubkey: VOTE_1,
     walletPubkey: 'WALL111111111111111111111111111111111111111',
+    publicRef: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa',
     label: 'hot',
     signedNonce: 'wallet-nonce',
     memoTxSignature: 'z'.repeat(88),
@@ -220,6 +221,7 @@ describe('GET /v1/claims/:vote', () => {
       activeWallets: [
         makeWallet({
           walletPubkey: 'WALL111111111111111111111111111111111111111',
+          publicRef: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa',
           label: 'first-registered',
           registeredAt: new Date('2026-02-01T00:00:00Z'),
           expiresAt: new Date('2026-06-01T00:00:00Z'),
@@ -227,6 +229,7 @@ describe('GET /v1/claims/:vote', () => {
         // Soonest-expiring active registration → drives oldestExpiresAt.
         makeWallet({
           walletPubkey: 'WALL222222222222222222222222222222222222222',
+          publicRef: 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb',
           label: 'second-registered',
           registeredAt: new Date('2026-02-15T00:00:00Z'),
           expiresAt: new Date('2026-05-15T00:00:00Z'),
@@ -247,14 +250,15 @@ describe('GET /v1/claims/:vote', () => {
     expect(body.wallets.capReached).toBe(false);
     // MIN expiry across the active rows.
     expect(body.wallets.oldestExpiresAt).toBe('2026-05-15T00:00:00.000Z');
-    // Per-wallet entries surface a DISPLAY-ONLY truncated address
-    // (`walletAddressShort`) + label + windows. We assert the EXACT
-    // shape AND ordering — the repo serves rows in `registered_at
-    // ASC`, so a regression that re-orders (or swaps the
-    // walletAddressShort ↔ label fields) shows up as a diff.
-    // `activity` is null because this request omits `?includeActivity`.
+    // Per-wallet entries surface the opaque `walletRef` + a
+    // DISPLAY-ONLY truncated address (`walletAddressShort`) + label +
+    // windows. We assert the EXACT shape AND ordering — the repo
+    // serves rows in `registered_at ASC`, so a regression that
+    // re-orders (or swaps fields) shows up as a diff. `activity` is
+    // null because this request omits `?includeActivity`.
     expect(body.wallets.entries).toEqual([
       {
+        walletRef: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa',
         walletAddressShort: 'WALL…1111',
         label: 'first-registered',
         registeredAt: '2026-02-01T00:00:00.000Z',
@@ -262,6 +266,7 @@ describe('GET /v1/claims/:vote', () => {
         activity: null,
       },
       {
+        walletRef: 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb',
         walletAddressShort: 'WALL…2222',
         label: 'second-registered',
         registeredAt: '2026-02-15T00:00:00.000Z',
@@ -270,7 +275,8 @@ describe('GET /v1/claims/:vote', () => {
       },
     ]);
     // The full operator-wallet pubkey must NOT appear anywhere in the
-    // response body — only the truncated `WALL…NNNN` form.
+    // response body — only the truncated `WALL…NNNN` form + the
+    // opaque `walletRef`.
     expect(res.body).not.toContain('WALL111111111111111111111111111111111111111');
     expect(res.body).not.toContain('WALL222222222222222222222222222222222222222');
     await app.close();
@@ -329,10 +335,12 @@ describe('GET /v1/claims/:vote', () => {
       activeWallets: [
         makeWallet({
           walletPubkey: 'WALL111111111111111111111111111111111111111',
+          publicRef: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa',
           label: 'hot',
         }),
         makeWallet({
           walletPubkey: 'WALL222222222222222222222222222222222222222',
+          publicRef: 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb',
           label: 'cold',
         }),
       ],
@@ -371,6 +379,7 @@ describe('GET /v1/claims/:vote', () => {
     // Rows are grouped per wallet; entry shape matches the activity
     // response — date (YYYY-MM-DD), txCount, and a null txFeesLamports.
     const first = body.wallets.entries[0];
+    expect(first.walletRef).toBe('aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa');
     expect(first.walletAddressShort).toBe('WALL…1111');
     expect(first.activity.days).toBe(365);
     expect(first.activity.entries).toEqual([
@@ -378,6 +387,7 @@ describe('GET /v1/claims/:vote', () => {
       { date: '2026-05-01', txCount: 3, txFeesLamports: null },
     ]);
     const second = body.wallets.entries[1];
+    expect(second.walletRef).toBe('bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb');
     expect(second.activity.entries).toEqual([
       { date: '2026-04-30', txCount: 11, txFeesLamports: null },
     ]);
