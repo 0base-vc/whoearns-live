@@ -116,8 +116,6 @@ function humanMessageForWalletFailure(reason: WalletFailureReason): string {
       return 'The memo transaction exists, but the connected wallet did not sign it. Reconnect the correct wallet and re-sign.';
     case 'memo_tx_no_memo_instruction':
       return 'The transaction contains no SPL Memo instruction. Re-sign the registration so the memo transaction is rebuilt.';
-    case 'memo_tx_not_memo_only':
-      return 'The transaction is not a memo-only transaction; it must contain only the single SPL Memo instruction.';
     case 'memo_mismatch':
       return 'The memo transaction does not carry this registration nonce. Re-sign so a fresh memo transaction is built for the current nonce.';
     case 'memo_tx_rpc_unavailable':

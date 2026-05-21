@@ -193,7 +193,6 @@ export type VerifyOperatorWalletFailure =
   | { ok: false; reason: 'memo_tx_not_found' }
   | { ok: false; reason: 'memo_tx_wallet_not_signer' }
   | { ok: false; reason: 'memo_tx_no_memo_instruction' }
-  | { ok: false; reason: 'memo_tx_not_memo_only' }
   | { ok: false; reason: 'memo_mismatch' }
   | { ok: false; reason: 'memo_tx_rpc_unavailable' }
   | { ok: false; reason: 'malformed_pubkey' };
@@ -268,8 +267,8 @@ function decodeMemoUtf8(dataBase58: string): string | null {
 }
 
 /**
- * Verifies an operator-wallet registration backed by a memo-only
- * Solana transaction.
+ * Verifies an operator-wallet registration backed by a browser-wallet
+ * memo transaction.
  *
  * Steps:
  *   1. Reject if `issuedNonce.expiresAtMs` is in the past.
@@ -281,14 +280,14 @@ function decodeMemoUtf8(dataBase58: string): string | null {
  *      commitment and confirm `walletPubkey` is one of the first
  *      `numRequiredSignatures` entries of `accountKeys` — i.e. the
  *      operator wallet actually signed the transaction.
- *   5. Enforce that the transaction is memo-ONLY — exactly one
- *      instruction, the SPL Memo (by program id) — and confirm its
- *      UTF-8 data equals the canonical nonce byte-for-byte. A tx that
- *      smuggles a transfer (or any other instruction) alongside the
- *      memo is rejected `memo_tx_not_memo_only`. This single
- *      transaction simultaneously proves wallet custody (step 4) and
- *      binds the registration to the nonce (step 5) — it replaces the
- *      legacy wallet-key signMessage + separate anchor transaction.
+ *   5. Locate an SPL Memo instruction (by program id) and confirm its
+ *      UTF-8 data equals the canonical nonce byte-for-byte. The
+ *      transaction is NOT required to be memo-only — wallets inject
+ *      ComputeBudget / Lighthouse instructions on sign-and-send (see
+ *      step 5 in the method body). This single transaction
+ *      simultaneously proves wallet custody (step 4) and binds the
+ *      registration to the nonce (step 5) — it replaces the legacy
+ *      wallet-key signMessage + separate anchor transaction.
  *
  * RPC errors are demoted to `memo_tx_rpc_unavailable` (transient,
  * retryable) so the operator gets actionable feedback instead of a
@@ -386,22 +385,28 @@ export class OperatorWalletVerificationService {
       return { ok: false, reason: 'memo_tx_wallet_not_signer' };
     }
 
-    // Step 5 — memo-only enforcement + memo-content binding. The seed
-    // mandates a memo-ONLY transaction: exactly one instruction, the
-    // SPL Memo, carrying the canonical nonce. Enforcing it here closes
-    // the door on a tx that smuggles a transfer or any other
-    // instruction alongside the memo.
-    if (chainResult.instructions.length === 0) {
+    // Step 5 — memo-content binding. Locate an SPL Memo instruction by
+    // program id and confirm its UTF-8 data equals the canonical
+    // nonce. The transaction is intentionally NOT required to be
+    // memo-only: wallets rewrite a sign-and-send transaction before
+    // broadcasting — Phantom prepends two ComputeBudget priority-fee
+    // instructions and appends a Lighthouse (L2TExMFK...) assertion
+    // guard, so a real operator-built memo tx lands on chain carrying
+    // ~4 instructions even though the UI built exactly one, and the
+    // operator cannot disable this. An earlier revision enforced
+    // strict memo-only and every Phantom registration failed — do NOT
+    // re-add that check. Extra instructions do not weaken the proof:
+    // custody is the signer-set check (step 4) and the registration is
+    // bound to this exact validator/wallet/nonce by the memo content,
+    // neither of which depends on the transaction being memo-only.
+    const memoInstructions = chainResult.instructions.filter(
+      (ix) => ix.programId === SPL_MEMO_PROGRAM_ID,
+    );
+    if (memoInstructions.length === 0) {
       return { ok: false, reason: 'memo_tx_no_memo_instruction' };
     }
-    if (chainResult.instructions.length > 1) {
-      return { ok: false, reason: 'memo_tx_not_memo_only' };
-    }
-    const memoIx = chainResult.instructions[0];
-    if (memoIx === undefined || memoIx.programId !== SPL_MEMO_PROGRAM_ID) {
-      return { ok: false, reason: 'memo_tx_no_memo_instruction' };
-    }
-    if (decodeMemoUtf8(memoIx.dataBase58) !== canonical) {
+    const memoMatches = memoInstructions.some((ix) => decodeMemoUtf8(ix.dataBase58) === canonical);
+    if (!memoMatches) {
       return { ok: false, reason: 'memo_mismatch' };
     }
 

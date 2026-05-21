@@ -478,23 +478,29 @@ describe('OperatorWalletVerificationService.verify', () => {
     if (!result.ok) expect(result.reason).toBe('memo_mismatch');
   });
 
-  it('rejects a memo tx that smuggles extra non-memo instructions alongside the memo', async () => {
-    // The seed mandates a memo-ONLY transaction. A tx that carries the
-    // canonical-nonce memo BUT also a transfer (or any other
-    // instruction) is rejected `memo_tx_not_memo_only` — even though
-    // the memo content itself matches.
+  it('accepts a memo tx carrying wallet-injected ComputeBudget / Lighthouse instructions', async () => {
+    // Wallets rewrite a sign-and-send transaction before broadcasting:
+    // Phantom prepends ComputeBudget priority-fee instructions and
+    // appends a Lighthouse guard, so the landed tx carries extra
+    // instructions the operator cannot suppress. Verification must
+    // still pass — custody (signer set) and nonce binding (memo
+    // content) do not depend on the tx being memo-only.
     const identity = await makeKeypair();
     const wallet = await makeKeypair();
     const nonce = makeNonce(identity.pubB58, wallet.pubB58);
     const canonical = canonicaliseOperatorNonce(nonce);
+    const COMPUTE_BUDGET = 'ComputeBudget111111111111111111111111111111';
+    const LIGHTHOUSE = 'L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95';
     const rpc: OperatorWalletRpc = {
       async getTransaction() {
         return {
-          accountKeys: [wallet.pubB58, '11111111111111111111111111111111', SPL_MEMO_PROGRAM_ID],
+          accountKeys: [wallet.pubB58, COMPUTE_BUDGET, SPL_MEMO_PROGRAM_ID, LIGHTHOUSE],
           numRequiredSignatures: 1,
           instructions: [
-            { programId: '11111111111111111111111111111111', dataBase58: memoDataBase58('') },
+            { programId: COMPUTE_BUDGET, dataBase58: memoDataBase58('') },
+            { programId: COMPUTE_BUDGET, dataBase58: memoDataBase58('') },
             { programId: SPL_MEMO_PROGRAM_ID, dataBase58: memoDataBase58(canonical) },
+            { programId: LIGHTHOUSE, dataBase58: memoDataBase58('') },
           ],
         };
       },
@@ -504,8 +510,7 @@ describe('OperatorWalletVerificationService.verify', () => {
       identitySignatureB58: await signCanonical(canonical, identity.priv),
       memoTxSignature: VALID_TX_SIG,
     });
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toBe('memo_tx_not_memo_only');
+    expect(result.ok).toBe(true);
   });
 
   it('demotes RPC errors to memo_tx_rpc_unavailable (transient)', async () => {
