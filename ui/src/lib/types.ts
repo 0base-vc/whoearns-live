@@ -174,17 +174,24 @@ export interface ClaimStatus {
     capReached: boolean;
     oldestExpiresAt: string | null;
     /**
-     * Per-wallet entries — full pubkey + operator-chosen label +
-     * registration/expiry windows. Surfaced on the response so the
-     * hub can fan-out `/v1/operator-wallets/:wallet/activity` calls
-     * per wallet without scraping the audit log. All fields here
-     * are public (operator-DECLARED affiliations).
+     * Per-wallet entries — a DISPLAY-ONLY truncated wallet address
+     * (`walletAddressShort`, e.g. `FXfD…PsJ5`) + operator-chosen
+     * label + registration/expiry windows. The full operator-wallet
+     * pubkey is never surfaced; the hub renders `walletAddressShort`
+     * verbatim. `activity` is the wallet's 365-day daily activity,
+     * populated only when the claim-status fetch is made with
+     * `includeActivity: true` (the hub does this so it renders the
+     * heatmaps from one fetch); `null` otherwise.
      */
     entries: ReadonlyArray<{
-      wallet: string;
+      walletAddressShort: string;
       label: string;
       registeredAt: string;
       expiresAt: string;
+      activity: {
+        days: number;
+        entries: OperatorWalletActivityEntry[];
+      } | null;
     }>;
   };
 }
@@ -318,27 +325,18 @@ export interface ScoringResponse {
   oai: OaiComponents | null;
 }
 
-/** `GET /v1/operator-wallets/:wallet`. */
-export interface OperatorWalletResponse {
-  wallet: string;
-  vote: string;
-  label: string;
-  registeredAt: string;
-  expiresAt: string;
-}
-
-/** One sparse-day entry from `/v1/operator-wallets/:wallet/activity`. */
+/**
+ * One sparse-day operator-wallet activity entry. Surfaced inline on
+ * `ClaimStatus.wallets.entries[].activity.entries` (the claim-status
+ * response folds wallet activity in when fetched with
+ * `includeActivity: true`). Days with zero activity are omitted —
+ * clients zero-fill at draw time. `txFeesLamports` is `null` in the
+ * current release (counts-only; fee backfill lands later).
+ */
 export interface OperatorWalletActivityEntry {
   date: string;
   txCount: number;
   txFeesLamports: string | null;
-}
-
-/** `GET /v1/operator-wallets/:wallet/activity?days=N`. */
-export interface OperatorWalletActivityResponse {
-  wallet: string;
-  days: number;
-  entries: OperatorWalletActivityEntry[];
 }
 
 /** One curated SIMD proposal from `/v1/simd-proposals`. */

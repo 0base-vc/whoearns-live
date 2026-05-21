@@ -1042,15 +1042,20 @@
       walletSuccess = `Wallet registered: ${shortenPubkey(result.wallet.walletPubkey, 4, 4)} (${result.wallet.label}). Expires ${new Date(result.wallet.expiresAt).toLocaleDateString()}.`;
       // Fold into local state so the list re-renders.
       if (status.claimed) {
-        // ClaimStatus's wallet entry shape uses `wallet` (not
-        // `walletPubkey`) — the read endpoint exposes the field that
-        // way for parity with `/v1/operator-wallets/:wallet`. The
-        // write-response shape uses `walletPubkey`; map between them.
+        // ClaimStatus's wallet entry shape carries only a DISPLAY
+        // truncated address (`walletAddressShort`) — the full
+        // operator-wallet pubkey is never surfaced by `GET
+        // /v1/claims/:vote`. The write-response shape uses the full
+        // `walletPubkey`; truncate it to the same `FXfD…PsJ5` form
+        // the read endpoint emits. `?includeActivity` is not passed
+        // here (the claim page renders no heatmap), so `activity` is
+        // null — matching the read response for that case.
         const newEntry = {
-          wallet: result.wallet.walletPubkey,
+          walletAddressShort: shortenPubkey(result.wallet.walletPubkey, 4, 4),
           label: result.wallet.label,
           registeredAt: result.wallet.registeredAt,
           expiresAt: result.wallet.expiresAt,
+          activity: null,
         };
         const entries = [...status.wallets.entries, newEntry];
         status = {
@@ -1197,11 +1202,14 @@
         identitySignatureB58: trimmedSig,
       });
       const removed = unregisterEnvelope.submittedPubkey;
-      unregisterSuccess = `Wallet ${shortenPubkey(removed, 4, 4)} removed.`;
+      // The list entries carry only the truncated address — match on
+      // the same `FXfD…PsJ5` truncation of the just-removed pubkey.
+      const removedShort = shortenPubkey(removed, 4, 4);
+      unregisterSuccess = `Wallet ${removedShort} removed.`;
       // Fold the deletion into local state so the list re-renders
       // without re-fetching `/v1/claims/:vote`.
       if (status.claimed) {
-        const entries = status.wallets.entries.filter((e) => e.wallet !== removed);
+        const entries = status.wallets.entries.filter((e) => e.walletAddressShort !== removedShort);
         status = {
           ...status,
           wallets: {
@@ -1687,14 +1695,19 @@
       <ul
         class="mt-4 divide-y divide-[color:var(--color-border-default)] rounded-lg border border-[color:var(--color-border-default)]"
       >
-        {#each sortedWallets as entry (entry.wallet)}
+        {#each sortedWallets as entry (entry.walletAddressShort)}
           {@const exp = formatExpiry(entry.expiresAt)}
           <li class="flex flex-col gap-2 px-3 py-2">
             <div class="flex flex-wrap items-baseline justify-between gap-2">
               <div class="min-w-0">
                 <div class="text-sm font-semibold">{entry.label}</div>
+                <!--
+                  Display-only truncated address. `GET /v1/claims/:vote`
+                  no longer surfaces the full operator-wallet pubkey;
+                  `walletAddressShort` is the `FXfD…PsJ5` form.
+                -->
                 <div class="font-mono text-[11px] text-[color:var(--color-text-subtle)]">
-                  {shortenPubkey(entry.wallet, 8, 8)}
+                  {entry.walletAddressShort}
                 </div>
               </div>
               <div class="flex items-center gap-3">
@@ -1713,7 +1726,7 @@
                   any in-progress removal for a different wallet
                   (only one removal can be in flight at a time).
                 -->
-                {#if unregisterTarget === entry.wallet}
+                {#if unregisterTarget === entry.walletAddressShort}
                   <button
                     type="button"
                     onclick={cancelUnregister}
@@ -1724,7 +1737,7 @@
                 {:else}
                   <button
                     type="button"
-                    onclick={() => startUnregister(entry.wallet)}
+                    onclick={() => startUnregister(entry.walletAddressShort)}
                     class="text-xs text-red-600 hover:underline dark:text-red-400"
                   >
                     Remove
@@ -1733,7 +1746,7 @@
               </div>
             </div>
 
-            {#if unregisterTarget === entry.wallet}
+            {#if unregisterTarget === entry.walletAddressShort}
               <!--
                 Inline single-signature removal flow.
 

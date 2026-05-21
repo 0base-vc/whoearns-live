@@ -10,8 +10,9 @@
   anything happen?" more than "how much."
 
   Data flow:
-    1. Caller fetches `/v1/operator-wallets/:wallet/activity?days=365`,
-       which returns sparse entries (days with 0 tx are omitted).
+    1. Caller fetches `/v1/claims/:vote?includeActivity=1`, whose
+       `wallets.entries[].activity.entries` are the sparse rows
+       (days with 0 tx are omitted).
     2. Caller passes `entries` here. The component zero-fills the
        window, builds the 53 × 7 grid, and renders.
     3. Cells outside the window (older than `windowStartDate` or in
@@ -43,7 +44,10 @@
   handles desktop and mobile.
 
   Props:
-    - `wallet`: the wallet's full pubkey (used for tooltip + label)
+    - `walletAddressShort`: the wallet's already-truncated address
+      (`FXfD…PsJ5`) — the full operator-wallet pubkey is hidden by
+      the API and never reaches this component. Rendered verbatim in
+      the `<code>` under the label.
     - `label`: operator-chosen wallet label (e.g. "Hot Wallet")
     - `entries`: sparse activity rows from the API
     - `endDate`: anchor date for the rightmost column (default = today UTC)
@@ -67,21 +71,21 @@
   } from '$lib/heatmap';
 
   interface Props {
-    wallet: string;
+    walletAddressShort: string;
     label: string;
     entries: ReadonlyArray<OperatorWalletActivityEntry>;
     endDate?: Date;
     days?: number;
   }
 
-  let { wallet, label, entries, endDate, days = 365 }: Props = $props();
+  let { walletAddressShort, label, entries, endDate, days = 365 }: Props = $props();
 
   // Unique-per-instance id for the `aria-labelledby` heading pairing.
-  // `$props.id()` — NOT the wallet pubkey — keeps the full operator-
-  // wallet address out of the public DOM as an `id` attribute. The
-  // only wallet text the component renders is the truncated
-  // `truncatedWallet` below. `$props.id()` must be a bare variable
-  // initializer, hence the two-step (uid -> headingId).
+  // `$props.id()` — NOT a wallet pubkey — keeps any wallet address
+  // out of the public DOM as an `id` attribute. The only wallet text
+  // the component renders is the already-truncated `walletAddressShort`.
+  // `$props.id()` must be a bare variable initializer, hence the
+  // two-step (uid -> headingId).
   const uid = $props.id();
   const headingId = `heatmap-heading-${uid}`;
 
@@ -151,7 +155,6 @@
   const peak = $derived(brightestDay(entries));
   const activeDays = $derived(activeDayCount(entries));
   const lastActive = $derived(daysSinceMostRecentActive(entries, today));
-  const truncatedWallet = $derived(`${wallet.slice(0, 4)}…${wallet.slice(-4)}`);
   const isInactive = $derived(activeDays === 0);
 
   /**
@@ -235,7 +238,7 @@
         {label}
       </h3>
       <p class="text-xs text-[color:var(--color-text-muted)]">
-        <code class="font-mono">{truncatedWallet}</code>
+        <code class="font-mono">{walletAddressShort}</code>
         {#if peak !== null && peakInWindow}
           <span class="ml-1 text-[color:var(--color-text-muted)]">
             · brightest day: {peak.txCount} tx on {peak.date}

@@ -1,8 +1,9 @@
 /**
  * Pure helpers for the 365-day operator-wallet activity heatmap.
  *
- * The backend (`GET /v1/operator-wallets/:wallet/activity?days=N`)
- * returns sparse entries — days with zero transactions are omitted.
+ * The backend (`GET /v1/claims/:vote?includeActivity=1`, inline on
+ * `wallets.entries[].activity.entries`) returns sparse entries —
+ * days with zero transactions are omitted.
  * The UI grid is 53 columns × 7 rows (week × day-of-week), and every
  * cell needs a numeric value. These helpers do the sparse → dense
  * fill, the log-scale intensity bucketing, the month label

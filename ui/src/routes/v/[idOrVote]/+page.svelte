@@ -78,19 +78,8 @@
   import { formatTimestamp, lamportsStringToSolNumber } from '$lib/format';
   import { SITE_URL } from '$lib/site';
   import { safeOperatorUrl } from '$lib/url-safety';
-  import {
-    fetchClaimAudit,
-    fetchClaimStatus,
-    fetchOperatorWalletActivity,
-    fetchSimdProposals,
-  } from '$lib/api';
-  import type {
-    ClaimAuditEvent,
-    ClaimStatus,
-    NodeTier,
-    OperatorWalletActivityResponse,
-    SimdProposalListItem,
-  } from '$lib/types';
+  import { fetchClaimAudit, fetchClaimStatus, fetchSimdProposals } from '$lib/api';
+  import type { ClaimAuditEvent, ClaimStatus, NodeTier, SimdProposalListItem } from '$lib/types';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -140,10 +129,10 @@
   // someone earlier completed the claim flow.
   let isOwnerHint = $state(false);
 
-  // CSR-deferred panel data — claim status + audit + per-wallet
-  // activity. None of these block the initial paint; the hero +
-  // tier card + tenure/client render from the SSR `/scoring`
-  // payload, then these fill in as their fetches resolve.
+  // CSR-deferred panel data — claim status + audit. None of these
+  // block the initial paint; the hero + tier card + tenure/client
+  // render from the SSR `/scoring` payload, then these fill in as
+  // their fetches resolve.
   //
   // Three failure dimensions, each tracked separately so the UI can
   // tell "loaded successfully but empty" apart from "fetch failed":
@@ -152,19 +141,18 @@
   //   - data:    fulfilled value (the real render)
   // Mirroring this shape across all three surfaces is what closes the
   // "audit-empty-OR-broken renders the same" silent-failure class.
+  //
+  // Wallet activity is no longer a separate fan-out: the claim-status
+  // fetch is made with `includeActivity: true`, so each registered
+  // wallet's 365-day activity arrives inline on
+  // `claimStatus.wallets.entries[].activity`. One loading state
+  // (`claimStatusLoading`) covers the whole wallet-activity section.
   let claimStatus = $state<ClaimStatus | null>(null);
   let claimStatusLoading = $state(true);
   let claimStatusFailed = $state(false);
   let auditEvents = $state<ClaimAuditEvent[]>([]);
   let auditLoading = $state(true);
   let auditFailed = $state(false);
-  let walletActivity = $state<Map<string, OperatorWalletActivityResponse>>(new Map());
-  // Per-wallet failure tracking — when one wallet's activity request
-  // rejects (5xx, network), we render an error tile for THAT wallet
-  // instead of silently dropping its heatmap. Other wallets still
-  // render their own state independently.
-  let walletActivityFailed = $state<Set<string>>(new Set());
-  let walletActivityLoading = $state(true);
   // SIMD proposals — fetched as a CSR (the homepage hits the same
   // endpoint, so an SSR fetch here would double-charge per-IP
   // budget for the common 'visit homepage → click hub link' flow).
@@ -199,27 +187,27 @@
     auditEvents = [];
     auditLoading = true;
     auditFailed = false;
-    walletActivity = new Map();
-    walletActivityFailed = new Set();
-    walletActivityLoading = true;
     simdItems = [];
     simdLoading = true;
   }
 
   /**
-   * Drive the two-wave CSR fan-out for `vote`. Each request honours
-   * the shared `signal`; if the user navigates away before it
-   * completes, the controller aborts and the resulting rejection
-   * (with `name: 'AbortError'`) is intentionally ignored so we
-   * don't paint a stale error tile after teardown.
+   * Drive the CSR fan-out for `vote` — claim status + audit log +
+   * SIMD feed, all in parallel. Each request honours the shared
+   * `signal`; if the user navigates away before it completes, the
+   * controller aborts and the resulting rejection (with
+   * `name: 'AbortError'`) is intentionally ignored so we don't paint
+   * a stale error tile after teardown.
+   *
+   * Claim status is fetched with `includeActivity: true` so each
+   * registered wallet's 365-day activity arrives INLINE on the same
+   * response — there is no longer a per-wallet activity fan-out
+   * (exposing the full operator-wallet pubkey in a `/v1/*` URL was
+   * information disclosure). The wallet-activity section's loading
+   * state is just `claimStatusLoading`.
    */
   async function loadCsrPanels(vote: string, signal: AbortSignal): Promise<void> {
-    // Wave 1 — claim status + audit log. Independent; allSettled so a
-    // failed audit doesn't mask the wallet section. Wave 2 fans out
-    // as SOON as Wave 1's claim half resolves (not after the
-    // allSettled join), so a slow audit doesn't serialize the
-    // heatmaps behind it.
-    const claimPromise = fetchClaimStatus(vote, { signal }).then(
+    const claimPromise = fetchClaimStatus(vote, { signal, includeActivity: true }).then(
       (v) => ({ ok: true as const, value: v }),
       (err: unknown) => ({ ok: false as const, error: err }),
     );
@@ -236,31 +224,6 @@
       (v) => ({ ok: true as const, value: v }),
       (err: unknown) => ({ ok: false as const, error: err }),
     );
-
-    // Start Wave 2 as soon as the wallet list lands.
-    const walletWavePromise = claimPromise.then(async (claim) => {
-      if (signal.aborted) return;
-      const wallets = claim.ok ? claim.value.wallets.entries : [];
-      if (wallets.length === 0) {
-        walletActivityLoading = false;
-        return;
-      }
-      const settled = await Promise.allSettled(
-        wallets.map((w) => fetchOperatorWalletActivity(w.wallet, 365, { signal })),
-      );
-      if (signal.aborted) return;
-      const nextMap = new Map<string, OperatorWalletActivityResponse>();
-      const nextFailed = new Set<string>();
-      settled.forEach((r, i) => {
-        const wallet = wallets[i];
-        if (wallet === undefined) return;
-        if (r.status === 'fulfilled') nextMap.set(wallet.wallet, r.value);
-        else if (!isAbortError(r.reason)) nextFailed.add(wallet.wallet);
-      });
-      walletActivity = nextMap;
-      walletActivityFailed = nextFailed;
-      walletActivityLoading = false;
-    });
 
     const [claim, audit, simd] = await Promise.all([claimPromise, auditPromise, simdPromise]);
     if (signal.aborted) return;
@@ -284,13 +247,6 @@
     // delegator's trust signal. No error tile here.
     if (simd.ok) simdItems = simd.value.items;
     simdLoading = false;
-
-    // If Wave 1's claim rejected we still need to flip Wave 2's
-    // loading flag — the walletWavePromise's short-circuit on
-    // `wallets.length === 0` does it, but only when claim resolved
-    // with an empty entries list. On a Wave 1 rejection wallets is
-    // []  (same path).
-    await walletWavePromise;
   }
 
   /** True when an unknown error is the rejection from a deliberate AbortController.abort(). */
@@ -1138,13 +1094,28 @@
   the per-day grid. The PM brief said: "shorter page, not sadder"
   + "audit + heatmaps are the highest-signal delegator surfaces."
 
-  Each registered operator wallet renders its own panel. Cold-
-  start renders a CLS-stable skeleton (fixed min-height) so
-  panels arriving via Wave 2 don't snap the page. Per-wallet
-  rejections (5xx, network) render an explicit error tile —
-  silent dropout was the worst version of this.
+  Each registered operator wallet renders its own panel. The
+  365-day activity arrives INLINE on the claim-status response
+  (fetched with `includeActivity: true`) — no per-wallet fan-out,
+  so the whole section shares one loading state tied to the
+  claim-status fetch. While that fetch is in flight a single
+  CLS-stable skeleton holds the space.
 -->
-{#if !claimStatusLoading && claimStatus !== null && claimStatus.wallets.entries.length > 0}
+{#if claimStatusLoading}
+  <!--
+    Section-level skeleton — one tile while the claim-status fetch
+    (which carries the inline activity) is in flight. `aria-busy`
+    tells AT users the region is mid-load.
+  -->
+  <div
+    class="mt-6 min-h-[220px] animate-pulse rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 text-sm text-[color:var(--color-text-muted)]"
+    role="status"
+    aria-busy="true"
+    aria-label="Loading wallet activity"
+  >
+    Loading wallet activity…
+  </div>
+{:else if claimStatus !== null && claimStatus.wallets.entries.length > 0}
   <section class="mt-6 flex flex-col gap-4" aria-labelledby="wallet-activity-heading">
     <header class="px-1">
       <h2 id="wallet-activity-heading" class="text-lg font-semibold tracking-tight">
@@ -1154,50 +1125,12 @@
         Daily transactions per registered wallet, last 365 days.
       </p>
     </header>
-    {#each claimStatus.wallets.entries as walletEntry (walletEntry.wallet)}
-      {@const activity = walletActivity.get(walletEntry.wallet)}
-      {@const isFailed = walletActivityFailed.has(walletEntry.wallet)}
-      {#if activity !== undefined}
-        <ActivityHeatmap
-          wallet={walletEntry.wallet}
-          label={walletEntry.label}
-          entries={activity.entries}
-        />
-      {:else if isFailed}
-        <!--
-          Per-wallet failure tile. Distinct from "loading" so a
-          delegator can see WHICH wallet's heatmap didn't load.
-          `role="status"` for screen-reader announcement.
-        -->
-        <!--
-          `role="status"` implies `aria-live="polite"` +
-          `aria-atomic="true"` per ARIA 1.2 — no need to spell out
-          both. The earlier explicit `aria-live="polite"` was
-          redundant chrome.
-        -->
-        <div
-          class="rounded-lg border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] p-4 text-sm text-[color:var(--color-status-warn-fg)]"
-          role="status"
-        >
-          Couldn't load activity for <strong>{walletEntry.label}</strong>. The wallet is registered;
-          try refreshing the page.
-        </div>
-      {:else}
-        <!--
-          Skeleton: matches the heatmap's resting height so panels
-          arriving via Wave 2 don't snap the page. `aria-busy="true"`
-          tells AT users that the region is mid-load; the static
-          "Loading…" text is the visible cue.
-        -->
-        <div
-          class="min-h-[220px] animate-pulse rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4 text-sm text-[color:var(--color-text-muted)]"
-          role="status"
-          aria-busy="true"
-          aria-label="Loading activity for {walletEntry.label}"
-        >
-          Loading activity for {walletEntry.label}…
-        </div>
-      {/if}
+    {#each claimStatus.wallets.entries as walletEntry (walletEntry.walletAddressShort)}
+      <ActivityHeatmap
+        walletAddressShort={walletEntry.walletAddressShort}
+        label={walletEntry.label}
+        entries={walletEntry.activity?.entries ?? []}
+      />
     {/each}
   </section>
 {/if}

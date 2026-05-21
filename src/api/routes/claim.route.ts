@@ -12,6 +12,7 @@ import type {
   ValidatorClaimEventsRepository,
 } from '../../storage/repositories/validator-claim-events.repo.js';
 import type { ValidatorGithubRepository } from '../../storage/repositories/validator-github.repo.js';
+import type { WalletActivityRepository } from '../../storage/repositories/wallet-activity.repo.js';
 import { cacheControl } from '../cache-control.js';
 import { sendError } from '../error-handler.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
@@ -67,7 +68,39 @@ export interface ClaimRoutesDeps {
    */
   validatorGithubRepo: Pick<ValidatorGithubRepository, 'findActiveByVote'>;
   operatorWalletsRepo: Pick<OperatorWalletsRepository, 'listActiveByVote'>;
+  /**
+   * SEC — operator-wallet pubkey hiding. `GET /v1/claims/:vote` with
+   * `?includeActivity` folds each registered wallet's 365-day daily
+   * activity into the response so the hub never has to call a
+   * per-wallet endpoint keyed on the full operator-wallet pubkey.
+   * Batched `listRecentForWallets` — ONE query for all of a
+   * validator's wallets — same repo the OAI route reads.
+   */
+  walletActivityRepo: Pick<WalletActivityRepository, 'listRecentForWallets'>;
 }
+
+/**
+ * Truncate an operator-wallet pubkey to the display-only short form
+ * `FXfD…PsJ5` — first 4 chars + a U+2026 ellipsis + last 4 chars.
+ * The full operator-wallet pubkey must NEVER reach a `/v1/*` response
+ * body; the hub renders this truncated string verbatim (the same form
+ * `ActivityHeatmap.svelte` already used internally). The full pubkey
+ * stays server-side for the truncation input + the activity query.
+ */
+function truncatePubkey(pubkey: string): string {
+  return `${pubkey.slice(0, 4)}…${pubkey.slice(-4)}`;
+}
+
+/**
+ * Per-wallet 365-day activity window surfaced inline on
+ * `GET /v1/claims/:vote?includeActivity=1`. `days` is the requested
+ * window; `entries` are the sparse daily rows (zero-activity days
+ * omitted — clients zero-fill at draw time). Entry shape matches the
+ * activity rows the (now-deleted) `/v1/operator-wallets/:wallet/activity`
+ * endpoint returned. `txFeesLamports` is `null` in this release — the
+ * indexer ships tx counts only; fee backfill lands in a later pass.
+ */
+const ACTIVITY_WINDOW_DAYS = 365;
 
 /**
  * Best-effort audit-log write (SEC-M4).
@@ -173,6 +206,22 @@ const ProfileUpdateBodySchema = SignedEnvelopeSchema.extend({
 const VoteParamSchema = z.object({ vote: PubkeySchema });
 
 /**
+ * Optional `?includeActivity` query for `GET /v1/claims/:vote`. Any
+ * present value is treated as truthy EXCEPT the explicit falsy
+ * spellings (`0`, `false`, `''`) — so `?includeActivity`,
+ * `?includeActivity=1`, `?includeActivity=true` all opt in. Absent →
+ * `undefined` → activity omitted.
+ */
+const ClaimStatusQuerySchema = z.object({
+  includeActivity: z
+    .preprocess(
+      (value) => (value === '0' || value === 'false' || value === '' ? undefined : value),
+      z.coerce.boolean(),
+    )
+    .optional(),
+});
+
+/**
  * REST-M7 path/body consistency guard for the `:vote` mutating
  * endpoints (`PUT /v1/claims/:vote`, `/:vote/profile`). The vote
  * pubkey now travels in BOTH the path and the signed body; the signed
@@ -264,17 +313,21 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
    *
    * CROSS-M1 — the response also folds in `githubLink` and `wallets`
    * so an operator dashboard renders the whole claim picture from a
-   * SINGLE fetch. Before this it had to chase the claim-status read
-   * with three more un-batched calls (`/operator-activity-index`
-   * read paths, etc.) just to know whether GitHub was linked and how
-   * many wallets were registered. Both are the ACTIVE-only reads —
-   * `githubLink` is `null` when there's no link OR the attestation
-   * lapsed; `wallets.count` counts only not-expired registrations —
-   * matching the OAI route's semantics so the dashboard sees the
-   * same "lapsed = inactive" view everywhere.
+   * SINGLE fetch. Both are the ACTIVE-only reads — `githubLink` is
+   * `null` when there's no link OR the attestation lapsed;
+   * `wallets.count` counts only not-expired registrations — matching
+   * the OAI route's semantics so the dashboard sees the same
+   * "lapsed = inactive" view everywhere.
    *
-   * All four reads run in parallel — they're independent, and the
-   * extra two-row trip is negligible against the UX win of a
+   * `wallets.entries[]` carries a DISPLAY-ONLY truncated wallet
+   * address (`walletAddressShort`) — the full operator-wallet pubkey
+   * is never surfaced. With `?includeActivity` each entry also folds
+   * in that wallet's 365-day daily activity (one batched query), so
+   * the hub renders its heatmaps from this fetch alone — there is no
+   * per-wallet activity endpoint keyed on the full pubkey.
+   *
+   * The four base reads run in parallel — they're independent, and
+   * the extra two-row trip is negligible against the UX win of a
    * one-fetch dashboard.
    *
    * This is the GET of the claim instance — "status" is just reading
@@ -282,6 +335,8 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
    */
   app.get('/v1/claims/:vote', async (request, reply) => {
     const params = unwrap(VoteParamSchema.safeParse(request.params), 'path parameter');
+    const query = unwrap(ClaimStatusQuerySchema.safeParse(request.query), 'query parameter');
+    const includeActivity = query.includeActivity === true;
     // SCORING tier — claim status flips on rare operator-initiated
     // events (claim, profile edit, GitHub link, wallet register), all
     // of which the operator already accepts a ~5min staleness for.
@@ -306,6 +361,35 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
       (oldest, w) => (oldest === null || w.expiresAt < oldest ? w.expiresAt : oldest),
       null,
     );
+    // `?includeActivity` — fold each registered wallet's 365-day
+    // daily activity into the response so the hub renders the
+    // heatmaps from THIS one fetch instead of a per-wallet fan-out
+    // keyed on the full operator-wallet pubkey. ONE batched query
+    // for all of the validator's wallets; rows are then grouped per
+    // wallet in JS. The full `w.walletPubkey` is used here as the
+    // query key + the truncation input — it never reaches the body.
+    const activityByWallet = new Map<
+      string,
+      Array<{ date: string; txCount: number; txFeesLamports: string | null }>
+    >();
+    if (includeActivity && activeWallets.length > 0) {
+      const rows = await opts.walletActivityRepo.listRecentForWallets(
+        activeWallets.map((w) => w.walletPubkey),
+        ACTIVITY_WINDOW_DAYS,
+      );
+      for (const row of rows) {
+        const list = activityByWallet.get(row.walletPubkey);
+        const entry = {
+          date: row.activityDate.toISOString().slice(0, 10),
+          txCount: row.txCount,
+          // Counts-only release — `txFeesLamports` is null until the
+          // indexer backfill pass populates real values.
+          txFeesLamports: null as string | null,
+        };
+        if (list === undefined) activityByWallet.set(row.walletPubkey, [entry]);
+        else list.push(entry);
+      }
+    }
     return {
       claimed: claim !== null,
       profile:
@@ -332,20 +416,32 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
         count: activeWallets.length,
         capReached: activeWallets.length >= OPERATOR_WALLET_CAP_PER_VALIDATOR,
         oldestExpiresAt: oldestExpiresAt?.toISOString() ?? null,
-        // Per-wallet entries: pubkey + operator-chosen label +
-        // registration/expiry windows. Public — these are operator-
-        // DECLARED affiliations (registered via the Ed25519 co-sign
-        // flow), so nothing here is information disclosure. The hub
-        // needs the pubkey list to wire the per-wallet 365-day
-        // activity heatmap (`/v1/operator-wallets/:wallet/activity`);
-        // without `entries` the UI would have to scrape the audit
-        // log to discover registered wallets, which couples
-        // unrelated surfaces.
+        // Per-wallet entries: a DISPLAY-ONLY truncated address
+        // (`FXfD…PsJ5`) + operator-chosen label + registration/expiry
+        // windows. The full operator-wallet pubkey is deliberately
+        // NOT surfaced — `walletAddressShort` is the truncated form
+        // (first 4 + U+2026 + last 4) the hub renders verbatim. The
+        // label + windows are operator-DECLARED affiliations
+        // (registered via the Ed25519 co-sign flow), so nothing here
+        // is information disclosure.
+        //
+        // When the request carries `?includeActivity` each entry also
+        // gets `activity` — the wallet's 365-day daily activity,
+        // fetched in the single batched query above. The hub renders
+        // its heatmaps directly from this; there is no longer a
+        // per-wallet activity endpoint to fan out to. `activity` is
+        // `null` when `?includeActivity` is absent.
         entries: activeWallets.map((w) => ({
-          wallet: w.walletPubkey,
+          walletAddressShort: truncatePubkey(w.walletPubkey),
           label: w.label,
           registeredAt: w.registeredAt.toISOString(),
           expiresAt: w.expiresAt.toISOString(),
+          activity: includeActivity
+            ? {
+                days: ACTIVITY_WINDOW_DAYS,
+                entries: activityByWallet.get(w.walletPubkey) ?? [],
+              }
+            : null,
         })),
       },
     };

@@ -8,12 +8,14 @@ import type { ClaimService, ClaimVerifyResult } from '../../../src/services/clai
 import type { OperatorWalletsRepository } from '../../../src/storage/repositories/operator-wallets.repo.js';
 import type { ValidatorClaimEventsRepository } from '../../../src/storage/repositories/validator-claim-events.repo.js';
 import type { ValidatorGithubRepository } from '../../../src/storage/repositories/validator-github.repo.js';
+import type { WalletActivityRepository } from '../../../src/storage/repositories/wallet-activity.repo.js';
 import type {
   OperatorWallet,
   ValidatorClaim,
   ValidatorClaimEvent,
   ValidatorGithubLink,
   ValidatorProfile,
+  WalletDailyActivity,
 } from '../../../src/types/domain.js';
 import { IDENTITY_1, makeTestApp, VOTE_1 } from './_fakes.js';
 
@@ -75,6 +77,17 @@ function makeWallet(over: Partial<OperatorWallet> = {}): OperatorWallet {
   };
 }
 
+function makeActivityRow(over: Partial<WalletDailyActivity> = {}): WalletDailyActivity {
+  return {
+    walletPubkey: 'WALL111111111111111111111111111111111111111',
+    activityDate: new Date('2026-05-01T00:00:00Z'),
+    txCount: 4,
+    txFeesLamports: 0n,
+    indexedAt: new Date(),
+    ...over,
+  };
+}
+
 /**
  * The claim route's deps are the full `ClaimService` class plus a
  * narrow `Pick<>` events repo and (CROSS-M1) the github-link +
@@ -91,9 +104,18 @@ function buildDeps(
     auditEvents?: ValidatorClaimEvent[];
     githubLink?: ValidatorGithubLink | null;
     activeWallets?: OperatorWallet[];
+    /**
+     * Flat list of activity rows the batched `listRecentForWallets`
+     * returns — the handler groups them per wallet. `walletsSeen`
+     * captures the pubkey list the handler passed, so a test can
+     * assert it was a SINGLE batched call over all the validator's
+     * wallets.
+     */
+    activityRows?: WalletDailyActivity[];
   } = {},
-): { deps: ClaimRoutesDeps; appended: unknown[] } {
+): { deps: ClaimRoutesDeps; appended: unknown[]; walletsSeen: string[][] } {
   const appended: unknown[] = [];
+  const walletsSeen: string[][] = [];
   const claim = overrides.claim === undefined ? makeClaim() : overrides.claim;
   const profile = overrides.profile === undefined ? null : overrides.profile;
   const service = {
@@ -119,8 +141,14 @@ function buildDeps(
     operatorWalletsRepo: {
       listActiveByVote: async () => overrides.activeWallets ?? [],
     } as unknown as Pick<OperatorWalletsRepository, 'listActiveByVote'>,
+    walletActivityRepo: {
+      listRecentForWallets: async (wallets: ReadonlyArray<string>) => {
+        walletsSeen.push([...wallets]);
+        return overrides.activityRows ?? [];
+      },
+    } as unknown as Pick<WalletActivityRepository, 'listRecentForWallets'>,
   };
-  return { deps, appended };
+  return { deps, appended, walletsSeen };
 }
 
 async function makeApp(deps: ClaimRoutesDeps): Promise<FastifyInstance> {
@@ -219,25 +247,32 @@ describe('GET /v1/claims/:vote', () => {
     expect(body.wallets.capReached).toBe(false);
     // MIN expiry across the active rows.
     expect(body.wallets.oldestExpiresAt).toBe('2026-05-15T00:00:00.000Z');
-    // Per-wallet entries surface the pubkey + label + windows so the
-    // hub page can fan-out activity heatmaps without scraping audits.
-    // We assert the EXACT shape AND ordering — the repo serves rows
-    // in `registered_at ASC`, so a regression that re-orders
-    // (or swaps the wallet ↔ label fields) shows up as a diff.
+    // Per-wallet entries surface a DISPLAY-ONLY truncated address
+    // (`walletAddressShort`) + label + windows. We assert the EXACT
+    // shape AND ordering — the repo serves rows in `registered_at
+    // ASC`, so a regression that re-orders (or swaps the
+    // walletAddressShort ↔ label fields) shows up as a diff.
+    // `activity` is null because this request omits `?includeActivity`.
     expect(body.wallets.entries).toEqual([
       {
-        wallet: 'WALL111111111111111111111111111111111111111',
+        walletAddressShort: 'WALL…1111',
         label: 'first-registered',
         registeredAt: '2026-02-01T00:00:00.000Z',
         expiresAt: '2026-06-01T00:00:00.000Z',
+        activity: null,
       },
       {
-        wallet: 'WALL222222222222222222222222222222222222222',
+        walletAddressShort: 'WALL…2222',
         label: 'second-registered',
         registeredAt: '2026-02-15T00:00:00.000Z',
         expiresAt: '2026-05-15T00:00:00.000Z',
+        activity: null,
       },
     ]);
+    // The full operator-wallet pubkey must NOT appear anywhere in the
+    // response body — only the truncated `WALL…NNNN` form.
+    expect(res.body).not.toContain('WALL111111111111111111111111111111111111111');
+    expect(res.body).not.toContain('WALL222222222222222222222222222222222222222');
     await app.close();
   });
 
@@ -267,6 +302,105 @@ describe('GET /v1/claims/:vote', () => {
     const res = await app.inject({ method: 'GET', url: '/v1/claims/not-a-pubkey' });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('validation_error');
+    await app.close();
+  });
+
+  it('omits per-wallet activity when ?includeActivity is absent (no batched query)', async () => {
+    const { deps, walletsSeen } = buildDeps({
+      claim: makeClaim(),
+      activeWallets: [makeWallet()],
+      activityRows: [makeActivityRow()],
+    });
+    const app = await makeApp(deps);
+    const res = await app.inject({ method: 'GET', url: `/v1/claims/${VOTE_1}` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // `activity` is null on every entry and the activity repo was
+    // never queried — the extra batched read is paid for ONLY when
+    // the caller opts in.
+    expect(body.wallets.entries[0].activity).toBeNull();
+    expect(walletsSeen).toHaveLength(0);
+    await app.close();
+  });
+
+  it('inlines each wallet 365-day activity when ?includeActivity is truthy (one batched query)', async () => {
+    const { deps, walletsSeen } = buildDeps({
+      claim: makeClaim(),
+      activeWallets: [
+        makeWallet({
+          walletPubkey: 'WALL111111111111111111111111111111111111111',
+          label: 'hot',
+        }),
+        makeWallet({
+          walletPubkey: 'WALL222222222222222222222222222222222222222',
+          label: 'cold',
+        }),
+      ],
+      // Flat rows across BOTH wallets — the handler groups per wallet.
+      activityRows: [
+        makeActivityRow({
+          walletPubkey: 'WALL111111111111111111111111111111111111111',
+          activityDate: new Date('2026-05-02T00:00:00Z'),
+          txCount: 7,
+        }),
+        makeActivityRow({
+          walletPubkey: 'WALL111111111111111111111111111111111111111',
+          activityDate: new Date('2026-05-01T00:00:00Z'),
+          txCount: 3,
+        }),
+        makeActivityRow({
+          walletPubkey: 'WALL222222222222222222222222222222222222222',
+          activityDate: new Date('2026-04-30T00:00:00Z'),
+          txCount: 11,
+        }),
+      ],
+    });
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/claims/${VOTE_1}?includeActivity=1`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // ONE batched call carrying BOTH wallet pubkeys — no N+1 fan-out.
+    expect(walletsSeen).toHaveLength(1);
+    expect(walletsSeen[0]).toEqual([
+      'WALL111111111111111111111111111111111111111',
+      'WALL222222222222222222222222222222222222222',
+    ]);
+    // Rows are grouped per wallet; entry shape matches the activity
+    // response — date (YYYY-MM-DD), txCount, and a null txFeesLamports.
+    const first = body.wallets.entries[0];
+    expect(first.walletAddressShort).toBe('WALL…1111');
+    expect(first.activity.days).toBe(365);
+    expect(first.activity.entries).toEqual([
+      { date: '2026-05-02', txCount: 7, txFeesLamports: null },
+      { date: '2026-05-01', txCount: 3, txFeesLamports: null },
+    ]);
+    const second = body.wallets.entries[1];
+    expect(second.activity.entries).toEqual([
+      { date: '2026-04-30', txCount: 11, txFeesLamports: null },
+    ]);
+    // Even with activity inlined, the full pubkey is never in the body.
+    expect(res.body).not.toContain('WALL111111111111111111111111111111111111111');
+    expect(res.body).not.toContain('WALL222222222222222222222222222222222222222');
+    await app.close();
+  });
+
+  it('gives a wallet with no activity rows an empty entries list under ?includeActivity', async () => {
+    const { deps } = buildDeps({
+      claim: makeClaim(),
+      activeWallets: [makeWallet()],
+      activityRows: [],
+    });
+    const app = await makeApp(deps);
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/claims/${VOTE_1}?includeActivity=true`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.wallets.entries[0].activity).toEqual({ days: 365, entries: [] });
     await app.close();
   });
 });

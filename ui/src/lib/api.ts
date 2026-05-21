@@ -6,8 +6,6 @@ import type {
   Leaderboard,
   LeaderboardSort,
   LeaderboardWindow,
-  OperatorWalletActivityResponse,
-  OperatorWalletResponse,
   ScoringResponse,
   SimdProposalListResponse,
   ValidatorEpochRecord,
@@ -217,13 +215,22 @@ export function fetchClaimChallenge(fetchFn: typeof fetch = fetch): Promise<Clai
  * show an Edit Profile button?") and the /claim page ("is this
  * already claimed, and if so what are the current values?"). This is
  * a plain GET of the claim instance — `/v1/claims/:vote`.
+ *
+ * `includeActivity` appends `?includeActivity=1`, which makes the
+ * response fold each registered operator wallet's 365-day daily
+ * activity into `wallets.entries[].activity`. The hub passes this so
+ * it renders the wallet heatmaps from this one fetch — there is no
+ * per-wallet activity endpoint. Default off: the /income and /claim
+ * pages don't render heatmaps and shouldn't pay for the extra query.
  */
 export function fetchClaimStatus(
   vote: string,
-  opts: CallOptions | typeof fetch = {},
+  opts: (CallOptions & { includeActivity?: boolean }) | typeof fetch = {},
 ): Promise<ClaimStatus> {
   const safe = encodeURIComponent(vote);
-  return call<ClaimStatus>(`/v1/claims/${safe}`, opts);
+  const includeActivity = typeof opts === 'object' && opts.includeActivity === true;
+  const qs = includeActivity ? '?includeActivity=1' : '';
+  return call<ClaimStatus>(`/v1/claims/${safe}${qs}`, opts);
 }
 
 /**
@@ -489,38 +496,12 @@ export function fetchScoring(
 }
 
 /**
- * Parent-resource metadata for a registered operator wallet. 404s
- * when no active registration exists (expired attestations are
- * filtered server-side).
+ * Operator-wallet activity is no longer fetched per wallet — exposing
+ * the full operator-wallet pubkey in a `/v1/*` URL path is
+ * information disclosure. The hub now reads each registered wallet's
+ * 365-day activity inline from `fetchClaimStatus(vote, {
+ * includeActivity: true })` (see `wallets.entries[].activity`).
  */
-export function fetchOperatorWallet(
-  wallet: string,
-  fetchFn: typeof fetch = fetch,
-): Promise<OperatorWalletResponse> {
-  const safe = encodeURIComponent(wallet);
-  return call<OperatorWalletResponse>(`/v1/operator-wallets/${safe}`, fetchFn);
-}
-
-/**
- * Per-day tx activity for a registered operator wallet. The response
- * is sparse — days with zero activity are omitted; clients zero-fill
- * at draw time. `txFeesLamports` is `null` everywhere today (Phase 4
- * ships tx counts only; fee anchoring planned).
- *
- * `days` is clamped server-side to 1-365.
- */
-export function fetchOperatorWalletActivity(
-  wallet: string,
-  days = 365,
-  opts: CallOptions | typeof fetch = {},
-): Promise<OperatorWalletActivityResponse> {
-  const safe = encodeURIComponent(wallet);
-  const safeDays = Math.max(1, Math.min(Math.floor(days), 365));
-  return call<OperatorWalletActivityResponse>(
-    `/v1/operator-wallets/${safe}/activity?days=${safeDays}`,
-    opts,
-  );
-}
 
 /**
  * AI-curated SIMD proposals (Phase 5 — only `reviewed_at IS NOT NULL`

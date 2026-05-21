@@ -34,7 +34,6 @@ import badgeRoutes from './routes/badge.route.js';
 import claimRoutes from './routes/claim.route.js';
 import claimV2Routes from './routes/claim-v2.route.js';
 import oaiRoutes from './routes/operator-activity-index.route.js';
-import operatorWalletsRoutes from './routes/operator-wallets.route.js';
 import scoringRoutes from './routes/scoring.route.js';
 import simdProposalsRoutes from './routes/simd-proposals.route.js';
 import epochsRoutes from './routes/epochs.route.js';
@@ -321,6 +320,11 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       // four. Same repos the OAI route reads.
       validatorGithubRepo: deps.repos.validatorGithub,
       operatorWalletsRepo: deps.repos.operatorWallets,
+      // `?includeActivity` inlines each registered wallet's 365-day
+      // daily activity into the claim-status response (one batched
+      // query) so the hub no longer needs a per-wallet activity
+      // endpoint keyed on the full operator-wallet pubkey.
+      walletActivityRepo: deps.repos.walletActivity,
     });
     // Phase 3 — Claim v2: GitHub Gist link + operator wallet
     // registration. Split into its own plugin from the v1 claim
@@ -339,12 +343,13 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       // SEC-M4 — best-effort audit log for github-link / wallet-register.
       claimEventsRepo: deps.repos.validatorClaimEvents,
     });
-    // Phase 4 — wallet activity read endpoint. The worker writes the
-    // table; the API just reads.
-    await scope.register(operatorWalletsRoutes, {
-      walletActivityRepo: deps.repos.walletActivity,
-      operatorWalletsRepo: deps.repos.operatorWallets,
-    });
+    // Phase 4 — wallet daily activity. The worker writes the table;
+    // the API reads it. There is no per-wallet activity endpoint:
+    // exposing the full operator-wallet pubkey in a `/v1/*` URL path
+    // is information disclosure, so the activity is inlined into
+    // `GET /v1/claims/:vote?includeActivity=1` instead (see
+    // claim.route.ts). The OAI + /scoring routes still consume the
+    // repo server-side to compute scores.
     // Phase 5 — Pending SIMD widget read endpoint. The curation
     // pipeline is worker-owned. `aiModel` is wired from config so the
     // response carries the currently-configured curation model as a

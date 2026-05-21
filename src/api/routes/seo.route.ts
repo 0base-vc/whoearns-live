@@ -181,7 +181,6 @@ Allow: /badge/
 Allow: /v1/leaderboard
 Allow: /v1/epoch/current
 Allow: /v1/validators/
-Allow: /v1/operator-wallets/
 Allow: /v1/simd-proposals
 
 User-agent: ClaudeBot
@@ -189,7 +188,6 @@ Allow: /badge/
 Allow: /v1/leaderboard
 Allow: /v1/epoch/current
 Allow: /v1/validators/
-Allow: /v1/operator-wallets/
 Allow: /v1/simd-proposals
 
 User-agent: PerplexityBot
@@ -197,14 +195,12 @@ Allow: /badge/
 Allow: /v1/leaderboard
 Allow: /v1/epoch/current
 Allow: /v1/validators/
-Allow: /v1/operator-wallets/
 Allow: /v1/simd-proposals
 
 User-agent: Googlebot
 Allow: /badge/
 Allow: /v1/leaderboard
 Allow: /v1/validators/
-Allow: /v1/operator-wallets/
 Allow: /v1/simd-proposals
 
 Sitemap: ${SITE_URL}/sitemap.xml
@@ -258,7 +254,7 @@ GET unless noted. Full descriptions + query params in /llms-full.txt.
 - ${SITE_URL}/v1/validators/{idOrVote}/badges: Tenure + client + tier badge bundle
 - ${SITE_URL}/v1/validators/{idOrVote}/operator-activity-index: Operator Activity Index (governance + wallet)
 - ${SITE_URL}/v1/validators/{idOrVote}/scoring: Aggregate scoring bundle — tier + badges + OAI in one round-trip
-- ${SITE_URL}/v1/operator-wallets/{wallet}/activity: Daily on-chain activity for a registered operator wallet
+- ${SITE_URL}/v1/claims/{vote}?includeActivity=1: Claim status — folds in each registered operator wallet's 365-day daily activity
 - ${SITE_URL}/v1/simd-proposals: Human-reviewed AI-curated SIMD proposal feed
 - ${SITE_URL}/badge/{vote}.svg: Embeddable SVG performance badge
 - ${SITE_URL}/v1/validators/current-epoch/batch: POST — bulk current-epoch lookup
@@ -438,16 +434,19 @@ the existence check.
 Body: { "votes": ["Vote111...", ...] }. Bulk lookup; returns
 { results: [...], missing: [...] }.
 
-### GET /v1/operator-wallets/{wallet}/activity
-Daily on-chain activity for a registered operator wallet. Query
-param: days (1-365, default 365) — the UTC-date window to return.
-Returns { wallet, days, entries }; each entry is { date, txCount,
-txFeesLamports }. Days with zero activity are omitted (clients
-zero-fill at render time); newest-first. txFeesLamports is null
-today — Phase 4 ships counts only, fee backfill lands in a later
-indexer pass. Gated on registered-wallet membership: probes for
-unregistered or expired-registration wallets return 404, so the
-route is not a public existence oracle for arbitrary pubkeys.
+### GET /v1/claims/{vote}?includeActivity=1
+Claim + profile status for a validator. Returns { claimed, profile,
+githubLink, wallets }. wallets.entries[] carries, per registered
+operator wallet, a DISPLAY-ONLY truncated address
+(walletAddressShort, e.g. "FXfD…PsJ5"), the operator-chosen label,
+and registration/expiry timestamps — the full operator-wallet
+pubkey is never surfaced. With ?includeActivity=1 each entry also
+folds in activity: { days: 365, entries: [{ date, txCount,
+txFeesLamports }] } — the wallet's daily on-chain tx counts. Days
+with zero activity are omitted (clients zero-fill at render time);
+txFeesLamports is null today (counts-only release, fee backfill
+lands in a later indexer pass). Without ?includeActivity, activity
+is null.
 
 ### GET /v1/simd-proposals
 Human-reviewed, AI-curated feed of SIMD (Solana Improvement
@@ -498,8 +497,8 @@ Default 60 requests / minute / IP. AI crawlers (GPTBot, ClaudeBot,
 PerplexityBot) are whitelisted via robots.txt to the public GET read
 surface: /v1/leaderboard, /v1/epoch/current, everything under
 /v1/validators/ (search, history, current-epoch, leader-slots, tier,
-badges, operator-activity-index), /v1/operator-wallets/, /v1/simd-proposals,
-and /badge/. The /v1/claims/* mutations are not crawlable. MCP calls
+badges, operator-activity-index), /v1/simd-proposals, and /badge/.
+The /v1/claims/* mutations are not crawlable. MCP calls
 use the same public per-IP budget. Higher-volume queries should run a
 self-hosted indexer.
 
