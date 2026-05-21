@@ -7,6 +7,7 @@ import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
+import type { ProcessedBlocksRepository } from '../../storage/repositories/processed-blocks.repo.js';
 import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
 import type {
   LeaderboardWindow,
@@ -73,6 +74,13 @@ export interface LeaderboardRoutesDeps {
     'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs' | 'findLatestCompleteClosedEpochBlock'
   >;
   aggregatesRepo: Pick<AggregatesRepository, 'findByEpochTopN'>;
+  /**
+   * Compute-unit aggregator. Powers the per-row `windowedCu` field —
+   * each validator's producedBlock-count-weighted average CU across
+   * the active window's epoch set. Derived from `processed_blocks`;
+   * no new ingestion path.
+   */
+  processedBlocksRepo: Pick<ProcessedBlocksRepository, 'getWindowedComputeUnitsByIdentity'>;
   validatorsRepo?: Pick<ValidatorsRepository, 'getInfosByIdentities'>;
   profilesRepo?: Pick<ProfilesRepository, 'findOptedOutVotes'>;
   claimsRepo?: Pick<ClaimsRepository, 'findClaimedVotes'>;
@@ -127,6 +135,16 @@ interface LeaderboardRow {
   decadeEpochStart: number | null;
   decadeEpochEnd: number | null;
   decadeRank: DecadeRank | null;
+  /**
+   * Average compute units per produced block for the active window,
+   * stringified. Single-epoch windows (`current_only`, `final_epoch`)
+   * expose that epoch's average; multi-epoch windows (`live_trend`,
+   * `stable_trend`, `decade_epoch`) expose the producedBlock-count-
+   * weighted average across the window. `null` when the validator
+   * produced no blocks in the window. Additive — Phase: compute-unit
+   * exposure.
+   */
+  windowedCu: string | null;
 }
 
 interface LeaderboardResponse {
@@ -168,6 +186,7 @@ function toRow(
   info: { name: string | null; iconUrl: string | null; website: string | null } | undefined,
   claimed: boolean,
   decadeBadge: DecadeBadge | undefined,
+  windowedCu: bigint | null,
 ): LeaderboardRow {
   const total = stats.blockFeesTotalLamports + stats.blockTipsTotalLamports;
   const perSlot = stats.windowSlots > 0 ? total / BigInt(stats.windowSlots) : null;
@@ -216,6 +235,7 @@ function toRow(
     decadeEpochStart: decadeBadge?.epochStart ?? null,
     decadeEpochEnd: decadeBadge?.epochEnd ?? null,
     decadeRank: decadeBadge?.rank ?? null,
+    windowedCu: windowedCu === null ? null : windowedCu.toString(),
   };
 }
 
@@ -363,7 +383,15 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
   app: FastifyInstance,
   opts: LeaderboardRoutesDeps,
 ) => {
-  const { statsRepo, epochsRepo, aggregatesRepo, validatorsRepo, profilesRepo, claimsRepo } = opts;
+  const {
+    statsRepo,
+    epochsRepo,
+    aggregatesRepo,
+    processedBlocksRepo,
+    validatorsRepo,
+    profilesRepo,
+    claimsRepo,
+  } = opts;
   const responseCache = new TtlCache<string, LeaderboardResponse>(LEADERBOARD_CACHE_MAX_ENTRIES);
 
   app.get('/v1/leaderboard', async (request, reply): Promise<LeaderboardResponse> => {
@@ -420,7 +448,7 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
       query.window === 'decade_epoch' && query.sort === 'income_per_slot'
         ? Promise.resolve(buildDecadeRankMapFromRows(rows, resolved.closed))
         : buildDecadeRankMap(statsRepo, epochsRepo, optedOutVotes, query.minWindowSlots);
-    const [infoByIdentity, claimedVotes, decadeRanks] = await Promise.all([
+    const [infoByIdentity, claimedVotes, decadeRanks, windowedCuByIdentity] = await Promise.all([
       validatorsRepo !== undefined && identities.length > 0
         ? validatorsRepo.getInfosByIdentities(identities)
         : Promise.resolve(
@@ -433,6 +461,13 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
         ? claimsRepo.findClaimedVotes(votes)
         : Promise.resolve(new Set<string>()),
       decadeRanksPromise,
+      // Per-row windowed CU: producedBlock-weighted average compute
+      // units across the resolved window epochs. Restricted to the
+      // visible identities so the aggregation only touches shown rows.
+      processedBlocksRepo.getWindowedComputeUnitsByIdentity(
+        resolved.epochs.map((e) => e.epoch),
+        identities,
+      ),
     ]);
 
     const items = visibleRows.map((row, i) =>
@@ -442,6 +477,7 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
         infoByIdentity.get(row.identityPubkey),
         claimedVotes.has(row.votePubkey),
         decadeRanks.get(row.votePubkey),
+        windowedCuByIdentity.get(row.identityPubkey) ?? null,
       ),
     );
 

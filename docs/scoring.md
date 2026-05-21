@@ -161,15 +161,16 @@ designing away from rather than tuning around.
 #### What we use instead
 
 ```
-composite = 0.30 × reliability + 0.70 × economicPercentile
-tier      = forge    if composite ≥ 95
-            anvil    if composite ≥ 80
-            hearth   if composite ≥ 40
-            kindling otherwise
-unrated   = slotsAssigned < 10
-         OR economic cohort < MIN_COHORT_FOR_PERCENTILE
-         OR this validator measured in < MIN_MEASURED_EPOCHS_FOR_ECONOMIC closed epochs
-         OR economicPercentile is null
+economicScore = 0.90 × economicPercentile + 0.10 × cuSubscore
+composite     = 0.30 × reliability + 0.70 × economicScore
+tier          = forge    if composite ≥ 95
+                anvil    if composite ≥ 80
+                hearth   if composite ≥ 40
+                kindling otherwise
+unrated       = slotsAssigned < 10
+             OR economic cohort < MIN_COHORT_FOR_PERCENTILE
+             OR this validator measured in < MIN_MEASURED_EPOCHS_FOR_ECONOMIC closed epochs
+             OR economicPercentile is null
 ```
 
 Both signals are on-chain-signed facts the validator can neither
@@ -227,6 +228,38 @@ range the cohort percentile was sampled over, or `null` when the
 window had no closed-epoch data) so a client can tell exactly which
 gate fired, how stale the underlying income data is, and which
 closed-epoch range the percentile reflects.
+
+#### Compute units in the economic score
+
+The economic half of the composite is itself a blend of income
+productivity and compute-unit productivity:
+
+```
+economicScore = 0.90 × economicPercentile + 0.10 × cuSubscore
+```
+
+- **`cuSubscore`** is `cuPercentile` for a validator that produced
+  at least one block in the window, and **`0`** for a validator with
+  no produced blocks (a `null` `cuPercentile`). A validator with no
+  CU data therefore scores `economicScore = 0.9 × economicPercentile`
+  — the CU side never, on its own, forces `unrated`; only the income
+  side does.
+- **`cuPercentile`** is the `PERCENT_RANK()` of the validator's
+  produced-block-count-weighted compute units per produced block,
+  computed over the SAME indexed cohort and closed-epoch window as
+  `economicPercentile` (one query — `findEconomicPercentile`).
+  Windowed CU is `SUM(compute_units_consumed) / COUNT(produced
+blocks)` across the window's epochs; validators with no produced
+  blocks are excluded from the CU ranking.
+
+The 10% weight is deliberately small: income productivity is what
+delegators actually receive and stays the dominant economic signal,
+while compute-unit throughput is a secondary nudge rewarding
+validators that pack more work into each produced block. CU is read
+from `processed_blocks` — the same fact table the income figures
+come from — so it adds no new ingestion path. `composite` surfaces
+`cuPercentile` alongside `economicPercentile` in `components` for a
+per-component breakdown.
 
 #### Reliability floor
 

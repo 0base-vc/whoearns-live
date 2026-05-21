@@ -985,6 +985,7 @@ export class FakeStatsRepo {
       cohortSize: peerVotes.size,
       measuredEpochs: 0,
       medianIncomePerSlotLamports: null,
+      cuPercentile: null,
     };
   }
 }
@@ -1270,6 +1271,72 @@ export class FakeProcessedBlocksRepo {
         null,
       ),
     };
+  }
+
+  /** Mirror of `ProcessedBlocksRepository.getEpochComputeUnitsForIdentity`. */
+  async getEpochComputeUnitsForIdentity(
+    identity: IdentityPubkey,
+    epochs: Epoch[],
+  ): Promise<Map<Epoch, bigint | null>> {
+    const epochSet = new Set(epochs);
+    const acc = new Map<Epoch, { cu: bigint; blocks: number }>();
+    for (const row of this.rows.values()) {
+      if (row.leaderIdentity !== identity) continue;
+      if (!epochSet.has(row.epoch)) continue;
+      if (row.blockStatus !== 'produced') continue;
+      const e = acc.get(row.epoch) ?? { cu: 0n, blocks: 0 };
+      e.cu += row.computeUnitsConsumed;
+      e.blocks += 1;
+      acc.set(row.epoch, e);
+    }
+    const out = new Map<Epoch, bigint | null>();
+    for (const [epoch, { cu, blocks }] of acc) {
+      out.set(epoch, blocks > 0 ? cu / BigInt(blocks) : null);
+    }
+    return out;
+  }
+
+  /** Mirror of `ProcessedBlocksRepository.getEpochComputeUnitsServiceWide`. */
+  async getEpochComputeUnitsServiceWide(epochs: Epoch[]): Promise<Map<Epoch, bigint | null>> {
+    const epochSet = new Set(epochs);
+    const acc = new Map<Epoch, { cu: bigint; blocks: number }>();
+    for (const row of this.rows.values()) {
+      if (!epochSet.has(row.epoch)) continue;
+      if (row.blockStatus !== 'produced') continue;
+      const e = acc.get(row.epoch) ?? { cu: 0n, blocks: 0 };
+      e.cu += row.computeUnitsConsumed;
+      e.blocks += 1;
+      acc.set(row.epoch, e);
+    }
+    const out = new Map<Epoch, bigint | null>();
+    for (const [epoch, { cu, blocks }] of acc) {
+      out.set(epoch, blocks > 0 ? cu / BigInt(blocks) : null);
+    }
+    return out;
+  }
+
+  /** Mirror of `ProcessedBlocksRepository.getWindowedComputeUnitsByIdentity`. */
+  async getWindowedComputeUnitsByIdentity(
+    epochs: Epoch[],
+    identities: IdentityPubkey[],
+  ): Promise<Map<IdentityPubkey, bigint | null>> {
+    const epochSet = new Set(epochs);
+    const identitySet = new Set(identities);
+    const acc = new Map<IdentityPubkey, { cu: bigint; blocks: number }>();
+    for (const row of this.rows.values()) {
+      if (!epochSet.has(row.epoch)) continue;
+      if (!identitySet.has(row.leaderIdentity)) continue;
+      if (row.blockStatus !== 'produced') continue;
+      const e = acc.get(row.leaderIdentity) ?? { cu: 0n, blocks: 0 };
+      e.cu += row.computeUnitsConsumed;
+      e.blocks += 1;
+      acc.set(row.leaderIdentity, e);
+    }
+    const out = new Map<IdentityPubkey, bigint | null>();
+    for (const [identity, { cu, blocks }] of acc) {
+      out.set(identity, blocks > 0 ? cu / BigInt(blocks) : null);
+    }
+    return out;
   }
 }
 

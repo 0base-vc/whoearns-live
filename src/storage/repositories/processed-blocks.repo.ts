@@ -950,4 +950,121 @@ export class ProcessedBlocksRepository {
       updatedAt,
     };
   }
+
+  /**
+   * Average compute units per produced block, per epoch, for ONE
+   * validator identity. Keyed by epoch. The value is `null` for an
+   * epoch where the validator produced no blocks (no denominator) —
+   * computed exactly like `getValidatorEpochSlotStats`'
+   * `avgComputeUnitsPerProducedBlock`: `SUM(compute_units_consumed) /
+   * COUNT(*)` over `block_status = 'produced'` rows. Powers the
+   * per-epoch validator CU series on the income-page chart.
+   */
+  async getEpochComputeUnitsForIdentity(
+    identity: IdentityPubkey,
+    epochs: Epoch[],
+  ): Promise<Map<Epoch, bigint | null>> {
+    const out = new Map<Epoch, bigint | null>();
+    if (epochs.length === 0) return out;
+    const { rows } = await this.pool.query<{
+      epoch: string;
+      compute_units_consumed: string;
+      produced_blocks: string;
+    }>(
+      `SELECT epoch::text AS epoch,
+              COALESCE(SUM(compute_units_consumed)
+                FILTER (WHERE block_status = 'produced'), 0)::numeric AS compute_units_consumed,
+              COUNT(*) FILTER (WHERE block_status = 'produced')::bigint AS produced_blocks
+         FROM processed_blocks
+        WHERE epoch = ANY($1::bigint[])
+          AND leader_identity = $2
+        GROUP BY epoch`,
+      [epochs, identity],
+    );
+    for (const row of rows) {
+      const cu = toIntegerBigInt(row.compute_units_consumed ?? '0', 'compute units');
+      const blocks = Number(row.produced_blocks ?? '0');
+      out.set(Number(row.epoch), bigintAverage(cu, blocks));
+    }
+    return out;
+  }
+
+  /**
+   * Service-wide average compute units per produced block, per epoch
+   * — every validator's produced blocks pooled. Keyed by epoch;
+   * `null` for an epoch with no produced blocks anywhere.
+   *
+   * This is the produced-block-count-weighted mean of each
+   * validator's per-epoch average CU: weighting each validator's mean
+   * by its block count and summing is algebraically identical to
+   * `SUM(all CU) / COUNT(all produced blocks)`, so a validator with 0
+   * produced blocks contributes nothing and is excluded for free.
+   * Powers the "service average" series on the CU chart.
+   */
+  async getEpochComputeUnitsServiceWide(epochs: Epoch[]): Promise<Map<Epoch, bigint | null>> {
+    const out = new Map<Epoch, bigint | null>();
+    if (epochs.length === 0) return out;
+    const { rows } = await this.pool.query<{
+      epoch: string;
+      compute_units_consumed: string;
+      produced_blocks: string;
+    }>(
+      `SELECT epoch::text AS epoch,
+              COALESCE(SUM(compute_units_consumed)
+                FILTER (WHERE block_status = 'produced'), 0)::numeric AS compute_units_consumed,
+              COUNT(*) FILTER (WHERE block_status = 'produced')::bigint AS produced_blocks
+         FROM processed_blocks
+        WHERE epoch = ANY($1::bigint[])
+        GROUP BY epoch`,
+      [epochs],
+    );
+    for (const row of rows) {
+      const cu = toIntegerBigInt(row.compute_units_consumed ?? '0', 'compute units');
+      const blocks = Number(row.produced_blocks ?? '0');
+      out.set(Number(row.epoch), bigintAverage(cu, blocks));
+    }
+    return out;
+  }
+
+  /**
+   * Windowed average compute units per produced block, per validator
+   * identity, pooled across the given window epochs. Keyed by
+   * identity pubkey; `null` for an identity that produced no blocks
+   * across the window.
+   *
+   * `SUM(CU) / COUNT(produced)` over the window's epochs is the
+   * produced-block-count-weighted CU the leaderboard needs: for a
+   * single-epoch window it is that epoch's average, for a multi-epoch
+   * window it weights each epoch by how many blocks the validator
+   * produced in it. Restricted to `identities` so the query only
+   * aggregates the leaderboard's visible rows.
+   */
+  async getWindowedComputeUnitsByIdentity(
+    epochs: Epoch[],
+    identities: IdentityPubkey[],
+  ): Promise<Map<IdentityPubkey, bigint | null>> {
+    const out = new Map<IdentityPubkey, bigint | null>();
+    if (epochs.length === 0 || identities.length === 0) return out;
+    const { rows } = await this.pool.query<{
+      leader_identity: string;
+      compute_units_consumed: string;
+      produced_blocks: string;
+    }>(
+      `SELECT leader_identity,
+              COALESCE(SUM(compute_units_consumed)
+                FILTER (WHERE block_status = 'produced'), 0)::numeric AS compute_units_consumed,
+              COUNT(*) FILTER (WHERE block_status = 'produced')::bigint AS produced_blocks
+         FROM processed_blocks
+        WHERE epoch = ANY($1::bigint[])
+          AND leader_identity = ANY($2::text[])
+        GROUP BY leader_identity`,
+      [epochs, identities],
+    );
+    for (const row of rows) {
+      const cu = toIntegerBigInt(row.compute_units_consumed ?? '0', 'compute units');
+      const blocks = Number(row.produced_blocks ?? '0');
+      out.set(row.leader_identity, bigintAverage(cu, blocks));
+    }
+    return out;
+  }
 }

@@ -223,6 +223,10 @@ export async function resolveTierForValidator(
     economicPercentile: economicLookup.percentile,
     economicCohortSize: economicLookup.cohortSize,
     economicMeasuredEpochs: economicLookup.measuredEpochs,
+    // CU percentile is computed by the same cohort query as the
+    // income percentile (`findEconomicPercentile`); `null` when this
+    // validator produced no blocks in the window.
+    cuPercentile: economicLookup.cuPercentile,
   };
   const result = computeTier(input);
   return { result, input, closedRows, economicLookup, cohortAsOfEpoch };
@@ -272,6 +276,7 @@ export function tierBodyFromResolved(resolved: ResolvedTier): TierBody {
     components: {
       reliability: result.components.reliability,
       economicPercentile: result.components.economicPercentile,
+      cuPercentile: result.components.cuPercentile,
     },
   };
 }
@@ -739,6 +744,16 @@ export interface NodeTierResponse {
      * epochs — and in that case `tier === 'unrated'`.
      */
     economicPercentile: number | null;
+    /**
+     * 0-1, percentile rank of this validator's produced-block-count-
+     * weighted compute units per produced block, vs the same indexed
+     * cohort as `economicPercentile`. **`null`** when the validator
+     * produced no blocks in the window. Contributes 10% of the
+     * composite's economic component
+     * (`0.9 × economicPercentile + 0.1 × cuSubscore`); a `null` here
+     * means a CU subscore of 0.
+     */
+    cuPercentile: number | null;
   };
 }
 

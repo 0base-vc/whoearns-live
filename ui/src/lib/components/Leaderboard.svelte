@@ -179,6 +179,27 @@
     return `◎${formatSolFixed(item.blockFeesTotalSol, DECIMALS_TOTAL)}`;
   }
 
+  /**
+   * Human-readable compute units for the active window. CU values are
+   * stringified integers in the tens of millions, so the default
+   * rendering is a one-decimal "M" suffix (e.g. `31.2M`); smaller
+   * magnitudes fall back to a "K" suffix or a thousands-separated
+   * integer. Returns "—" when the row has no CU data for the window
+   * (matches the table's existing null placeholder).
+   */
+  function windowedCuText(item: LeaderboardItem): string {
+    if (item.windowedCu == null) return '—';
+    const n = Number(item.windowedCu);
+    if (!Number.isFinite(n)) return '—';
+    if (Math.abs(n) >= 1_000_000) {
+      return `${new Intl.NumberFormat('en', { maximumFractionDigits: 1 }).format(n / 1_000_000)}M`;
+    }
+    if (Math.abs(n) >= 1_000) {
+      return `${new Intl.NumberFormat('en', { maximumFractionDigits: 1 }).format(n / 1_000)}K`;
+    }
+    return new Intl.NumberFormat('en').format(n);
+  }
+
   function cellText(item: LeaderboardItem, key: LeaderboardSort): string {
     switch (key) {
       case 'income_per_slot':
@@ -353,6 +374,17 @@
           <tr>
             <th scope="col" class="px-4 py-2.5 text-left">#</th>
             <th scope="col" class="px-4 py-2.5 text-left">Validator</th>
+            <th scope="col" class="px-4 py-2.5 text-right">
+              <span class="inline-flex items-center justify-end gap-1">
+                <span class="font-semibold">CU</span>
+                <Tooltip
+                  content="Average compute units consumed per produced block across the selected window. Not a sort key."
+                  placement="bottom"
+                  align="right"
+                  label="About compute units"
+                />
+              </span>
+            </th>
             {#each COLUMNS as col (col.key)}
               <th
                 scope="col"
@@ -455,6 +487,9 @@
                   {item.windowSlots} window slots · skip {skipRateText(item)}
                 </span>
               </td>
+              <td class="px-4 py-2.5 text-right font-mono tabular-nums">
+                {windowedCuText(item)}
+              </td>
               {#each COLUMNS as col (col.key)}
                 <td
                   class="px-4 py-2.5 font-mono tabular-nums"
@@ -534,7 +569,9 @@
                 <div
                   class="mt-0.5 inline-flex items-center text-[11px] text-[color:var(--color-text-subtle)]"
                 >
-                  {item.windowSlots} window slots · skip {skipRateText(item)}
+                  {item.windowSlots} window slots · skip {skipRateText(item)} · CU {windowedCuText(
+                    item,
+                  )}
                 </div>
               </div>
               <div class="shrink-0 text-right">

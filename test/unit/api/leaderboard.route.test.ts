@@ -8,16 +8,19 @@ import leaderboardRoutes, {
 } from '../../../src/api/routes/leaderboard.route.js';
 import type { AggregatesRepository } from '../../../src/storage/repositories/aggregates.repo.js';
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
+import type { ProcessedBlocksRepository } from '../../../src/storage/repositories/processed-blocks.repo.js';
 import type { ProfilesRepository } from '../../../src/storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
 import {
   FakeAggregatesRepo,
   FakeEpochsRepo,
+  FakeProcessedBlocksRepo,
   FakeStatsRepo,
   IDENTITY_1,
   IDENTITY_2,
   IDENTITY_3,
   makeEpochInfo,
+  makeProcessedBlock,
   makeStats,
   makeTestApp,
   VOTE_1,
@@ -38,21 +41,41 @@ function buildDeps(): {
   stats: FakeStatsRepo;
   epochs: FakeEpochsRepo;
   aggregates: FakeAggregatesRepo;
+  processedBlocks: FakeProcessedBlocksRepo;
   deps: LeaderboardRoutesDeps;
 } {
   const stats = new FakeStatsRepo();
   const epochs = new FakeEpochsRepo();
   const aggregates = new FakeAggregatesRepo();
+  const processedBlocks = new FakeProcessedBlocksRepo();
   return {
     stats,
     epochs,
     aggregates,
+    processedBlocks,
     deps: {
       statsRepo: stats as unknown as StatsRepository,
       epochsRepo: epochs as unknown as EpochsRepository,
       aggregatesRepo: aggregates as unknown as AggregatesRepository,
+      processedBlocksRepo: processedBlocks as unknown as ProcessedBlocksRepository,
     },
   };
+}
+
+/**
+ * Seed one produced block carrying a known compute-unit total so the
+ * leaderboard's windowed-CU aggregation has data to fold.
+ */
+function seedCuBlock(
+  processedBlocks: FakeProcessedBlocksRepo,
+  slot: number,
+  epoch: number,
+  identity: string,
+  computeUnits: bigint,
+): void {
+  const block = makeProcessedBlock(slot, epoch, identity, 0n);
+  block.computeUnitsConsumed = computeUnits;
+  processedBlocks.rows.set(slot, block);
 }
 
 function seedLiveWindow(stats: FakeStatsRepo, epochs: FakeEpochsRepo): void {
@@ -431,6 +454,45 @@ describe('GET /v1/leaderboard', () => {
 
       const bogus = await app.inject({ method: 'GET', url: '/v1/leaderboard?sort=bogus' });
       expect(bogus.statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('exposes windowed CU per row, produced-block-weighted across the window', async () => {
+    const { stats, epochs, processedBlocks, deps } = buildDeps();
+    seedLiveWindow(stats, epochs);
+    // live_trend pools the current epoch (961) and the most recent
+    // closed epoch (960). Seed VOTE_1's produced blocks:
+    //   epoch 960 — 2 blocks: 10M + 20M CU
+    //   epoch 961 — 1 block: 60M CU
+    // windowedCu = (10M + 20M + 60M) / 3 = 30M.
+    seedCuBlock(processedBlocks, 9_600_001, 960, IDENTITY_1, 10_000_000n);
+    seedCuBlock(processedBlocks, 9_600_002, 960, IDENTITY_1, 20_000_000n);
+    seedCuBlock(processedBlocks, 9_610_001, 961, IDENTITY_1, 60_000_000n);
+    const app = await makeApp(deps);
+    try {
+      const live = await app.inject({ method: 'GET', url: '/v1/leaderboard' });
+      expect(live.statusCode).toBe(200);
+      const liveItems = (
+        live.json() as { items: Array<{ vote: string; windowedCu: string | null }> }
+      ).items;
+      // Multi-epoch window → producedBlock-weighted average.
+      expect(liveItems.find((r) => r.vote === VOTE_1)?.windowedCu).toBe('30000000');
+      // VOTE_2 produced no blocks with CU data → null.
+      expect(liveItems.find((r) => r.vote === VOTE_2)?.windowedCu).toBeNull();
+
+      // Single-epoch window (current_only = epoch 961) → that epoch's
+      // average alone: 60M / 1 block.
+      const current = await app.inject({
+        method: 'GET',
+        url: '/v1/leaderboard?window=current_only',
+      });
+      expect(current.statusCode).toBe(200);
+      const currentItems = (
+        current.json() as { items: Array<{ vote: string; windowedCu: string | null }> }
+      ).items;
+      expect(currentItems.find((r) => r.vote === VOTE_1)?.windowedCu).toBe('60000000');
     } finally {
       await app.close();
     }

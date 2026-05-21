@@ -408,4 +408,24 @@ export interface ValidatorCurrentEpochResponse {
     medianIncomeSolPerSlot: string;
     basis: PeerBenchmarkBasis;
   } | null;
+
+  /**
+   * This validator's average compute units per produced block for the
+   * epoch — `SUM(compute_units_consumed) / COUNT(produced blocks)`,
+   * stringified (CU totals exceed JSON safe-integer range at the
+   * window scale). `null` when the validator produced no blocks this
+   * epoch (no denominator). Always present on the history response;
+   * `null` on the current-epoch / batch / per-epoch routes, which do
+   * not surface CU. Additive — Phase: compute-unit exposure.
+   */
+  avgComputeUnitsPerProducedBlock: string | null;
+  /**
+   * Service-wide producedBlock-weighted average CU per produced block
+   * for the epoch — the cluster benchmark the income-page CU chart
+   * plots the validator against. Stringified. `null` when no
+   * validator produced a block this epoch. Always present on the
+   * history response; `null` elsewhere. Additive — Phase: compute-unit
+   * exposure.
+   */
+  serviceAverageCu: string | null;
 }

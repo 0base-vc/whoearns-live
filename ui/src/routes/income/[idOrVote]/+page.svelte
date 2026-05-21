@@ -39,6 +39,7 @@
   } from '$lib/format';
 
   import IncomeChartLoader from '$lib/components/IncomeChartLoader.svelte';
+  import ComputeUnitsChartLoader from '$lib/components/ComputeUnitsChartLoader.svelte';
   import Card from '$lib/components/Card.svelte';
   import AddressDisplay from '$lib/components/AddressDisplay.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
@@ -653,15 +654,24 @@
   </section>
 {/if}
 
-<!-- ─────────── 2. Income trend chart ─────────── -->
+<!-- ─────────── 2. Trend charts (income + compute units) ─────────── -->
 <!--
   Hidden during the initial tracking window: an empty chart card is a
   "nothing here" signal that stacks redundantly with the tracking
   banner + Validator card. Shows as soon as `items.length > 0`.
+
+  Responsive 2-column grid: at the `md` breakpoint (>= 768px) the
+  income chart and the compute-units chart sit side by side, each
+  roughly half width; below 768px the grid collapses to a single
+  column so each chart gets the full content width on phones. Both
+  charts read the same `history.items` array — one source of truth.
+  Each chart's inner LineChart is `w-full`, so it reflows to whatever
+  width its grid cell resolves to at any viewport size.
 -->
 {#if hasAnyHistory}
-  <div class="mt-6">
+  <div class="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
     <IncomeChartLoader history={history.items} />
+    <ComputeUnitsChartLoader history={history.items} />
   </div>
 {/if}
 

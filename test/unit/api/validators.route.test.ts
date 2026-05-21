@@ -686,6 +686,7 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
       cohortSize: 200,
       measuredEpochs: 5,
       medianIncomePerSlotLamports: '50000000',
+      cuPercentile: 1.0,
     });
     const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
     expect(res.statusCode).toBe(200);

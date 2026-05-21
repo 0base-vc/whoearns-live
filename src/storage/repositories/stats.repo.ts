@@ -327,6 +327,17 @@ export interface EconomicPercentileLookup {
    * "your median: X SOL/slot, cluster median: Y SOL/slot."
    */
   medianIncomePerSlotLamports: string | null;
+  /**
+   * Percentile rank in [0, 1] of this validator's produced-block-
+   * count-weighted compute units per produced block, against the
+   * SAME cohort + window used for `percentile`. Computed in the same
+   * query (a `processed_blocks` join + a second `PERCENT_RANK()`).
+   *
+   * `null` when the validator produced no blocks in the window — the
+   * Node Tier composite treats that as a CU subscore of 0. A validator
+   * outside the cohort entirely also gets `null` here.
+   */
+  cuPercentile: number | null;
 }
 
 /**
@@ -344,6 +355,7 @@ export const EMPTY_ECONOMIC_LOOKUP: EconomicPercentileLookup = {
   cohortSize: 0,
   measuredEpochs: 0,
   medianIncomePerSlotLamports: null,
+  cuPercentile: null,
 };
 
 interface EconomicPercentileRow {
@@ -356,6 +368,10 @@ interface EconomicPercentileRow {
   cohort_size: string;
   measured_epochs: number;
   median_income_per_slot: string | null;
+  // `PERCENT_RANK()` of windowed CU across the cohort. NULL when the
+  // target produced no blocks in the window (absent from `cu_ranked`)
+  // OR is absent from the cohort altogether.
+  cu_pct: string | null;
 }
 
 export interface WindowedLeaderboardStats {
@@ -1038,6 +1054,7 @@ export class StatsRepository {
       WITH per_validator_per_epoch AS (
         SELECT
           evs.vote_pubkey,
+          evs.identity_pubkey,
           evs.epoch,
           (
             evs.block_fees_total_lamports
@@ -1064,6 +1081,44 @@ export class StatsRepository {
         FROM per_validator_per_epoch
         GROUP BY vote_pubkey
       ),
+      -- Compute units for the SAME cohort + window. Each cohort
+      -- validator's produced blocks across its windowed (epoch,
+      -- identity) pairs are pooled; windowed_cu is the
+      -- producedBlock-count-weighted average CU per produced block,
+      -- i.e. SUM(CU) / COUNT(produced). NULL when the validator
+      -- produced no blocks in the window.
+      cu_per_validator AS (
+        SELECT
+          pve.vote_pubkey,
+          SUM(pb.compute_units_consumed)
+            FILTER (WHERE pb.block_status = 'produced') AS cu_consumed,
+          COUNT(pb.slot) FILTER (WHERE pb.block_status = 'produced') AS produced_blocks
+        FROM per_validator_per_epoch pve
+        LEFT JOIN processed_blocks pb
+          ON pb.epoch = pve.epoch
+         AND pb.leader_identity = pve.identity_pubkey
+        GROUP BY pve.vote_pubkey
+      ),
+      windowed_cu AS (
+        SELECT
+          vote_pubkey,
+          CASE
+            WHEN COALESCE(produced_blocks, 0) > 0
+            THEN cu_consumed::numeric / produced_blocks::numeric
+            ELSE NULL
+          END AS windowed_cu
+        FROM cu_per_validator
+      ),
+      -- CU percentile reuses the PERCENT_RANK method; validators with
+      -- no produced blocks (NULL windowed_cu) are excluded from the CU
+      -- ranking, so they receive no cu_pct (-> CU subscore 0).
+      cu_ranked AS (
+        SELECT
+          vote_pubkey,
+          PERCENT_RANK() OVER (ORDER BY windowed_cu) AS cu_pct
+        FROM windowed_cu
+        WHERE windowed_cu IS NOT NULL
+      ),
       ranked AS (
         SELECT
           vote_pubkey,
@@ -1074,9 +1129,14 @@ export class StatsRepository {
         FROM median_per_validator
       ),
       target_row AS (
-        SELECT pct, median_income_per_slot, measured_epochs
+        SELECT
+          ranked.pct,
+          ranked.median_income_per_slot,
+          ranked.measured_epochs,
+          cu_ranked.cu_pct
         FROM ranked
-        WHERE vote_pubkey = $3
+        LEFT JOIN cu_ranked ON cu_ranked.vote_pubkey = ranked.vote_pubkey
+        WHERE ranked.vote_pubkey = $3
       ),
       cohort AS (
         SELECT COUNT(*)::bigint AS cohort_size FROM median_per_validator
@@ -1088,7 +1148,8 @@ export class StatsRepository {
         cohort.cohort_size::text                       AS cohort_size,
         COALESCE(target_row.measured_epochs, 0)::int   AS measured_epochs,
         target_row.pct::text                           AS pct,
-        target_row.median_income_per_slot::text        AS median_income_per_slot
+        target_row.median_income_per_slot::text        AS median_income_per_slot,
+        target_row.cu_pct::text                        AS cu_pct
       FROM cohort
       LEFT JOIN target_row ON TRUE
     `;
@@ -1108,10 +1169,15 @@ export class StatsRepository {
         cohortSize,
         measuredEpochs: 0,
         medianIncomePerSlotLamports: null,
+        cuPercentile: null,
       };
     }
 
     const pct = row.pct === null ? Number.NaN : Number(row.pct);
+    // CU percentile is independently nullable: the target can be in
+    // the income cohort yet have produced no blocks in the window
+    // (absent from `cu_ranked`, so `cu_pct` is NULL).
+    const cuPct = row.cu_pct === null ? Number.NaN : Number(row.cu_pct);
     return {
       // `PERCENT_RANK` returns 0 for a cohort of size 1 (no other
       // peers to rank against). We still pass that through — the
@@ -1120,6 +1186,7 @@ export class StatsRepository {
       cohortSize,
       measuredEpochs: row.measured_epochs,
       medianIncomePerSlotLamports: row.median_income_per_slot,
+      cuPercentile: Number.isFinite(cuPct) ? cuPct : null,
     };
   }
 

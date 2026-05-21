@@ -61,6 +61,18 @@ export interface TierInput {
    * — below that the median is too noisy and the percentile is `null`.
    */
   economicMeasuredEpochs: number;
+  /**
+   * CU-productivity percentile rank in [0, 1] of this validator's
+   * produced-block-count-weighted compute units per produced block,
+   * ranked against the SAME cohort and window as `economicPercentile`
+   * (computed in one query by `findEconomicPercentile`).
+   *
+   * `null` when the validator produced no blocks in the window — a
+   * `null` here contributes a CU subscore of 0 to the economic blend
+   * (`0.9 × economicPercentile + 0.1 × cuSubscore`); it does NOT, on
+   * its own, force `unrated` — only the income side does that.
+   */
+  cuPercentile: number | null;
 }
 
 /**
@@ -103,6 +115,14 @@ export interface TierResult {
      * consumer can read the same number that drove the tier.
      */
     economicPercentile: number | null;
+    /**
+     * 0-1, CU-productivity percentile rank vs the same cohort —
+     * mirrors `TierInput.cuPercentile`, surfaced unchanged for a
+     * per-component breakdown. `null` when the validator produced no
+     * blocks in the window. Contributes 10% of the economic
+     * component (`0.9 × economicPercentile + 0.1 × cuSubscore`).
+     */
+    cuPercentile: number | null;
   };
 }
 
@@ -226,13 +246,27 @@ const WEIGHT_RELIABILITY = 0.3;
 const WEIGHT_ECONOMIC = 0.7;
 
 /**
+ * Sub-weights WITHIN the economic component. The economic score fed
+ * to the composite is `0.9 × economicPercentile + 0.1 × cuSubscore` —
+ * income productivity stays the dominant signal (it is what
+ * delegators actually receive), while compute-unit productivity adds
+ * a small 10% nudge for validators packing more work into each
+ * produced block. `cuSubscore` is `cuPercentile` for a validator with
+ * produced blocks in the window, 0 otherwise (null CU). See
+ * `docs/scoring.md` Phase 1, "Compute units in the economic score".
+ */
+const WEIGHT_INCOME_IN_ECONOMIC = 0.9;
+const WEIGHT_CU_IN_ECONOMIC = 0.1;
+
+/**
  * Compute the composite score and tier for one validator. Returns
  * `tier: 'unrated'` when the sample is below the confidence floor —
  * never falsely classifies a tiny-stake validator as 'forge'.
  *
  * Composite (documented in `docs/scoring.md` Phase 1 section):
  *
- *   composite = 0.3 × reliability + 0.7 × economicPercentile
+ *   composite      = 0.3 × reliability + 0.7 × economicScore
+ *   economicScore  = 0.9 × economicPercentile + 0.1 × cuSubscore
  *
  * where:
  *
@@ -286,10 +320,19 @@ export function computeTier(input: TierInput): TierResult {
   // reliability alone, which would let a single-signal score sneak
   // into the leaderboard and contradict the "no half-shown scores"
   // promise in docs/scoring.md.
+  // Economic score blends income productivity with CU productivity:
+  // `0.9 × economicPercentile + 0.1 × cuSubscore`. A validator with
+  // no produced blocks in the window has `cuPercentile === null` and
+  // contributes a CU subscore of 0 — the economic score then equals
+  // `0.9 × economicPercentile`. The CU side never, on its own, gates
+  // the tier to `unrated`; only the income side does.
+  const cuSubscore = input.cuPercentile ?? 0;
   let rawComposite: number | null = null;
   if (!insufficientEconomic && input.economicPercentile !== null) {
+    const economicScore =
+      WEIGHT_INCOME_IN_ECONOMIC * input.economicPercentile + WEIGHT_CU_IN_ECONOMIC * cuSubscore;
     rawComposite = Math.round(
-      (WEIGHT_RELIABILITY * reliability + WEIGHT_ECONOMIC * input.economicPercentile) * 100,
+      (WEIGHT_RELIABILITY * reliability + WEIGHT_ECONOMIC * economicScore) * 100,
     );
   }
 
@@ -315,6 +358,7 @@ export function computeTier(input: TierInput): TierResult {
     components: {
       reliability,
       economicPercentile: input.economicPercentile,
+      cuPercentile: input.cuPercentile,
     },
   };
 }

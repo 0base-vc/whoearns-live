@@ -23,20 +23,24 @@ import { LAMPORTS_PER_SOL } from '../../../src/core/lamports.js';
 import type { ValidatorService } from '../../../src/services/validator.service.js';
 import type { AggregatesRepository } from '../../../src/storage/repositories/aggregates.repo.js';
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
+import type { ProcessedBlocksRepository } from '../../../src/storage/repositories/processed-blocks.repo.js';
 import type { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../../src/storage/repositories/validators.repo.js';
 import type { WatchedDynamicRepository } from '../../../src/storage/repositories/watched-dynamic.repo.js';
 import {
   FakeAggregatesRepo,
   FakeEpochsRepo,
+  FakeProcessedBlocksRepo,
   FakeStatsRepo,
   FakeValidatorService,
   FakeValidatorsRepo,
   FakeWatchedDynamicRepo,
   IDENTITY_1,
+  IDENTITY_2,
   VOTE_1,
   VOTE_2,
   makeEpochInfo,
+  makeProcessedBlock,
   makeStats,
   makeTestApp,
 } from './_fakes.js';
@@ -49,6 +53,7 @@ interface Ctx {
   validators: FakeValidatorsRepo;
   epochs: FakeEpochsRepo;
   aggregates: FakeAggregatesRepo;
+  processedBlocks: FakeProcessedBlocksRepo;
   watchedDynamic: FakeWatchedDynamicRepo;
   validatorService: FakeValidatorService;
 }
@@ -58,6 +63,7 @@ async function makeCtx(): Promise<Ctx> {
   const validators = new FakeValidatorsRepo();
   const epochs = new FakeEpochsRepo();
   const aggregates = new FakeAggregatesRepo();
+  const processedBlocks = new FakeProcessedBlocksRepo();
   const watchedDynamic = new FakeWatchedDynamicRepo();
   const validatorService = new FakeValidatorService();
 
@@ -68,11 +74,37 @@ async function makeCtx(): Promise<Ctx> {
     validatorsRepo: validators as unknown as ValidatorsRepository,
     epochsRepo: epochs as unknown as EpochsRepository,
     aggregatesRepo: aggregates as unknown as AggregatesRepository,
+    processedBlocksRepo: processedBlocks as unknown as ProcessedBlocksRepository,
     watchedDynamicRepo: watchedDynamic as unknown as WatchedDynamicRepository,
     validatorService: validatorService as unknown as ValidatorService,
   });
 
-  return { app, stats, validators, epochs, aggregates, watchedDynamic, validatorService };
+  return {
+    app,
+    stats,
+    validators,
+    epochs,
+    aggregates,
+    processedBlocks,
+    watchedDynamic,
+    validatorService,
+  };
+}
+
+/**
+ * Seed one produced block carrying a known compute-unit total so the
+ * history route's per-epoch CU aggregation has data to fold.
+ */
+function seedCuBlock(
+  processedBlocks: FakeProcessedBlocksRepo,
+  slot: number,
+  epoch: number,
+  identity: string,
+  computeUnits: bigint,
+): void {
+  const block = makeProcessedBlock(slot, epoch, identity, 0n);
+  block.computeUnitsConsumed = computeUnits;
+  processedBlocks.rows.set(slot, block);
 }
 
 describe('GET /v1/validators/:idOrVote/history', () => {
@@ -266,6 +298,60 @@ describe('GET /v1/validators/:idOrVote/history', () => {
     expect(res.statusCode).toBe(400);
     // trackOnDemand was never called — the path validator tripped first.
     expect(ctx.validatorService.trackCalls).toHaveLength(0);
+    await ctx.app.close();
+  });
+
+  it('exposes per-epoch validator CU and service-average CU', async () => {
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 501,
+    });
+    const updatedAt = new Date('2026-04-28T00:00:00.000Z');
+    // Two history rows for the validator: epoch 501 (newer) and 500.
+    ctx.stats.rows.set(
+      `501:${VOTE_1}`,
+      makeStats(501, VOTE_1, IDENTITY_1, { slotsUpdatedAt: updatedAt, feesUpdatedAt: updatedAt }),
+    );
+    ctx.stats.rows.set(
+      `500:${VOTE_1}`,
+      makeStats(500, VOTE_1, IDENTITY_1, { slotsUpdatedAt: updatedAt, feesUpdatedAt: updatedAt }),
+    );
+    await ctx.epochs.upsert(makeEpochInfo(500, 0, 431_999, { isClosed: true }));
+    await ctx.epochs.upsert(makeEpochInfo(501, 432_000, 863_999, { isClosed: true }));
+
+    // Epoch 500 produced blocks:
+    //   VOTE_1 (IDENTITY_1): 25M + 35M CU → validator avg 30M
+    //   another validator (IDENTITY_2): 50M + 70M CU
+    //   service-wide: (25M + 35M + 50M + 70M) / 4 = 45M
+    seedCuBlock(ctx.processedBlocks, 5_000_001, 500, IDENTITY_1, 25_000_000n);
+    seedCuBlock(ctx.processedBlocks, 5_000_002, 500, IDENTITY_1, 35_000_000n);
+    seedCuBlock(ctx.processedBlocks, 5_000_003, 500, IDENTITY_2, 50_000_000n);
+    seedCuBlock(ctx.processedBlocks, 5_000_004, 500, IDENTITY_2, 70_000_000n);
+    // Epoch 501: VOTE_1 produced nothing; only IDENTITY_2 has a block.
+    seedCuBlock(ctx.processedBlocks, 5_010_001, 501, IDENTITY_2, 40_000_000n);
+
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/history?limit=10`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      items: Array<{
+        epoch: number;
+        avgComputeUnitsPerProducedBlock: string | null;
+        serviceAverageCu: string | null;
+      }>;
+    };
+    const e500 = body.items.find((i) => i.epoch === 500);
+    expect(e500?.avgComputeUnitsPerProducedBlock).toBe('30000000');
+    expect(e500?.serviceAverageCu).toBe('45000000');
+    // Epoch 501: the validator produced no blocks → its CU is null,
+    // but the service average still reflects the rest of the cluster.
+    const e501 = body.items.find((i) => i.epoch === 501);
+    expect(e501?.avgComputeUnitsPerProducedBlock).toBeNull();
+    expect(e501?.serviceAverageCu).toBe('40000000');
     await ctx.app.close();
   });
 });

@@ -113,6 +113,7 @@ function buildDeps(
         cohortSize: 200,
         measuredEpochs: 5,
         medianIncomePerSlotLamports: '50000000',
+        cuPercentile: 1.0,
       }),
     },
     epochsRepo: {

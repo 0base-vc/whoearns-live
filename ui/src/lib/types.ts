@@ -51,6 +51,18 @@ export interface ValidatorEpochRecord {
   totalIncomeLamports: string | null;
   totalIncomeSol: string | null;
 
+  /**
+   * Compute-units surface (additive). `avgComputeUnitsPerProducedBlock`
+   * is this validator's average CU per produced block for the epoch;
+   * `serviceAverageCu` is the service-wide average CU per produced
+   * block across all validators for the same epoch. Both are
+   * stringified integers (tens of millions, safe to `Number()`-parse)
+   * and may be `null` — the validator field when it produced 0 blocks
+   * that epoch, the service field when no data exists.
+   */
+  avgComputeUnitsPerProducedBlock: string | null;
+  serviceAverageCu: string | null;
+
   lastUpdatedAt: string | null;
   freshness: {
     slotsUpdatedAt: string | null;
@@ -461,6 +473,13 @@ export interface LeaderboardItem {
   /** APR-equivalent (income / stake). Null when stake data is missing
    * (pre-stake-snapshot-migration epoch). */
   incomePerStake: number | null;
+  /**
+   * Compute units for the currently-active leaderboard window
+   * (additive). Stringified integer (tens of millions, safe to
+   * `Number()`-parse); `null` when no CU data is available for the
+   * window. Present for every window filter.
+   */
+  windowedCu: string | null;
   /**
    * Phase 3: `true` when this validator's operator has gone through
    * the Ed25519 claim flow at least once. The UI renders a small

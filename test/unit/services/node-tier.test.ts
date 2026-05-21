@@ -66,6 +66,7 @@ describe('computeTier', () => {
       economicPercentile: 0.99,
       economicCohortSize: 500,
       economicMeasuredEpochs: 5,
+      cuPercentile: 0.99,
     });
     expect(result.tier).toBe('unrated');
     expect(result.composite).toBeNull();
@@ -82,6 +83,7 @@ describe('computeTier', () => {
       economicPercentile: 0.85,
       economicCohortSize: MIN_COHORT_FOR_PERCENTILE - 1,
       economicMeasuredEpochs: 5,
+      cuPercentile: 0.85,
     });
     expect(result.tier).toBe('unrated');
     expect(result.composite).toBeNull();
@@ -98,6 +100,7 @@ describe('computeTier', () => {
       economicPercentile: 0.85,
       economicCohortSize: 500,
       economicMeasuredEpochs: MIN_MEASURED_EPOCHS_FOR_ECONOMIC - 1,
+      cuPercentile: 0.85,
     });
     expect(result.tier).toBe('unrated');
     expect(result.composite).toBeNull();
@@ -111,14 +114,16 @@ describe('computeTier', () => {
       economicPercentile: null,
       economicCohortSize: 500,
       economicMeasuredEpochs: 5,
+      cuPercentile: null,
     });
     expect(result.tier).toBe('unrated');
     expect(result.composite).toBeNull();
   });
 
   it('classifies top economic + clean block production as forge', () => {
-    // economicPercentile = 1.0 (top of cohort), skip rate ~0% with
-    // a healthy sample. Composite = 0.3 × 0.97 + 0.7 × 1.0 ≈ 0.99 → 99 → forge.
+    // economicPercentile = 1.0 and cuPercentile = 1.0, so the economic
+    // score is 0.9 × 1.0 + 0.1 × 1.0 = 1.0. Skip rate ~0% with a
+    // healthy sample. Composite = 0.3 × 0.97 + 0.7 × 1.0 ≈ 0.99 → 99 → forge.
     const result = computeTier({
       votePubkey: VOTE,
       slotsAssigned: 2000,
@@ -126,6 +131,7 @@ describe('computeTier', () => {
       economicPercentile: 1.0,
       economicCohortSize: 1500,
       economicMeasuredEpochs: 5,
+      cuPercentile: 1.0,
     });
     expect(result.tier).toBe('forge');
     expect(result.composite).not.toBeNull();
@@ -135,8 +141,9 @@ describe('computeTier', () => {
   });
 
   it('classifies mid-pack as hearth', () => {
-    // economicPercentile = 0.5 (median), good reliability.
-    // Composite = 0.3 × 0.97 + 0.7 × 0.5 ≈ 0.64 → 64 → hearth.
+    // economicPercentile = cuPercentile = 0.5, so economic score is
+    // 0.5. Good reliability. Composite = 0.3 × 0.97 + 0.7 × 0.5 ≈ 0.64
+    // → 64 → hearth.
     const result = computeTier({
       votePubkey: VOTE,
       slotsAssigned: 2000,
@@ -144,6 +151,7 @@ describe('computeTier', () => {
       economicPercentile: 0.5,
       economicCohortSize: 1500,
       economicMeasuredEpochs: 5,
+      cuPercentile: 0.5,
     });
     expect(result.tier).toBe('hearth');
     expect(result.composite).not.toBeNull();
@@ -152,8 +160,9 @@ describe('computeTier', () => {
   });
 
   it('classifies near-bottom economic as kindling', () => {
-    // economicPercentile = 0.05 (bottom 5%), reliability still
-    // healthy. Composite = 0.3 × 0.97 + 0.7 × 0.05 ≈ 0.33 → 33 → kindling.
+    // economicPercentile = cuPercentile = 0.05, economic score 0.05.
+    // Reliability still healthy. Composite = 0.3 × 0.97 + 0.7 × 0.05 ≈
+    // 0.33 → 33 → kindling.
     const result = computeTier({
       votePubkey: VOTE,
       slotsAssigned: 2000,
@@ -161,6 +170,7 @@ describe('computeTier', () => {
       economicPercentile: 0.05,
       economicCohortSize: 1500,
       economicMeasuredEpochs: 5,
+      cuPercentile: 0.05,
     });
     expect(result.tier).toBe('kindling');
     expect(result.composite).not.toBeNull();
@@ -178,6 +188,7 @@ describe('computeTier', () => {
       economicPercentile: 1.0,
       economicCohortSize: 1500,
       economicMeasuredEpochs: 5,
+      cuPercentile: 1.0,
     });
     // Reliability bites but doesn't capsize a top earner. Document
     // the actual behaviour rather than aspire to "drop a tier":
@@ -195,6 +206,7 @@ describe('computeTier', () => {
       economicPercentile: 1.0,
       economicCohortSize: 1500,
       economicMeasuredEpochs: 5,
+      cuPercentile: 1.0,
     });
     expect(badResult.tier).not.toBe('forge');
     expect(badResult.components.reliability).toBeLessThan(0.6);
@@ -214,6 +226,7 @@ describe('computeTier', () => {
       economicPercentile: 1.0,
       economicCohortSize: 500,
       economicMeasuredEpochs: 5,
+      cuPercentile: 1.0,
     });
     // 1 - upper_bound(0/11) is well below 1.0 — small sample carries cost.
     expect(result.components.reliability).toBeLessThan(0.8);
@@ -228,6 +241,7 @@ describe('computeTier', () => {
       economicPercentile: 0.7321,
       economicCohortSize: 200,
       economicMeasuredEpochs: 5,
+      cuPercentile: 0.7321,
     });
     expect(result.components.economicPercentile).toBe(0.7321);
   });
@@ -248,6 +262,7 @@ describe('computeTier', () => {
       economicPercentile: 1.0,
       economicCohortSize: 1500,
       economicMeasuredEpochs: 5,
+      cuPercentile: 1.0,
     });
     expect(result.tier).toBe('kindling');
     expect(result.composite).not.toBeNull();
@@ -270,6 +285,7 @@ describe('computeTier', () => {
       economicPercentile: 1.0,
       economicCohortSize: 1500,
       economicMeasuredEpochs: 5,
+      cuPercentile: 1.0,
     });
     expect(['forge', 'anvil']).toContain(result.tier);
     // Sanity: the Wilson upper IS below the floor.
@@ -290,9 +306,89 @@ describe('computeTier', () => {
       economicPercentile: 1.0,
       economicCohortSize: 1500,
       economicMeasuredEpochs: 3,
+      cuPercentile: 1.0,
     });
     expect(result.tier).toBe('unrated');
     expect(result.composite).toBeNull();
+  });
+
+  // --- Compute units in the economic score (Phase: CU exposure) ---
+  // economic score = 0.9 × economicPercentile + 0.1 × cuSubscore,
+  // where cuSubscore = cuPercentile for a validator with produced
+  // blocks and 0 (null cuPercentile) otherwise.
+
+  it('blends CU into the economic score: a higher cuPercentile lifts the composite', () => {
+    // Same validator, same income percentile — only cuPercentile
+    // moves 0 → 1. The economic score rises by 0.1, so the composite
+    // rises by ≈ 0.7 × 0.1 × 100 = 7 points.
+    const base = {
+      votePubkey: VOTE,
+      slotsAssigned: 2000,
+      slotsSkipped: 5,
+      economicPercentile: 0.5,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 5,
+    };
+    const lowCu = computeTier({ ...base, cuPercentile: 0 });
+    const highCu = computeTier({ ...base, cuPercentile: 1 });
+    expect(lowCu.composite).not.toBeNull();
+    expect(highCu.composite).not.toBeNull();
+    expect(highCu.composite!).toBeGreaterThan(lowCu.composite!);
+    // 0.7 × 0.1 × (1 − 0) × 100 = 7, ±1 for independent rounding.
+    const delta = highCu.composite! - lowCu.composite!;
+    expect(delta).toBeGreaterThanOrEqual(6);
+    expect(delta).toBeLessThanOrEqual(8);
+  });
+
+  it('null cuPercentile contributes a CU subscore of 0 (identical to cuPercentile 0)', () => {
+    // A validator that produced no blocks in the window has
+    // cuPercentile = null. computeTier must treat that EXACTLY like
+    // cuPercentile = 0 — the economic score collapses to 0.9 × income.
+    const base = {
+      votePubkey: VOTE,
+      slotsAssigned: 2000,
+      slotsSkipped: 5,
+      economicPercentile: 0.8,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 5,
+    };
+    const nullCu = computeTier({ ...base, cuPercentile: null });
+    const zeroCu = computeTier({ ...base, cuPercentile: 0 });
+    expect(nullCu.composite).toBe(zeroCu.composite);
+    expect(nullCu.components.cuPercentile).toBeNull();
+  });
+
+  it('a top-income validator with no CU data scores below an all-round-strong peer', () => {
+    // Both have economicPercentile 1.0. One has cuPercentile 1.0, the
+    // other null (produced no blocks). Economic score is 1.0 vs 0.9,
+    // so the no-CU validator's composite is strictly lower — a null
+    // CU side never, on its own, gates the tier to `unrated`.
+    const base = {
+      votePubkey: VOTE,
+      slotsAssigned: 2000,
+      slotsSkipped: 5,
+      economicPercentile: 1.0,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 5,
+    };
+    const allRound = computeTier({ ...base, cuPercentile: 1.0 });
+    const noCuData = computeTier({ ...base, cuPercentile: null });
+    expect(noCuData.composite).not.toBeNull();
+    expect(noCuData.composite!).toBeLessThan(allRound.composite!);
+    expect(noCuData.tier).not.toBe('unrated');
+  });
+
+  it('surfaces cuPercentile unchanged in components', () => {
+    const result = computeTier({
+      votePubkey: VOTE,
+      slotsAssigned: 1000,
+      slotsSkipped: 5,
+      economicPercentile: 0.6,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 5,
+      cuPercentile: 0.4242,
+    });
+    expect(result.components.cuPercentile).toBe(0.4242);
   });
 });
 
