@@ -755,7 +755,16 @@ export class StatsRepository {
             evs.block_fees_total_lamports          <> fact.fees OR
             evs.block_base_fees_total_lamports     <> fact.base_fees OR
             evs.block_priority_fees_total_lamports <> fact.priority_fees OR
-            evs.block_tips_total_lamports          <> fact.tips
+            evs.block_tips_total_lamports          <> fact.tips OR
+            -- A row whose income timestamps are still NULL has never
+            -- been marked measured. Update it even when the totals
+            -- already equal fact — e.g. a genuine zero-income epoch,
+            -- where the freshly-inserted 0 equals the recomputed 0 —
+            -- so fees_updated_at / tips_updated_at get stamped and
+            -- findEconomicPercentile counts the epoch as measured.
+            -- Without this a zero-income validator stays unrated.
+            evs.fees_updated_at IS NULL OR
+            evs.tips_updated_at IS NULL
           )`,
       [epoch, identities],
     );
@@ -1030,7 +1039,7 @@ export class StatsRepository {
             FROM epoch_validator_stats evs
            WHERE evs.epoch = w.epoch
              AND evs.vote_pubkey = ANY($2::text[])
-        ) < cardinality($2::text[])`,
+        ) < (SELECT COUNT(DISTINCT v) FROM unnest($2::text[]) AS v)`,
       [epochs, votes],
     );
     return rows.map((r) => Number(r.epoch));

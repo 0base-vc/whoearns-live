@@ -231,7 +231,14 @@ export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
         (a, b) => b - a,
       );
       for (const epoch of repairTargets) {
-        await repairEpoch(epoch, epoch === latestClosed ? latestVotes : undefined);
+        try {
+          await repairEpoch(epoch, epoch === latestClosed ? latestVotes : undefined);
+        } catch (err) {
+          // Isolate per epoch: one epoch's repair failure (an RPC
+          // timeout, a transient DB error) must not starve the other
+          // repair targets this tick. The next tick retries.
+          deps.logger.warn({ err, epoch }, 'income-reconciler: epoch repair failed');
+        }
       }
     },
   };

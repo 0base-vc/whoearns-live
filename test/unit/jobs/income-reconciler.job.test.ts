@@ -221,4 +221,34 @@ describe('income-reconciler.job', () => {
       expect.objectContaining({ epoch: 958 }),
     );
   });
+
+  it('isolates a failing epoch repair — the other targets still run', async () => {
+    const deps = makeDeps();
+    (deps.statsRepo.findEpochsWithIncomeGaps as ReturnType<typeof vi.fn>).mockResolvedValue([959]);
+    // The latest closed epoch (962) is repaired first. Make its
+    // processed-block backfill throw; the 959 repair must still run.
+    (deps.feeService.backfillPreviousEpoch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('rpc timeout'),
+    );
+    const job = createIncomeReconcilerJob({
+      ...deps,
+      watchMode: 'explicit',
+      explicitVotes: [VOTE_A],
+      intervalMs: 300_000,
+      batchSize: 25,
+      logger: silent,
+    });
+
+    await job.tick(new AbortController().signal);
+
+    // 962's repair threw, but the loop's per-epoch try/catch kept
+    // going — 959 was still repaired through to the income rebuild.
+    const attemptedEpochs = (
+      deps.feeService.backfillPreviousEpoch as ReturnType<typeof vi.fn>
+    ).mock.calls.map((call) => (call[0] as { epoch: number }).epoch);
+    expect(attemptedEpochs).toContain(959);
+    expect(deps.statsRepo.rebuildIncomeTotalsFromProcessedBlocks).toHaveBeenCalledWith(959, [
+      IDENTITY_A,
+    ]);
+  });
 });
