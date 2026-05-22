@@ -56,13 +56,13 @@ function makeGithubLink(): ValidatorGithubLink {
  * supplied separately via the `findEconomicPercentile` stub below;
  * the seed here only needs to populate the reliability half of the
  * composite plus the window numerics. `resolveTierForValidator`
- * windows these to the 5 most recent CLOSED epochs; the fake epochs
- * repo below reports a current epoch of 600, so all 6 rows count as
+ * windows these to the 10 most recent CLOSED epochs; the fake epochs
+ * repo below reports a current epoch of 600, so all 11 rows count as
  * closed.
  */
 function makeTierHistory(): EpochValidatorStats[] {
   const rows: EpochValidatorStats[] = [];
-  for (let e = 505; e >= 500; e--) {
+  for (let e = 505; e >= 495; e--) {
     rows.push(
       makeStats(e, VOTE_1, IDENTITY_1, {
         slotsAssigned: 100,
@@ -111,7 +111,7 @@ function buildDeps(
       findEconomicPercentile: async () => ({
         percentile: 1.0,
         cohortSize: 200,
-        measuredEpochs: 5,
+        measuredEpochs: 10,
         medianIncomePerSlotLamports: '50000000',
         cuPercentile: 1.0,
       }),
@@ -211,15 +211,15 @@ describe('GET /v1/validators/:idOrVote/scoring', () => {
     expect(body.identity).toBe(IDENTITY_1);
 
     // Full /tier body, carried once at top level (NOT the /badges
-    // tier summary). Window resolves to 5 closed epochs → forge.
+    // tier summary). Window resolves to 10 closed epochs → forge.
     expect(body.tier.tier).toBe('forge');
-    expect(body.tier.window.epochs).toBe(5);
-    expect(body.tier.window.slotsAssigned).toBe(500);
+    expect(body.tier.window.epochs).toBe(10);
+    expect(body.tier.window.slotsAssigned).toBe(1000);
     expect(body.tier.window.economicCohortSize).toBe(200);
-    expect(body.tier.window.economicMeasuredEpochs).toBe(5);
-    // Fixture seeds epochs 500..505 + current epoch 600 → all six
-    // count as closed, window picks the 5 newest (501..505).
-    expect(body.tier.window.cohortAsOfEpoch).toEqual({ fromEpoch: 501, toEpoch: 505 });
+    expect(body.tier.window.economicMeasuredEpochs).toBe(10);
+    // Fixture seeds epochs 495..505 + current epoch 600 → all eleven
+    // count as closed, window picks the 10 newest (496..505).
+    expect(body.tier.window.cohortAsOfEpoch).toEqual({ fromEpoch: 496, toEpoch: 505 });
     expect(body.tier.composite).toBeGreaterThanOrEqual(95);
     expect(body.tier.components.economicPercentile).toBe(1.0);
     expect(typeof body.tier.components.reliability).toBe('number');

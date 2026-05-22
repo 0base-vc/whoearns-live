@@ -4,6 +4,7 @@ import {
   MIN_COHORT_FOR_PERCENTILE,
   MIN_MEASURED_EPOCHS_FOR_ECONOMIC,
   SKIP_RATE_FLOOR,
+  WINDOW_CLOSED_EPOCHS,
   oldestIncomeFreshness,
   slotCountersFromHistory,
   wilsonInterval,
@@ -65,7 +66,7 @@ describe('computeTier', () => {
       slotsSkipped: 0,
       economicPercentile: 0.99,
       economicCohortSize: 500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: 0.99,
     });
     expect(result.tier).toBe('unrated');
@@ -82,7 +83,7 @@ describe('computeTier', () => {
       slotsSkipped: 5,
       economicPercentile: 0.85,
       economicCohortSize: MIN_COHORT_FOR_PERCENTILE - 1,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: 0.85,
     });
     expect(result.tier).toBe('unrated');
@@ -90,9 +91,9 @@ describe('computeTier', () => {
   });
 
   it('returns unrated when this validator has too few measured epochs', () => {
-    // The cohort is fine but this validator only had measurable
-    // income in 2 of 5 epochs — below MIN_MEASURED_EPOCHS_FOR_ECONOMIC.
-    // The percentile is noise; refuse to classify.
+    // The cohort is fine but this validator's income record is
+    // incomplete — one epoch short of the full window, below
+    // MIN_MEASURED_EPOCHS_FOR_ECONOMIC. Refuse to classify.
     const result = computeTier({
       votePubkey: VOTE,
       slotsAssigned: 500,
@@ -113,7 +114,7 @@ describe('computeTier', () => {
       slotsSkipped: 5,
       economicPercentile: null,
       economicCohortSize: 500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: null,
     });
     expect(result.tier).toBe('unrated');
@@ -130,7 +131,7 @@ describe('computeTier', () => {
       slotsSkipped: 5,
       economicPercentile: 1.0,
       economicCohortSize: 1500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: 1.0,
     });
     expect(result.tier).toBe('forge');
@@ -150,7 +151,7 @@ describe('computeTier', () => {
       slotsSkipped: 5,
       economicPercentile: 0.5,
       economicCohortSize: 1500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: 0.5,
     });
     expect(result.tier).toBe('hearth');
@@ -169,7 +170,7 @@ describe('computeTier', () => {
       slotsSkipped: 5,
       economicPercentile: 0.05,
       economicCohortSize: 1500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: 0.05,
     });
     expect(result.tier).toBe('kindling');
@@ -187,7 +188,7 @@ describe('computeTier', () => {
       slotsSkipped: 100,
       economicPercentile: 1.0,
       economicCohortSize: 1500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: 1.0,
     });
     // Reliability bites but doesn't capsize a top earner. Document
@@ -205,7 +206,7 @@ describe('computeTier', () => {
       slotsSkipped: 500,
       economicPercentile: 1.0,
       economicCohortSize: 1500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: 1.0,
     });
     expect(badResult.tier).not.toBe('forge');
@@ -225,7 +226,7 @@ describe('computeTier', () => {
       slotsSkipped: 0,
       economicPercentile: 1.0,
       economicCohortSize: 500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: 1.0,
     });
     // 1 - upper_bound(0/11) is well below 1.0 — small sample carries cost.
@@ -240,7 +241,7 @@ describe('computeTier', () => {
       slotsSkipped: 5,
       economicPercentile: 0.7321,
       economicCohortSize: 200,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: 0.7321,
     });
     expect(result.components.economicPercentile).toBe(0.7321);
@@ -261,7 +262,7 @@ describe('computeTier', () => {
       slotsSkipped: 250,
       economicPercentile: 1.0,
       economicCohortSize: 1500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: 1.0,
     });
     expect(result.tier).toBe('kindling');
@@ -284,7 +285,7 @@ describe('computeTier', () => {
       slotsSkipped: 100,
       economicPercentile: 1.0,
       economicCohortSize: 1500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: 1.0,
     });
     expect(['forge', 'anvil']).toContain(result.tier);
@@ -292,20 +293,19 @@ describe('computeTier', () => {
     expect(1 - result.components.reliability).toBeLessThanOrEqual(SKIP_RATE_FLOOR);
   });
 
-  it('MIN_MEASURED_EPOCHS_FOR_ECONOMIC = 4 — three measured epochs is now insufficient', () => {
-    // Three of five measured epochs used to suffice, but the median
-    // at n=3 has 1-in-3 sensitivity to an anomalous epoch. We require
-    // four to reduce that to a 2-in-4 (50%) signal-to-noise. A
-    // validator with three measured epochs must drop to `unrated`,
-    // even with otherwise-perfect inputs.
-    expect(MIN_MEASURED_EPOCHS_FOR_ECONOMIC).toBe(4);
+  it('MIN_MEASURED_EPOCHS_FOR_ECONOMIC is the full window — one missing epoch is unrated', () => {
+    // A tier needs a COMPLETE record: measurable income in every
+    // closed epoch of the window. A validator missing even one epoch
+    // — here, WINDOW_CLOSED_EPOCHS - 1 of WINDOW_CLOSED_EPOCHS — drops
+    // to `unrated`, even with otherwise-perfect inputs.
+    expect(MIN_MEASURED_EPOCHS_FOR_ECONOMIC).toBe(WINDOW_CLOSED_EPOCHS);
     const result = computeTier({
       votePubkey: VOTE,
       slotsAssigned: 1000,
       slotsSkipped: 5,
       economicPercentile: 1.0,
       economicCohortSize: 1500,
-      economicMeasuredEpochs: 3,
+      economicMeasuredEpochs: WINDOW_CLOSED_EPOCHS - 1,
       cuPercentile: 1.0,
     });
     expect(result.tier).toBe('unrated');
@@ -327,7 +327,7 @@ describe('computeTier', () => {
       slotsSkipped: 5,
       economicPercentile: 0.5,
       economicCohortSize: 1500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
     };
     const lowCu = computeTier({ ...base, cuPercentile: 0 });
     const highCu = computeTier({ ...base, cuPercentile: 1 });
@@ -350,7 +350,7 @@ describe('computeTier', () => {
       slotsSkipped: 5,
       economicPercentile: 0.8,
       economicCohortSize: 1500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
     };
     const nullCu = computeTier({ ...base, cuPercentile: null });
     const zeroCu = computeTier({ ...base, cuPercentile: 0 });
@@ -369,7 +369,7 @@ describe('computeTier', () => {
       slotsSkipped: 5,
       economicPercentile: 1.0,
       economicCohortSize: 1500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
     };
     const allRound = computeTier({ ...base, cuPercentile: 1.0 });
     const noCuData = computeTier({ ...base, cuPercentile: null });
@@ -385,7 +385,7 @@ describe('computeTier', () => {
       slotsSkipped: 5,
       economicPercentile: 0.6,
       economicCohortSize: 1500,
-      economicMeasuredEpochs: 5,
+      economicMeasuredEpochs: 10,
       cuPercentile: 0.4242,
     });
     expect(result.components.cuPercentile).toBe(0.4242);

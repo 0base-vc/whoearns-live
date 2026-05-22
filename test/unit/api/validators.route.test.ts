@@ -650,11 +650,11 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
 
   it('classifies a strong validator with enough closed-epoch history', async () => {
     await seedValidator(ctx, VOTE_1, IDENTITY_1, 505);
-    // Seed 6 epochs. The tier endpoint resolves the running epoch
+    // Seed 11 epochs. The tier endpoint resolves the running epoch
     // from `epochsRepo.findCurrent()` and excludes any row whose
     // `epoch >= current.epoch`. We bump the current epoch to 600 so
-    // all 6 rows are treated as closed and the window picks 5.
-    for (let e = 500; e <= 505; e++) {
+    // all 11 rows are treated as closed and the window picks 10.
+    for (let e = 495; e <= 505; e++) {
       ctx.stats.rows.set(
         `${e}:${VOTE_1}`,
         makeStats(e, VOTE_1, IDENTITY_1, {
@@ -666,8 +666,8 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
         }),
       );
     }
-    // Bump the current epoch above the seeded window so all 6
-    // seeded rows count as CLOSED, and the route picks 5 for the
+    // Bump the current epoch above the seeded window so all 11
+    // seeded rows count as CLOSED, and the route picks 10 for the
     // window.
     await ctx.epochs.upsert({
       epoch: 600,
@@ -684,7 +684,7 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
     ctx.stats.setEconomicLookup(VOTE_1, {
       percentile: 1.0,
       cohortSize: 200,
-      measuredEpochs: 5,
+      measuredEpochs: 10,
       medianIncomePerSlotLamports: '50000000',
       cuPercentile: 1.0,
     });
@@ -703,17 +703,17 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
       components: { reliability: number; economicPercentile: number };
     };
     expect(body.tier).toBe('forge');
-    expect(body.window.epochs).toBe(5);
-    expect(body.window.slotsAssigned).toBe(500);
+    expect(body.window.epochs).toBe(10);
+    expect(body.window.slotsAssigned).toBe(1000);
     expect(body.window.economicCohortSize).toBe(200);
-    expect(body.window.economicMeasuredEpochs).toBe(5);
+    expect(body.window.economicMeasuredEpochs).toBe(10);
     expect(body.components.economicPercentile).toBe(1.0);
     expect(body.composite).toBeGreaterThanOrEqual(95);
     // cohortAsOfEpoch reflects the closed-epoch window the percentile
-    // was evaluated against: oldest closed epoch in [500..505] and
-    // newest, with current epoch 600 bumping all six into the closed
-    // set and the route picking the 5 newest (501..505).
-    expect(body.window.cohortAsOfEpoch).toEqual({ fromEpoch: 501, toEpoch: 505 });
+    // was evaluated against: oldest closed epoch in [495..505] and
+    // newest, with current epoch 600 bumping all eleven into the
+    // closed set and the route picking the 10 newest (496..505).
+    expect(body.window.cohortAsOfEpoch).toEqual({ fromEpoch: 496, toEpoch: 505 });
   });
 
   it('cohortAsOfEpoch is null when the validator has no closed history', async () => {

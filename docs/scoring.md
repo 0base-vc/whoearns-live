@@ -128,7 +128,7 @@ and through `/v1/validators/:id/current-epoch`.
 
 ### Phase 1 — Node Tier (on-chain-anchored composite)
 
-**Status:** live. Two-signal composite over the most recent 5 closed
+**Status:** live. Two-signal composite over the most recent 10 closed
 epochs, deliberately constructed from signals that cannot be inflated
 by client mods or networking-stack patches.
 
@@ -213,8 +213,9 @@ Floors:
 
 - **`MIN_LEADER_SLOTS_FOR_TIER = 10`** — below this the sample is
   too thin for reliability to mean anything.
-- **`MIN_MEASURED_EPOCHS_FOR_ECONOMIC = 4`** of the 5-epoch window
-  — below this the per-validator median is noisy.
+- **`MIN_MEASURED_EPOCHS_FOR_ECONOMIC = 10`** — the full window; a
+  tier needs a complete 10-epoch income record, so a validator
+  missing any epoch (or still warming up) stays `unrated`.
 - **`MIN_COHORT_FOR_PERCENTILE = 10`** — below this the rank is
   drawn against too few peers to be meaningful (a `PERCENT_RANK` of
   0.8 against 4 peers is not the same signal as against 1,500).

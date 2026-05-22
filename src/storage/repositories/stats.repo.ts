@@ -1027,7 +1027,7 @@ export class StatsRepository {
    * fees/tips ingested, opt-out respected. Per-validator inclusion
    * also requires at least one epoch with measured income — the
    * caller checks `measuredEpochs >= MIN_MEASURED_EPOCHS_FOR_ECONOMIC`
-   * (4 of 5 by default) before trusting the percentile.
+   * (the full window by default) before trusting the percentile.
    *
    * @param vote          Target validator's vote pubkey.
    * @param fromEpoch     Inclusive lower bound of the epoch window.

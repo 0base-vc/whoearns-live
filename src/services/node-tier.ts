@@ -58,7 +58,8 @@ export interface TierInput {
   /**
    * How many closed epochs in the window had measurable income for
    * THIS validator. Min for inclusion is `MIN_MEASURED_EPOCHS_FOR_ECONOMIC`
-   * — below that the median is too noisy and the percentile is `null`.
+   * (the full window) — below that the record is incomplete and the
+   * percentile is `null`.
    */
   economicMeasuredEpochs: number;
   /**
@@ -188,8 +189,12 @@ export function wilsonLowerBound(successes: number, trials: number): number {
  * contract — the API exposes "based on the most recent N closed
  * epochs." `WINDOW_FETCH_ROWS` is +1 to skip the running epoch when
  * the running-epoch row is present.
+ *
+ * Set to 10 so the tier is read over the same span as the
+ * leaderboard's 10-epoch "Decade" window — a validator's tier and its
+ * Decade ranking then describe the same stretch of history.
  */
-export const WINDOW_CLOSED_EPOCHS = 5;
+export const WINDOW_CLOSED_EPOCHS = 10;
 export const WINDOW_FETCH_ROWS = WINDOW_CLOSED_EPOCHS + 1;
 
 /**
@@ -198,16 +203,19 @@ export const WINDOW_FETCH_ROWS = WINDOW_CLOSED_EPOCHS + 1;
  */
 const MIN_LEADER_SLOTS_FOR_TIER = 10;
 /**
- * Min closed epochs (within the 5-epoch window) the target validator
- * must have measured income on. Four of five = a strong majority of
- * the window has data. We raised this from 3 to 4 because at n=3 the
- * median has 1-in-3 sensitivity to a single anomalous epoch (one
- * lucky-MEV or one bad-uptime epoch can swing the rank significantly);
- * at n=4 a shift requires a 2-in-4 (50%) signal to move the median.
- * The cost is one extra epoch of `unrated` on cold starts and after
- * any per-validator outage that drops an income row from the window.
+ * Min closed epochs (within the window) the target validator must
+ * have measured income on — set to the FULL window. A tier is granted
+ * only on a complete `WINDOW_CLOSED_EPOCHS`-epoch income record; any
+ * epoch missing income data holds the validator at `unrated`. The
+ * median is amply robust at this many points (the original concern,
+ * anomalous-epoch sensitivity at n=3, is long gone) — this floor is
+ * now a completeness contract: a rated validator has a full track
+ * record, and a brand-new validator waits the whole window before
+ * being tiered. Missing epochs caused by our own ingestion are
+ * expected to be closed by backfill, not absorbed by lowering this
+ * floor.
  */
-export const MIN_MEASURED_EPOCHS_FOR_ECONOMIC = 4;
+export const MIN_MEASURED_EPOCHS_FOR_ECONOMIC = WINDOW_CLOSED_EPOCHS;
 /**
  * Min peer cohort size for a percentile to be meaningful. With fewer
  * than this many measured peers in the window, ranking is mostly

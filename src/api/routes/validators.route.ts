@@ -690,9 +690,9 @@ export interface NodeTierResponse {
     /**
      * How many closed epochs in the window had measurable income
      * for THIS validator. Below
-     * `MIN_MEASURED_EPOCHS_FOR_ECONOMIC` (4 of 5 by default) the
-     * percentile is treated as null and the tier falls to
-     * `unrated`.
+     * `MIN_MEASURED_EPOCHS_FOR_ECONOMIC` (the full window by
+     * default) the percentile is treated as null and the tier
+     * falls to `unrated`.
      */
     economicMeasuredEpochs: number;
     /**
