@@ -25,16 +25,6 @@ function makeDeps() {
     observedAt: new Date(),
     closedAt: null,
   };
-  const closed = {
-    epoch: 962,
-    firstSlot: 415584000,
-    lastSlot: 416015999,
-    slotCount: 432000,
-    currentSlot: 416015999,
-    isClosed: true,
-    observedAt: new Date(),
-    closedAt: new Date(),
-  };
   const schedule = { [IDENTITY_A]: [10, 20, 30] };
   return {
     epochService: {
@@ -42,7 +32,19 @@ function makeDeps() {
       syncCurrent: vi.fn().mockResolvedValue(current),
     } as unknown as EpochService,
     epochsRepo: {
-      findByEpoch: vi.fn().mockResolvedValue(closed),
+      // Closed-epoch info for any epoch — slot numbers derived from the
+      // 432000-slot epoch length, so e.g. epoch 962 reproduces
+      // firstSlot 415584000.
+      findByEpoch: vi.fn().mockImplementation(async (epoch: number) => ({
+        epoch,
+        firstSlot: epoch * 432000,
+        lastSlot: epoch * 432000 + 431999,
+        slotCount: 432000,
+        currentSlot: epoch * 432000 + 431999,
+        isClosed: true,
+        observedAt: new Date(),
+        closedAt: new Date(),
+      })),
     } as unknown as Pick<EpochsRepository, 'findByEpoch'>,
     validatorService: {
       getActiveVotePubkeys: vi.fn().mockResolvedValue([VOTE_A]),
@@ -60,7 +62,11 @@ function makeDeps() {
     } as unknown as FeeService,
     statsRepo: {
       rebuildIncomeTotalsFromProcessedBlocks: vi.fn().mockResolvedValue(1),
-    } as unknown as Pick<StatsRepository, 'rebuildIncomeTotalsFromProcessedBlocks'>,
+      findEpochsWithIncomeGaps: vi.fn().mockResolvedValue([]),
+    } as unknown as Pick<
+      StatsRepository,
+      'rebuildIncomeTotalsFromProcessedBlocks' | 'findEpochsWithIncomeGaps'
+    >,
     rpc: {
       getLeaderSchedule: vi.fn().mockResolvedValue(schedule),
     } as unknown as SolanaRpcClient,
@@ -139,5 +145,38 @@ describe('income-reconciler.job', () => {
 
     expect(fallback.getLeaderSchedule).toHaveBeenCalledWith(415584000);
     expect(deps.feeService.backfillPreviousEpoch).toHaveBeenCalled();
+  });
+
+  it('repairs a gap epoch detected in the trailing tier window', async () => {
+    const deps = makeDeps();
+    // The detector reports an income gap in epoch 959, somewhere in
+    // the trailing 10-epoch tier window below the running epoch 963.
+    (deps.statsRepo.findEpochsWithIncomeGaps as ReturnType<typeof vi.fn>).mockResolvedValue([959]);
+    const job = createIncomeReconcilerJob({
+      ...deps,
+      watchMode: 'explicit',
+      explicitVotes: [VOTE_A],
+      intervalMs: 300_000,
+      batchSize: 25,
+      logger: silent,
+    });
+
+    await job.tick(new AbortController().signal);
+
+    // Detection scans the 10 closed epochs below the running epoch:
+    // 962 down to 953, filtered to the watched set.
+    expect(deps.statsRepo.findEpochsWithIncomeGaps).toHaveBeenCalledWith(
+      [962, 961, 960, 959, 958, 957, 956, 955, 954, 953],
+      [VOTE_A],
+    );
+    // Both the latest closed epoch (962, always) and the detected gap
+    // epoch (959) are repaired — newest first, and nothing else.
+    const repairedEpochs = (
+      deps.feeService.backfillPreviousEpoch as ReturnType<typeof vi.fn>
+    ).mock.calls.map((call) => (call[0] as { epoch: number }).epoch);
+    expect(repairedEpochs).toEqual([962, 959]);
+    expect(deps.statsRepo.rebuildIncomeTotalsFromProcessedBlocks).toHaveBeenCalledWith(959, [
+      IDENTITY_A,
+    ]);
   });
 });

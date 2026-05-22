@@ -1,6 +1,7 @@
 import type { Logger } from '../core/logger.js';
 import type { EpochService } from '../services/epoch.service.js';
 import type { FeeService } from '../services/fee.service.js';
+import { WINDOW_CLOSED_EPOCHS } from '../services/node-tier.js';
 import type { ValidatorService, WatchMode } from '../services/validator.service.js';
 import type { SolanaRpcClient } from '../clients/solana-rpc.js';
 import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
@@ -14,7 +15,10 @@ export interface IncomeReconcilerJobDeps {
   epochsRepo: Pick<EpochsRepository, 'findByEpoch'>;
   validatorService: ValidatorService;
   feeService: FeeService;
-  statsRepo: Pick<StatsRepository, 'rebuildIncomeTotalsFromProcessedBlocks'>;
+  statsRepo: Pick<
+    StatsRepository,
+    'rebuildIncomeTotalsFromProcessedBlocks' | 'findEpochsWithIncomeGaps'
+  >;
   rpc: SolanaRpcClient;
   rpcFallback?: Pick<SolanaRpcClient, 'getLeaderSchedule'>;
   watchMode: WatchMode;
@@ -37,101 +41,163 @@ export const INCOME_RECONCILER_JOB_NAME = 'income-reconciler';
  *
  *   1. RPC errors that left a leader slot without a fact row.
  *   2. Aggregate drift where facts exist but delta updates were missed.
+ *
+ * Scope: the latest closed epoch is ALWAYS repaired — it has only just
+ * closed and may still be settling (aggregate drift the gap query
+ * cannot see). The rest of the Node Tier window — the trailing
+ * `WINDOW_CLOSED_EPOCHS` closed epochs — is repaired only where a
+ * cheap detection query (`findEpochsWithIncomeGaps`) finds an actual
+ * income gap: a watched validator with leader slots but no income
+ * recorded. Without this, an RPC outage straddling an epoch boundary
+ * would leave a permanent hole in epoch N-2..N-10 and silently drop
+ * that validator to `unrated`, because the tier requires a complete
+ * income record across the whole window.
  */
 export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
+  /**
+   * Repair one closed epoch: fill any missing `processed_blocks` rows
+   * for watched validators and rebuild `epoch_validator_stats` totals.
+   * `knownVotes` lets a caller that has already resolved the watched
+   * set for this epoch skip the lookup.
+   */
+  async function repairEpoch(epoch: Epoch, knownVotes?: VotePubkey[]): Promise<void> {
+    const epochInfo = await deps.epochsRepo.findByEpoch(epoch);
+    if (epochInfo === null || !epochInfo.isClosed) {
+      deps.logger.debug(
+        { epoch, known: epochInfo !== null },
+        'income-reconciler: target epoch not closed, skipping',
+      );
+      return;
+    }
+
+    const votes =
+      knownVotes ??
+      (await deps.validatorService.getActiveVotePubkeys(
+        deps.watchMode,
+        deps.explicitVotes,
+        epoch,
+        deps.topN !== undefined ? { topN: deps.topN } : undefined,
+      ));
+    if (votes.length === 0) {
+      deps.logger.debug({ epoch }, 'income-reconciler: no watched votes, skipping');
+      return;
+    }
+
+    const leaderSchedule = await withRpcFallback({
+      method: 'getLeaderSchedule',
+      logger: deps.logger,
+      fallback: deps.rpcFallback,
+      context: {
+        targetEpoch: epoch,
+        firstSlot: epochInfo.firstSlot,
+        job: INCOME_RECONCILER_JOB_NAME,
+      },
+      runPrimary: () => deps.rpc.getLeaderSchedule(epochInfo.firstSlot),
+      runFallback: (fallback) => fallback.getLeaderSchedule(epochInfo.firstSlot),
+    });
+    if (leaderSchedule === null) {
+      deps.logger.warn({ epoch }, 'income-reconciler: leader schedule unavailable');
+      return;
+    }
+
+    const identityByVote = await deps.validatorService.getIdentityMap(votes);
+    const identities: IdentityPubkey[] = [];
+
+    let processed = 0;
+    let skipped = 0;
+    let errors = 0;
+    for (const vote of votes) {
+      const identity = identityByVote.get(vote);
+      if (identity === undefined) {
+        deps.logger.warn({ vote, epoch }, 'income-reconciler: identity missing for vote');
+        continue;
+      }
+      identities.push(identity);
+      const result = await deps.feeService.backfillPreviousEpoch({
+        epoch,
+        vote,
+        identity,
+        firstSlot: epochInfo.firstSlot,
+        lastSlot: epochInfo.lastSlot,
+        leaderSchedule,
+        batchSize: deps.batchSize,
+      });
+      processed += result.processed;
+      skipped += result.skipped;
+      errors += result.errors;
+    }
+
+    const uniqueIdentities = Array.from(new Set(identities));
+    const aggregatesRebuilt = await deps.statsRepo.rebuildIncomeTotalsFromProcessedBlocks(
+      epoch,
+      uniqueIdentities,
+    );
+
+    deps.logger.info(
+      {
+        epoch,
+        validators: uniqueIdentities.length,
+        processed,
+        skipped,
+        errors,
+        aggregatesRebuilt,
+      },
+      'income-reconciler: closed epoch reconciled',
+    );
+  }
+
   return {
     name: INCOME_RECONCILER_JOB_NAME,
     intervalMs: deps.intervalMs,
     async tick(_signal: AbortSignal): Promise<void> {
       const current =
         (await deps.epochService.getCurrent()) ?? (await deps.epochService.syncCurrent());
-      const targetEpoch = current.epoch - 1;
-      if (targetEpoch < 0) {
+      const latestClosed = current.epoch - 1;
+      if (latestClosed < 0) {
         deps.logger.debug('income-reconciler: no closed epoch yet, skipping');
         return;
       }
 
-      const epochInfo = await deps.epochsRepo.findByEpoch(targetEpoch);
-      if (epochInfo === null || !epochInfo.isClosed) {
-        deps.logger.debug(
-          { targetEpoch, known: epochInfo !== null },
-          'income-reconciler: target epoch not closed, skipping',
-        );
-        return;
+      // The trailing closed-epoch window the Node Tier scores over.
+      const oldest = Math.max(0, latestClosed - (WINDOW_CLOSED_EPOCHS - 1));
+      const windowEpochs: Epoch[] = [];
+      for (let e = latestClosed; e >= oldest; e--) {
+        windowEpochs.push(e);
       }
 
-      const votes = await deps.validatorService.getActiveVotePubkeys(
+      // Watched set resolved once against the latest closed epoch — it
+      // is the gap-detection filter AND that epoch's repair scope, so
+      // it is not looked up twice.
+      const latestVotes = await deps.validatorService.getActiveVotePubkeys(
         deps.watchMode,
         deps.explicitVotes,
-        targetEpoch,
+        latestClosed,
         deps.topN !== undefined ? { topN: deps.topN } : undefined,
       );
-      if (votes.length === 0) {
-        deps.logger.debug({ targetEpoch }, 'income-reconciler: no watched votes, skipping');
+      if (latestVotes.length === 0) {
+        deps.logger.debug({ latestClosed }, 'income-reconciler: no watched votes, skipping');
         return;
       }
 
-      const leaderSchedule = await withRpcFallback({
-        method: 'getLeaderSchedule',
-        logger: deps.logger,
-        fallback: deps.rpcFallback,
-        context: {
-          targetEpoch,
-          firstSlot: epochInfo.firstSlot,
-          job: INCOME_RECONCILER_JOB_NAME,
-        },
-        runPrimary: () => deps.rpc.getLeaderSchedule(epochInfo.firstSlot),
-        runFallback: (fallback) => fallback.getLeaderSchedule(epochInfo.firstSlot),
-      });
-      if (leaderSchedule === null) {
-        deps.logger.warn({ targetEpoch }, 'income-reconciler: leader schedule unavailable');
-        return;
+      // Cheap detection: which window epochs have a watched validator
+      // with leader slots but no income recorded?
+      const gapEpochs = await deps.statsRepo.findEpochsWithIncomeGaps(windowEpochs, latestVotes);
+      if (gapEpochs.length > 0) {
+        deps.logger.info(
+          { latestClosed, gapEpochs, windowSize: windowEpochs.length },
+          'income-reconciler: income gaps detected in the tier window',
+        );
       }
 
-      const identityByVote = await deps.validatorService.getIdentityMap(votes);
-      const identities: IdentityPubkey[] = [];
-
-      let processed = 0;
-      let skipped = 0;
-      let errors = 0;
-      for (const vote of votes) {
-        const identity = identityByVote.get(vote);
-        if (identity === undefined) {
-          deps.logger.warn({ vote, targetEpoch }, 'income-reconciler: identity missing for vote');
-          continue;
-        }
-        identities.push(identity);
-        const result = await deps.feeService.backfillPreviousEpoch({
-          epoch: targetEpoch as Epoch,
-          vote,
-          identity,
-          firstSlot: epochInfo.firstSlot,
-          lastSlot: epochInfo.lastSlot,
-          leaderSchedule,
-          batchSize: deps.batchSize,
-        });
-        processed += result.processed;
-        skipped += result.skipped;
-        errors += result.errors;
+      // The latest closed epoch is always repaired — it may still be
+      // settling, and aggregate drift is invisible to the gap query.
+      // Older epochs are repaired only when a gap was detected.
+      const repairTargets = Array.from(new Set<Epoch>([latestClosed, ...gapEpochs])).sort(
+        (a, b) => b - a,
+      );
+      for (const epoch of repairTargets) {
+        await repairEpoch(epoch, epoch === latestClosed ? latestVotes : undefined);
       }
-
-      const uniqueIdentities = Array.from(new Set(identities));
-      const aggregatesRebuilt = await deps.statsRepo.rebuildIncomeTotalsFromProcessedBlocks(
-        targetEpoch as Epoch,
-        uniqueIdentities,
-      );
-
-      deps.logger.info(
-        {
-          epoch: targetEpoch,
-          validators: uniqueIdentities.length,
-          processed,
-          skipped,
-          errors,
-          aggregatesRebuilt,
-        },
-        'income-reconciler: closed epoch reconciled',
-      );
     },
   };
 }
