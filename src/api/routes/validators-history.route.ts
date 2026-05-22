@@ -283,15 +283,40 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // benchmark blocks. Both are bulk-fetched by distinct epoch to keep
     // the round-trip count at O(1) per response regardless of `limit`.
     const distinctEpochs = Array.from(new Set(rows.map((r) => r.epoch)));
-    const [epochInfos, aggregates, validatorCuByEpoch, serviceCuByEpoch] = await Promise.all([
+    // A validator's identity can change across the window (identity
+    // rotation); `processed_blocks` is keyed by `leader_identity`, so
+    // group each epoch under the identity that actually ran it — the
+    // per-epoch `identityPubkey` carried on every history row, NOT the
+    // validator's current identity. Almost always one identity, hence
+    // one query; a rotated validator gets one query per identity.
+    const epochsByIdentity = new Map<string, number[]>();
+    for (const row of rows) {
+      const list = epochsByIdentity.get(row.identityPubkey);
+      if (list) list.push(row.epoch);
+      else epochsByIdentity.set(row.identityPubkey, [row.epoch]);
+    }
+    const identityEpochEntries = Array.from(epochsByIdentity);
+    const [epochInfos, aggregates, validatorCuMaps, serviceCuByEpoch] = await Promise.all([
       Promise.all(distinctEpochs.map((e) => epochsRepo.findByEpoch(e))),
       aggregatesRepo.findManyByEpochsTopN(distinctEpochs, DEFAULT_CLUSTER_TOP_N),
-      // Per-epoch CU: this validator's average, plus the service-wide
-      // average it is plotted against. Both keyed by epoch; absent
-      // epochs / zero-produced-block epochs collapse to `null`.
-      processedBlocksRepo.getEpochComputeUnitsForIdentity(validator.identityPubkey, distinctEpochs),
+      // Per-epoch validator CU, fetched per distinct identity so
+      // pre-rotation epochs resolve under the identity that produced
+      // them.
+      Promise.all(
+        identityEpochEntries.map(([identity, eps]) =>
+          processedBlocksRepo.getEpochComputeUnitsForIdentity(identity, eps),
+        ),
+      ),
+      // Service-wide average it is plotted against — keyed by epoch;
+      // absent / zero-produced-block epochs collapse to `null`.
       processedBlocksRepo.getEpochComputeUnitsServiceWide(distinctEpochs),
     ]);
+    // Merge the per-identity CU maps — each epoch belongs to exactly
+    // one identity, so the keys never collide.
+    const validatorCuByEpoch = new Map<number, bigint | null>();
+    for (const cuMap of validatorCuMaps) {
+      for (const [epoch, cu] of cuMap) validatorCuByEpoch.set(epoch, cu);
+    }
     const epochByNumber = new Map<number, EpochInfo>();
     distinctEpochs.forEach((e, i) => {
       const info = epochInfos[i];

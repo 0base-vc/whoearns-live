@@ -60,7 +60,13 @@ const validatorLeaderSlotsRoutes: FastifyPluginAsync<ValidatorLeaderSlotsRoutesD
       const slotStats = await processedBlocksRepo.getValidatorEpochSlotStats({
         epoch: params.epoch,
         votePubkey: validator.votePubkey,
-        identityPubkey: validator.identityPubkey,
+        // `processed_blocks` is keyed by `leader_identity`, which is
+        // the identity AS OF that epoch — a validator may have rotated
+        // its identity key since. Use the per-epoch identity from the
+        // `epoch_validator_stats` row, falling back to the current
+        // identity only when there is no row (no activity → all-zero
+        // either way).
+        identityPubkey: stats?.identityPubkey ?? validator.identityPubkey,
         slotsAssigned: stats?.slotsAssigned ?? 0,
         slotsProduced: stats?.slotsProduced ?? 0,
         slotsSkipped: stats?.slotsSkipped ?? 0,

@@ -48,6 +48,10 @@ function buildDeps(): {
   const epochs = new FakeEpochsRepo();
   const aggregates = new FakeAggregatesRepo();
   const processedBlocks = new FakeProcessedBlocksRepo();
+  // Wire the windowed-CU fake to the stats fake so
+  // getWindowedComputeUnitsByVote can resolve each (epoch, vote)'s
+  // identity — mirrors the real epoch_validator_stats join.
+  processedBlocks.epochValidatorStatsRows = stats.rows;
   return {
     stats,
     epochs,
@@ -72,8 +76,9 @@ function seedCuBlock(
   epoch: number,
   identity: string,
   computeUnits: bigint,
+  status: 'produced' | 'skipped' | 'missing' = 'produced',
 ): void {
-  const block = makeProcessedBlock(slot, epoch, identity, 0n);
+  const block = makeProcessedBlock(slot, epoch, identity, 0n, status);
   block.computeUnitsConsumed = computeUnits;
   processedBlocks.rows.set(slot, block);
 }
@@ -470,6 +475,10 @@ describe('GET /v1/leaderboard', () => {
     seedCuBlock(processedBlocks, 9_600_001, 960, IDENTITY_1, 10_000_000n);
     seedCuBlock(processedBlocks, 9_600_002, 960, IDENTITY_1, 20_000_000n);
     seedCuBlock(processedBlocks, 9_610_001, 961, IDENTITY_1, 60_000_000n);
+    // A skipped slot with a huge CU value — the `block_status='produced'`
+    // filter must exclude it; if it leaked in, windowedCu would be
+    // wildly inflated and the assertions below would fail.
+    seedCuBlock(processedBlocks, 9_600_003, 960, IDENTITY_1, 999_000_000n, 'skipped');
     const app = await makeApp(deps);
     try {
       const live = await app.inject({ method: 'GET', url: '/v1/leaderboard' });
@@ -493,6 +502,63 @@ describe('GET /v1/leaderboard', () => {
         current.json() as { items: Array<{ vote: string; windowedCu: string | null }> }
       ).items;
       expect(currentItems.find((r) => r.vote === VOTE_1)?.windowedCu).toBe('60000000');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('windowedCu survives identity rotation (per-epoch identity join)', async () => {
+    const { stats, epochs, processedBlocks, deps } = buildDeps();
+    const updatedAt = new Date('2026-04-28T00:00:00.000Z');
+    // Two epochs; VOTE_1 ran identity IDENTITY_3 in the closed epoch
+    // 960, then rotated to IDENTITY_1 for the running epoch 961.
+    epochs.rows.set(
+      960,
+      makeEpochInfo(960, 0, 431_999, { isClosed: true, closedAt: new Date('2026-04-25') }),
+    );
+    epochs.rows.set(
+      961,
+      makeEpochInfo(961, 432_000, 863_999, {
+        isClosed: false,
+        currentSlot: 432_400,
+        closedAt: null,
+      }),
+    );
+    stats.rows.set(
+      `960:${VOTE_1}`,
+      makeStats(960, VOTE_1, IDENTITY_3, {
+        slotsAssigned: 10,
+        slotsProduced: 10,
+        blockFeesTotalLamports: 1_000_000_000n,
+        slotsUpdatedAt: updatedAt,
+        feesUpdatedAt: updatedAt,
+      }),
+    );
+    stats.rows.set(
+      `961:${VOTE_1}`,
+      makeStats(961, VOTE_1, IDENTITY_1, {
+        slotsAssigned: 100,
+        slotsElapsedAssigned: 10,
+        slotsProduced: 10,
+        blockFeesTotalLamports: 1_000_000_000n,
+        slotsUpdatedAt: updatedAt,
+        slotWindowLastSlot: 432_400,
+        slotWindowUpdatedAt: updatedAt,
+        feesUpdatedAt: updatedAt,
+      }),
+    );
+    // Pre-rotation blocks under the OLD identity, post-rotation under
+    // the NEW. A naive latest-identity lookup would miss epoch 960.
+    seedCuBlock(processedBlocks, 9_600_001, 960, IDENTITY_3, 20_000_000n);
+    seedCuBlock(processedBlocks, 9_610_001, 961, IDENTITY_1, 40_000_000n);
+    const app = await makeApp(deps);
+    try {
+      const res = await app.inject({ method: 'GET', url: '/v1/leaderboard' });
+      expect(res.statusCode).toBe(200);
+      const items = (res.json() as { items: Array<{ vote: string; windowedCu: string | null }> })
+        .items;
+      // Both epochs counted despite the rotation: (20M + 40M) / 2 = 30M.
+      expect(items.find((r) => r.vote === VOTE_1)?.windowedCu).toBe('30000000');
     } finally {
       await app.close();
     }

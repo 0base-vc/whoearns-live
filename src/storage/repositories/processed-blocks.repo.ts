@@ -991,8 +991,9 @@ export class ProcessedBlocksRepository {
 
   /**
    * Service-wide average compute units per produced block, per epoch
-   * — every validator's produced blocks pooled. Keyed by epoch;
-   * `null` for an epoch with no produced blocks anywhere.
+   * — every tracked validator's produced blocks pooled (`processed_blocks`
+   * holds tracked validators' leader slots, not the whole cluster).
+   * Keyed by epoch; `null` for an epoch with no produced blocks anywhere.
    *
    * This is the produced-block-count-weighted mean of each
    * validator's per-epoch average CU: weighting each validator's mean
@@ -1028,42 +1029,51 @@ export class ProcessedBlocksRepository {
 
   /**
    * Windowed average compute units per produced block, per validator
-   * identity, pooled across the given window epochs. Keyed by
-   * identity pubkey; `null` for an identity that produced no blocks
-   * across the window.
+   * VOTE, pooled across the given window epochs. Keyed by vote pubkey;
+   * `null` for a vote that produced no blocks across the window.
    *
-   * `SUM(CU) / COUNT(produced)` over the window's epochs is the
-   * produced-block-count-weighted CU the leaderboard needs: for a
-   * single-epoch window it is that epoch's average, for a multi-epoch
-   * window it weights each epoch by how many blocks the validator
-   * produced in it. Restricted to `identities` so the query only
-   * aggregates the leaderboard's visible rows.
+   * Joins `epoch_validator_stats` so each epoch's blocks resolve under
+   * the identity the validator actually ran THAT epoch — correct even
+   * when the operator rotated its identity key mid-window (a bare
+   * `processed_blocks`-by-identity query would miss pre-rotation
+   * epochs). `SUM(CU) / COUNT(produced)` over the window is the
+   * produced-block-count-weighted CU the leaderboard needs: a
+   * single-epoch window yields that epoch's average, a multi-epoch
+   * window weights each epoch by how many blocks the validator
+   * produced. Restricted to `votes` so the query only aggregates the
+   * leaderboard's visible rows.
    */
-  async getWindowedComputeUnitsByIdentity(
+  async getWindowedComputeUnitsByVote(
     epochs: Epoch[],
-    identities: IdentityPubkey[],
-  ): Promise<Map<IdentityPubkey, bigint | null>> {
-    const out = new Map<IdentityPubkey, bigint | null>();
-    if (epochs.length === 0 || identities.length === 0) return out;
+    votes: VotePubkey[],
+  ): Promise<Map<VotePubkey, bigint | null>> {
+    const out = new Map<VotePubkey, bigint | null>();
+    if (epochs.length === 0 || votes.length === 0) return out;
     const { rows } = await this.pool.query<{
-      leader_identity: string;
+      vote_pubkey: string;
       compute_units_consumed: string;
       produced_blocks: string;
     }>(
-      `SELECT leader_identity,
-              COALESCE(SUM(compute_units_consumed)
-                FILTER (WHERE block_status = 'produced'), 0)::numeric AS compute_units_consumed,
-              COUNT(*) FILTER (WHERE block_status = 'produced')::bigint AS produced_blocks
-         FROM processed_blocks
-        WHERE epoch = ANY($1::bigint[])
-          AND leader_identity = ANY($2::text[])
-        GROUP BY leader_identity`,
-      [epochs, identities],
+      `SELECT evs.vote_pubkey,
+              COALESCE(SUM(pb.compute_units_consumed)
+                FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS compute_units_consumed,
+              COUNT(pb.slot) FILTER (WHERE pb.block_status = 'produced')::bigint AS produced_blocks
+         FROM epoch_validator_stats evs
+         LEFT JOIN processed_blocks pb
+           ON pb.epoch = evs.epoch
+          -- Constant list so the planner prunes processed_blocks
+          -- partitions; a bare join-column equality does not.
+          AND pb.epoch = ANY($1::bigint[])
+          AND pb.leader_identity = evs.identity_pubkey
+        WHERE evs.epoch = ANY($1::bigint[])
+          AND evs.vote_pubkey = ANY($2::text[])
+        GROUP BY evs.vote_pubkey`,
+      [epochs, votes],
     );
     for (const row of rows) {
       const cu = toIntegerBigInt(row.compute_units_consumed ?? '0', 'compute units');
       const blocks = Number(row.produced_blocks ?? '0');
-      out.set(row.leader_identity, bigintAverage(cu, blocks));
+      out.set(row.vote_pubkey, bigintAverage(cu, blocks));
     }
     return out;
   }

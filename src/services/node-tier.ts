@@ -64,8 +64,10 @@ export interface TierInput {
   /**
    * CU-productivity percentile rank in [0, 1] of this validator's
    * produced-block-count-weighted compute units per produced block,
-   * ranked against the SAME cohort and window as `economicPercentile`
-   * (computed in one query by `findEconomicPercentile`).
+   * over the same window and economic cohort as `economicPercentile`
+   * but ranked only among the cohort validators that produced at
+   * least one block (non-producers have no CU and cannot be ranked;
+   * computed in one query by `findEconomicPercentile`).
    *
    * `null` when the validator produced no blocks in the window — a
    * `null` here contributes a CU subscore of 0 to the economic blend
@@ -116,11 +118,11 @@ export interface TierResult {
      */
     economicPercentile: number | null;
     /**
-     * 0-1, CU-productivity percentile rank vs the same cohort —
-     * mirrors `TierInput.cuPercentile`, surfaced unchanged for a
-     * per-component breakdown. `null` when the validator produced no
-     * blocks in the window. Contributes 10% of the economic
-     * component (`0.9 × economicPercentile + 0.1 × cuSubscore`).
+     * 0-1, CU-productivity percentile rank among the cohort
+     * validators that produced blocks — mirrors `TierInput.cuPercentile`,
+     * surfaced unchanged for a per-component breakdown. `null` when
+     * the validator produced no blocks in the window. Contributes 10%
+     * of the economic component (`0.9 × economicPercentile + 0.1 × cuSubscore`).
      */
     cuPercentile: number | null;
   };

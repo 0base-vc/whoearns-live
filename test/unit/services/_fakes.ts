@@ -1027,6 +1027,14 @@ export class FakeProcessedBlocksRepo {
   readonly fetchErrors = new Map<Slot, { epoch: Epoch; leaderIdentity: IdentityPubkey }>();
   /** Number of insert calls for race testing. */
   insertCalls = 0;
+  /**
+   * Optional link to a `FakeStatsRepo`'s `rows` map (the
+   * epoch_validator_stats fake). `getWindowedComputeUnitsByVote`
+   * iterates it to resolve each (epoch, vote)'s identity, mirroring
+   * the real query's `epoch_validator_stats` join — tests wire it so
+   * the windowed-CU lookup survives identity rotation.
+   */
+  epochValidatorStatsRows: Map<string, EpochValidatorStats> | undefined;
 
   async insertBatch(blocks: ProcessedBlock[]): Promise<Set<Slot>> {
     this.insertCalls += 1;
@@ -1315,26 +1323,43 @@ export class FakeProcessedBlocksRepo {
     return out;
   }
 
-  /** Mirror of `ProcessedBlocksRepository.getWindowedComputeUnitsByIdentity`. */
-  async getWindowedComputeUnitsByIdentity(
+  /** Mirror of `ProcessedBlocksRepository.getWindowedComputeUnitsByVote`. */
+  async getWindowedComputeUnitsByVote(
     epochs: Epoch[],
-    identities: IdentityPubkey[],
-  ): Promise<Map<IdentityPubkey, bigint | null>> {
-    const epochSet = new Set(epochs);
-    const identitySet = new Set(identities);
-    const acc = new Map<IdentityPubkey, { cu: bigint; blocks: number }>();
-    for (const row of this.rows.values()) {
-      if (!epochSet.has(row.epoch)) continue;
-      if (!identitySet.has(row.leaderIdentity)) continue;
-      if (row.blockStatus !== 'produced') continue;
-      const e = acc.get(row.leaderIdentity) ?? { cu: 0n, blocks: 0 };
-      e.cu += row.computeUnitsConsumed;
-      e.blocks += 1;
-      acc.set(row.leaderIdentity, e);
+    votes: VotePubkey[],
+  ): Promise<Map<VotePubkey, bigint | null>> {
+    const out = new Map<VotePubkey, bigint | null>();
+    if (epochs.length === 0 || votes.length === 0) return out;
+    if (this.epochValidatorStatsRows === undefined) {
+      // Fail loud: the real query joins epoch_validator_stats, so a
+      // test that exercises this path without wiring the link would
+      // otherwise get a silent all-null result for the wrong reason.
+      throw new Error(
+        'FakeProcessedBlocksRepo.getWindowedComputeUnitsByVote: epochValidatorStatsRows ' +
+          'is not wired — assign a FakeStatsRepo `rows` map to it before use.',
+      );
     }
-    const out = new Map<IdentityPubkey, bigint | null>();
-    for (const [identity, { cu, blocks }] of acc) {
-      out.set(identity, blocks > 0 ? cu / BigInt(blocks) : null);
+    const epochSet = new Set(epochs);
+    const voteSet = new Set(votes);
+    const acc = new Map<VotePubkey, { cu: bigint; blocks: number }>();
+    // Resolve per-epoch identity from the linked epoch_validator_stats
+    // rows, then pool produced-block CU — mirrors the real join, so
+    // identity rotation across the window is handled.
+    const evsRows = this.epochValidatorStatsRows;
+    for (const stat of evsRows.values()) {
+      if (!epochSet.has(stat.epoch) || !voteSet.has(stat.votePubkey)) continue;
+      for (const block of this.rows.values()) {
+        if (block.epoch !== stat.epoch) continue;
+        if (block.leaderIdentity !== stat.identityPubkey) continue;
+        if (block.blockStatus !== 'produced') continue;
+        const e = acc.get(stat.votePubkey) ?? { cu: 0n, blocks: 0 };
+        e.cu += block.computeUnitsConsumed;
+        e.blocks += 1;
+        acc.set(stat.votePubkey, e);
+      }
+    }
+    for (const [vote, { cu, blocks }] of acc) {
+      out.set(vote, blocks > 0 ? cu / BigInt(blocks) : null);
     }
     return out;
   }

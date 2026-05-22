@@ -329,8 +329,9 @@ export interface EconomicPercentileLookup {
   medianIncomePerSlotLamports: string | null;
   /**
    * Percentile rank in [0, 1] of this validator's produced-block-
-   * count-weighted compute units per produced block, against the
-   * SAME cohort + window used for `percentile`. Computed in the same
+   * count-weighted compute units per produced block, over the same
+   * window and cohort as `percentile` but ranked only among the
+   * cohort validators that produced blocks. Computed in the same
    * query (a `processed_blocks` join + a second `PERCENT_RANK()`).
    *
    * `null` when the validator produced no blocks in the window — the
@@ -1096,6 +1097,14 @@ export class StatsRepository {
         FROM per_validator_per_epoch pve
         LEFT JOIN processed_blocks pb
           ON pb.epoch = pve.epoch
+         -- Explicit constant range so the planner prunes
+         -- processed_blocks partitions. pve.epoch is already within
+         -- [$1,$2], so this is logically redundant — but a bare
+         -- join-column equality (pb.epoch = pve.epoch) does NOT
+         -- prune a RANGE-partitioned table, and without it the hash
+         -- side scans every partition of the largest table on the
+         -- DB.
+         AND pb.epoch BETWEEN $1::bigint AND $2::bigint
          AND pb.leader_identity = pve.identity_pubkey
         GROUP BY pve.vote_pubkey
       ),

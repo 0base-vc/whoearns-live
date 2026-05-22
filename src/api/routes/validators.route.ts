@@ -746,9 +746,10 @@ export interface NodeTierResponse {
     economicPercentile: number | null;
     /**
      * 0-1, percentile rank of this validator's produced-block-count-
-     * weighted compute units per produced block, vs the same indexed
-     * cohort as `economicPercentile`. **`null`** when the validator
-     * produced no blocks in the window. Contributes 10% of the
+     * weighted compute units per produced block, over the same window
+     * and indexed cohort as `economicPercentile` but ranked only
+     * among the cohort's block-producing validators. **`null`** when
+     * the validator produced no blocks in the window. Contributes 10% of the
      * composite's economic component
      * (`0.9 × economicPercentile + 0.1 × cuSubscore`); a `null` here
      * means a CU subscore of 0.

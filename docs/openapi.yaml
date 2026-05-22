@@ -1274,10 +1274,11 @@ components:
               description: |
                 Percentile rank of this validator's
                 produced-block-count-weighted compute units per
-                produced block, vs the same indexed cohort and window
-                as `economicPercentile`. `null` when the validator
-                produced no blocks in the window. Contributes 10% of
-                the economic component of `composite`
+                produced block, over the same window and indexed
+                cohort as `economicPercentile` but ranked only among
+                the cohort's block-producing validators. `null` when
+                the validator produced no blocks in the window.
+                Contributes 10% of the economic component of `composite`
                 (`economicScore = 0.9 × economicPercentile + 0.1 ×
                 cuSubscore`, where `cuSubscore` is `cuPercentile` for a
                 validator with produced blocks and 0 — a `null`
@@ -1566,12 +1567,14 @@ components:
         serviceAverageCu:
           type: [string, 'null']
           description: |
-            Service-wide produced-block-count-weighted average CU per
-            produced block for the epoch — the cluster benchmark the
+            Produced-block-count-weighted average CU per produced block
+            for the epoch across the validators WhoEarns tracks
+            (`processed_blocks` covers tracked validators' leader slots,
+            not the whole cluster) — the service-wide benchmark the
             income-page CU chart plots the validator against.
-            Stringified. `null` when no validator produced a block this
-            epoch. Always present on `/v1/validators/{idOrVote}/history`;
-            `null` elsewhere.
+            Stringified. `null` when no tracked validator produced a
+            block this epoch. Always present on
+            `/v1/validators/{idOrVote}/history`; `null` elsewhere.
 
     ValidatorEpochLeaderSlots:
       type: object

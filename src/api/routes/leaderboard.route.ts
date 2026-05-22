@@ -77,10 +77,12 @@ export interface LeaderboardRoutesDeps {
   /**
    * Compute-unit aggregator. Powers the per-row `windowedCu` field —
    * each validator's producedBlock-count-weighted average CU across
-   * the active window's epoch set. Derived from `processed_blocks`;
-   * no new ingestion path.
+   * the active window's epoch set, resolved by per-epoch identity so
+   * it stays correct across identity rotation. Derived from
+   * `processed_blocks` joined to `epoch_validator_stats`; no new
+   * ingestion path.
    */
-  processedBlocksRepo: Pick<ProcessedBlocksRepository, 'getWindowedComputeUnitsByIdentity'>;
+  processedBlocksRepo: Pick<ProcessedBlocksRepository, 'getWindowedComputeUnitsByVote'>;
   validatorsRepo?: Pick<ValidatorsRepository, 'getInfosByIdentities'>;
   profilesRepo?: Pick<ProfilesRepository, 'findOptedOutVotes'>;
   claimsRepo?: Pick<ClaimsRepository, 'findClaimedVotes'>;
@@ -448,7 +450,7 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
       query.window === 'decade_epoch' && query.sort === 'income_per_slot'
         ? Promise.resolve(buildDecadeRankMapFromRows(rows, resolved.closed))
         : buildDecadeRankMap(statsRepo, epochsRepo, optedOutVotes, query.minWindowSlots);
-    const [infoByIdentity, claimedVotes, decadeRanks, windowedCuByIdentity] = await Promise.all([
+    const [infoByIdentity, claimedVotes, decadeRanks, windowedCuByVote] = await Promise.all([
       validatorsRepo !== undefined && identities.length > 0
         ? validatorsRepo.getInfosByIdentities(identities)
         : Promise.resolve(
@@ -462,11 +464,12 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
         : Promise.resolve(new Set<string>()),
       decadeRanksPromise,
       // Per-row windowed CU: producedBlock-weighted average compute
-      // units across the resolved window epochs. Restricted to the
-      // visible identities so the aggregation only touches shown rows.
-      processedBlocksRepo.getWindowedComputeUnitsByIdentity(
+      // units across the resolved window epochs, keyed by vote.
+      // Restricted to the visible votes so the aggregation only
+      // touches shown rows.
+      processedBlocksRepo.getWindowedComputeUnitsByVote(
         resolved.epochs.map((e) => e.epoch),
-        identities,
+        votes,
       ),
     ]);
 
@@ -477,7 +480,7 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
         infoByIdentity.get(row.identityPubkey),
         claimedVotes.has(row.votePubkey),
         decadeRanks.get(row.votePubkey),
-        windowedCuByIdentity.get(row.identityPubkey) ?? null,
+        windowedCuByVote.get(row.votePubkey) ?? null,
       ),
     );
 

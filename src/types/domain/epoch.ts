@@ -420,12 +420,13 @@ export interface ValidatorCurrentEpochResponse {
    */
   avgComputeUnitsPerProducedBlock: string | null;
   /**
-   * Service-wide producedBlock-weighted average CU per produced block
-   * for the epoch — the cluster benchmark the income-page CU chart
-   * plots the validator against. Stringified. `null` when no
-   * validator produced a block this epoch. Always present on the
-   * history response; `null` elsewhere. Additive — Phase: compute-unit
-   * exposure.
+   * Produced-block-count-weighted average CU per produced block for
+   * the epoch across the validators WhoEarns tracks (`processed_blocks`
+   * covers tracked validators' leader slots, not the whole cluster) —
+   * the service-wide benchmark the income-page CU chart plots the
+   * validator against. Stringified. `null` when no tracked validator
+   * produced a block this epoch. Always present on the history
+   * response; `null` elsewhere. Additive — Phase: compute-unit exposure.
    */
   serviceAverageCu: string | null;
 }

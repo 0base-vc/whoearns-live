@@ -55,7 +55,10 @@ export interface McpRoutesDeps {
     StatsRepository,
     'findHistoryByVote' | 'findTopNByWindow' | 'findByVoteEpoch' | 'findEconomicPercentile'
   >;
-  processedBlocksRepo: Pick<ProcessedBlocksRepository, 'getValidatorEpochSlotStats'>;
+  processedBlocksRepo: Pick<
+    ProcessedBlocksRepository,
+    'getValidatorEpochSlotStats' | 'getWindowedComputeUnitsByVote'
+  >;
   aggregatesRepo: Pick<AggregatesRepository, 'findByEpochTopN'>;
   profilesRepo: Pick<ProfilesRepository, 'findOptedOutVotes' | 'findByVote'>;
   claimsRepo: Pick<ClaimsRepository, 'findClaimedVotes'>;
@@ -371,7 +374,7 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
         title: 'Get validator Node Tier',
         description:
           'Returns the Node Tier (forge / anvil / hearth / kindling / unrated) for ONE validator. Pass either a vote pubkey OR an identity pubkey. ' +
-          "Node Tier composite — `0.3 × reliability + 0.7 × economicPercentile`. Reliability is the pessimistic Wilson upper bound on skip rate (so small samples cannot inflate to 1.0). Economic percentile is the cohort rank of this validator's median per-leader-slot income across 5 CLOSED epochs, computed against the INDEXED-VALIDATOR cohort (not the full Solana cluster) — the running epoch is excluded so the tier never rides mid-epoch counters. " +
+          "Node Tier composite — `0.3 × reliability + 0.7 × economicScore`, where `economicScore = 0.9 × economicPercentile + 0.1 × cuSubscore`. Reliability is the pessimistic Wilson upper bound on skip rate (so small samples cannot inflate to 1.0). Economic percentile is the cohort rank of this validator's median per-leader-slot income across 5 CLOSED epochs, computed against the INDEXED-VALIDATOR cohort (not the full Solana cluster); cuSubscore is the cohort percentile rank of producedBlock-weighted compute units per block among block-producing validators, or 0 when the validator produced no blocks. The running epoch is excluded so the tier never rides mid-epoch counters. " +
           'Tier is "unrated" when the sample is too thin (slotsAssigned < 10, cohort < 10, or measuredEpochs < 4) and capped at "kindling" when skip_rate > 20% regardless of economic percentile. The response carries the window aggregates and per-component sub-scores so the classification is auditable. Vote credits are deliberately excluded — see docs/scoring.md Phase 1 for the rationale. Same data as GET /v1/validators/{idOrVote}/tier. ' +
           SHARED_TOOL_PROVENANCE_NOTE,
         inputSchema: {
@@ -401,7 +404,7 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
         title: 'Get validator badge row',
         description:
           'Returns the profile-level badge row for ONE validator: tenure (first-seen epoch, active-epoch count, landmark badge), client kind + version (from gossip ingestion), and Node Tier. Pass either a vote pubkey OR an identity pubkey. ' +
-          'This is the single-call equivalent of the badge strip on a validator profile page — use it when you need the "who is this operator" summary rather than per-epoch income. The tier sub-object mirrors get_validator_tier: composite is `0.3 × reliability + 0.7 × economicPercentile` over 5 closed epochs, "unrated" for thin samples (slotsAssigned < 10, cohort < 10, or measuredEpochs < 4), and capped at "kindling" when skip_rate > 20%. Vote credits are deliberately excluded — see docs/scoring.md Phase 1. Same data as GET /v1/validators/{idOrVote}/badges. ' +
+          'This is the single-call equivalent of the badge strip on a validator profile page — use it when you need the "who is this operator" summary rather than per-epoch income. The tier sub-object mirrors get_validator_tier: composite is `0.3 × reliability + 0.7 × economicScore` (economicScore = `0.9 × economicPercentile + 0.1 × cuSubscore`, cuSubscore = cuPercentile or 0 when no blocks produced) over 5 closed epochs, "unrated" for thin samples (slotsAssigned < 10, cohort < 10, or measuredEpochs < 4), and capped at "kindling" when skip_rate > 20%. Vote credits are deliberately excluded — see docs/scoring.md Phase 1. Same data as GET /v1/validators/{idOrVote}/badges. ' +
           SHARED_TOOL_PROVENANCE_NOTE,
         inputSchema: {
           voteOrIdentity: z
@@ -519,6 +522,12 @@ interface LeaderboardPayloadRow {
   decadeEpochStart: number | null;
   decadeEpochEnd: number | null;
   decadeRank: DecadeRank | null;
+  /**
+   * Produced-block-count-weighted average CU per produced block for
+   * the active window, stringified; `null` when the validator
+   * produced no blocks in the window. Mirrors REST /v1/leaderboard.
+   */
+  windowedCu: string | null;
 }
 
 type DecadeRank = 1 | 2 | 3;
@@ -674,9 +683,15 @@ async function buildLeaderboardPayload(
 
   const identities = trimmed.map((r) => r.identityPubkey);
   const votes = trimmed.map((r) => r.votePubkey);
-  const [infoMap, claimedSet] = await Promise.all([
+  const [infoMap, claimedSet, windowedCuByVote] = await Promise.all([
     opts.validatorsRepo.getInfosByIdentities(identities),
     opts.claimsRepo.findClaimedVotes(votes),
+    // Per-row windowed CU — mirrors REST /v1/leaderboard. Keyed by
+    // vote (rotation-correct via the epoch_validator_stats join).
+    opts.processedBlocksRepo.getWindowedComputeUnitsByVote(
+      epochs.map((e) => e.epoch),
+      votes,
+    ),
   ]);
 
   const items: LeaderboardPayloadRow[] = trimmed.map((row, i) =>
@@ -686,6 +701,7 @@ async function buildLeaderboardPayload(
       infoMap.get(row.identityPubkey),
       claimedSet.has(row.votePubkey),
       decadeRanks.get(row.votePubkey),
+      windowedCuByVote.get(row.votePubkey) ?? null,
     ),
   );
 
@@ -714,6 +730,7 @@ function serializeLeaderboardRow(
   info: { name: string | null } | undefined,
   claimed: boolean,
   decadeBadge: DecadeBadge | undefined,
+  windowedCu: bigint | null,
 ): LeaderboardPayloadRow {
   const blockFees = stats.blockFeesTotalLamports;
   const blockTips = stats.blockTipsTotalLamports;
@@ -746,6 +763,7 @@ function serializeLeaderboardRow(
     decadeEpochStart: decadeBadge?.epochStart ?? null,
     decadeEpochEnd: decadeBadge?.epochEnd ?? null,
     decadeRank: decadeBadge?.rank ?? null,
+    windowedCu: windowedCu === null ? null : windowedCu.toString(),
   };
 }
 
@@ -896,7 +914,12 @@ async function buildValidatorLeaderSlotsPayload(
   const slotStats = await opts.processedBlocksRepo.getValidatorEpochSlotStats({
     epoch,
     votePubkey: validator.votePubkey,
-    identityPubkey: validator.identityPubkey,
+    // `processed_blocks` is keyed by the `leader_identity` as of that
+    // epoch — use the per-epoch identity from `epoch_validator_stats`
+    // so a validator that rotated its identity key still resolves its
+    // historical leader slots (falls back to the current identity when
+    // there is no row — no activity → all-zero either way).
+    identityPubkey: stats?.identityPubkey ?? validator.identityPubkey,
     slotsAssigned: stats?.slotsAssigned ?? 0,
     slotsProduced: stats?.slotsProduced ?? 0,
     slotsSkipped: stats?.slotsSkipped ?? 0,
@@ -936,7 +959,11 @@ async function buildValidatorTierPayload(
       };
       tier: NodeTier;
       composite: number | null;
-      components: { reliability: number; economicPercentile: number | null };
+      components: {
+        reliability: number;
+        economicPercentile: number | null;
+        cuPercentile: number | null;
+      };
     }
 > {
   const validator = await resolveValidator(opts, voteOrIdentity);
@@ -978,6 +1005,7 @@ async function buildValidatorTierPayload(
     components: {
       reliability: result.components.reliability,
       economicPercentile: result.components.economicPercentile,
+      cuPercentile: result.components.cuPercentile,
     },
   };
 }

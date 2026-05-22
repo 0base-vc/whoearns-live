@@ -83,8 +83,12 @@
     const prev = chartData[chartData.length - 2];
     const running = chartData[chartData.length - 1];
     if (!prev || !running) return null;
-    // Only meaningful when both endpoints have a validator value —
-    // a dashed segment to/from a gap can't be drawn anyway.
+    // Both endpoints must carry a validator value AND `prev` must be
+    // the IMMEDIATELY preceding epoch: the dashed segment marks a
+    // genuine adjacent closed -> running step. If the prior epoch is a
+    // validator gap we draw no dashed cue rather than connect a
+    // straight line across the gap epoch's x-position (which would
+    // fabricate a validator value where there is none).
     if (prev.validatorCu === null || running.validatorCu === null) return null;
     return { prev, running };
   });
