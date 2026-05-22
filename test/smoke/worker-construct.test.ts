@@ -108,6 +108,7 @@ describe('worker construction', () => {
         epochsRepo,
         validatorService,
         feeService,
+        slotService,
         statsRepo: statsRepo as unknown as Parameters<
           typeof createIncomeReconcilerJob
         >[0]['statsRepo'],

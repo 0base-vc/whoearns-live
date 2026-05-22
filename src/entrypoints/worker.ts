@@ -260,6 +260,7 @@ export async function startWorker(): Promise<void> {
       epochsRepo,
       validatorService,
       feeService,
+      slotService,
       statsRepo,
       rpc,
       ...(rpcFallback !== undefined ? { rpcFallback } : {}),

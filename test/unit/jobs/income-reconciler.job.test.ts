@@ -7,6 +7,7 @@ import {
 import type { SolanaRpcClient } from '../../../src/clients/solana-rpc.js';
 import type { EpochService } from '../../../src/services/epoch.service.js';
 import type { FeeService } from '../../../src/services/fee.service.js';
+import type { SlotService } from '../../../src/services/slot.service.js';
 import type { ValidatorService } from '../../../src/services/validator.service.js';
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
 import type { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
@@ -60,12 +61,18 @@ function makeDeps() {
         errors: 0,
       }),
     } as unknown as FeeService,
+    slotService: {
+      ingestCurrentEpoch: vi.fn().mockResolvedValue({ updatedCount: 0 }),
+    } as unknown as SlotService,
     statsRepo: {
       rebuildIncomeTotalsFromProcessedBlocks: vi.fn().mockResolvedValue(1),
       findEpochsWithIncomeGaps: vi.fn().mockResolvedValue([]),
+      findEpochsWithMissingWatchedRows: vi.fn().mockResolvedValue([]),
     } as unknown as Pick<
       StatsRepository,
-      'rebuildIncomeTotalsFromProcessedBlocks' | 'findEpochsWithIncomeGaps'
+      | 'rebuildIncomeTotalsFromProcessedBlocks'
+      | 'findEpochsWithIncomeGaps'
+      | 'findEpochsWithMissingWatchedRows'
     >,
     rpc: {
       getLeaderSchedule: vi.fn().mockResolvedValue(schedule),
@@ -178,5 +185,40 @@ describe('income-reconciler.job', () => {
     expect(deps.statsRepo.rebuildIncomeTotalsFromProcessedBlocks).toHaveBeenCalledWith(959, [
       IDENTITY_A,
     ]);
+  });
+
+  it('repairs an epoch where a watched validator has no stats row', async () => {
+    const deps = makeDeps();
+    // The detector reports epoch 958 has a watched validator with no
+    // epoch_validator_stats row at all (a slot-ingest gap).
+    (deps.statsRepo.findEpochsWithMissingWatchedRows as ReturnType<typeof vi.fn>).mockResolvedValue(
+      [958],
+    );
+    const job = createIncomeReconcilerJob({
+      ...deps,
+      watchMode: 'explicit',
+      explicitVotes: [VOTE_A],
+      intervalMs: 300_000,
+      batchSize: 25,
+      logger: silent,
+    });
+
+    await job.tick(new AbortController().signal);
+
+    expect(deps.statsRepo.findEpochsWithMissingWatchedRows).toHaveBeenCalledWith(
+      [962, 961, 960, 959, 958, 957, 956, 955, 954, 953],
+      [VOTE_A],
+    );
+    // The latest closed epoch (962) and the missing-row epoch (958)
+    // are both repaired.
+    const repairedEpochs = (
+      deps.feeService.backfillPreviousEpoch as ReturnType<typeof vi.fn>
+    ).mock.calls.map((call) => (call[0] as { epoch: number }).epoch);
+    expect(repairedEpochs).toEqual([962, 958]);
+    // SlotService materialises the rows so the income rebuild always
+    // has a row to update — including for the missing-row epoch.
+    expect(deps.slotService.ingestCurrentEpoch).toHaveBeenCalledWith(
+      expect.objectContaining({ epoch: 958 }),
+    );
   });
 });

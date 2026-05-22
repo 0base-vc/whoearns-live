@@ -2,6 +2,7 @@ import type { Logger } from '../core/logger.js';
 import type { EpochService } from '../services/epoch.service.js';
 import type { FeeService } from '../services/fee.service.js';
 import { WINDOW_CLOSED_EPOCHS } from '../services/node-tier.js';
+import type { SlotService } from '../services/slot.service.js';
 import type { ValidatorService, WatchMode } from '../services/validator.service.js';
 import type { SolanaRpcClient } from '../clients/solana-rpc.js';
 import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
@@ -15,9 +16,12 @@ export interface IncomeReconcilerJobDeps {
   epochsRepo: Pick<EpochsRepository, 'findByEpoch'>;
   validatorService: ValidatorService;
   feeService: FeeService;
+  slotService: Pick<SlotService, 'ingestCurrentEpoch'>;
   statsRepo: Pick<
     StatsRepository,
-    'rebuildIncomeTotalsFromProcessedBlocks' | 'findEpochsWithIncomeGaps'
+    | 'rebuildIncomeTotalsFromProcessedBlocks'
+    | 'findEpochsWithIncomeGaps'
+    | 'findEpochsWithMissingWatchedRows'
   >;
   rpc: SolanaRpcClient;
   rpcFallback?: Pick<SolanaRpcClient, 'getLeaderSchedule'>;
@@ -36,22 +40,25 @@ export const INCOME_RECONCILER_JOB_NAME = 'income-reconciler';
  *
  * The expensive space is NOT the full epoch range. We fetch the epoch's
  * leader schedule, take only watched validators' assigned leader slots,
- * let FeeService fill any missing `processed_blocks` rows, then rebuild
- * `epoch_validator_stats` totals from that fact table. This catches both:
+ * let FeeService fill any missing `processed_blocks` rows, materialise
+ * the `epoch_validator_stats` rows from the schedule, then rebuild the
+ * income totals from that fact table. This catches:
  *
  *   1. RPC errors that left a leader slot without a fact row.
  *   2. Aggregate drift where facts exist but delta updates were missed.
+ *   3. Missing `epoch_validator_stats` rows entirely — a watched
+ *      validator the slot-ingester never wrote a row for.
  *
  * Scope: the latest closed epoch is ALWAYS repaired — it has only just
- * closed and may still be settling (aggregate drift the gap query
- * cannot see). The rest of the Node Tier window — the trailing
- * `WINDOW_CLOSED_EPOCHS` closed epochs — is repaired only where a
- * cheap detection query (`findEpochsWithIncomeGaps`) finds an actual
- * income gap: a watched validator with leader slots but no income
- * recorded. Without this, an RPC outage straddling an epoch boundary
- * would leave a permanent hole in epoch N-2..N-10 and silently drop
- * that validator to `unrated`, because the tier requires a complete
- * income record across the whole window.
+ * closed and may still be settling (drift the gap queries cannot see).
+ * The rest of the Node Tier window — the trailing `WINDOW_CLOSED_EPOCHS`
+ * closed epochs — is repaired only where one of two cheap detection
+ * queries finds a gap: `findEpochsWithIncomeGaps` (a watched validator
+ * with a row but no income) or `findEpochsWithMissingWatchedRows` (a
+ * watched validator with no row at all). Without this, an ingest
+ * outage straddling an epoch boundary would leave a permanent hole in
+ * epoch N-2..N-10 and silently drop that validator to `unrated`,
+ * because the tier requires a complete record across the whole window.
  */
 export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
   /**
@@ -127,6 +134,26 @@ export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
       errors += result.errors;
     }
 
+    // Materialise slot rows from the leader schedule before rebuilding
+    // income totals. `rebuildIncomeTotalsFromProcessedBlocks` only
+    // UPDATEs existing rows, so a watched validator the slot-ingester
+    // never wrote a row for — a multi-epoch ingest outage, or a recent
+    // watched-set addition — would otherwise stay rowless, and the
+    // full-window tier would hold it at `unrated`. SlotService writes
+    // one row per watched vote (slots from the schedule, produced /
+    // skipped from the just-backfilled `processed_blocks`), so the
+    // rebuild below always finds a row. Despite its name,
+    // `ingestCurrentEpoch` is epoch-agnostic — the closed epoch's
+    // final `lastSlot` yields its final counters.
+    await deps.slotService.ingestCurrentEpoch({
+      epoch,
+      votes,
+      identityByVote,
+      firstSlot: epochInfo.firstSlot,
+      lastSlot: epochInfo.lastSlot,
+      leaderSchedule,
+    });
+
     const uniqueIdentities = Array.from(new Set(identities));
     const aggregatesRebuilt = await deps.statsRepo.rebuildIncomeTotalsFromProcessedBlocks(
       epoch,
@@ -181,16 +208,24 @@ export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
 
       // Cheap detection: which window epochs have a watched validator
       // with leader slots but no income recorded?
-      const gapEpochs = await deps.statsRepo.findEpochsWithIncomeGaps(windowEpochs, latestVotes);
+      // Two cheap detection queries over the tier window: epochs where
+      // a watched validator has a row but incomplete income (income-
+      // ingest gap), and epochs where a watched validator has no row
+      // at all (slot-ingest gap, or a recent watched-set addition).
+      const [incomeGapEpochs, missingRowEpochs] = await Promise.all([
+        deps.statsRepo.findEpochsWithIncomeGaps(windowEpochs, latestVotes),
+        deps.statsRepo.findEpochsWithMissingWatchedRows(windowEpochs, latestVotes),
+      ]);
+      const gapEpochs = Array.from(new Set<Epoch>([...incomeGapEpochs, ...missingRowEpochs]));
       if (gapEpochs.length > 0) {
         deps.logger.info(
-          { latestClosed, gapEpochs, windowSize: windowEpochs.length },
-          'income-reconciler: income gaps detected in the tier window',
+          { latestClosed, incomeGapEpochs, missingRowEpochs, windowSize: windowEpochs.length },
+          'income-reconciler: gaps detected in the tier window',
         );
       }
 
       // The latest closed epoch is always repaired — it may still be
-      // settling, and aggregate drift is invisible to the gap query.
+      // settling, and aggregate drift is invisible to the gap queries.
       // Older epochs are repaired only when a gap was detected.
       const repairTargets = Array.from(new Set<Epoch>([latestClosed, ...gapEpochs])).sort(
         (a, b) => b - a,

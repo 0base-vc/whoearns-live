@@ -1010,6 +1010,33 @@ export class StatsRepository {
   }
 
   /**
+   * Returns the subset of `epochs` for which at least one of `votes`
+   * has NO `epoch_validator_stats` row at all. `findEpochsWithIncomeGaps`
+   * only sees rows that exist; this catches the complementary hole — a
+   * watched validator the slot-ingester never materialised a row for
+   * (a multi-epoch ingest outage, or a validator only recently added
+   * to the watched set). Under the full-window tier requirement such
+   * an epoch holds the validator at `unrated`, so the income-reconciler
+   * rebuilds the row from the leader schedule. Cheap — one indexed
+   * count per epoch, no block fetches.
+   */
+  async findEpochsWithMissingWatchedRows(epochs: Epoch[], votes: VotePubkey[]): Promise<Epoch[]> {
+    if (epochs.length === 0 || votes.length === 0) return [];
+    const { rows } = await this.pool.query<{ epoch: string }>(
+      `SELECT w.epoch::text AS epoch
+         FROM unnest($1::bigint[]) AS w(epoch)
+        WHERE (
+          SELECT COUNT(*)
+            FROM epoch_validator_stats evs
+           WHERE evs.epoch = w.epoch
+             AND evs.vote_pubkey = ANY($2::text[])
+        ) < cardinality($2::text[])`,
+      [epochs, votes],
+    );
+    return rows.map((r) => Number(r.epoch));
+  }
+
+  /**
    * Return all historical stats rows for a single vote, newest first.
    * Used by the UI income page to render the epoch history table.
    */
