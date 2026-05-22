@@ -64,6 +64,10 @@ async function makeCtx(): Promise<Ctx> {
   const epochs = new FakeEpochsRepo();
   const aggregates = new FakeAggregatesRepo();
   const processedBlocks = new FakeProcessedBlocksRepo();
+  // The windowed/per-epoch CU fakes resolve each vote's identity set
+  // from epoch_validator_stats — wire the link (mirrors the real
+  // join) so identity rotation across the window is handled.
+  processedBlocks.epochValidatorStatsRows = stats.rows;
   const watchedDynamic = new FakeWatchedDynamicRepo();
   const validatorService = new FakeValidatorService();
 
@@ -395,6 +399,53 @@ describe('GET /v1/validators/:idOrVote/history', () => {
     // Epoch 500's CU resolves under the OLD identity it actually ran,
     // not the validator's current identity — a naive single-identity
     // lookup would return null here.
+    expect(body.items.find((i) => i.epoch === 500)?.avgComputeUnitsPerProducedBlock).toBe(
+      '30000000',
+    );
+    expect(body.items.find((i) => i.epoch === 501)?.avgComputeUnitsPerProducedBlock).toBe(
+      '50000000',
+    );
+    await ctx.app.close();
+  });
+
+  it('per-epoch CU folds mid-epoch identity rotation blocks', async () => {
+    // VOTE_1 rotated IDENTITY_1 -> IDENTITY_2 *within* epoch 500.
+    // epoch_validator_stats records ONE identity per (epoch, vote):
+    // 500 -> IDENTITY_1 (the snapshot caught the pre-rotation key),
+    // 501 -> IDENTITY_2 (post-rotation, confirms the new key).
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_2,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 501,
+    });
+    const updatedAt = new Date('2026-04-28T00:00:00.000Z');
+    ctx.stats.rows.set(
+      `500:${VOTE_1}`,
+      makeStats(500, VOTE_1, IDENTITY_1, { slotsUpdatedAt: updatedAt, feesUpdatedAt: updatedAt }),
+    );
+    ctx.stats.rows.set(
+      `501:${VOTE_1}`,
+      makeStats(501, VOTE_1, IDENTITY_2, { slotsUpdatedAt: updatedAt, feesUpdatedAt: updatedAt }),
+    );
+    await ctx.epochs.upsert(makeEpochInfo(500, 0, 431_999, { isClosed: true }));
+    await ctx.epochs.upsert(makeEpochInfo(501, 432_000, 863_999, { isClosed: true }));
+    // Epoch 500 produced blocks under BOTH identities — the rotation
+    // happened mid-epoch, so the same epoch ran two identity keys.
+    seedCuBlock(ctx.processedBlocks, 5_000_001, 500, IDENTITY_1, 20_000_000n);
+    seedCuBlock(ctx.processedBlocks, 5_000_002, 500, IDENTITY_2, 40_000_000n);
+    seedCuBlock(ctx.processedBlocks, 5_010_001, 501, IDENTITY_2, 50_000_000n);
+
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/history?limit=10`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      items: Array<{ epoch: number; avgComputeUnitsPerProducedBlock: string | null }>;
+    };
+    // Epoch 500 folds BOTH identities: (20M + 40M) / 2 = 30M. Keying
+    // on the single recorded identity (IDENTITY_1) would see only 20M.
     expect(body.items.find((i) => i.epoch === 500)?.avgComputeUnitsPerProducedBlock).toBe(
       '30000000',
     );

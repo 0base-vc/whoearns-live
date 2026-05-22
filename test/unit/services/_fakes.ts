@@ -1281,16 +1281,35 @@ export class FakeProcessedBlocksRepo {
     };
   }
 
-  /** Mirror of `ProcessedBlocksRepository.getEpochComputeUnitsForIdentity`. */
-  async getEpochComputeUnitsForIdentity(
-    identity: IdentityPubkey,
+  /** Mirror of `ProcessedBlocksRepository.getEpochComputeUnitsByVote`. */
+  async getEpochComputeUnitsByVote(
+    vote: VotePubkey,
     epochs: Epoch[],
   ): Promise<Map<Epoch, bigint | null>> {
+    if (this.epochValidatorStatsRows === undefined) {
+      // Fail loud: the real query resolves the vote's identity set
+      // from epoch_validator_stats — a test exercising this path
+      // without the link would otherwise get a silent all-null
+      // result for the wrong reason.
+      throw new Error(
+        'FakeProcessedBlocksRepo.getEpochComputeUnitsByVote: epochValidatorStatsRows ' +
+          'is not wired — assign a FakeStatsRepo `rows` map to it before use.',
+      );
+    }
     const epochSet = new Set(epochs);
+    // Resolve the set of identity keys the vote ran across the window
+    // — mirrors the real `vote_identities` CTE, so a mid-epoch
+    // rotation (one epoch produced under two identities) folds both.
+    const identities = new Set<IdentityPubkey>();
+    for (const stat of this.epochValidatorStatsRows.values()) {
+      if (epochSet.has(stat.epoch) && stat.votePubkey === vote) {
+        identities.add(stat.identityPubkey);
+      }
+    }
     const acc = new Map<Epoch, { cu: bigint; blocks: number }>();
     for (const row of this.rows.values()) {
-      if (row.leaderIdentity !== identity) continue;
       if (!epochSet.has(row.epoch)) continue;
+      if (!identities.has(row.leaderIdentity)) continue;
       if (row.blockStatus !== 'produced') continue;
       const e = acc.get(row.epoch) ?? { cu: 0n, blocks: 0 };
       e.cu += row.computeUnitsConsumed;
@@ -1341,21 +1360,27 @@ export class FakeProcessedBlocksRepo {
     }
     const epochSet = new Set(epochs);
     const voteSet = new Set(votes);
-    const acc = new Map<VotePubkey, { cu: bigint; blocks: number }>();
-    // Resolve per-epoch identity from the linked epoch_validator_stats
-    // rows, then pool produced-block CU — mirrors the real join, so
-    // identity rotation across the window is handled.
-    const evsRows = this.epochValidatorStatsRows;
-    for (const stat of evsRows.values()) {
+    // Resolve, per vote, the SET of identity keys it ran across the
+    // window — mirrors the real `vote_identities` CTE, so a mid-epoch
+    // rotation (one epoch produced under two identities) folds both
+    // halves, not just the one identity epoch_validator_stats records.
+    const identitiesByVote = new Map<VotePubkey, Set<IdentityPubkey>>();
+    for (const stat of this.epochValidatorStatsRows.values()) {
       if (!epochSet.has(stat.epoch) || !voteSet.has(stat.votePubkey)) continue;
+      const set = identitiesByVote.get(stat.votePubkey) ?? new Set<IdentityPubkey>();
+      set.add(stat.identityPubkey);
+      identitiesByVote.set(stat.votePubkey, set);
+    }
+    const acc = new Map<VotePubkey, { cu: bigint; blocks: number }>();
+    for (const [vote, identities] of identitiesByVote) {
       for (const block of this.rows.values()) {
-        if (block.epoch !== stat.epoch) continue;
-        if (block.leaderIdentity !== stat.identityPubkey) continue;
+        if (!epochSet.has(block.epoch)) continue;
+        if (!identities.has(block.leaderIdentity)) continue;
         if (block.blockStatus !== 'produced') continue;
-        const e = acc.get(stat.votePubkey) ?? { cu: 0n, blocks: 0 };
+        const e = acc.get(vote) ?? { cu: 0n, blocks: 0 };
         e.cu += block.computeUnitsConsumed;
         e.blocks += 1;
-        acc.set(stat.votePubkey, e);
+        acc.set(vote, e);
       }
     }
     for (const [vote, { cu, blocks }] of acc) {

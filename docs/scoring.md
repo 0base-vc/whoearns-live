@@ -243,14 +243,25 @@ economicScore = 0.90 × economicPercentile + 0.10 × cuSubscore
   no produced blocks (a `null` `cuPercentile`). A validator with no
   CU data therefore scores `economicScore = 0.9 × economicPercentile`
   — the CU side never, on its own, forces `unrated`; only the income
-  side does.
+  side does. This `0` is a genuine penalty, not a neutral default: a
+  non-producing validator is scored as the _lowest-ranked_ CU peer,
+  so it lands up to `0.7 × 0.1 × 100 = 7` composite points — and
+  potentially a tier band — below an otherwise identical
+  block-producing validator. That is deliberate (producing blocks is
+  part of a validator's job), but it does mean two validators with
+  identical _received_ income can land in different tiers purely on
+  whether one produced any blocks in the window.
 - **`cuPercentile`** is the `PERCENT_RANK()` of the validator's
   produced-block-count-weighted compute units per produced block,
   computed over the SAME indexed cohort and closed-epoch window as
   `economicPercentile` (one query — `findEconomicPercentile`).
   Windowed CU is `SUM(compute_units_consumed) / COUNT(produced
 blocks)` across the window's epochs; validators with no produced
-  blocks are excluded from the CU ranking.
+  blocks are excluded from the CU ranking. A validator's produced
+  blocks are resolved by the full set of identity keys it ran across
+  the window, so an operator that rotates its identity key — even
+  mid-epoch — is not under-counted, provided the rotated-to/-from key
+  appears somewhere in the measured window.
 
 The 10% weight is deliberately small: income productivity is what
 delegators actually receive and stays the dominant economic signal,

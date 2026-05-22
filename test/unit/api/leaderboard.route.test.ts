@@ -563,4 +563,65 @@ describe('GET /v1/leaderboard', () => {
       await app.close();
     }
   });
+
+  it('windowedCu folds mid-epoch identity rotation blocks', async () => {
+    const { stats, epochs, processedBlocks, deps } = buildDeps();
+    const updatedAt = new Date('2026-04-28T00:00:00.000Z');
+    // VOTE_1 rotated IDENTITY_3 -> IDENTITY_1 *within* the closed
+    // epoch 960. epoch_validator_stats records ONE identity per
+    // (epoch, vote): 960 -> IDENTITY_3 (the snapshot caught the
+    // pre-rotation key), 961 -> IDENTITY_1 (post-rotation).
+    epochs.rows.set(
+      960,
+      makeEpochInfo(960, 0, 431_999, { isClosed: true, closedAt: new Date('2026-04-25') }),
+    );
+    epochs.rows.set(
+      961,
+      makeEpochInfo(961, 432_000, 863_999, {
+        isClosed: false,
+        currentSlot: 432_400,
+        closedAt: null,
+      }),
+    );
+    stats.rows.set(
+      `960:${VOTE_1}`,
+      makeStats(960, VOTE_1, IDENTITY_3, {
+        slotsAssigned: 10,
+        slotsProduced: 10,
+        blockFeesTotalLamports: 1_000_000_000n,
+        slotsUpdatedAt: updatedAt,
+        feesUpdatedAt: updatedAt,
+      }),
+    );
+    stats.rows.set(
+      `961:${VOTE_1}`,
+      makeStats(961, VOTE_1, IDENTITY_1, {
+        slotsAssigned: 100,
+        slotsElapsedAssigned: 10,
+        slotsProduced: 10,
+        blockFeesTotalLamports: 1_000_000_000n,
+        slotsUpdatedAt: updatedAt,
+        slotWindowLastSlot: 432_400,
+        slotWindowUpdatedAt: updatedAt,
+        feesUpdatedAt: updatedAt,
+      }),
+    );
+    // Epoch 960 produced blocks under BOTH identity keys — the
+    // rotation happened mid-epoch, so the same epoch ran two keys.
+    seedCuBlock(processedBlocks, 9_600_001, 960, IDENTITY_3, 10_000_000n);
+    seedCuBlock(processedBlocks, 9_600_002, 960, IDENTITY_1, 50_000_000n);
+    const app = await makeApp(deps);
+    try {
+      const res = await app.inject({ method: 'GET', url: '/v1/leaderboard' });
+      expect(res.statusCode).toBe(200);
+      const items = (res.json() as { items: Array<{ vote: string; windowedCu: string | null }> })
+        .items;
+      // Both mid-epoch identities folded: (10M + 50M) / 2 = 30M. A
+      // join keyed on the single recorded 960 identity (IDENTITY_3)
+      // would see only 10M.
+      expect(items.find((r) => r.vote === VOTE_1)?.windowedCu).toBe('30000000');
+    } finally {
+      await app.close();
+    }
+  });
 });

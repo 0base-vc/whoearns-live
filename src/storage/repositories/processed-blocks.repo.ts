@@ -953,15 +953,26 @@ export class ProcessedBlocksRepository {
 
   /**
    * Average compute units per produced block, per epoch, for ONE
-   * validator identity. Keyed by epoch. The value is `null` for an
+   * validator VOTE account. Keyed by epoch. The value is `null` for an
    * epoch where the validator produced no blocks (no denominator) —
    * computed exactly like `getValidatorEpochSlotStats`'
    * `avgComputeUnitsPerProducedBlock`: `SUM(compute_units_consumed) /
    * COUNT(*)` over `block_status = 'produced'` rows. Powers the
    * per-epoch validator CU series on the income-page chart.
+   *
+   * Resolves the SET of identity keys the vote ran across `epochs`
+   * from `epoch_validator_stats`, then folds every produced block
+   * under any of them. `epoch_validator_stats` records only ONE
+   * identity per (epoch, vote), so an operator that rotates its
+   * identity key *mid-epoch* runs that epoch under two identities;
+   * keying CU on the windowed identity set — rather than a single
+   * per-epoch identity — folds both halves instead of dropping the
+   * unrecorded one. Correct as long as the rotated-to/-from identity
+   * appears in `epochs` somewhere, which holds whenever the window
+   * spans the rotation.
    */
-  async getEpochComputeUnitsForIdentity(
-    identity: IdentityPubkey,
+  async getEpochComputeUnitsByVote(
+    vote: VotePubkey,
     epochs: Epoch[],
   ): Promise<Map<Epoch, bigint | null>> {
     const out = new Map<Epoch, bigint | null>();
@@ -971,15 +982,22 @@ export class ProcessedBlocksRepository {
       compute_units_consumed: string;
       produced_blocks: string;
     }>(
-      `SELECT epoch::text AS epoch,
-              COALESCE(SUM(compute_units_consumed)
-                FILTER (WHERE block_status = 'produced'), 0)::numeric AS compute_units_consumed,
-              COUNT(*) FILTER (WHERE block_status = 'produced')::bigint AS produced_blocks
-         FROM processed_blocks
-        WHERE epoch = ANY($1::bigint[])
-          AND leader_identity = $2
-        GROUP BY epoch`,
-      [epochs, identity],
+      `WITH vote_identities AS (
+         SELECT ARRAY_AGG(DISTINCT identity_pubkey) AS identities
+           FROM epoch_validator_stats
+          WHERE epoch = ANY($1::bigint[])
+            AND vote_pubkey = $2
+       )
+       SELECT pb.epoch::text AS epoch,
+              COALESCE(SUM(pb.compute_units_consumed)
+                FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS compute_units_consumed,
+              COUNT(*) FILTER (WHERE pb.block_status = 'produced')::bigint AS produced_blocks
+         FROM processed_blocks pb
+         CROSS JOIN vote_identities vi
+        WHERE pb.epoch = ANY($1::bigint[])
+          AND pb.leader_identity = ANY(vi.identities)
+        GROUP BY pb.epoch`,
+      [epochs, vote],
     );
     for (const row of rows) {
       const cu = toIntegerBigInt(row.compute_units_consumed ?? '0', 'compute units');
@@ -1032,11 +1050,15 @@ export class ProcessedBlocksRepository {
    * VOTE, pooled across the given window epochs. Keyed by vote pubkey;
    * `null` for a vote that produced no blocks across the window.
    *
-   * Joins `epoch_validator_stats` so each epoch's blocks resolve under
-   * the identity the validator actually ran THAT epoch — correct even
-   * when the operator rotated its identity key mid-window (a bare
-   * `processed_blocks`-by-identity query would miss pre-rotation
-   * epochs). `SUM(CU) / COUNT(produced)` over the window is the
+   * Resolves, per vote, the SET of identity keys it ran across the
+   * window from `epoch_validator_stats`, then pools every produced
+   * block under any of them. `epoch_validator_stats` records one
+   * identity per (epoch, vote), so a bare per-epoch-identity join
+   * would drop blocks an operator produced under a second identity
+   * after a *mid-epoch* rotation; the windowed identity set folds
+   * both. Ordinary cross-epoch rotation is covered for free — the
+   * pre- and post-rotation identities are simply both in the set.
+   * `SUM(CU) / COUNT(produced)` over the window is the
    * produced-block-count-weighted CU the leaderboard needs: a
    * single-epoch window yields that epoch's average, a multi-epoch
    * window weights each epoch by how many blocks the validator
@@ -1054,20 +1076,26 @@ export class ProcessedBlocksRepository {
       compute_units_consumed: string;
       produced_blocks: string;
     }>(
-      `SELECT evs.vote_pubkey,
+      `WITH vote_identities AS (
+         SELECT vote_pubkey,
+                ARRAY_AGG(DISTINCT identity_pubkey) AS identities
+           FROM epoch_validator_stats
+          WHERE epoch = ANY($1::bigint[])
+            AND vote_pubkey = ANY($2::text[])
+          GROUP BY vote_pubkey
+       )
+       SELECT vi.vote_pubkey,
               COALESCE(SUM(pb.compute_units_consumed)
                 FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS compute_units_consumed,
               COUNT(pb.slot) FILTER (WHERE pb.block_status = 'produced')::bigint AS produced_blocks
-         FROM epoch_validator_stats evs
+         FROM vote_identities vi
          LEFT JOIN processed_blocks pb
-           ON pb.epoch = evs.epoch
-          -- Constant list so the planner prunes processed_blocks
-          -- partitions; a bare join-column equality does not.
-          AND pb.epoch = ANY($1::bigint[])
-          AND pb.leader_identity = evs.identity_pubkey
-        WHERE evs.epoch = ANY($1::bigint[])
-          AND evs.vote_pubkey = ANY($2::text[])
-        GROUP BY evs.vote_pubkey`,
+           -- Constant epoch list so the planner prunes
+           -- processed_blocks partitions; a bare join-column
+           -- equality does not.
+           ON pb.epoch = ANY($1::bigint[])
+          AND pb.leader_identity = ANY(vi.identities)
+        GROUP BY vi.vote_pubkey`,
       [epochs, votes],
     );
     for (const row of rows) {

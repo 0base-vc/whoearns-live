@@ -1083,30 +1083,41 @@ export class StatsRepository {
         GROUP BY vote_pubkey
       ),
       -- Compute units for the SAME cohort + window. Each cohort
-      -- validator's produced blocks across its windowed (epoch,
-      -- identity) pairs are pooled; windowed_cu is the
-      -- producedBlock-count-weighted average CU per produced block,
-      -- i.e. SUM(CU) / COUNT(produced). NULL when the validator
-      -- produced no blocks in the window.
+      -- validator's produced blocks across the window are pooled;
+      -- windowed_cu is the producedBlock-count-weighted average CU
+      -- per produced block, i.e. SUM(CU) / COUNT(produced). NULL when
+      -- the validator produced no blocks in the window.
+      --
+      -- cu_vote_identities resolves the SET of identity keys each
+      -- vote ran across the window. epoch_validator_stats (and so
+      -- per_validator_per_epoch) records one identity per
+      -- (epoch, vote), so an operator that rotates its identity key
+      -- mid-epoch runs that epoch under two identities; pooling
+      -- blocks by the windowed identity set folds both halves rather
+      -- than dropping the unrecorded one.
+      cu_vote_identities AS (
+        SELECT
+          vote_pubkey,
+          ARRAY_AGG(DISTINCT identity_pubkey) AS identities
+        FROM per_validator_per_epoch
+        GROUP BY vote_pubkey
+      ),
       cu_per_validator AS (
         SELECT
-          pve.vote_pubkey,
+          cvi.vote_pubkey,
           SUM(pb.compute_units_consumed)
             FILTER (WHERE pb.block_status = 'produced') AS cu_consumed,
           COUNT(pb.slot) FILTER (WHERE pb.block_status = 'produced') AS produced_blocks
-        FROM per_validator_per_epoch pve
+        FROM cu_vote_identities cvi
         LEFT JOIN processed_blocks pb
-          ON pb.epoch = pve.epoch
-         -- Explicit constant range so the planner prunes
-         -- processed_blocks partitions. pve.epoch is already within
-         -- [$1,$2], so this is logically redundant — but a bare
-         -- join-column equality (pb.epoch = pve.epoch) does NOT
-         -- prune a RANGE-partitioned table, and without it the hash
-         -- side scans every partition of the largest table on the
-         -- DB.
-         AND pb.epoch BETWEEN $1::bigint AND $2::bigint
-         AND pb.leader_identity = pve.identity_pubkey
-        GROUP BY pve.vote_pubkey
+          -- Explicit constant range so the planner prunes
+          -- processed_blocks partitions — a bare join-column
+          -- equality does NOT prune a RANGE-partitioned table, and
+          -- without it the hash side scans every partition of the
+          -- largest table on the DB.
+          ON pb.epoch BETWEEN $1::bigint AND $2::bigint
+         AND pb.leader_identity = ANY(cvi.identities)
+        GROUP BY cvi.vote_pubkey
       ),
       windowed_cu AS (
         SELECT
