@@ -457,6 +457,14 @@ describe('GET /v1/leaderboard', () => {
       expect(oldMedianSort.statusCode).toBe(200);
       expect((oldMedianSort.json() as { sort: string }).sort).toBe('fees');
 
+      // compute_units is a first-class window sort (migration 0043).
+      const cuSort = await app.inject({
+        method: 'GET',
+        url: '/v1/leaderboard?sort=compute_units',
+      });
+      expect(cuSort.statusCode).toBe(200);
+      expect((cuSort.json() as { sort: string }).sort).toBe('compute_units');
+
       const bogus = await app.inject({ method: 'GET', url: '/v1/leaderboard?sort=bogus' });
       expect(bogus.statusCode).toBe(400);
     } finally {

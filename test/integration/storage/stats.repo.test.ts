@@ -16,6 +16,7 @@ describe('StatsRepository', () => {
     slotsElapsedAssigned?: number;
     fees: bigint;
     tips?: bigint;
+    computeUnits?: bigint;
   }): Promise<void> {
     await repo.upsertSlotStats({
       epoch: args.epoch,
@@ -35,6 +36,7 @@ describe('StatsRepository', () => {
       baseFeeDeltaLamports: 0n,
       priorityFeeDeltaLamports: args.fees,
       tipDeltaLamports: args.tips ?? 0n,
+      computeUnitsDelta: args.computeUnits ?? 0n,
     });
   }
 
@@ -169,6 +171,7 @@ describe('StatsRepository', () => {
       baseFeeDeltaLamports: 40n,
       priorityFeeDeltaLamports: 60n,
       tipDeltaLamports: 7n,
+      computeUnitsDelta: 0n,
     });
 
     const inserted = await repo.ensureSlotStatsRows([
@@ -220,6 +223,7 @@ describe('StatsRepository', () => {
       baseFeeDeltaLamports: 40n,
       priorityFeeDeltaLamports: 60n,
       tipDeltaLamports: 7n,
+      computeUnitsDelta: 0n,
     });
 
     const inserted = await repo.ensureSlotStatsRows([
@@ -374,6 +378,9 @@ describe('StatsRepository', () => {
       baseFeeDeltaLamports: 1n,
       priorityFeeDeltaLamports: 0n,
       tipDeltaLamports: 1n,
+      // Deliberately drifted (the real facts below sum to 3_000_000) so
+      // the rebuild has compute-unit drift to repair, like the fees.
+      computeUnitsDelta: 5n,
     });
     await processedBlocksRepo.insertBatch([
       {
@@ -394,7 +401,7 @@ describe('StatsRepository', () => {
         tipTxCount: 0,
         maxTipLamports: 0n,
         maxPriorityFeeLamports: 0n,
-        computeUnitsConsumed: 0n,
+        computeUnitsConsumed: 1_000_000n,
         costUnits: 0n,
         computeBudgetRequestedUnits: 0n,
         computeBudgetLimitTxCount: 0,
@@ -422,7 +429,7 @@ describe('StatsRepository', () => {
         tipTxCount: 0,
         maxTipLamports: 0n,
         maxPriorityFeeLamports: 0n,
-        computeUnitsConsumed: 0n,
+        computeUnitsConsumed: 2_000_000n,
         costUnits: 0n,
         computeBudgetRequestedUnits: 0n,
         computeBudgetLimitTxCount: 0,
@@ -441,6 +448,8 @@ describe('StatsRepository', () => {
     expect(row?.blockBaseFeesTotalLamports).toBe(60n);
     expect(row?.blockPriorityFeesTotalLamports).toBe(240n);
     expect(row?.blockTipsTotalLamports).toBe(18n);
+    // compute_units_total rebuilds from the facts just like the fees.
+    expect(row?.computeUnitsTotal).toBe(3_000_000n);
 
     await expect(repo.rebuildIncomeTotalsFromProcessedBlocks(500, ['I1'])).resolves.toBe(0);
   });
@@ -715,5 +724,51 @@ describe('StatsRepository', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.votePubkey).toBe('CompleteVote');
     expect(rows[0]?.closedEpochsIncluded).toBe(10);
+  });
+
+  it('findTopNByWindow: compute_units sorts by average CU per produced block', async () => {
+    // Two closed epochs. HiCu earns LESS income than LoCu but burns far
+    // more compute per block — the compute_units sort must rank by
+    // CU/produced-block, not by income.
+    for (const epoch of [500, 501]) {
+      await seedIncomeRow({
+        epoch,
+        vote: 'HiCuVote',
+        identity: 'HiCuId',
+        slotsAssigned: 10,
+        fees: 10_000n,
+        computeUnits: 9_000_000n,
+      });
+      await seedIncomeRow({
+        epoch,
+        vote: 'LoCuVote',
+        identity: 'LoCuId',
+        slotsAssigned: 10,
+        fees: 5_000_000n,
+        computeUnits: 2_000_000n,
+      });
+    }
+    const epochs = [
+      { epoch: 501, isCurrent: false },
+      { epoch: 500, isCurrent: false },
+    ];
+
+    const byCu = await repo.findTopNByWindow({
+      epochs,
+      limit: 10,
+      sort: 'compute_units',
+      minWindowSlots: 1,
+    });
+    expect(byCu.map((r) => r.votePubkey)).toEqual(['HiCuVote', 'LoCuVote']);
+
+    // Income sort is the opposite order — proves the compute_units sort
+    // is ranking by CU, not echoing the income ranking.
+    const byIncome = await repo.findTopNByWindow({
+      epochs,
+      limit: 10,
+      sort: 'total_income',
+      minWindowSlots: 1,
+    });
+    expect(byIncome.map((r) => r.votePubkey)).toEqual(['LoCuVote', 'HiCuVote']);
   });
 });

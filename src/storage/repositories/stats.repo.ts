@@ -30,6 +30,8 @@ interface StatsRow {
   block_tips_total_lamports: string;
   median_tip_lamports: string | null;
   median_total_lamports: string | null;
+  /** Epoch-total produced-block compute units. NOT NULL DEFAULT 0 since 0043. */
+  compute_units_total: string;
   activated_stake_lamports: string | null;
   /** Cumulative vote credits this epoch. NOT NULL DEFAULT 0 since 0021. */
   vote_credits: string;
@@ -80,6 +82,12 @@ function rowToStats(row: StatsRow): EpochValidatorStats {
       row.median_tip_lamports === null ? null : toLamports(row.median_tip_lamports),
     medianTotalLamports:
       row.median_total_lamports === null ? null : toLamports(row.median_total_lamports),
+    // `compute_units_total` is NOT NULL DEFAULT 0 (migration 0043) and
+    // COALESCEd in STATS_COLS; the `?? '0'` guard is belt-and-braces
+    // for a caller that hand-rolls a query without the COALESCE. Not
+    // lamports — `toLamports` is the repo's NUMERIC(30,0)->bigint
+    // parser, used here as for `voteCredits`.
+    computeUnitsTotal: toLamports(row.compute_units_total ?? '0'),
     activatedStakeLamports:
       row.activated_stake_lamports === null ? null : toLamports(row.activated_stake_lamports),
     voteCredits: toLamports(row.vote_credits ?? '0'),
@@ -165,6 +173,14 @@ export interface AddIncomeDeltaArgs {
   priorityFeeDeltaLamports: bigint;
   /** Positive-delta sum on the 8 Jito tip accounts. */
   tipDeltaLamports: bigint;
+  /**
+   * Compute units consumed across the produced blocks in this delta.
+   * Summed into the denormalised `compute_units_total` (migration
+   * 0043) in the same atomic UPDATE as the four fee deltas. NOT
+   * lamports — a separate accounting axis. `0n` for a skipped-only
+   * batch.
+   */
+  computeUnitsDelta: bigint;
 }
 
 /**
@@ -185,6 +201,7 @@ const STATS_COLS = `epoch, vote_pubkey, identity_pubkey,
   median_priority_fee_lamports,
   COALESCE(block_tips_total_lamports, 0) AS block_tips_total_lamports,
   median_tip_lamports, median_total_lamports,
+  COALESCE(compute_units_total, 0) AS compute_units_total,
   activated_stake_lamports,
   COALESCE(vote_credits, 0) AS vote_credits,
   COALESCE(prev_epoch_vote_credits, 0) AS prev_epoch_vote_credits,
@@ -246,7 +263,8 @@ export type LeaderboardWindowSort =
   | 'total_income'
   | 'mev_tips'
   | 'fees'
-  | 'skip_rate';
+  | 'skip_rate'
+  | 'compute_units';
 
 export interface LeaderboardWindowEpoch {
   epoch: Epoch;
@@ -585,14 +603,19 @@ export class StatsRepository {
       baseFeeDeltaLamports: 0n,
       priorityFeeDeltaLamports: 0n,
       tipDeltaLamports: args.tipDeltaLamports,
+      // This forwarder predates the per-block fact pipeline; a caller
+      // with only fee+tip deltas has no CU figure, so leave the
+      // compute-unit total untouched (adding 0 is a no-op).
+      computeUnitsDelta: 0n,
     });
   }
 
   /**
-   * Four-way income delta — applies leader-receipt fees (post-burn),
-   * gross base fees, gross priority fees, and tips atomically in a
-   * single UPDATE. Preferred entry point for any ingest path that
-   * has access to the per-tx fee decomposition (i.e. anything using
+   * Four-way income delta plus the compute-unit total — applies
+   * leader-receipt fees (post-burn), gross base fees, gross priority
+   * fees, tips, and consumed compute units atomically in a single
+   * UPDATE. Preferred entry point for any ingest path that has access
+   * to the per-tx fee decomposition (i.e. anything using
    * `transactionDetails: 'full'`).
    *
    * Zero-valued deltas are safe (adding 0 is a no-op). Timestamps
@@ -607,6 +630,7 @@ export class StatsRepository {
               block_base_fees_total_lamports     = block_base_fees_total_lamports     + $4::numeric,
               block_priority_fees_total_lamports = block_priority_fees_total_lamports + $5::numeric,
               block_tips_total_lamports          = block_tips_total_lamports          + $6::numeric,
+              compute_units_total                = compute_units_total                + $7::numeric,
               fees_updated_at = NOW(),
               tips_updated_at = NOW()
         WHERE epoch = $1 AND identity_pubkey = $2`,
@@ -617,6 +641,7 @@ export class StatsRepository {
         args.baseFeeDeltaLamports.toString(),
         args.priorityFeeDeltaLamports.toString(),
         args.tipDeltaLamports.toString(),
+        args.computeUnitsDelta.toString(),
       ],
     );
   }
@@ -694,8 +719,13 @@ export class StatsRepository {
    * reset to 0 so the re-scan's `addIncomeDelta` calls end at the
    * correct total.
    *
+   * `compute_units_total` is reset alongside the four lamport counters
+   * for the same reason: a re-scan re-applies it through
+   * `addIncomeDelta`, so leaving a stale value here would double-count.
+   *
    * Keeps `slots_*`, stake, and all `*_updated_at` columns
-   * untouched — only the four epoch-total lamport counters move.
+   * untouched — only the four lamport counters and the compute-unit
+   * total move.
    */
   async resetEpochTotals(epoch: Epoch, identity: IdentityPubkey): Promise<void> {
     await this.pool.query(
@@ -703,7 +733,8 @@ export class StatsRepository {
           SET block_fees_total_lamports          = 0,
               block_base_fees_total_lamports     = 0,
               block_priority_fees_total_lamports = 0,
-              block_tips_total_lamports          = 0
+              block_tips_total_lamports          = 0,
+              compute_units_total                = 0
         WHERE epoch = $1 AND identity_pubkey = $2`,
       [epoch, identity],
     );
@@ -714,6 +745,11 @@ export class StatsRepository {
    * the accounting fact table. This repairs the exact drift we can get
    * if a process writes processed block rows but dies before, or races
    * during, the aggregate delta update.
+   *
+   * Rebuilds the four income totals AND `compute_units_total` — the
+   * latter is a denormalised income-family peer (migration 0043)
+   * maintained on the same delta path, so it drifts and self-heals
+   * identically and is recomputed here in the same pass.
    *
    * Only the requested identities are touched. Missing fact rows are
    * treated as zero, which is correct for validators that produced no
@@ -734,7 +770,8 @@ export class StatsRepository {
            COALESCE(SUM(pb.fees_lamports) FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS fees,
            COALESCE(SUM(pb.base_fees_lamports) FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS base_fees,
            COALESCE(SUM(pb.priority_fees_lamports) FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS priority_fees,
-           COALESCE(SUM(pb.tips_lamports) FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS tips
+           COALESCE(SUM(pb.tips_lamports) FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS tips,
+           COALESCE(SUM(pb.compute_units_consumed) FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS compute_units
          FROM input i
          LEFT JOIN processed_blocks pb
            ON pb.epoch = $1
@@ -746,6 +783,7 @@ export class StatsRepository {
               block_base_fees_total_lamports     = fact.base_fees,
               block_priority_fees_total_lamports = fact.priority_fees,
               block_tips_total_lamports          = fact.tips,
+              compute_units_total                = fact.compute_units,
               fees_updated_at = NOW(),
               tips_updated_at = NOW()
          FROM fact
@@ -756,6 +794,7 @@ export class StatsRepository {
             evs.block_base_fees_total_lamports     <> fact.base_fees OR
             evs.block_priority_fees_total_lamports <> fact.priority_fees OR
             evs.block_tips_total_lamports          <> fact.tips OR
+            evs.compute_units_total                <> fact.compute_units OR
             -- A row whose income timestamps are still NULL has never
             -- been marked measured. Update it even when the totals
             -- already equal fact — e.g. a genuine zero-income epoch,
@@ -1489,6 +1528,13 @@ export class StatsRepository {
         case 'skip_rate':
           return `(slots_skipped::float / NULLIF(window_slots, 0)) ASC NULLS LAST,
                   window_income_lamports DESC`;
+        case 'compute_units':
+          // ProducedBlock-weighted average compute units per produced
+          // block: SUM(compute_units_total) / SUM(slots_produced) over
+          // the window. NULLIF guards a validator that produced no
+          // blocks in the window (NULLs sort last). Income breaks ties.
+          return `(compute_units_total / NULLIF(slots_produced, 0)) DESC NULLS LAST,
+                  window_income_lamports DESC`;
         case 'income_per_slot':
         default:
           return `(window_income_lamports::numeric / NULLIF(window_slots, 0)) DESC NULLS LAST,
@@ -1532,6 +1578,15 @@ export class StatsRepository {
            SUM(evs.slots_skipped)::bigint AS slots_skipped,
            SUM(evs.block_fees_total_lamports)::numeric AS block_fees_total_lamports,
            SUM(COALESCE(evs.block_tips_total_lamports, 0))::numeric AS block_tips_total_lamports,
+           -- Window-summed compute units, paired with slots_produced
+           -- above so the outer ORDER BY can rank by average CU per
+           -- produced block. Exposed by the CTE purely so that the
+           -- ORDER BY can reach it (an ORDER BY may reference any CTE
+           -- column); deliberately NOT in the outer SELECT list — the
+           -- leaderboard's DISPLAYED per-row CU still comes from the
+           -- rotation-aware getWindowedComputeUnitsByVote aggregation,
+           -- this column drives the compute-unit sort only.
+           SUM(COALESCE(evs.compute_units_total, 0))::numeric AS compute_units_total,
            SUM(evs.block_fees_total_lamports + COALESCE(evs.block_tips_total_lamports, 0))::numeric
              AS window_income_lamports,
            SUM(CASE

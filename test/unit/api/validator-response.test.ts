@@ -40,6 +40,7 @@ const baseStats: EpochValidatorStats = {
   blockTipsTotalLamports: 800_000_000n,
   medianTipLamports: 1_800_000n,
   medianTotalLamports: 4_800_000n,
+  computeUnitsTotal: 12_900_000_000n,
   activatedStakeLamports: null,
   voteCredits: 0n,
   prevEpochVoteCredits: 0n,

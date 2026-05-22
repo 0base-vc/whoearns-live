@@ -52,3 +52,7 @@ marketing/
 # dev tooling (command reference), not project source — keep it
 # untracked.
 /CLAUDE.md
+
+# Marketing handoff brief — generated locally for the marketing team as
+# raw material for content, not project source. Keep untracked.
+/MARKETING-BRIEF.md

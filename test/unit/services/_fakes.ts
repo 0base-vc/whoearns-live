@@ -375,6 +375,7 @@ export class FakeStatsRepo {
       blockTipsTotalLamports: prev?.blockTipsTotalLamports ?? 0n,
       medianTipLamports: prev?.medianTipLamports ?? null,
       medianTotalLamports: prev?.medianTotalLamports ?? null,
+      computeUnitsTotal: prev?.computeUnitsTotal ?? 0n,
       activatedStakeLamports: nextStake,
       voteCredits: prev?.voteCredits ?? 0n,
       prevEpochVoteCredits: prev?.prevEpochVoteCredits ?? 0n,
@@ -436,6 +437,7 @@ export class FakeStatsRepo {
         blockTipsTotalLamports: 0n,
         medianTipLamports: null,
         medianTotalLamports: null,
+        computeUnitsTotal: 0n,
         activatedStakeLamports: row.activatedStakeLamports ?? null,
         voteCredits: 0n,
         prevEpochVoteCredits: 0n,
@@ -485,6 +487,7 @@ export class FakeStatsRepo {
       baseFeeDeltaLamports: 0n,
       priorityFeeDeltaLamports: 0n,
       tipDeltaLamports: args.tipDeltaLamports,
+      computeUnitsDelta: 0n,
     });
   }
 
@@ -508,6 +511,7 @@ export class FakeStatsRepo {
           blockPriorityFeesTotalLamports:
             row.blockPriorityFeesTotalLamports + args.priorityFeeDeltaLamports,
           blockTipsTotalLamports: row.blockTipsTotalLamports + args.tipDeltaLamports,
+          computeUnitsTotal: row.computeUnitsTotal + args.computeUnitsDelta,
           feesUpdatedAt: now,
           tipsUpdatedAt: now,
         });
@@ -525,6 +529,7 @@ export class FakeStatsRepo {
           blockBaseFeesTotalLamports: 0n,
           blockPriorityFeesTotalLamports: 0n,
           blockTipsTotalLamports: 0n,
+          computeUnitsTotal: 0n,
         });
       }
     }
@@ -547,13 +552,18 @@ export class FakeStatsRepo {
         0n,
       );
       const tips = (this.processedTipsByEpochIdentity.get(key) ?? []).reduce((a, b) => a + b, 0n);
+      const computeUnits = (this.processedComputeUnitsByEpochIdentity.get(key) ?? []).reduce(
+        (a, b) => a + b,
+        0n,
+      );
       for (const [rowKey, row] of this.rows.entries()) {
         if (row.epoch !== epoch || row.identityPubkey !== identity) continue;
         if (
           row.blockFeesTotalLamports === fees &&
           row.blockBaseFeesTotalLamports === base &&
           row.blockPriorityFeesTotalLamports === priority &&
-          row.blockTipsTotalLamports === tips
+          row.blockTipsTotalLamports === tips &&
+          row.computeUnitsTotal === computeUnits
         ) {
           continue;
         }
@@ -564,6 +574,7 @@ export class FakeStatsRepo {
           blockBaseFeesTotalLamports: base,
           blockPriorityFeesTotalLamports: priority,
           blockTipsTotalLamports: tips,
+          computeUnitsTotal: computeUnits,
           feesUpdatedAt: now,
           tipsUpdatedAt: now,
         });
@@ -612,6 +623,9 @@ export class FakeStatsRepo {
   processedTotalsByEpochIdentity: Map<string, bigint[]> = new Map();
   processedBaseByEpochIdentity: Map<string, bigint[]> = new Map();
   processedPriorityByEpochIdentity: Map<string, bigint[]> = new Map();
+  // Per-block compute units, keyed `${epoch}:${identity}` — feeds the
+  // `compute_units_total` rebuild in `rebuildIncomeTotalsFromProcessedBlocks`.
+  processedComputeUnitsByEpochIdentity: Map<string, bigint[]> = new Map();
 
   private async recomputeMedianFrom(
     epoch: Epoch,
@@ -1600,6 +1614,7 @@ export function makeStats(
     tipsUpdatedAt: null,
     medianTipUpdatedAt: null,
     medianTotalUpdatedAt: null,
+    computeUnitsTotal: 0n,
     ...overrides,
   };
 }

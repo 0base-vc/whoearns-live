@@ -76,6 +76,19 @@ export interface EpochValidatorStats {
    */
   medianTotalLamports: bigint | null;
   /**
+   * Epoch-total compute units consumed across this validator's produced
+   * blocks, summed from `processed_blocks.compute_units_consumed`
+   * (migration 0043). NOT lamports — a separate productivity axis,
+   * stored as a `bigint` only because it shares the NUMERIC(30,0)
+   * representation. Denormalised peer of `blockFeesTotalLamports`: it
+   * lets the leaderboard rank by compute units with no `processed_blocks`
+   * join. Maintained by the same delta / reset / rebuild paths as the
+   * income totals, so it is exactly as rotation-robust as those — the
+   * rotation-aware live CU reads are a separate, more precise path.
+   * Reads 0 for epochs the closed-epoch reconciler has not yet rebuilt.
+   */
+  computeUnitsTotal: bigint;
+  /**
    * Snapshot of this validator's activated stake for the epoch, taken
    * by the slot-ingester from the RPC `getVoteAccounts` cache. Null
    * for epochs closed BEFORE the stake-snapshot migration shipped —

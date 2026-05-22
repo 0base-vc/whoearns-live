@@ -50,7 +50,7 @@ const SortEnumSchema = z.preprocess(
     }
   },
   z
-    .enum(['income_per_slot', 'total_income', 'mev_tips', 'fees', 'skip_rate'])
+    .enum(['income_per_slot', 'total_income', 'mev_tips', 'fees', 'skip_rate', 'compute_units'])
     .default('income_per_slot'),
 );
 
