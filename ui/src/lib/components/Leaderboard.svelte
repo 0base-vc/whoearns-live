@@ -374,18 +374,20 @@
           <tr>
             <th scope="col" class="px-4 py-2.5 text-left">#</th>
             <th scope="col" class="px-4 py-2.5 text-left">Validator</th>
-            <th scope="col" class="px-4 py-2.5 text-right">
-              <span class="inline-flex items-center justify-end gap-1">
-                <span class="font-semibold">CU</span>
-                <Tooltip
-                  content="Average compute units consumed per produced block across the selected window. Not a sort key."
-                  placement="bottom"
-                  align="right"
-                  label="About compute units"
-                />
-              </span>
-            </th>
             {#each COLUMNS as col (col.key)}
+              {#if col.key === 'skip_rate'}
+                <th scope="col" class="px-4 py-2.5 text-right">
+                  <span class="inline-flex items-center justify-end gap-1">
+                    <span class="font-semibold">CU</span>
+                    <Tooltip
+                      content="Average compute units consumed per produced block across the selected window. Not a sort key."
+                      placement="bottom"
+                      align="right"
+                      label="About compute units"
+                    />
+                  </span>
+                </th>
+              {/if}
               <th
                 scope="col"
                 aria-sort={sort === col.key ? 'descending' : 'none'}
@@ -487,10 +489,12 @@
                   {item.windowSlots} window slots · skip {skipRateText(item)}
                 </span>
               </td>
-              <td class="px-4 py-2.5 text-right font-mono tabular-nums">
-                {windowedCuText(item)}
-              </td>
               {#each COLUMNS as col (col.key)}
+                {#if col.key === 'skip_rate'}
+                  <td class="px-4 py-2.5 text-right font-mono tabular-nums">
+                    {windowedCuText(item)}
+                  </td>
+                {/if}
                 <td
                   class="px-4 py-2.5 font-mono tabular-nums"
                   class:text-right={col.alignRight}

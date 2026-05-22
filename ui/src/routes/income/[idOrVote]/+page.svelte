@@ -56,6 +56,21 @@
   // rationale behind the specific counts.
   const HISTORY_PER_EPOCH_DECIMALS = 3;
 
+  /**
+   * Average compute units per produced block for one epoch row. CU
+   * runs to tens of millions, so render a one-decimal "M" suffix to
+   * keep the table cell scannable (matching the leaderboard's CU
+   * column). "—" when the epoch produced no blocks (null CU).
+   */
+  function epochCuText(cu: string | null): string {
+    if (cu === null) return '—';
+    const n = Number(cu);
+    if (!Number.isFinite(n)) return '—';
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    return new Intl.NumberFormat('en').format(n);
+  }
+
   const LAST_MONTH_EPOCHS = 16;
 
   let { data }: { data: PageData } = $props();
@@ -678,7 +693,7 @@
 <!-- ─────────── 3. Epoch income ─────────── -->
 <section aria-labelledby="history-title" class="mt-10">
   <div class="mb-4">
-    <h2 id="history-title" class="text-lg font-semibold">Epoch income</h2>
+    <h2 id="history-title" class="text-lg font-semibold">Epoch breakdown</h2>
   </div>
 
   {#if !hasAnyHistory}
@@ -805,7 +820,7 @@
                   {/if}
                 </dd>
               </div>
-              <div class="col-span-2">
+              <div>
                 <dt class="inline-flex items-center text-[color:var(--color-text-muted)]">
                   MEV tips
                   <Tooltip
@@ -821,6 +836,18 @@
                   {/if}
                 </dd>
               </div>
+              <div>
+                <dt class="inline-flex items-center text-[color:var(--color-text-muted)]">
+                  CU
+                  <Tooltip
+                    label="About compute units"
+                    content="Average compute units consumed per block this validator produced this epoch."
+                  />
+                </dt>
+                <dd class="font-mono tabular-nums">
+                  {epochCuText(row.avgComputeUnitsPerProducedBlock)}
+                </dd>
+              </div>
             </dl>
           </Card>
         </li>
@@ -833,10 +860,10 @@
     >
       <table class="min-w-full divide-y divide-[color:var(--color-border-default)] text-sm">
         <caption class="sr-only">
-          Epoch income for validator {history.vote}, newest epoch first. The live running epoch
+          Epoch breakdown for validator {history.vote}, newest epoch first. The live running epoch
           appears first when available. Income is decomposed into three revenue streams: base fees,
           priority fees, and Jito MEV tips. The MEV column shows on-chain Jito tips derived from
-          produced blocks.
+          produced blocks. The CU column is the average compute units consumed per produced block.
         </caption>
         <thead
           class="bg-[color:var(--color-surface-muted)] text-xs uppercase tracking-wide text-[color:var(--color-text-muted)]"
@@ -899,8 +926,18 @@
                 <Tooltip
                   label="About total"
                   placement="bottom"
-                  align="right"
                   content="Base fees + Priority fees + MEV — every revenue stream the indexer can see, summed."
+                />
+              </span>
+            </th>
+            <th scope="col" class="px-4 py-3 text-right">
+              <span class="inline-flex items-center justify-end">
+                CU
+                <Tooltip
+                  label="About compute units"
+                  placement="bottom"
+                  align="right"
+                  content="Average compute units consumed per block this validator produced this epoch."
                 />
               </span>
             </th>
@@ -966,6 +1003,13 @@
                       HISTORY_PER_EPOCH_DECIMALS,
                     )}
                   </span>
+                {:else}
+                  <span class="text-[color:var(--color-text-subtle)]" aria-label="no data">—</span>
+                {/if}
+              </td>
+              <td class="px-4 py-3 text-right tabular-nums">
+                {#if row.avgComputeUnitsPerProducedBlock !== null}
+                  {epochCuText(row.avgComputeUnitsPerProducedBlock)}
                 {:else}
                   <span class="text-[color:var(--color-text-subtle)]" aria-label="no data">—</span>
                 {/if}

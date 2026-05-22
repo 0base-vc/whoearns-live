@@ -230,7 +230,7 @@
       </p>
     </div>
     {#if epochRange !== null}
-      <span class="text-xs text-[color:var(--color-text-subtle)]">
+      <span class="whitespace-nowrap text-xs text-[color:var(--color-text-subtle)]">
         Epoch {epochRange.first} - {epochRange.last}
       </span>
     {/if}
