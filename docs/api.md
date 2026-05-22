@@ -442,7 +442,7 @@ Body validation:
 ## `GET /v1/validators/:idOrVote/tier`
 
 Returns the validator's **Node Tier** (Phase 1 release: 2-signal composite
-over the most recent 5 closed epochs). See [`scoring.md`](./scoring.md)
+over the most recent 10 closed epochs). See [`scoring.md`](./scoring.md)
 for the full formula and rationale on why vote credits are excluded.
 
 Response shape:
@@ -452,14 +452,14 @@ Response shape:
   "vote": "5BAi9YGCipHq4ZcXuen5vagRQqRTVTRszXNqBZC6uBPZ",
   "identity": "IDENTITY_PUBKEY",
   "window": {
-    "epochs": 5,
+    "epochs": 10,
     "slotsAssigned": 432,
     "slotsSkipped": 3,
     "economicCohortSize": 1247,
-    "economicMeasuredEpochs": 5,
+    "economicMeasuredEpochs": 10,
     "economicMedianLamportsPerSlot": "8421337",
     "incomeFreshness": "2026-05-12T08:00:00.000Z",
-    "cohortAsOfEpoch": { "fromEpoch": 820, "toEpoch": 824 }
+    "cohortAsOfEpoch": { "fromEpoch": 815, "toEpoch": 824 }
   },
   "tier": "forge | anvil | hearth | kindling | unrated",
   "composite": 96,
@@ -475,23 +475,24 @@ scaled to 0-100. `reliability` is the pessimistic block-production
 success rate (`1 − wilsonInterval(slotsSkipped, slotsAssigned).upper`);
 `economicPercentile` is the cohort rank of this validator's median
 per-leader-slot income (`(blockFeesTotalLamports +
-blockTipsTotalLamports) / slotsAssigned`) across the 5-epoch window,
+blockTipsTotalLamports) / slotsAssigned`) across the 10-epoch window,
 computed against the **indexed-validator cohort** (the deployment's
 `WatchMode` set — `top:N`, an explicit list, or `*` for every active
 validator). Tier cutoffs: `forge ≥ 95`, `anvil ≥ 80`, `hearth ≥ 40`,
 `kindling < 40`.
 
 `window.epochs` is the count of closed-epoch rows actually indexed
-for this validator (`≤ 5`) — **not** the configured window, which is
-always 5. A value below 5 is a cold-start state: the indexer has not
-yet backfilled this validator's older epochs. The tier is still
-computed, just over the rows available so far; `economicMeasuredEpochs`
-(epochs with measurable income) is likewise `≤ window.epochs`.
+for this validator (`≤ 10`) — **not** the configured window, which is
+always 10. A value below 10 is a cold-start state: the indexer has not
+yet observed 10 closed epochs for this validator. The tier requires a
+complete record, so a validator with fewer than 10 measured epochs is
+`unrated` until the window fills; `economicMeasuredEpochs` (epochs with
+measurable income) is likewise `≤ window.epochs`.
 
 `tier === "unrated"` when the validator has fewer than 10 leader slots
 across the window, OR the cohort had fewer than 10 indexed peers with
-measurable income, OR this validator had measurable income in fewer
-than 4 of the 5 closed epochs in the window, OR
+measurable income, OR this validator did not have measurable income in
+all 10 closed epochs of the window, OR
 `economicPercentile === null` — the confidence floors prevent
 tiny-sample validators from being mis-classified. **`composite === null`
 when tier is `unrated`** so a UI cannot accidentally display a
@@ -1090,11 +1091,11 @@ duplication**:
   "identity": "IDENTITY_PUBKEY",
   "tier": {
     "window": {
-      "epochs": 5,
+      "epochs": 10,
       "slotsAssigned": 432,
       "slotsSkipped": 3,
       "economicCohortSize": 1247,
-      "economicMeasuredEpochs": 5,
+      "economicMeasuredEpochs": 10,
       "economicMedianLamportsPerSlot": "8421337",
       "incomeFreshness": "2026-05-12T08:00:00.000Z",
       "cohortAsOfEpoch": { "fromEpoch": 820, "toEpoch": 824 }

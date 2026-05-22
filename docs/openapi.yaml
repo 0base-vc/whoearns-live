@@ -330,7 +330,7 @@ paths:
       summary: Node Tier (block-production reliability + economic percentile)
       description: |
         Returns the validator's Node Tier (Forge / Anvil / Hearth /
-        Kindling / Unrated) derived from the most recent 5 closed
+        Kindling / Unrated) derived from the most recent 10 closed
         epochs. Composite is `0.3 × reliability + 0.7 ×
         economicPercentile`, scaled to 0-100. See `docs/scoring.md`
         Phase 1 for the public formula and the rationale for excluding
@@ -1178,12 +1178,12 @@ components:
             economicMeasuredEpochs:
               type: integer
               minimum: 0
-              maximum: 5
+              maximum: 10
               description: |
-                How many closed epochs in the 5-epoch window had
-                measurable income for THIS validator. Below `4` the
-                per-validator median is too noisy and the tier falls
-                to `unrated`.
+                How many closed epochs in the 10-epoch window had
+                measurable income for THIS validator. Below the full
+                window the tier falls to `unrated` — a rating needs a
+                complete 10-epoch income record.
             economicMedianLamportsPerSlot:
               type: string
               nullable: true

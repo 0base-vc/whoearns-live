@@ -250,7 +250,7 @@ GET unless noted. Full descriptions + query params in /llms-full.txt.
 - ${SITE_URL}/v1/validators/{idOrVote}/history: Per-epoch income history
 - ${SITE_URL}/v1/validators/{idOrVote}/current-epoch: Single running-epoch record
 - ${SITE_URL}/v1/validators/{idOrVote}/epochs/{epoch}/leader-slots: Leader-slot facts for one epoch
-- ${SITE_URL}/v1/validators/{idOrVote}/tier: Node Tier composite (5-epoch window)
+- ${SITE_URL}/v1/validators/{idOrVote}/tier: Node Tier composite (10-epoch window)
 - ${SITE_URL}/v1/validators/{idOrVote}/badges: Tenure + client + tier badge bundle
 - ${SITE_URL}/v1/validators/{idOrVote}/operator-activity-index: Operator Activity Index (governance + wallet)
 - ${SITE_URL}/v1/validators/{idOrVote}/scoring: Aggregate scoring bundle — tier + badges + OAI in one round-trip
@@ -383,7 +383,7 @@ Use closed epochs before deriving public claims from these facts.
 ### GET /v1/validators/{idOrVote}/tier
 Node Tier composite — pessimistic block-production reliability
 (Wilson upper bound on skip rate) + economic-productivity percentile
-(cohort rank of median per-leader-slot income across 5 closed epochs).
+(cohort rank of median per-leader-slot income across 10 closed epochs).
 Formula: 0.3 × reliability + 0.7 × economicPercentile. The cohort is
 the INDEXED-VALIDATOR set (the deployment's WatchMode), not the full
 Solana cluster. Accepts a vote OR identity pubkey; no query params.

@@ -516,7 +516,7 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
    * GET /v1/validators/:idOrVote/tier
    *
    * Returns the validator's Node Tier (forge / anvil / hearth /
-   * kindling / unrated) derived from the most recent 5 CLOSED
+   * kindling / unrated) derived from the most recent 10 CLOSED
    * epochs — the running epoch is skipped because its slot/income
    * counters grow during the response cache window and would make
    * a tier ride the running-epoch values.

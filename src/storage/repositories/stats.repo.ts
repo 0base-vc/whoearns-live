@@ -985,13 +985,15 @@ export class StatsRepository {
 
   /**
    * Returns the subset of `epochs` that have at least one of `votes`
-   * with leader slots assigned but no income recorded —
-   * `slots_assigned > 0 AND fees_updated_at IS NULL`. This is the
-   * income-ingest gap the income-reconciler repairs: a validator whose
-   * every leader-block fetch failed for an epoch never gets an
-   * `addIncomeDelta`, so `fees_updated_at` (stamped together with
-   * `tips_updated_at`) stays NULL and the epoch is unmeasured for the
-   * Node Tier. Cheap — a single indexed scan, no block fetches.
+   * with leader slots assigned but income only partially recorded —
+   * `slots_assigned > 0 AND (fees_updated_at IS NULL OR
+   * tips_updated_at IS NULL)`. This is the income-ingest gap the
+   * income-reconciler repairs: a validator whose leader-block fetches
+   * failed for an epoch never gets a full income delta, so the epoch
+   * is unmeasured for the Node Tier. BOTH timestamps are checked so
+   * this matches `findEconomicPercentile`'s "fees AND tips required"
+   * cohort filter exactly. Cheap — a single indexed scan, no block
+   * fetches.
    */
   async findEpochsWithIncomeGaps(epochs: Epoch[], votes: VotePubkey[]): Promise<Epoch[]> {
     if (epochs.length === 0 || votes.length === 0) return [];
@@ -1001,7 +1003,7 @@ export class StatsRepository {
         WHERE epoch = ANY($1::bigint[])
           AND vote_pubkey = ANY($2::text[])
           AND slots_assigned > 0
-          AND fees_updated_at IS NULL`,
+          AND (fees_updated_at IS NULL OR tips_updated_at IS NULL)`,
       [epochs, votes],
     );
     return rows.map((r) => Number(r.epoch));
