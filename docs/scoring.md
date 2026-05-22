@@ -240,18 +240,13 @@ economicScore = 0.90 × economicPercentile + 0.10 × cuSubscore
 ```
 
 - **`cuSubscore`** is `cuPercentile` for a validator that produced
-  at least one block in the window, and **`0`** for a validator with
-  no produced blocks (a `null` `cuPercentile`). A validator with no
-  CU data therefore scores `economicScore = 0.9 × economicPercentile`
-  — the CU side never, on its own, forces `unrated`; only the income
-  side does. This `0` is a genuine penalty, not a neutral default: a
-  non-producing validator is scored as the _lowest-ranked_ CU peer,
-  so it lands up to `0.7 × 0.1 × 100 = 7` composite points — and
-  potentially a tier band — below an otherwise identical
-  block-producing validator. That is deliberate (producing blocks is
-  part of a validator's job), but it does mean two validators with
-  identical _received_ income can land in different tiers purely on
-  whether one produced any blocks in the window.
+  at least one block in the window. For a validator with no produced
+  blocks (a `null` `cuPercentile`), `cuSubscore` falls back to that
+  validator's own `economicPercentile`, so `economicScore` collapses
+  to `economicPercentile` — a non-producer is judged purely on the
+  income it posts, never penalised for a CU metric it has no way to
+  produce. The CU side never, on its own, forces `unrated`; only the
+  income side does.
 - **`cuPercentile`** is the `PERCENT_RANK()` of the validator's
   produced-block-count-weighted compute units per produced block,
   computed over the SAME indexed cohort and closed-epoch window as

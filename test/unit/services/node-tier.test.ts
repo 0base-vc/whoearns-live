@@ -340,10 +340,13 @@ describe('computeTier', () => {
     expect(delta).toBeLessThanOrEqual(8);
   });
 
-  it('null cuPercentile contributes a CU subscore of 0 (identical to cuPercentile 0)', () => {
+  it('null cuPercentile folds the CU subscore back to the income percentile', () => {
     // A validator that produced no blocks in the window has
-    // cuPercentile = null. computeTier must treat that EXACTLY like
-    // cuPercentile = 0 — the economic score collapses to 0.9 × income.
+    // cuPercentile = null. Its CU subscore falls back to its own
+    // economicPercentile, so the economic score collapses to
+    // economicPercentile — NOT to 0.9 × income. A null-CU validator
+    // therefore matches a peer whose cuPercentile equals its income
+    // percentile, and outscores one with cuPercentile 0.
     const base = {
       votePubkey: VOTE,
       slotsAssigned: 2000,
@@ -353,16 +356,20 @@ describe('computeTier', () => {
       economicMeasuredEpochs: 10,
     };
     const nullCu = computeTier({ ...base, cuPercentile: null });
+    const cuEqualsIncome = computeTier({ ...base, cuPercentile: 0.8 });
     const zeroCu = computeTier({ ...base, cuPercentile: 0 });
-    expect(nullCu.composite).toBe(zeroCu.composite);
+    expect(nullCu.composite).toBe(cuEqualsIncome.composite);
+    expect(nullCu.composite!).toBeGreaterThan(zeroCu.composite!);
     expect(nullCu.components.cuPercentile).toBeNull();
   });
 
-  it('a top-income validator with no CU data scores below an all-round-strong peer', () => {
-    // Both have economicPercentile 1.0. One has cuPercentile 1.0, the
-    // other null (produced no blocks). Economic score is 1.0 vs 0.9,
-    // so the no-CU validator's composite is strictly lower — a null
-    // CU side never, on its own, gates the tier to `unrated`.
+  it('a top-income validator with no CU data is judged on income, not penalised', () => {
+    // Both have economicPercentile 1.0. One produced blocks at the top
+    // CU rank, the other produced none (cuPercentile null). The
+    // non-producer's CU subscore folds back to income, so its economic
+    // score is also 1.0 — it ties the all-round peer rather than
+    // landing below it. A null CU side never gates the tier to
+    // `unrated`.
     const base = {
       votePubkey: VOTE,
       slotsAssigned: 2000,
@@ -374,7 +381,7 @@ describe('computeTier', () => {
     const allRound = computeTier({ ...base, cuPercentile: 1.0 });
     const noCuData = computeTier({ ...base, cuPercentile: null });
     expect(noCuData.composite).not.toBeNull();
-    expect(noCuData.composite!).toBeLessThan(allRound.composite!);
+    expect(noCuData.composite).toBe(allRound.composite);
     expect(noCuData.tier).not.toBe('unrated');
   });
 

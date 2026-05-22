@@ -71,9 +71,11 @@ export interface TierInput {
    * computed in one query by `findEconomicPercentile`).
    *
    * `null` when the validator produced no blocks in the window — a
-   * `null` here contributes a CU subscore of 0 to the economic blend
-   * (`0.9 × economicPercentile + 0.1 × cuSubscore`); it does NOT, on
-   * its own, force `unrated` — only the income side does that.
+   * `null` here makes the CU subscore fall back to the income
+   * percentile, so `economicScore` collapses to `economicPercentile`
+   * (a non-producer is judged on income, not penalised for absent
+   * CU); it does NOT, on its own, force `unrated` — only the income
+   * side does that.
    */
   cuPercentile: number | null;
 }
@@ -262,8 +264,11 @@ const WEIGHT_ECONOMIC = 0.7;
  * delegators actually receive), while compute-unit productivity adds
  * a small 10% nudge for validators packing more work into each
  * produced block. `cuSubscore` is `cuPercentile` for a validator with
- * produced blocks in the window, 0 otherwise (null CU). See
- * `docs/scoring.md` Phase 1, "Compute units in the economic score".
+ * produced blocks in the window, and falls back to the validator's
+ * own `economicPercentile` otherwise (null CU) — so a non-producer's
+ * `economicScore` is just its income percentile, never a penalised
+ * blend. See `docs/scoring.md` Phase 1, "Compute units in the
+ * economic score".
  */
 const WEIGHT_INCOME_IN_ECONOMIC = 0.9;
 const WEIGHT_CU_IN_ECONOMIC = 0.1;
@@ -332,13 +337,16 @@ export function computeTier(input: TierInput): TierResult {
   // promise in docs/scoring.md.
   // Economic score blends income productivity with CU productivity:
   // `0.9 × economicPercentile + 0.1 × cuSubscore`. A validator with
-  // no produced blocks in the window has `cuPercentile === null` and
-  // contributes a CU subscore of 0 — the economic score then equals
-  // `0.9 × economicPercentile`. The CU side never, on its own, gates
-  // the tier to `unrated`; only the income side does.
-  const cuSubscore = input.cuPercentile ?? 0;
+  // no produced blocks in the window has `cuPercentile === null`; its
+  // CU subscore falls back to its own income percentile, so the CU
+  // term folds into income and `economicScore` equals
+  // `economicPercentile`. A non-producer is judged purely on the
+  // income it posts — never scored as the lowest-ranked CU peer for a
+  // metric it has no way to produce. The CU side never, on its own,
+  // gates the tier to `unrated`; only the income side does.
   let rawComposite: number | null = null;
   if (!insufficientEconomic && input.economicPercentile !== null) {
+    const cuSubscore = input.cuPercentile ?? input.economicPercentile;
     const economicScore =
       WEIGHT_INCOME_IN_ECONOMIC * input.economicPercentile + WEIGHT_CU_IN_ECONOMIC * cuSubscore;
     rawComposite = Math.round(

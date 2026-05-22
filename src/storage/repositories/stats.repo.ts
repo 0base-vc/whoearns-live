@@ -1131,7 +1131,8 @@ export class StatsRepository {
       ),
       -- CU percentile reuses the PERCENT_RANK method; validators with
       -- no produced blocks (NULL windowed_cu) are excluded from the CU
-      -- ranking, so they receive no cu_pct (-> CU subscore 0).
+      -- ranking, so they receive no cu_pct — the tier folds their CU
+      -- subscore back to their income percentile.
       cu_ranked AS (
         SELECT
           vote_pubkey,
