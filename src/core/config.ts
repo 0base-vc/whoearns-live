@@ -197,7 +197,11 @@ export const ConfigSchema = z.object({
   FEE_INGEST_INTERVAL_MS: PositiveInt.default(30_000),
   FEE_INGEST_BATCH_SIZE: PositiveInt.default(50),
   AGGREGATES_INTERVAL_MS: PositiveInt.default(300_000),
-  CLOSED_EPOCH_RECONCILE_INTERVAL_MS: PositiveInt.default(300_000),
+  // Closed-epoch income repair: N-1 reconcile + a trailing-window gap
+  // scan. Not latency-sensitive and getBlock-heavy — 4h still repairs
+  // a freshly-closed epoch many times over its multi-day life and
+  // catches income gaps well within the SCORING cache horizon.
+  CLOSED_EPOCH_RECONCILE_INTERVAL_MS: PositiveInt.default(14_400_000),
   // Periodic on-chain validator-info refresh — picks up operator
   // renames/icon-changes for the WATCHED set only. Six hours is
   // comfortable: 4 watched validators × 1 RPC each × 4 ticks/day
