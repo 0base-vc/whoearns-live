@@ -426,6 +426,7 @@ export type LeaderboardSort =
   | 'total_income'
   | 'mev_tips'
   | 'fees'
+  | 'compute_units'
   | 'skip_rate';
 
 /** One row of the homepage top-N leaderboard. */
