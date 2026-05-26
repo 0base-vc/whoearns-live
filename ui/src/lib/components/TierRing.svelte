@@ -46,7 +46,6 @@
 -->
 <script lang="ts">
   import type { NodeTier } from '$lib/types';
-  import TierBadge from './TierBadge.svelte';
 
   interface Props {
     tier: NodeTier;
@@ -241,23 +240,25 @@
       {/if}
     </svg>
     <!--
-      Centre stack — Tier badge + composite number. Absolutely
-      positioned over the ring; pointer-events:none so click-through
-      to the wrapper still works.
+      Centre — the composite number, on its own. The 8-point
+      `TierBadge` glyph used to sit above the number; we dropped it
+      because the ring color (per-tier `--color-tier-*-500` token)
+      and the "HEARTH" / "ANVIL" / etc. pill in the card header are
+      already two unambiguous tier signals. A third tier-silhouette
+      glyph inside the ring competed with the composite number for
+      attention without adding information. Pointer-events:none so
+      click-through to the wrapper still works.
     -->
-    <div
-      class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-0.5"
-    >
-      <TierBadge {tier} size={Math.round(size * 0.24)} label="" />
+    <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
       <!--
-        The composite is the single most prominent number on the
-        hub — was `text-2xl` (24px), now `text-4xl` so it dominates
-        the ring centre. The `/ 100` suffix mirrors the OAI tile
-        convention and answers the "out of what" question that the
-        bare `79` used to leave hanging.
+        Numeric composite, the single most prominent value on the
+        hub. `text-5xl` (vs the earlier `text-4xl`) reclaims the
+        vertical room the dropped badge used to occupy. `/ 100`
+        stays the same to answer the "out of what" question that a
+        bare `76` leaves hanging.
       -->
       <div class="flex items-baseline gap-1">
-        <span class="font-bold tabular-nums text-4xl leading-none">
+        <span class="font-bold tabular-nums text-5xl leading-none">
           {centreLabel}
         </span>
         {#if composite !== null}
