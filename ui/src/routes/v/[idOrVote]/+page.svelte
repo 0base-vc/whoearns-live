@@ -67,6 +67,9 @@
     TIER_BANDS,
     TIER_CUTOFFS,
     TIER_LABEL,
+    WEIGHT_RELIABILITY,
+    WEIGHT_ECONOMIC_PERCENTILE_EFFECTIVE,
+    WEIGHT_CU_PERCENTILE_EFFECTIVE,
     WINDOW_CLOSED_EPOCHS,
     isReliabilityFloorTriggered,
     nextTierGap,
@@ -396,7 +399,21 @@
   );
 
   // Composite arithmetic for the <details> breakdown — shows the
-  // score is BUILT (0.3·reliability + 0.7·economic), not assigned.
+  // score is BUILT, not assigned. Mirrors the exact backend formula:
+  //
+  //   composite     = 0.30·reliability + 0.70·economicScore
+  //   economicScore = 0.90·economicPercentile + 0.10·cuSubscore
+  //   cuSubscore    = cuPercentile (or economicPercentile when the
+  //                   validator produced no blocks — non-producer
+  //                   fallback in `services/node-tier.ts`).
+  //
+  // Expanded into the three raw inputs each input ends up with these
+  // effective composite weights: 0.30 / 0.63 / 0.07. The breakdown
+  // shows all three lines explicitly so a delegator can verify the
+  // composite arithmetically — the earlier two-line form silently
+  // dropped the CU contribution and didn't add up to the rendered
+  // composite when CU subscore diverged from economic percentile.
+  //
   // Null when there's no composite (unrated): the breakdown then
   // shows only tier bands + measurement, never a phantom sum.
   const compositeMath = $derived.by(() => {
@@ -405,11 +422,23 @@
     if (composite === null || economicPercentile === null) return null;
     const reliabilityPct = tierComponents.reliability * 100;
     const economicPct = economicPercentile * 100;
+    // Non-producer fallback: when `cuPercentile` is null, the
+    // composite uses `economicPercentile` as the CU subscore so the
+    // validator is judged on income alone. Mirror that here so the
+    // breakdown matches the displayed composite even for non-
+    // producers.
+    const cuPercentileRaw = tierComponents.cuPercentile;
+    const cuFallback = cuPercentileRaw === null;
+    const cuSubscoreFraction = cuPercentileRaw ?? economicPercentile;
+    const cuSubscorePct = cuSubscoreFraction * 100;
     return {
       reliabilityPct,
       economicPct,
-      reliabilityTerm: 0.3 * reliabilityPct,
-      economicTerm: 0.7 * economicPct,
+      cuSubscorePct,
+      cuFallback,
+      reliabilityTerm: WEIGHT_RELIABILITY * reliabilityPct,
+      economicTerm: WEIGHT_ECONOMIC_PERCENTILE_EFFECTIVE * economicPct,
+      cuTerm: WEIGHT_CU_PERCENTILE_EFFECTIVE * cuSubscorePct,
       composite,
     };
   });
@@ -960,13 +989,35 @@
                   How the composite is built
                 </p>
                 <dl class="flex flex-col gap-1 font-mono text-[color:var(--color-text-muted)]">
+                  <!--
+                    Three input lines + a rounded total. Effective
+                    composite weights (0.30 / 0.63 / 0.07) are the
+                    expansion of `0.30·reliability + 0.70·(0.90·
+                    economicPercentile + 0.10·cuSubscore)`. Showing
+                    them this way means the three displayed terms sum
+                    to the rounded composite arithmetically — earlier
+                    the breakdown used `0.70 × economicPercentile`
+                    which dropped the CU subscore and produced a sum
+                    that didn't match the rendered composite.
+                  -->
                   <div class="flex items-baseline justify-between gap-3">
                     <dt>0.30 × reliability {compositeMath.reliabilityPct.toFixed(1)}%</dt>
                     <dd class="tabular-nums">≈ {compositeMath.reliabilityTerm.toFixed(1)}</dd>
                   </div>
                   <div class="flex items-baseline justify-between gap-3">
-                    <dt>0.70 × economic percentile {compositeMath.economicPct.toFixed(1)}%</dt>
+                    <dt>0.63 × economic percentile {compositeMath.economicPct.toFixed(1)}%</dt>
                     <dd class="tabular-nums">≈ {compositeMath.economicTerm.toFixed(1)}</dd>
+                  </div>
+                  <div class="flex items-baseline justify-between gap-3">
+                    <dt>
+                      0.07 × CU subscore {compositeMath.cuSubscorePct.toFixed(1)}%
+                      {#if compositeMath.cuFallback}
+                        <span class="text-[color:var(--color-text-subtle)]"
+                          >(no blocks — defaults to income percentile)</span
+                        >
+                      {/if}
+                    </dt>
+                    <dd class="tabular-nums">≈ {compositeMath.cuTerm.toFixed(1)}</dd>
                   </div>
                   <div
                     class="flex items-baseline justify-between gap-3 border-t border-[color:var(--color-border-default)] pt-1 font-semibold text-[color:var(--color-text-default)]"

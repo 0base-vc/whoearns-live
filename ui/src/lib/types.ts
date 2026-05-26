@@ -267,6 +267,17 @@ export interface NodeTierBody {
   components: {
     reliability: number;
     economicPercentile: number | null;
+    /**
+     * Cohort percentile rank of this validator's producedBlock-weighted
+     * compute-units-per-block. `null` when the validator produced no
+     * blocks in the window — see `docs/scoring.md` Phase 1's non-
+     * producer fallback (the composite folds `economicPercentile` back
+     * in as the CU subscore so a non-producer is judged on income
+     * alone, never penalised with a zero on a metric it had no chance
+     * to register). Mirrors the same key on `NodeTierBody.components`
+     * in the backend `/v1/validators/:idOrVote/tier` response.
+     */
+    cuPercentile: number | null;
   };
 }
 

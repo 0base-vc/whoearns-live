@@ -67,6 +67,33 @@ export const WINDOW_CLOSED_EPOCHS = 5;
 export const SKIP_RATE_FLOOR = 0.2;
 
 /**
+ * Composite-weight constants — mirror the same names in
+ * `src/services/node-tier.ts`. The composite is:
+ *
+ *   composite      = 0.30 × reliability + 0.70 × economicScore
+ *   economicScore  = 0.90 × economicPercentile + 0.10 × cuSubscore
+ *   cuSubscore     = cuPercentile (or economicPercentile when the
+ *                    validator produced no blocks — see node-tier.ts)
+ *
+ * Expanded, each raw input ends up with these effective weights in
+ * the composite:
+ *
+ *   reliability         → 0.30
+ *   economicPercentile  → 0.70 × 0.90 = 0.63
+ *   cuSubscore          → 0.70 × 0.10 = 0.07
+ *
+ * Surfaced as constants so the hub's "How the composite is built"
+ * breakdown can render the three lines with the exact factors —
+ * the same arithmetic the backend uses.
+ */
+export const WEIGHT_RELIABILITY = 0.3;
+export const WEIGHT_ECONOMIC = 0.7;
+export const WEIGHT_INCOME_IN_ECONOMIC = 0.9;
+export const WEIGHT_CU_IN_ECONOMIC = 0.1;
+export const WEIGHT_ECONOMIC_PERCENTILE_EFFECTIVE = WEIGHT_ECONOMIC * WEIGHT_INCOME_IN_ECONOMIC; // 0.63
+export const WEIGHT_CU_PERCENTILE_EFFECTIVE = WEIGHT_ECONOMIC * WEIGHT_CU_IN_ECONOMIC; // 0.07
+
+/**
  * Plain-English tier names. Source of truth for any UI string that
  * displays the tier next to its visual mark.
  */
