@@ -39,6 +39,15 @@
     LOCALIZED_CONTENT_ROUTES.has(page.url.pathname),
   );
 
+  /**
+   * Validator-hub pages (`/v/<idOrVote>`) get the compact-variant
+   * sponsor band instead of the full DelegationCTA card. On a
+   * per-validator surface the full card visually dominates the
+   * lower half of the page and reads as "sponsored content" to a
+   * delegator-first audience — see the 4-agent UI review.
+   */
+  const isHubRoute = $derived<boolean>(page.url.pathname.startsWith('/v/'));
+
   const DEFAULT_TITLE = `${SITE_NAME} — AI-assisted Solana validator income intelligence`;
   const DEFAULT_DESCRIPTION = `${SITE_NAME} is an AI-assisted open data project by 0base.vc for Solana validator income: live-trend block fees, Jito tips, slots, skip rate, and income per slot.`;
 
@@ -258,7 +267,7 @@
   >
     <div class="mx-auto max-w-6xl px-6 py-10">
       {#if !hideFooterCta}
-        <DelegationCTA />
+        <DelegationCTA variant={isHubRoute ? 'compact' : 'card'} />
       {/if}
 
       <div

@@ -1196,9 +1196,15 @@
   ships and OAI publishes a real composite, this section will
   move back up. Same component — only its place in the hierarchy
   changes.
+
+  Hidden entirely when the validator is unclaimed AND `scoring.oai`
+  is null — the "shorter page, not sadder" PM doctrine. The Claim
+  CTA below already nudges the operator; rendering an OAI stub here
+  just steals scroll real estate from that surface.
 -->
-<div class="mt-6">
-  <!--
+{#if isClaimed}
+  <div class="mt-6">
+    <!--
     OAI renders directly from the SSR `scoring.oai` payload — no
     CSR fetch required. Earlier revision gated render on
     `claimStatusLoading`, but the OaiPanel's display state is
@@ -1211,8 +1217,9 @@
     requests (SIMD curator latency would delay OAI for no data
     reason).
   -->
-  <OaiPanel oai={scoring.oai} claimed={isClaimed} />
-</div>
+    <OaiPanel oai={scoring.oai} claimed={isClaimed} />
+  </div>
+{/if}
 
 <!--
   ─────────── 7. SIMD curations ───────────
@@ -1268,7 +1275,15 @@
   is the canonical surface.
 -->
 {#if !data.hideFooterCta || isOwnerHint}
-  <Card tone="accent" class="mt-6">
+  <!--
+    Card tone is `accent` (the loudest tone) ONLY for the owner-claimed
+    flow where the operator is the only audience who can act on the
+    button. For unclaimed validators and non-owner visits the tone
+    drops to `panel` so the CTA doesn't shout — the primary persona
+    is a delegator, and a delegator-primary surface shouldn't have
+    its highest visual weight on an operator-only action.
+  -->
+  <Card tone={isClaimed && isOwnerHint ? 'accent' : 'panel'} class="mt-6">
     <div class="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div class="min-w-0 flex-1">
         <h2 class="text-lg font-semibold tracking-tight">
@@ -1278,7 +1293,8 @@
           {#if isClaimed}
             Claimed and verified by the validator's operator.
           {:else}
-            Claim with an offline Ed25519 signature to publish a profile and register wallets.
+            Claim this validator to publish a profile and register operator wallets. The claim
+            ceremony is signed offline with the validator identity key.
           {/if}
         </p>
       </div>
@@ -1292,16 +1308,23 @@
           delegators who happened to land on the page)
         - claimed + no owner hint: GHOST "Operator? Manage profile"
           (same reasoning — the visitor probably isn't the operator)
+
+      Wrapper is `w-full sm:w-auto` so the button fills the row at
+      mobile (left-aligned 180px button under a stretched header
+      reads as a misplaced chip); from `sm` up it returns to
+      intrinsic width on the right of the flex row.
     -->
-      <div class="flex shrink-0 items-center gap-2">
+      <div class="flex w-full shrink-0 items-center gap-2 sm:w-auto">
         {#if isClaimed && isOwnerHint}
-          <Button href="/claim/{scoring.vote}" variant="primary" size="md">Manage profile</Button>
+          <Button href="/claim/{scoring.vote}" variant="primary" size="md" class="w-full sm:w-auto"
+            >Manage profile</Button
+          >
         {:else if !isClaimed}
-          <Button href="/claim/{scoring.vote}" variant="ghost" size="md"
+          <Button href="/claim/{scoring.vote}" variant="ghost" size="md" class="w-full sm:w-auto"
             >Operator? Sign to claim</Button
           >
         {:else}
-          <Button href="/claim/{scoring.vote}" variant="ghost" size="md"
+          <Button href="/claim/{scoring.vote}" variant="ghost" size="md" class="w-full sm:w-auto"
             >Operator? Manage profile</Button
           >
         {/if}
