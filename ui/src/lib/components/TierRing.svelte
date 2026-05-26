@@ -1,41 +1,56 @@
 <!--
   TierRing — the hero composite-score visual for the Validator Hub.
 
-  Renders the 0-100 composite as a circular progress ring around a
-  centered `TierBadge`, with two thin sub-component bars beneath it
-  (reliability + economic percentile) so the breakdown is always
-  visible per the project's "per-component breakdown is mandatory"
-  design principle (see docs/scoring.md design principles).
+  Renders the 0-100 composite as a circular progress ring with the
+  numeric composite as the single centre element, plus two thin
+  sub-component bars to the right (reliability + economic percentile)
+  on `sm:` and up — vertical on mobile. The bars keep the per-
+  component breakdown always-visible per the project's "per-
+  component breakdown is mandatory" design principle (see
+  docs/scoring.md design principles).
 
   Three states the ring honours:
 
     - **Rated (composite is a number)**: ring fills from 12 o'clock
       clockwise to `composite/100 × 360°`. Per-tier colour from the
-      `--color-tier-*-500` family. CSS `transition` animates the
-      stroke-dashoffset on mount (180ms). `prefers-reduced-motion`
-      is honoured by the global rule in app.css:99-108 — the
-      transition becomes a no-op there.
+      `--color-tier-*-500` family — same token that paints the
+      "HEARTH" / "ANVIL" / etc. pill in the card header, so the two
+      signals reinforce each other. CSS `transition` animates the
+      stroke-dashoffset on mount (180ms); `prefers-reduced-motion`
+      is honoured by the global rule in `app.css` — the transition
+      becomes a no-op there.
     - **Unrated (composite is null)**: ring renders as a faint dashed
       stroke at full circle (the validator EXISTS, the score is just
-      missing). Central glyph is the `unrated` TierBadge (stroke-only
-      8-point silhouette). The `unratedReason` string is surfaced as
-      the `aria-label` so screen readers explain "why" the same way
-      the tooltip does.
+      missing). Centre reads "—" so a screen reader announces
+      "pending" rather than an invented number. The `unratedReason`
+      string is surfaced as the `aria-label` so AT users learn WHY
+      it's unrated.
     - **Skip-floor capped**: when the visible tier is `kindling` AND
-      `isReliabilityFloorTriggered(window)` returns true, the ring
-      paints with a warn-tone accent on the SUB-bar for reliability
-      so a delegator can see that the kindling tier came from skip
-      rate, not economic productivity.
+      `isReliabilityFloorTriggered(window)` returns true, the
+      reliability SUB-bar paints in the warn tone so a delegator
+      can see that the kindling tier came from skip rate, not
+      economic productivity.
 
   Why a ring and not a horizontal bar: the composite is bounded
   [0,100] and represents "how much of the craft this operator has
   earned"; a ring reads as a finite quantity better than a bar that
-  could imply "more is possible." Anchored next to the 8-point star
-  geometry below, the visual idiom stays consistent (round vocab,
-  not progress-bar vocab).
+  could imply "more is possible." The shape itself signals
+  completeness.
+
+  Composite-tier signal: the centre stack is JUST the number. The
+  tier identity is communicated by two other elements always
+  rendered next to it (the ring color + the tier pill in the
+  parent card header), so a third tier-silhouette glyph inside
+  the ring would have been a redundant signal competing with the
+  number for centre-stack attention. Removed.
+
+  Optional `nextCutoff` prop drops a small filled tick on the ring's
+  perimeter at the next-tier composite — for a Hearth validator at
+  76 the tick sits at the 80-mark "this is where the fill needs to
+  reach for Anvil." Hidden when the composite already passed it.
 
   Props:
-    - `tier`: the NodeTier value (drives badge + ring colour)
+    - `tier`: the NodeTier value (drives the ring colour)
     - `composite`: the 0-100 composite OR null (unrated state)
     - `reliability`: 0-1 sub-component
     - `economicPercentile`: 0-1 sub-component OR null
@@ -43,6 +58,8 @@
     - `unratedReason`: pre-formatted string from `lib/tier.ts` (only
        relevant when tier === 'unrated')
     - `size`: pixel diameter of the ring (default 160)
+    - `nextCutoff`: composite cutoff of the next tier up (drives the
+       perimeter tick). Null at the top tier.
 -->
 <script lang="ts">
   import type { NodeTier } from '$lib/types';
