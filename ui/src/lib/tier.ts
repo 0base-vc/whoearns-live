@@ -286,9 +286,12 @@ const RELIABILITY_NEAR_CEILING = 0.97;
 
 /**
  * One-line "what raises your score" guidance for the tier card —
- * names the input the operator actually controls so the score
- * motivates rather than merely labels. `null` when there is nothing
- * constructive to say on this surface:
+ * names the underlying lever the operator actually controls
+ * (skip rate / fee + tip capture / block density) rather than the
+ * abstract sub-component label, so the copy reads as an action
+ * rather than a glossary entry.
+ *
+ * Returns `null` when there is nothing constructive to say:
  *
  *   - unrated (`composite === null`): the `unratedReason` copy
  *     already states what's missing.
@@ -296,8 +299,8 @@ const RELIABILITY_NEAR_CEILING = 0.97;
  *     Naming economic percentile here would be actively wrong — the
  *     tier is hard-capped regardless of it.
  *
- * Otherwise it weight-ranks the two live levers, surfacing economic
- * percentile alone once reliability is already near its ceiling.
+ * Otherwise it weight-ranks the two live levers, surfacing the
+ * income side alone once reliability is already near its ceiling.
  */
 export function scoreLever(args: {
   composite: number | null;
@@ -307,9 +310,15 @@ export function scoreLever(args: {
   if (args.composite === null) return null;
   if (args.reliabilityFloorTriggered) return null;
   if (args.reliability >= RELIABILITY_NEAR_CEILING) {
-    return 'Economic percentile is the lever here — it carries 70% of the score, and reliability is already near its ceiling.';
+    // Reliability is near 100% — only the economic side moves the
+    // composite meaningfully. Name the operator-controlled lever
+    // (income per leader slot) rather than the abstract metric.
+    return 'Income per leader slot is the lever here — it drives the 70% economic portion. Capture more block fees + Jito tips per slot to climb; denser block packing also nudges the 7% CU subscore.';
   }
-  return 'Both signals move the score: economic percentile carries 70% of the weight, reliability the other 30%.';
+  // Both signals can move the score. Lead with skip rate because it's
+  // the more directly operator-controllable input (uptime, hardware,
+  // colocation, client tuning).
+  return 'Two operator-controllable inputs move this score: skip rate (30% weight via reliability) and income per leader slot (70% via economic percentile + CU subscore). Lowering skip rate AND raising per-slot income capture both push the composite.';
 }
 
 /**

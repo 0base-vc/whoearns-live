@@ -63,6 +63,7 @@
 -->
 <script lang="ts">
   import type { NodeTier } from '$lib/types';
+  import Tooltip from './Tooltip.svelte';
 
   interface Props {
     tier: NodeTier;
@@ -296,13 +297,25 @@
   <dl class="flex w-full flex-col gap-2 sm:max-w-xs sm:flex-1">
     <div class="flex flex-col gap-1">
       <div class="flex items-center justify-between text-xs">
-        <dt class="text-[color:var(--color-text-subtle)] uppercase tracking-wide font-medium">
+        <dt
+          class="inline-flex items-center gap-1 text-[color:var(--color-text-subtle)] uppercase tracking-wide font-medium"
+        >
           Reliability
+          <!--
+            Definition tooltip. The label "Reliability" is jargony
+            for a delegator OR a new operator — clicking the (i)
+            says exactly what the bar measures and what moves it.
+          -->
+          <Tooltip
+            content="Pessimistic upper bound on your skip rate (Wilson 95%) — a small sample can't inflate this to 100%. Lower skip rate raises this signal. The tier is hard-capped at Kindling if skip rate exceeds 20%."
+            label="About reliability"
+            placement="bottom"
+          />
           {#if floorTriggered}
             <span
               class="ml-1 text-[color:var(--color-status-warn-fg)]"
-              title="Reliability fell below 80% — tier is capped at Kindling regardless of economic productivity."
-              >⚠</span
+              title="Reliability fell below the floor — tier is capped at Kindling regardless of economic productivity."
+              aria-label="Reliability floor triggered">⚠</span
             >
           {/if}
         </dt>
@@ -317,8 +330,20 @@
     </div>
     <div class="flex flex-col gap-1">
       <div class="flex items-center justify-between text-xs">
-        <dt class="text-[color:var(--color-text-subtle)] uppercase tracking-wide font-medium">
+        <dt
+          class="inline-flex items-center gap-1 text-[color:var(--color-text-subtle)] uppercase tracking-wide font-medium"
+        >
           Economic percentile
+          <!--
+            Definition tooltip. "Economic percentile" reads as
+            domain jargon; explain it's a cohort rank of per-slot
+            income and name the lever an operator can pull.
+          -->
+          <Tooltip
+            content="Cohort rank of your median fee + Jito tip per leader slot vs the validators WhoEarns indexes (not the whole cluster). Higher fee + tip capture per leader slot pushes this up; see 'Peers compared' below for the sample size."
+            label="About economic percentile"
+            placement="bottom"
+          />
         </dt>
         <dd class="tabular-nums">{economicPct}%</dd>
       </div>

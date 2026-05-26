@@ -49,6 +49,7 @@
   import Button from '$lib/components/Button.svelte';
   import Pill from '$lib/components/Pill.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
+  import Tooltip from '$lib/components/Tooltip.svelte';
   import EllipsisAddress from '$lib/components/EllipsisAddress.svelte';
   import TierBadge from '$lib/components/TierBadge.svelte';
   import TierRing from '$lib/components/TierRing.svelte';
@@ -1009,8 +1010,20 @@
                     <dd class="tabular-nums">≈ {compositeMath.economicTerm.toFixed(1)}</dd>
                   </div>
                   <div class="flex items-baseline justify-between gap-3">
-                    <dt>
-                      0.07 × CU subscore {compositeMath.cuSubscorePct.toFixed(1)}%
+                    <dt class="inline-flex items-baseline gap-1.5">
+                      <span>0.07 × CU subscore {compositeMath.cuSubscorePct.toFixed(1)}%</span>
+                      <!--
+                        CU subscore is the most operator-unknown of the three
+                        inputs. The tooltip names what it ranks (avg CU per
+                        produced block), what raises it (denser block packing),
+                        and the non-producer fallback so a delegator doesn't
+                        wonder why the score equals income percentile.
+                      -->
+                      <Tooltip
+                        content="Cohort rank of your producedBlock-weighted average compute units per block — a 'block density' signal. Denser block packing raises it. Validators that produced no blocks in the window default to the economic percentile so they aren't penalised on a metric they had no chance to register."
+                        label="About CU subscore"
+                        placement="top"
+                      />
                       {#if compositeMath.cuFallback}
                         <span class="text-[color:var(--color-text-subtle)]"
                           >(no blocks — defaults to income percentile)</span
