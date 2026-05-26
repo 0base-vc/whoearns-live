@@ -49,7 +49,6 @@
   import Button from '$lib/components/Button.svelte';
   import Pill from '$lib/components/Pill.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
-  import Tooltip from '$lib/components/Tooltip.svelte';
   import EllipsisAddress from '$lib/components/EllipsisAddress.svelte';
   import TierBadge from '$lib/components/TierBadge.svelte';
   import TierRing from '$lib/components/TierRing.svelte';
@@ -65,7 +64,6 @@
 
   import {
     SKIP_RATE_FLOOR,
-    TIER_BANDS,
     TIER_CUTOFFS,
     TIER_LABEL,
     WEIGHT_RELIABILITY,
@@ -74,7 +72,6 @@
     WINDOW_CLOSED_EPOCHS,
     isReliabilityFloorTriggered,
     nextTierGap,
-    scoreLever,
     skipRate,
     trustSummary,
     unratedReason,
@@ -357,49 +354,22 @@
   });
   const reason = $derived(isUnrated ? unratedReason(scoring.tier) : null);
 
-  // ── Tier card: gap-to-next, score lever, composite arithmetic ──
+  // ── Tier card: gap-to-next + composite arithmetic ──
   // All presentation-layer derivations off the SSR scoring payload —
   // no extra fetch. The card answers not just "what tier" but "why",
-  // "how far to the next tier", and "what raises the score".
+  // "how far to the next tier", and (via the breakdown table) how
+  // the composite is built.
 
-  // Per-tier ring/fill colour token. Record-typed (not template
-  // interpolation) so a future NodeTier variant is a typecheck error
-  // here, not a silently-missing CSS var — same rationale as TierRing.
-  const TIER_COLOR_VAR: Record<NodeTier, string> = {
-    forge: '--color-tier-forge-500',
-    anvil: '--color-tier-anvil-500',
-    hearth: '--color-tier-hearth-500',
-    kindling: '--color-tier-kindling-500',
-    unrated: '--color-tier-unrated-500',
-  };
-  const tierColorVar = $derived(TIER_COLOR_VAR[tier.tier]);
-
-  // Cutoff ticks drawn on the gap strip's 0-100 scale.
-  const SCALE_TICKS = [TIER_CUTOFFS.hearth, TIER_CUTOFFS.anvil, TIER_CUTOFFS.forge];
-
-  // The gap strip renders only for a rated, non-floored validator.
-  // Floored: the composite is not the blocker (warn chip owns that).
-  // Unrated: the composite is null (the reason box owns that).
+  // The gap one-liner renders only for a rated, non-floored
+  // validator. Floored: the composite is not the blocker (warn chip
+  // owns that). Unrated: the composite is null (the reason box
+  // owns that).
   const showGapStrip = $derived(tier.composite !== null && !reliabilityFloor);
-  // `nextTierGap` is null at forge (top tier) — the strip then shows
+  // `nextTierGap` is null at forge (top tier) — the line then shows
   // the "top tier" headline instead of a points-away line.
   const tierGap = $derived(tier.composite === null ? null : nextTierGap(tier.composite));
-  // Clamp for the fill width — composite is already 0-100, defensive.
-  const gapFillPct = $derived(
-    tier.composite === null ? 0 : Math.max(0, Math.min(100, tier.composite)),
-  );
 
-  // One-line "what raises the score" lever. Null for unrated +
-  // skip-floored (the reason box / warn chip carry those messages).
-  const lever = $derived(
-    scoreLever({
-      composite: tier.composite,
-      reliability: tierComponents.reliability,
-      reliabilityFloorTriggered: reliabilityFloor,
-    }),
-  );
-
-  // Composite arithmetic for the <details> breakdown — shows the
+  // Composite arithmetic for the breakdown table — shows the
   // score is BUILT, not assigned. Mirrors the exact backend formula:
   //
   //   composite     = 0.30·reliability + 0.70·economicScore
@@ -851,9 +821,6 @@
         <TierRing
           tier={tier.tier}
           composite={tier.composite}
-          reliability={tierComponents.reliability}
-          economicPercentile={tierComponents.economicPercentile}
-          floorTriggered={reliabilityFloor}
           unratedReason={reason ?? undefined}
           size={144}
           nextCutoff={tierGap?.nextCutoff ?? null}
@@ -883,72 +850,33 @@
           </div>
         {/if}
 
+        <!--
+          One-line tier-gap note. The wide gap-to-next strip with
+          0/40/80/100 tick labels collapsed into a single line
+          because the per-row composite footer in the table below
+          already carries the "tier ≥ N" map. The ring's next-tier
+          tick (the small dot on the perimeter) visualises position;
+          this line names it in words. Suppressed under skip-floor
+          (the banner above is the blocker).
+        -->
         {#if showGapStrip}
-          <!--
-            Gap-to-next-tier strip. The composite alone is a number
-            with no scale; this places it on the 0-100 tier map so a
-            delegator (and the operator) can see how far the next
-            tier is. Suppressed for skip-floored validators — there
-            the composite is not the blocker. The decorative bar is
-            `aria-hidden`; the headline <p> carries the same fact as
-            real text for assistive tech.
-          -->
-          <div class="flex flex-col gap-1.5">
-            <p class="text-sm">
-              {#if tierGap}
-                <span class="font-semibold text-[color:var(--color-text-default)]">
-                  {tierGap.pointsAway}
-                  {tierGap.pointsAway === 1 ? 'point' : 'points'}
-                </span>
-                <span class="text-[color:var(--color-text-muted)]">
-                  to {tierGap.nextLabel} tier (composite {tierGap.nextCutoff})
-                </span>
-              {:else}
-                <span class="font-semibold text-[color:var(--color-text-default)]">
-                  {tierLabel}
-                </span>
-                <span class="text-[color:var(--color-text-muted)]">
-                  — the top tier, composite {tier.composite} of 100
-                </span>
-              {/if}
-            </p>
-            <div
-              class="relative h-2 w-full rounded-full bg-[color:var(--color-border-default)]"
-              aria-hidden="true"
-            >
-              <div
-                class="absolute inset-y-0 left-0 rounded-full"
-                style="width: {gapFillPct}%; background-color: var({tierColorVar}); transition: width 200ms ease-out;"
-              ></div>
-              {#each SCALE_TICKS as tickAt (tickAt)}
-                <div
-                  class="absolute top-1/2 h-3 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[color:var(--color-text-subtle)]"
-                  style="left: {tickAt}%;"
-                ></div>
-              {/each}
-            </div>
-            <div
-              class="relative h-3 text-[10px] tabular-nums text-[color:var(--color-text-subtle)]"
-              aria-hidden="true"
-            >
-              <span class="absolute left-0">0</span>
-              <span class="absolute -translate-x-1/2" style="left: {TIER_CUTOFFS.hearth}%;">
-                {TIER_CUTOFFS.hearth}
+          <p class="text-sm">
+            {#if tierGap}
+              <span class="font-semibold text-[color:var(--color-text-default)]">
+                {tierGap.pointsAway}
+                {tierGap.pointsAway === 1 ? 'point' : 'points'}
               </span>
-              <span class="absolute -translate-x-1/2" style="left: {TIER_CUTOFFS.anvil}%;">
-                {TIER_CUTOFFS.anvil}
+              <span class="text-[color:var(--color-text-muted)]">
+                to {tierGap.nextLabel} tier — composite needs to reach {tierGap.nextCutoff}.
               </span>
-              <span class="absolute right-0">100</span>
-            </div>
-          </div>
-        {/if}
-
-        {#if lever}
-          <p class="text-sm text-[color:var(--color-text-muted)]">
-            <span class="font-semibold text-[color:var(--color-text-default)]">
-              What raises this score:
-            </span>
-            {lever}
+            {:else}
+              <span class="font-semibold text-[color:var(--color-text-default)]">
+                {tierLabel}
+              </span>
+              <span class="text-[color:var(--color-text-muted)]">
+                — the top tier, composite {tier.composite} of 100.
+              </span>
+            {/if}
           </p>
         {/if}
 
@@ -966,157 +894,154 @@
           </p>
         {/if}
 
-        <details class="group text-xs">
-          <summary
-            class="inline-flex min-h-11 cursor-pointer items-center gap-1 text-[color:var(--color-text-muted)] hover:text-[color:var(--color-text-default)]"
-          >
-            <!-- Chevron rotates 90° when the details opens. Marks the
-                 row as an expandable disclosure rather than a footnote. -->
-            <span
-              class="inline-block text-[color:var(--color-text-subtle)] transition-transform group-open:rotate-90 motion-reduce:transition-none"
-              aria-hidden="true">›</span
-            >
-            How this tier was scored
-          </summary>
-          <div class="mt-2 flex flex-col gap-4">
-            <!-- (a) The composite — the literal arithmetic, so the
-                 score reads as built, not assigned. Hidden when
-                 unrated (no composite to break down). -->
-            {#if compositeMath}
-              <div class="flex flex-col gap-1.5">
-                <p
-                  class="text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-text-subtle)]"
-                >
-                  How the composite is built
-                </p>
-                <dl class="flex flex-col gap-1 font-mono text-[color:var(--color-text-muted)]">
-                  <!--
-                    Three input lines + a rounded total. Effective
-                    composite weights (0.30 / 0.63 / 0.07) are the
-                    expansion of `0.30·reliability + 0.70·(0.90·
-                    economicPercentile + 0.10·cuSubscore)`. Showing
-                    them this way means the three displayed terms sum
-                    to the rounded composite arithmetically — earlier
-                    the breakdown used `0.70 × economicPercentile`
-                    which dropped the CU subscore and produced a sum
-                    that didn't match the rendered composite.
-                  -->
-                  <div class="flex items-baseline justify-between gap-3">
-                    <dt>0.30 × reliability {compositeMath.reliabilityPct.toFixed(1)}%</dt>
-                    <dd class="tabular-nums">≈ {compositeMath.reliabilityTerm.toFixed(1)}</dd>
-                  </div>
-                  <div class="flex items-baseline justify-between gap-3">
-                    <dt>0.63 × economic percentile {compositeMath.economicPct.toFixed(1)}%</dt>
-                    <dd class="tabular-nums">≈ {compositeMath.economicTerm.toFixed(1)}</dd>
-                  </div>
-                  <div class="flex items-baseline justify-between gap-3">
-                    <dt class="inline-flex items-baseline gap-1.5">
-                      <span>0.07 × CU subscore {compositeMath.cuSubscorePct.toFixed(1)}%</span>
-                      <!--
-                        CU subscore is the most operator-unknown of the three
-                        inputs. The tooltip names what it ranks (avg CU per
-                        produced block), what raises it (denser block packing),
-                        and the non-producer fallback so a delegator doesn't
-                        wonder why the score equals income percentile.
-                      -->
-                      <Tooltip
-                        content="Cohort rank of your producedBlock-weighted average compute units per block — a 'block density' signal. Denser block packing raises it. Validators that produced no blocks in the window default to the economic percentile so they aren't penalised on a metric they had no chance to register."
-                        label="About CU subscore"
-                        placement="top"
-                      />
-                      {#if compositeMath.cuFallback}
-                        <span class="text-[color:var(--color-text-subtle)]"
-                          >(no blocks — defaults to income percentile)</span
+        <!--
+          Sub-component breakdown table. Replaces the previous
+          paragraph-style "What raises this score" + the collapsible
+          "How this tier was scored" disclosure. The table is
+          information-denser per vertical inch:
+
+          - One row per input (reliability / economic percentile /
+            CU subscore) with the value, weight, and contribution
+            visible in-line — no need to expand a disclosure to
+            see the math.
+          - A "what moves it" hint sits under each metric name as
+            small muted text so the actionable lever is right next
+            to its number.
+          - The composite row at the bottom carries the tier-cutoff
+            label ("Forge ≥ 95") instead of a separate tier-bands
+            list — same fact, less vertical space.
+          - The earlier `<details>` chevron is dropped because the
+            information no longer hides behind a click.
+
+          Only renders for rated validators (composite non-null).
+          Unrated state already gets the `reason` box above which
+          explains which gate fired.
+        -->
+        {#if compositeMath}
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead
+                class="text-[10px] uppercase tracking-wider text-[color:var(--color-text-subtle)]"
+              >
+                <tr class="border-b border-[color:var(--color-border-default)]">
+                  <th scope="col" class="text-left py-1.5 pr-3 font-medium">Sub-component</th>
+                  <th scope="col" class="text-right py-1.5 px-2 font-medium">Value</th>
+                  <th scope="col" class="text-right py-1.5 px-2 font-medium">Weight</th>
+                  <th scope="col" class="text-right py-1.5 pl-2 font-medium">Contribution</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-[color:var(--color-border-default)]">
+                <tr class="align-top">
+                  <th scope="row" class="text-left py-2.5 pr-3 font-medium">
+                    <span class="inline-flex items-center gap-1.5">
+                      Reliability
+                      {#if reliabilityFloor}
+                        <span
+                          class="text-[color:var(--color-status-warn-fg)]"
+                          aria-label="Reliability floor triggered">⚠</span
                         >
                       {/if}
-                    </dt>
-                    <dd class="tabular-nums">≈ {compositeMath.cuTerm.toFixed(1)}</dd>
-                  </div>
-                  <div
-                    class="flex items-baseline justify-between gap-3 border-t border-[color:var(--color-border-default)] pt-1 font-semibold text-[color:var(--color-text-default)]"
+                    </span>
+                    <p class="mt-0.5 text-xs font-normal text-[color:var(--color-text-muted)]">
+                      Pessimistic skip-rate upper bound (Wilson 95%). Lower skip rate raises it;
+                      hard-capped at Kindling if skip exceeds 20%.
+                    </p>
+                  </th>
+                  <td class="text-right tabular-nums py-2.5 px-2"
+                    >{compositeMath.reliabilityPct.toFixed(1)}%</td
                   >
-                    <dt>composite (rounded)</dt>
-                    <dd class="tabular-nums">{compositeMath.composite}</dd>
-                  </div>
-                </dl>
-                {#if reliabilityFloor}
-                  <p class="text-[color:var(--color-status-warn-fg)]">
-                    The skip-rate floor caps the tier below this composite — see the warning above.
-                  </p>
-                {/if}
-              </div>
-            {/if}
-
-            <!-- (b) The tiers — every cutoff named so the composite
-                 has a scale; the current tier is marked. -->
-            <div class="flex flex-col gap-1.5">
-              <p
-                class="text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-text-subtle)]"
-              >
-                Tier thresholds
-              </p>
-              <dl class="flex flex-col gap-1 text-[color:var(--color-text-muted)]">
-                {#each TIER_BANDS as band (band.tier)}
-                  {@const isCurrentTier = band.tier === tier.tier}
-                  <div
-                    class="flex items-baseline justify-between gap-3 {isCurrentTier
-                      ? 'font-semibold text-[color:var(--color-text-default)]'
-                      : ''}"
+                  <td
+                    class="text-right tabular-nums py-2.5 px-2 text-[color:var(--color-text-muted)]"
+                    >0.30</td
                   >
-                    <dt class="flex items-center gap-1.5">
-                      <span
-                        class="inline-block h-2 w-2 shrink-0 rounded-full"
-                        style="background-color: var({TIER_COLOR_VAR[band.tier]});"
-                      ></span>
-                      {band.label}
-                      {#if isCurrentTier}
-                        <span class="font-normal text-[color:var(--color-text-subtle)]">
-                          — this validator
-                        </span>
+                  <td class="text-right tabular-nums py-2.5 pl-2 font-semibold"
+                    >{compositeMath.reliabilityTerm.toFixed(1)}</td
+                  >
+                </tr>
+                <tr class="align-top">
+                  <th scope="row" class="text-left py-2.5 pr-3 font-medium">
+                    Economic percentile
+                    <p class="mt-0.5 text-xs font-normal text-[color:var(--color-text-muted)]">
+                      Cohort rank of median fee + Jito tip per leader slot vs
+                      {tierWindow.economicCohortSize.toLocaleString()} indexed peers. Higher fee + tip
+                      capture per slot raises it.
+                    </p>
+                  </th>
+                  <td class="text-right tabular-nums py-2.5 px-2"
+                    >{compositeMath.economicPct.toFixed(1)}%</td
+                  >
+                  <td
+                    class="text-right tabular-nums py-2.5 px-2 text-[color:var(--color-text-muted)]"
+                    >0.63</td
+                  >
+                  <td class="text-right tabular-nums py-2.5 pl-2 font-semibold"
+                    >{compositeMath.economicTerm.toFixed(1)}</td
+                  >
+                </tr>
+                <tr class="align-top">
+                  <th scope="row" class="text-left py-2.5 pr-3 font-medium">
+                    CU subscore
+                    <p class="mt-0.5 text-xs font-normal text-[color:var(--color-text-muted)]">
+                      {#if compositeMath.cuFallback}
+                        Validator produced no blocks in the window — defaults to economic percentile
+                        so it isn't penalised on a metric it had no chance to register.
+                      {:else}
+                        Cohort rank of producedBlock-weighted average compute units per block.
+                        Denser block packing raises it.
                       {/if}
-                    </dt>
-                    <dd class="tabular-nums">{band.min}–{band.max}</dd>
-                  </div>
-                {/each}
-              </dl>
-            </div>
-
-            <!-- (c) This measurement — the sample facts, cold-start
-                 honest ("{n} of 5", not a bare "4"). -->
-            <div class="flex flex-col gap-1.5">
-              <p
-                class="text-[10px] font-semibold uppercase tracking-wide text-[color:var(--color-text-subtle)]"
-              >
-                This measurement
-              </p>
-              <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-[color:var(--color-text-muted)]">
-                <dt>Closed epochs scored</dt>
-                <dd class="tabular-nums">
-                  {tierWindow.epochs} of {WINDOW_CLOSED_EPOCHS}{windowStillFilling
-                    ? ' (window still filling)'
-                    : ''}
-                </dd>
-                <dt>Epochs with income</dt>
-                <dd class="tabular-nums">{tierWindow.economicMeasuredEpochs}</dd>
-                <dt>Peers compared</dt>
-                <dd class="tabular-nums">{tierWindow.economicCohortSize.toLocaleString()}</dd>
-                {#if economicMedianSol !== null}
-                  <dt>Median income / leader slot</dt>
-                  <dd class="tabular-nums">◎{economicMedianSol}</dd>
-                {/if}
-                {#if tierWindow.cohortAsOfEpoch}
-                  <dt>Cohort epoch range</dt>
-                  <dd class="tabular-nums">
-                    {tierWindow.cohortAsOfEpoch.fromEpoch}–{tierWindow.cohortAsOfEpoch.toEpoch}
-                  </dd>
-                {/if}
-              </dl>
-              <p class="text-[color:var(--color-text-subtle)]">
-                Percentile is ranked against the validators WhoEarns indexes, not the whole cluster.
-              </p>
-            </div>
+                    </p>
+                  </th>
+                  <td class="text-right tabular-nums py-2.5 px-2"
+                    >{compositeMath.cuSubscorePct.toFixed(1)}%</td
+                  >
+                  <td
+                    class="text-right tabular-nums py-2.5 px-2 text-[color:var(--color-text-muted)]"
+                    >0.07</td
+                  >
+                  <td class="text-right tabular-nums py-2.5 pl-2 font-semibold"
+                    >{compositeMath.cuTerm.toFixed(1)}</td
+                  >
+                </tr>
+              </tbody>
+              <tfoot class="border-t-2 border-[color:var(--color-border-default)]">
+                <tr>
+                  <th scope="row" class="text-left pt-3 pr-3 font-semibold">
+                    Composite
+                    <span class="font-normal text-[color:var(--color-text-muted)]">
+                      — {tierLabel}
+                      {#if reliabilityFloor}
+                        (capped by skip-rate floor)
+                      {:else if tier.tier !== 'kindling'}
+                        ≥ {TIER_CUTOFFS[tier.tier as Exclude<NodeTier, 'kindling' | 'unrated'>]}
+                      {/if}
+                    </span>
+                  </th>
+                  <td class="pt-3 px-2"></td>
+                  <td class="pt-3 px-2"></td>
+                  <td class="text-right tabular-nums pt-3 pl-2 font-bold text-base"
+                    >{compositeMath.composite}</td
+                  >
+                </tr>
+              </tfoot>
+            </table>
           </div>
-        </details>
+
+          <!--
+            Measurement context — single dense line in lieu of the
+            previous nested "This measurement" grid inside the
+            collapsible. Same facts, one screen-friendly row.
+          -->
+          <p class="text-xs text-[color:var(--color-text-muted)]">
+            <span class="text-[color:var(--color-text-subtle)]">Measurement:</span>
+            {tierWindow.epochs} of {WINDOW_CLOSED_EPOCHS} closed epochs · {tierWindow.economicCohortSize.toLocaleString()}
+            peers compared{#if economicMedianSol !== null}
+              · median ◎{economicMedianSol} / slot{/if}{#if tierWindow.cohortAsOfEpoch}
+              · cohort epochs {tierWindow.cohortAsOfEpoch.fromEpoch}–{tierWindow.cohortAsOfEpoch
+                .toEpoch}{/if}{#if windowStillFilling}
+              (window still filling){/if}. Percentile is ranked against the validators WhoEarns
+            indexes, not the whole cluster.
+          </p>
+        {/if}
       </div>
     </Card>
   </div>
@@ -1133,6 +1058,16 @@
   <div class="lg:col-span-5">
     <Card tone="panel" class="lg:sticky lg:top-20">
       <h2 class="text-lg font-semibold tracking-tight">Validator facts</h2>
+      <!--
+        Two-tier layout inside the card:
+          1. Tenure + Client badges at the top (visually anchored,
+             carry a sub-line of context each).
+          2. A dense key-value table below for the operational +
+             economic facts (slots / skip rate / median income per
+             slot / last 30d income). The four rows fit on one
+             screen-height and let the right column actually balance
+             the dense Tier card on the left.
+      -->
       <dl class="mt-4 flex flex-col gap-5">
         <!--
           Tenure row.
@@ -1193,6 +1128,65 @@
             {/if}
           </dd>
         </div>
+      </dl>
+
+      <!--
+        Operational + economic facts table. Same window as the Tier
+        card (10 closed epochs by default). Each row is a single
+        key-value pair so the right column carries actual content
+        rather than only the two visual badge rows above.
+
+        - Slots: leader-slot sample size in the window. Tied to the
+          composite's measurement footer ("X of Y closed epochs").
+        - Skip rate: raw `slotsSkipped / slotsAssigned`. This is the
+          INPUT to the Wilson-95 pessimistic reliability shown in
+          the Tier card — surfacing the raw number lets an operator
+          read both at once.
+        - Median income / slot: same number the economic percentile
+          ranks against (see the Tier card's measurement footer).
+        - Last 30d income: rolling 30-day total fee + tip take.
+          Mirrors the trust-strip number in the hero so the figure
+          has a place on the page outside the one-liner.
+      -->
+      <dl
+        class="mt-5 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 border-t border-[color:var(--color-border-default)] pt-5 text-sm"
+      >
+        <dt class="text-xs uppercase tracking-wider text-[color:var(--color-text-subtle)]">
+          Slots
+        </dt>
+        <dd class="text-right tabular-nums">
+          {tierWindow.slotsAssigned.toLocaleString()}
+          <span class="text-xs text-[color:var(--color-text-muted)]">
+            assigned · {tierWindow.slotsSkipped.toLocaleString()} skipped
+          </span>
+        </dd>
+
+        <dt class="text-xs uppercase tracking-wider text-[color:var(--color-text-subtle)]">
+          Skip rate
+        </dt>
+        <dd class="text-right tabular-nums">{skipRatePctLabel}%</dd>
+
+        <dt class="text-xs uppercase tracking-wider text-[color:var(--color-text-subtle)]">
+          Median income / slot
+        </dt>
+        <dd class="text-right tabular-nums">
+          {#if economicMedianSol !== null}
+            ◎{economicMedianSol}
+          {:else}
+            <span class="text-[color:var(--color-text-muted)]">—</span>
+          {/if}
+        </dd>
+
+        <dt class="text-xs uppercase tracking-wider text-[color:var(--color-text-subtle)]">
+          Block income · 30d
+        </dt>
+        <dd class="text-right tabular-nums">
+          {#if incomeLast30dSol !== null}
+            ◎{incomeLast30dSol}
+          {:else}
+            <span class="text-[color:var(--color-text-muted)]">—</span>
+          {/if}
+        </dd>
       </dl>
     </Card>
   </div>

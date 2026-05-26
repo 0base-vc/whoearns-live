@@ -2,47 +2,30 @@
   TierRing — the hero composite-score visual for the Validator Hub.
 
   Renders the 0-100 composite as a circular progress ring with the
-  numeric composite as the single centre element, plus two thin
-  sub-component bars to the right (reliability + economic percentile)
-  on `sm:` and up — vertical on mobile. The bars keep the per-
-  component breakdown always-visible per the project's "per-
-  component breakdown is mandatory" design principle (see
-  docs/scoring.md design principles).
+  numeric composite as the single centre element. The sub-component
+  breakdown that previously sat next to the ring (reliability +
+  economic percentile bars) now lives in a dedicated table BELOW
+  the ring in the Tier card — the table form fits more information
+  (value, weight, contribution, lever) per metric than two thin
+  bars can, and lets the ring's visual mass be just the headline
+  number a delegator reads at a glance.
 
   Three states the ring honours:
 
     - **Rated (composite is a number)**: ring fills from 12 o'clock
       clockwise to `composite/100 × 360°`. Per-tier colour from the
       `--color-tier-*-500` family — same token that paints the
-      "HEARTH" / "ANVIL" / etc. pill in the card header, so the two
-      signals reinforce each other. CSS `transition` animates the
-      stroke-dashoffset on mount (180ms); `prefers-reduced-motion`
-      is honoured by the global rule in `app.css` — the transition
-      becomes a no-op there.
+      tier pill in the card header, so the two signals reinforce
+      each other. CSS `transition` animates the stroke-dashoffset
+      on mount (180ms); `prefers-reduced-motion` is honoured by
+      the global rule in `app.css` — the transition becomes a no-op
+      there.
     - **Unrated (composite is null)**: ring renders as a faint dashed
       stroke at full circle (the validator EXISTS, the score is just
       missing). Centre reads "—" so a screen reader announces
       "pending" rather than an invented number. The `unratedReason`
       string is surfaced as the `aria-label` so AT users learn WHY
       it's unrated.
-    - **Skip-floor capped**: when the visible tier is `kindling` AND
-      `isReliabilityFloorTriggered(window)` returns true, the
-      reliability SUB-bar paints in the warn tone so a delegator
-      can see that the kindling tier came from skip rate, not
-      economic productivity.
-
-  Why a ring and not a horizontal bar: the composite is bounded
-  [0,100] and represents "how much of the craft this operator has
-  earned"; a ring reads as a finite quantity better than a bar that
-  could imply "more is possible." The shape itself signals
-  completeness.
-
-  Composite-tier signal: the centre stack is JUST the number. The
-  tier identity is communicated by two other elements always
-  rendered next to it (the ring color + the tier pill in the
-  parent card header), so a third tier-silhouette glyph inside
-  the ring would have been a redundant signal competing with the
-  number for centre-stack attention. Removed.
 
   Optional `nextCutoff` prop drops a small filled tick on the ring's
   perimeter at the next-tier composite — for a Hearth validator at
@@ -52,9 +35,6 @@
   Props:
     - `tier`: the NodeTier value (drives the ring colour)
     - `composite`: the 0-100 composite OR null (unrated state)
-    - `reliability`: 0-1 sub-component
-    - `economicPercentile`: 0-1 sub-component OR null
-    - `floorTriggered`: true when reliability hard floor capped the tier
     - `unratedReason`: pre-formatted string from `lib/tier.ts` (only
        relevant when tier === 'unrated')
     - `size`: pixel diameter of the ring (default 160)
@@ -63,14 +43,10 @@
 -->
 <script lang="ts">
   import type { NodeTier } from '$lib/types';
-  import Tooltip from './Tooltip.svelte';
 
   interface Props {
     tier: NodeTier;
     composite: number | null;
-    reliability: number;
-    economicPercentile: number | null;
-    floorTriggered?: boolean;
     unratedReason?: string;
     size?: number;
     /**
@@ -83,16 +59,7 @@
     nextCutoff?: number | null;
   }
 
-  let {
-    tier,
-    composite,
-    reliability,
-    economicPercentile,
-    floorTriggered = false,
-    unratedReason,
-    size = 160,
-    nextCutoff = null,
-  }: Props = $props();
+  let { tier, composite, unratedReason, size = 160, nextCutoff = null }: Props = $props();
 
   // SVG geometry — work in a 100×100 user space, scale via attribute.
   // Stroke width is intentionally chunky (8) so the ring reads as a
@@ -129,34 +96,6 @@
   };
   const ringColorVar = $derived(RING_COLOR_VAR[tier]);
 
-  // Per-bar tones for reliability + economic percentile. The
-  // reliability bar uses a warn tone when the floor fired so the
-  // visual ramp matches the "capped at kindling" explanation chip.
-  const reliabilityTone = $derived(
-    floorTriggered
-      ? 'bg-[color:var(--color-status-warn-fg)]'
-      : 'bg-[color:var(--color-text-default)]/70',
-  );
-  const economicTone = 'bg-[color:var(--color-brand-500)]';
-
-  // Stringify sub-component scores for the label rows. Reliability is
-  // always a number; economic percentile is nullable.
-  const reliabilityPct = $derived((reliability * 100).toFixed(1));
-  const economicPct = $derived(
-    economicPercentile === null ? '—' : (economicPercentile * 100).toFixed(1),
-  );
-
-  // Bar widths — CSS `width: X%`. Clamp before format so a stray
-  // out-of-range input from the API can't blow the layout.
-  const reliabilityBarWidth = $derived(
-    `${Math.max(0, Math.min(100, reliability * 100)).toFixed(2)}%`,
-  );
-  const economicBarWidth = $derived(
-    economicPercentile === null
-      ? '0%'
-      : `${Math.max(0, Math.min(100, economicPercentile * 100)).toFixed(2)}%`,
-  );
-
   // Position of the next-tier tick on the ring perimeter. SVG strokes
   // start at angle 0 (3 o'clock) and proceed clockwise; the foreground
   // ring is `css -rotate-90`d so screen-top is angle 0. A tick at
@@ -173,183 +112,91 @@
     };
   });
 
-  // Accessible name for the entire ring widget. Reads like:
-  // "Tier: Forge, composite 96 of 100. Reliability 99.2 percent.
-  //  Economic percentile 99.0 percent."
+  // Accessible name. The sub-component breakdown is announced
+  // separately via the `<table>` in the parent Tier card with proper
+  // `<th>` scope semantics; this label just covers the headline.
   const ariaLabel = $derived.by(() => {
     if (tier === 'unrated') {
       return `Tier: Unrated${unratedReason ? ` — ${unratedReason}` : ''}`;
     }
     const compositeText = composite === null ? '' : `, composite ${composite} of 100`;
-    const reliabilityText = `Reliability ${reliabilityPct} percent`;
-    const economicText =
-      economicPercentile === null
-        ? 'Economic percentile unavailable'
-        : `Economic percentile ${economicPct} percent`;
-    return `Tier: ${tier}${compositeText}. ${reliabilityText}. ${economicText}.`;
+    return `Tier: ${tier}${compositeText}.`;
   });
 </script>
 
-<!--
-  Layout: vertical stack on mobile (`<sm`); ring left + bars right on
-  `sm:` and up. The Tier card has plenty of horizontal room on every
-  breakpoint above mobile — placing the sub-component bars beside the
-  ring rather than below it shortens the card's vertical footprint
-  and stops the bars from spanning the card's full width.
--->
-<div
-  class="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-6"
-  aria-label={ariaLabel}
->
-  <div class="relative shrink-0" style="width: {size}px; height: {size}px;">
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 {VIEWBOX_SIZE} {VIEWBOX_SIZE}"
-      width={size}
-      height={size}
-      class="-rotate-90"
-      aria-hidden="true"
-    >
-      <!--
-        Track — a faint full-circle stroke so the ring has a "shape"
-        even at composite 0. Same radius as the foreground ring.
-      -->
-      <circle
-        cx={VIEWBOX_SIZE / 2}
-        cy={VIEWBOX_SIZE / 2}
-        r={RING_RADIUS}
-        fill="none"
-        stroke="var(--color-border-default)"
-        stroke-width={RING_STROKE_WIDTH}
-      />
-      <!--
-        Foreground — the composite fill. `stroke-dasharray` = circumference,
-        `stroke-dashoffset` = leftover. CSS transition is reduced-motion-aware
-        via the global rule in app.css.
-      -->
-      <circle
-        cx={VIEWBOX_SIZE / 2}
-        cy={VIEWBOX_SIZE / 2}
-        r={RING_RADIUS}
-        fill="none"
-        stroke={`var(${ringColorVar})`}
-        stroke-width={RING_STROKE_WIDTH}
-        stroke-linecap="round"
-        stroke-dasharray={RING_CIRCUMFERENCE}
-        stroke-dashoffset={dashOffset}
-        style="transition: stroke-dashoffset 180ms ease-out;"
-      />
-      {#if nextTickPosition !== null}
-        <!--
-          Next-tier threshold tick. A small filled circle on the ring
-          perimeter at `nextCutoff` (e.g. 80 for Hearth → Anvil). The
-          ring under it is still the background track, so the tick
-          reads as "the fill needs to reach here." Hidden once the
-          composite has passed the cutoff (no next step to mark).
-        -->
-        <circle
-          cx={nextTickPosition.x}
-          cy={nextTickPosition.y}
-          r={3.5}
-          fill="var(--color-text-default)"
-          stroke="var(--color-surface)"
-          stroke-width={1.5}
-        />
-      {/if}
-    </svg>
+<div class="relative mx-auto" style="width: {size}px; height: {size}px;" aria-label={ariaLabel}>
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 {VIEWBOX_SIZE} {VIEWBOX_SIZE}"
+    width={size}
+    height={size}
+    class="-rotate-90"
+    aria-hidden="true"
+  >
     <!--
-      Centre — the composite number, on its own. The 8-point
-      `TierBadge` glyph used to sit above the number; we dropped it
-      because the ring color (per-tier `--color-tier-*-500` token)
-      and the "HEARTH" / "ANVIL" / etc. pill in the card header are
-      already two unambiguous tier signals. A third tier-silhouette
-      glyph inside the ring competed with the composite number for
-      attention without adding information. Pointer-events:none so
-      click-through to the wrapper still works.
+      Track — a faint full-circle stroke so the ring has a "shape"
+      even at composite 0. Same radius as the foreground ring.
     -->
-    <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
+    <circle
+      cx={VIEWBOX_SIZE / 2}
+      cy={VIEWBOX_SIZE / 2}
+      r={RING_RADIUS}
+      fill="none"
+      stroke="var(--color-border-default)"
+      stroke-width={RING_STROKE_WIDTH}
+    />
+    <!--
+      Foreground — the composite fill. `stroke-dasharray` = circumference,
+      `stroke-dashoffset` = leftover. CSS transition is reduced-motion-aware
+      via the global rule in app.css.
+    -->
+    <circle
+      cx={VIEWBOX_SIZE / 2}
+      cy={VIEWBOX_SIZE / 2}
+      r={RING_RADIUS}
+      fill="none"
+      stroke={`var(${ringColorVar})`}
+      stroke-width={RING_STROKE_WIDTH}
+      stroke-linecap="round"
+      stroke-dasharray={RING_CIRCUMFERENCE}
+      stroke-dashoffset={dashOffset}
+      style="transition: stroke-dashoffset 180ms ease-out;"
+    />
+    {#if nextTickPosition !== null}
       <!--
-        Numeric composite, the single most prominent value on the
-        hub. `text-5xl` (vs the earlier `text-4xl`) reclaims the
-        vertical room the dropped badge used to occupy. `/ 100`
-        stays the same to answer the "out of what" question that a
-        bare `76` leaves hanging.
+        Next-tier threshold tick. A small filled circle on the ring
+        perimeter at `nextCutoff` (e.g. 80 for Hearth → Anvil). The
+        ring under it is still the background track, so the tick
+        reads as "the fill needs to reach here." Hidden once the
+        composite has passed the cutoff (no next step to mark).
       -->
-      <div class="flex items-baseline gap-1">
-        <span class="font-bold tabular-nums text-5xl leading-none">
-          {centreLabel}
+      <circle
+        cx={nextTickPosition.x}
+        cy={nextTickPosition.y}
+        r={3.5}
+        fill="var(--color-text-default)"
+        stroke="var(--color-surface)"
+        stroke-width={1.5}
+      />
+    {/if}
+  </svg>
+  <!--
+    Centre — the composite number, alone. The sub-component bars +
+    8-point badge that used to surround it both moved out: the bars
+    became a dense `<table>` row in the parent Tier card, the badge
+    was redundant with the ring colour + tier pill in the header.
+    Pointer-events:none so click-through to the wrapper still works.
+  -->
+  <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
+    <div class="flex items-baseline gap-1">
+      <span class="font-bold tabular-nums text-5xl leading-none">
+        {centreLabel}
+      </span>
+      {#if composite !== null}
+        <span class="text-xs font-normal text-[color:var(--color-text-muted)] leading-none">
+          / 100
         </span>
-        {#if composite !== null}
-          <span class="text-xs font-normal text-[color:var(--color-text-muted)] leading-none">
-            / 100
-          </span>
-        {/if}
-      </div>
+      {/if}
     </div>
   </div>
-
-  <!--
-    Sub-component bars. Two rows: reliability + economic percentile.
-    `sm:max-w-xs` caps the bar width on the wider breakpoints so the
-    rails don't stretch the full card width — short enough to read
-    at a glance, alongside the ring rather than below it.
-  -->
-  <dl class="flex w-full flex-col gap-2 sm:max-w-xs sm:flex-1">
-    <div class="flex flex-col gap-1">
-      <div class="flex items-center justify-between text-xs">
-        <dt
-          class="inline-flex items-center gap-1 text-[color:var(--color-text-subtle)] uppercase tracking-wide font-medium"
-        >
-          Reliability
-          <!--
-            Definition tooltip. The label "Reliability" is jargony
-            for a delegator OR a new operator — clicking the (i)
-            says exactly what the bar measures and what moves it.
-          -->
-          <Tooltip
-            content="Pessimistic upper bound on your skip rate (Wilson 95%) — a small sample can't inflate this to 100%. Lower skip rate raises this signal. The tier is hard-capped at Kindling if skip rate exceeds 20%."
-            label="About reliability"
-            placement="bottom"
-          />
-          {#if floorTriggered}
-            <span
-              class="ml-1 text-[color:var(--color-status-warn-fg)]"
-              title="Reliability fell below the floor — tier is capped at Kindling regardless of economic productivity."
-              aria-label="Reliability floor triggered">⚠</span
-            >
-          {/if}
-        </dt>
-        <dd class="tabular-nums">{reliabilityPct}%</dd>
-      </div>
-      <div class="h-1.5 w-full rounded-full bg-[color:var(--color-border-default)]">
-        <div
-          class="h-full rounded-full {reliabilityTone}"
-          style="width: {reliabilityBarWidth};"
-        ></div>
-      </div>
-    </div>
-    <div class="flex flex-col gap-1">
-      <div class="flex items-center justify-between text-xs">
-        <dt
-          class="inline-flex items-center gap-1 text-[color:var(--color-text-subtle)] uppercase tracking-wide font-medium"
-        >
-          Economic percentile
-          <!--
-            Definition tooltip. "Economic percentile" reads as
-            domain jargon; explain it's a cohort rank of per-slot
-            income and name the lever an operator can pull.
-          -->
-          <Tooltip
-            content="Cohort rank of your median fee + Jito tip per leader slot vs the validators WhoEarns indexes (not the whole cluster). Higher fee + tip capture per leader slot pushes this up; see 'Peers compared' below for the sample size."
-            label="About economic percentile"
-            placement="bottom"
-          />
-        </dt>
-        <dd class="tabular-nums">{economicPct}%</dd>
-      </div>
-      <div class="h-1.5 w-full rounded-full bg-[color:var(--color-border-default)]">
-        <div class="h-full rounded-full {economicTone}" style="width: {economicBarWidth};"></div>
-      </div>
-    </div>
-  </dl>
 </div>
