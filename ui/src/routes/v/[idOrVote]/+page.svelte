@@ -703,15 +703,14 @@
         <!--
           Cross-link to /compare so a delegator researching "should I
           delegate here vs. someone else" has a single-click path to
-          the side-by-side comparison flow. Without this the hub is a
-          dead-end for the comparison sub-task — they have to open
-          two /v/ tabs manually and switch. Generic /compare doesn't
-          take a seed-vote param yet, but the path becomes
-          discoverable here.
+          the side-by-side comparison flow. `?a=<vote>` pre-seeds the
+          left slot with THIS validator so the user only has to pick
+          the right slot, not both. Without this the hub is a dead-
+          end for the comparison sub-task.
         -->
         <p class="mt-2 text-xs">
           <a
-            href="/compare"
+            href={`/compare?a=${scoring.vote}`}
             class="inline-flex min-h-11 items-center text-[color:var(--color-brand-500)] hover:underline"
           >
             Compare to peer validators →
