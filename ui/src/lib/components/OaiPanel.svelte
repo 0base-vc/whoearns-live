@@ -95,10 +95,16 @@
   </header>
 
   {#if !claimed || oai === null}
-    <!-- Unclaimed / opted-out / identity-drifted → no OAI surface. -->
+    <!--
+      Unclaimed / opted-out / identity-drifted — explain what the OAI
+      measures (its value to a delegator) FIRST, then the data gap.
+      A delegator reading "OAI" for the first time needs the value
+      proposition; the previous one-liner only described the missing
+      data.
+    -->
     <p class="text-sm text-[color:var(--color-text-muted)]">
-      Not claimed yet — wallet and governance activity appear once an operator claims this
-      validator.
+      The Operator Activity Index measures how engaged this operator is with on-chain governance and
+      day-to-day wallet activity. Visible once the operator claims this validator.
     </p>
   {:else}
     <!--

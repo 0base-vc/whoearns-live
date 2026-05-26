@@ -115,7 +115,7 @@
 -->
 {#if visible}
   <div
-    class="fixed inset-x-0 top-14 z-20 flex min-h-11 items-center gap-2 border-b border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-1.5 shadow-sm sm:hidden"
+    class="fixed inset-x-0 top-14 z-20 flex min-h-11 items-center gap-2 border-b border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-1.5 shadow-sm md:hidden"
     role="region"
     aria-label="Validator overview sticky header"
   >

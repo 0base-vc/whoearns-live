@@ -79,6 +79,13 @@ export function formatTimestamp(iso: string | null, now: Date = new Date()): str
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d ago`;
+  // Keep the relative form up to ~30 days — a delegator skimming
+  // "Last refreshed 3w ago" reads age at a glance; an absolute UTC
+  // stamp at 8 days old forces them into mental subtraction. Past
+  // ~30 days the relative form starts losing precision, so fall
+  // through to the absolute date format below.
+  const weeks = Math.floor(days / 7);
+  if (weeks < 4) return `${weeks}w ago`;
   const months = [
     'Jan',
     'Feb',

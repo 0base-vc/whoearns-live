@@ -35,9 +35,16 @@
            white on dark. No baked-in fill. -->
       <FullLogo height={28} class="text-[color:var(--color-text-default)]" alt="0base.vc logo" />
 
+      <!--
+        Headline tone is understated — "craft over gear" brand voice.
+        Earlier "Like this tool? Delegate SOL to 0base.vc." read like
+        a tip-jar pitch; this lead-with-maintenance framing reads as
+        attribution + ask.
+      -->
       <h3 id="delegation-heading" class="mt-4 text-base font-semibold">
-        Like this tool?
-        <span class="text-[color:var(--color-brand-500)]">Delegate SOL to 0base.vc.</span>
+        Maintained by
+        <span class="text-[color:var(--color-brand-500)]">0base.vc</span>
+        — delegate SOL to keep the project running.
       </h3>
       <p class="mt-1 text-sm text-[color:var(--color-text-muted)]">
         WhoEarns and the indexer behind it are maintained by the team at 0base.vc. If you find it
@@ -98,7 +105,7 @@
         href={`/v/${VOTE_PUBKEY}`}
         class="inline-flex min-h-11 items-center justify-center rounded-lg border border-[color:var(--color-brand-500)] px-4 py-2 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-50)] dark:hover:bg-[color:var(--color-brand-950)]"
       >
-        View our metrics
+        View our validator
       </a>
     </div>
   </div>

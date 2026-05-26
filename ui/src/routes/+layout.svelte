@@ -155,7 +155,9 @@
 
 <a class="skip-link" href="#main">Skip to content</a>
 
-<div class="min-h-screen bg-[color:var(--color-surface)] text-[color:var(--color-text-default)]">
+<!-- `100dvh` instead of `100vh` accommodates iOS Safari's URL-bar
+     collapse without a content-height jump on scroll. -->
+<div class="min-h-[100dvh] bg-[color:var(--color-surface)] text-[color:var(--color-text-default)]">
   <header
     class="sticky top-0 z-30 border-b border-[color:var(--color-border-default)] bg-[color:var(--color-surface)]/85 backdrop-blur"
   >
@@ -252,7 +254,7 @@
   </main>
 
   <footer
-    class="mt-20 border-t border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)]"
+    class="mt-12 border-t border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)]"
   >
     <div class="mx-auto max-w-6xl px-6 py-10">
       {#if !hideFooterCta}
@@ -262,8 +264,12 @@
       <div
         class="mt-8 flex flex-col items-start justify-between gap-3 text-xs text-[color:var(--color-text-subtle)] sm:flex-row sm:items-center"
       >
+        <!-- Provenance line — replaces the earlier "Data from WhoEarns."
+             which was self-citing. Naming the actual upstream (Solana
+             on-chain records) + the maintainer reinforces the open-data
+             positioning and matches the sponsor attribution above. -->
         <p>
-          Data from
+          Data from Solana on-chain records, indexed by
           <a
             href={SITE_URL}
             class="font-medium text-[color:var(--color-text-muted)] hover:text-[color:var(--color-brand-500)]"
@@ -277,7 +283,7 @@
           desktop layout — `inline-flex items-center` keeps the
           baseline the same as the surrounding `<p>` text.
         -->
-        <nav aria-label="Footer" class="flex flex-wrap items-center gap-x-5 gap-y-1">
+        <nav aria-label="Footer" class="flex flex-wrap items-center gap-x-5 gap-y-2">
           <a
             href="/about"
             class="inline-flex min-h-11 items-center hover:text-[color:var(--color-brand-500)]"

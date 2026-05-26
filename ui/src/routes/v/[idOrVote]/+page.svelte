@@ -596,7 +596,10 @@
             ? `${moniker} (${scoring.vote})`
             : `Validator vote pubkey ${scoring.vote}`}
         >
-          <span class="truncate">{heroTitle}</span>
+          <!-- break-words at <sm so long monikers wrap rather than
+               silently clipping to "…"; sm: switches to single-line
+               truncate where the hero has horizontal room. -->
+          <span class="min-w-0 break-words sm:truncate">{heroTitle}</span>
           {#if isClaimed}
             <VerifiedBadge
               size={18}
@@ -604,7 +607,11 @@
             />
           {/if}
         </h1>
-        <p class="mt-0.5">
+        <!-- min-w-0 on the wrapper so EllipsisAddress's flex truncate
+             actually fires under the hero's flex column constraints —
+             without it the pubkey's font-mono span ignores the column
+             width and wraps mid-key. -->
+        <p class="mt-0.5 min-w-0">
           <EllipsisAddress
             pubkey={scoring.vote}
             class="font-mono text-xs text-[color:var(--color-text-subtle)]"
@@ -626,7 +633,7 @@
               href="https://github.com/{githubLink.githubUsername}"
               target="_blank"
               rel="noopener noreferrer nofollow"
-              class="inline-flex items-center gap-1.5 rounded-full border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] py-1 pr-2.5 pl-2 text-xs font-medium text-[color:var(--color-text-default)] transition-colors hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+              class="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] px-3 py-2 text-xs font-medium text-[color:var(--color-text-default)] transition-colors hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
               aria-label="Verified GitHub account {githubLink.githubUsername} — opens github.com in a new tab"
             >
               <svg
@@ -665,11 +672,14 @@
 
         {#if safeWebsiteUrl}
           <p class="mt-2 text-xs">
+            <!-- inline-flex + min-h-11 gives the link a WCAG 2.5.5 touch
+                 target without bloating the visible text — the hit area
+                 grows, the type stays at text-xs. -->
             <a
               href={safeWebsiteUrl}
               target="_blank"
               rel="noopener noreferrer nofollow"
-              class="text-[color:var(--color-brand-500)] hover:underline"
+              class="inline-flex min-h-11 items-center text-[color:var(--color-brand-500)] hover:underline"
             >
               {safeWebsiteUrl}
             </a>
@@ -894,10 +904,16 @@
           </p>
         {/if}
 
-        <details class="text-xs">
+        <details class="group text-xs">
           <summary
-            class="inline-flex min-h-11 cursor-pointer items-center text-[color:var(--color-text-muted)] hover:text-[color:var(--color-text-default)]"
+            class="inline-flex min-h-11 cursor-pointer items-center gap-1 text-[color:var(--color-text-muted)] hover:text-[color:var(--color-text-default)]"
           >
+            <!-- Chevron rotates 90° when the details opens. Marks the
+                 row as an expandable disclosure rather than a footnote. -->
+            <span
+              class="inline-block text-[color:var(--color-text-subtle)] transition-transform group-open:rotate-90 motion-reduce:transition-none"
+              aria-hidden="true">›</span
+            >
             How this tier was scored
           </summary>
           <div class="mt-2 flex flex-col gap-4">

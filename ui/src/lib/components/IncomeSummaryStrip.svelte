@@ -193,7 +193,10 @@
 
 <Card tone="panel" ariaLabelledby="income-summary-heading">
   <header class="flex items-baseline justify-between gap-2 pb-3">
-    <h2 id="income-summary-heading" class="text-lg font-semibold tracking-tight">Epoch income</h2>
+    <!-- "Block income" reads cleanly to a delegator who hasn't internalised
+         the Solana "epoch" concept; the KPI labels below are in days
+         anyway ("Last 60 days"), so the heading should match that frame. -->
+    <h2 id="income-summary-heading" class="text-lg font-semibold tracking-tight">Block income</h2>
     {#if !isColdStart}
       <!--
         Deep-link to the full per-epoch table. Action-arrow `→`
@@ -215,7 +218,10 @@
       Hasn't earned its first epoch of fees yet.
     </p>
   {:else}
-    <div class="grid grid-cols-3 gap-3 sm:gap-4">
+    <!-- Stack the three KPI tiles on mobile so labels like "Last 60 days"
+         don't crush into a ~100px column at 375px. Three-up at `sm:` and
+         above where the row has horizontal room. -->
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
       <KpiStat
         label="Last 60 days"
         suffix="SOL"

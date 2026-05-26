@@ -303,6 +303,33 @@ export function scoreLever(args: {
  */
 const TRUST_SEPARATOR = ' • ';
 
+/**
+ * Display labels for `ClientKind`. Duplicated from `ClientBadge.svelte`
+ * because a `.svelte` file cannot be imported from a `.ts` file —
+ * keep the two in sync if a new client ships. Sentence-case is the
+ * public-surface convention; the lowercased enum stays on the wire.
+ */
+const TRUST_CLIENT_LABEL: Record<string, string> = {
+  agave: 'Agave',
+  jito_solana: 'Jito-Solana',
+  firedancer: 'Firedancer',
+  frankendancer: 'Frankendancer',
+  paladin: 'Paladin',
+  sig: 'Sig',
+  unknown: 'Unknown client',
+};
+
+/**
+ * Trim a build-metadata / pre-release suffix from a semver-ish version
+ * string for the trust strip. `0.909.0-rc.40001` → `0.909.0`,
+ * `2.1.0+build.42` → `2.1.0`. The fuller string is still surfaced on
+ * the `ClientBadge` pill where it has room; the trust strip is the
+ * scannable one-liner and the suffix carries no delegator signal.
+ */
+function trimClientVersion(version: string): string {
+  return version.split(/[-+]/, 1)[0] ?? version;
+}
+
 export function trustSummary(parts: {
   tierLabel: string;
   tenureBadge: string;
@@ -312,13 +339,16 @@ export function trustSummary(parts: {
   incomeLast30dSol: string | null;
 }): string {
   const segments: string[] = [parts.tierLabel, parts.tenureBadge];
-  const client = parts.clientVersion
-    ? `${parts.clientKind} ${parts.clientVersion}`
-    : parts.clientKind;
+  const clientKindLabel = TRUST_CLIENT_LABEL[parts.clientKind] ?? parts.clientKind;
+  const trimmedVersion = parts.clientVersion ? trimClientVersion(parts.clientVersion) : null;
+  const client = trimmedVersion ? `${clientKindLabel} ${trimmedVersion}` : clientKindLabel;
   segments.push(client);
   segments.push(parts.skipRate === null ? '— skip' : `${(parts.skipRate * 100).toFixed(1)}% skip`);
+  // "last 30d" rather than "last month" — the underlying window IS a
+  // rolling 30 days (matches `IncomeSummaryStrip` KPIs), so the
+  // explicit duration removes "calendar vs rolling month" ambiguity.
   segments.push(
-    parts.incomeLast30dSol === null ? '— last month' : `◎${parts.incomeLast30dSol} last month`,
+    parts.incomeLast30dSol === null ? '— last 30d' : `◎${parts.incomeLast30dSol} last 30d`,
   );
   return segments.join(TRUST_SEPARATOR);
 }
