@@ -44,7 +44,11 @@
   let { variant = 'card' }: Props = $props();
 
   const stakeHref = `https://solanacompass.com/validators/${VOTE_PUBKEY}`;
-  const hubHref = `/v/${VOTE_PUBKEY}`;
+  // Sponsor "View our validator" entry points at `/income/<vote>` —
+  // the canonical per-validator surface. `/v/<vote>` is reachable
+  // only from inside `/income/<vote>`; a public sponsor card linking
+  // straight to the hub would bypass that gating.
+  const hubHref = `/income/${VOTE_PUBKEY}`;
 </script>
 
 {#if variant === 'compact'}
@@ -167,8 +171,13 @@
             <path d="M7 17L17 7M17 7H7M17 7V17"></path>
           </svg>
         </a>
+        <!--
+          Same canonical-routing as the compact variant's `hubHref` —
+          the public sponsor entry lands on `/income/<vote>` rather
+          than the internal `/v/<vote>` hub.
+        -->
         <a
-          href={`/v/${VOTE_PUBKEY}`}
+          href={`/income/${VOTE_PUBKEY}`}
           class="inline-flex min-h-11 items-center justify-center rounded-lg border border-[color:var(--color-brand-500)] px-4 py-2 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-50)] dark:hover:bg-[color:var(--color-brand-950)]"
         >
           View our validator

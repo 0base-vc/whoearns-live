@@ -133,10 +133,13 @@
         url: SITE_URL,
         potentialAction: {
           '@type': 'SearchAction',
-          // Hub `/v/<idOrVote>` is the canonical per-validator
-          // surface (PR3 canonical flip). Google sitelinks
-          // search-box routes here.
-          target: `${SITE_URL}/v/{idOrVote}`,
+          // `/income/<idOrVote>` is the canonical per-validator
+          // surface (PR3 canonical points there; `/v/<vote>` is
+          // reachable only from inside the income page via the
+          // "Operator profile →" strip). Google sitelinks search-
+          // box routes here so search results land on the public
+          // entry surface rather than the internal hub.
+          target: `${SITE_URL}/income/{idOrVote}`,
           'query-input': 'required name=idOrVote',
         },
       },

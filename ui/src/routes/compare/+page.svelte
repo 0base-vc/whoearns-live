@@ -704,8 +704,13 @@
         </p>
         {#if slot.history}
           <h2 class="mt-2 inline-flex items-center gap-2 text-2xl font-semibold tracking-tight">
+            <!--
+              Validator name routes to `/income/<vote>` — the canonical
+              per-validator surface. `/v/<vote>` is internal-only and
+              reached from within the income page.
+            -->
             <a
-              href={`/v/${slot.history.vote}`}
+              href={`/income/${slot.history.vote}`}
               class="hover:text-[color:var(--color-brand-500)] hover:underline"
             >
               {slot.history.name ?? shortenPubkey(slot.history.vote, 8, 8)}

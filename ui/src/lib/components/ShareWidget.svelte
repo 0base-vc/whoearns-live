@@ -88,7 +88,12 @@
     }
   }
 
-  const hubUrl = $derived(`${siteUrl}/v/${vote}`);
+  // External share URL points at `/income/<vote>` — the canonical
+  // per-validator surface. The hub (`/v/<vote>`) is reachable only
+  // from inside `/income/<vote>` via the "Operator profile →" hand-
+  // off strip; sharing a hub URL externally would land a recipient
+  // on a page that's intentionally not a public entry point.
+  const hubUrl = $derived(`${siteUrl}/income/${vote}`);
   const badgeUrl = $derived(`${siteUrl}/badge/${vote}.svg`);
 
   // Build the `<a><img>` embed via DOM APIs rather than string

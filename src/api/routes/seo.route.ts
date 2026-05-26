@@ -135,13 +135,13 @@ const seoRoutes: FastifyPluginAsync<SeoRoutesDeps> = async (
       );
     }
     for (const vote of votes) {
-      // The validator hub at `/v/<vote>` is the canonical surface
-      // (see PR3's canonical-flip on the income page). Sitemap
-      // emits the hub URL so crawlers index the right page; the
-      // `/income/<vote>` route still resolves for older inbound
-      // links but is no longer advertised here.
+      // The public per-validator surface is `/income/<vote>`. The
+      // `/v/<vote>` hub is intentionally an internal-only deep view
+      // reached from inside the income page via the "Operator
+      // profile →" hand-off — sitemap advertises only the public
+      // entry, so crawlers never index hub URLs directly.
       urls.push(
-        `  <url><loc>${SITE_URL}/v/${vote}</loc><changefreq>daily</changefreq><priority>0.7</priority></url>`,
+        `  <url><loc>${SITE_URL}/income/${vote}</loc><changefreq>daily</changefreq><priority>0.7</priority></url>`,
       );
     }
 
@@ -225,8 +225,7 @@ Sitemap: ${SITE_URL}/sitemap.xml
 ## Core pages
 
 - ${SITE_URL}/: Leaderboard — top validators by live-trend income per slot
-- ${SITE_URL}/v/{vote}: Validator overview — tier, income summary, wallet activity, claim audit, governance, OAI (vote OR identity pubkey)
-- ${SITE_URL}/income/{vote}: Per-epoch income table — full history behind the overview page's 16-epoch sparkline. Indexed but non-canonical; /v/{vote} is the primary surface.
+- ${SITE_URL}/income/{vote}: Per-validator surface — tier strip, per-epoch income table, slot stats, freshness. Primary public entry for a single validator; accepts both vote and identity pubkeys.
 - ${SITE_URL}/compare: Side-by-side comparison of two validators
 - ${SITE_URL}/glossary: Plain-language definitions of Solana validator terms
 - ${SITE_URL}/faq: Frequently asked questions

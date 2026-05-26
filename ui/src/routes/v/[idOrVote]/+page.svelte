@@ -541,18 +541,32 @@
   <meta name="description" content={seoDescription} />
   <meta property="og:title" content={seoTitle} />
   <meta property="og:description" content={seoDescription} />
-  <meta property="og:url" content="{SITE_URL}/v/{scoring.vote}" />
+  <!--
+    `og:url` matches the canonical (`/income/<vote>`) below — both
+    point at the public per-validator surface so an `/v/<vote>` URL
+    shared on social media surfaces the canonical equivalent in the
+    Twitter / OG preview rather than echoing the internal hub path.
+  -->
+  <meta property="og:url" content="{SITE_URL}/income/{scoring.vote}" />
   <meta property="og:image" content="{SITE_URL}/og/{scoring.vote}.png" />
   <meta name="twitter:card" content="summary_large_image" />
+  <!--
+    `noindex, follow` — `/v/<vote>` is intentionally not a public
+    entry point. Every app surface routes external visitors through
+    `/income/<vote>` (the canonical), and the hub is only reached from
+    the income page's "Operator profile →" hand-off strip. Search
+    engines shouldn't expose hub URLs in results; the `follow` half
+    keeps internal links discoverable so the canonical+OG signals
+    above still propagate.
+  -->
+  <meta name="robots" content="noindex, follow" />
   <!--
     Canonical points at the income page (`/income/<vote>`). Site
     naming (whoearns.live) + the leaderboard's income-sorted default
     establish per-validator earnings as the primary surface; this hub
     is the secondary "operator profile" view. Pointing canonical
     there avoids the hub competing for the same query as income when
-    both surfaces describe the same validator. The hub still indexes
-    via its own URL; canonical just tells search engines which to
-    prefer for ranking attribution.
+    both surfaces describe the same validator.
   -->
   <link rel="canonical" href="{SITE_URL}/income/{scoring.vote}" />
 </svelte:head>
