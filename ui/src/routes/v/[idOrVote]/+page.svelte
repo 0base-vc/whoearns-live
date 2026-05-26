@@ -826,6 +826,7 @@
           floorTriggered={reliabilityFloor}
           unratedReason={reason ?? undefined}
           size={144}
+          nextCutoff={tierGap?.nextCutoff ?? null}
         />
 
         {#if reliabilityFloor}

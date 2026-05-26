@@ -56,6 +56,14 @@
     floorTriggered?: boolean;
     unratedReason?: string;
     size?: number;
+    /**
+     * Composite threshold for the NEXT tier up (e.g. 80 when this
+     * validator sits in Hearth and the next step is Anvil). Drives a
+     * small tick on the ring's perimeter that points at "this is where
+     * the score needs to reach." `null` (or omitted) when the validator
+     * is at the top tier and there's no next step.
+     */
+    nextCutoff?: number | null;
   }
 
   let {
@@ -66,6 +74,7 @@
     floorTriggered = false,
     unratedReason,
     size = 160,
+    nextCutoff = null,
   }: Props = $props();
 
   // SVG geometry — work in a 100×100 user space, scale via attribute.
@@ -131,6 +140,22 @@
       : `${Math.max(0, Math.min(100, economicPercentile * 100)).toFixed(2)}%`,
   );
 
+  // Position of the next-tier tick on the ring perimeter. SVG strokes
+  // start at angle 0 (3 o'clock) and proceed clockwise; the foreground
+  // ring is `css -rotate-90`d so screen-top is angle 0. A tick at
+  // composite `nextCutoff` lands at angle `(nextCutoff/100) × 2π`
+  // along the same perimeter the fill traces — so the mark sits
+  // exactly where the fill needs to grow to.
+  const nextTickPosition = $derived.by<{ x: number; y: number } | null>(() => {
+    if (nextCutoff === null || nextCutoff === undefined) return null;
+    if (composite !== null && composite >= nextCutoff) return null;
+    const angleRad = (nextCutoff / 100) * 2 * Math.PI;
+    return {
+      x: VIEWBOX_SIZE / 2 + RING_RADIUS * Math.cos(angleRad),
+      y: VIEWBOX_SIZE / 2 + RING_RADIUS * Math.sin(angleRad),
+    };
+  });
+
   // Accessible name for the entire ring widget. Reads like:
   // "Tier: Forge, composite 96 of 100. Reliability 99.2 percent.
   //  Economic percentile 99.0 percent."
@@ -148,8 +173,18 @@
   });
 </script>
 
-<div class="flex flex-col items-stretch gap-3" aria-label={ariaLabel}>
-  <div class="relative mx-auto" style="width: {size}px; height: {size}px;">
+<!--
+  Layout: vertical stack on mobile (`<sm`); ring left + bars right on
+  `sm:` and up. The Tier card has plenty of horizontal room on every
+  breakpoint above mobile — placing the sub-component bars beside the
+  ring rather than below it shortens the card's vertical footprint
+  and stops the bars from spanning the card's full width.
+-->
+<div
+  class="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-6"
+  aria-label={ariaLabel}
+>
+  <div class="relative shrink-0" style="width: {size}px; height: {size}px;">
     <svg
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 {VIEWBOX_SIZE} {VIEWBOX_SIZE}"
@@ -187,6 +222,23 @@
         stroke-dashoffset={dashOffset}
         style="transition: stroke-dashoffset 180ms ease-out;"
       />
+      {#if nextTickPosition !== null}
+        <!--
+          Next-tier threshold tick. A small filled circle on the ring
+          perimeter at `nextCutoff` (e.g. 80 for Hearth → Anvil). The
+          ring under it is still the background track, so the tick
+          reads as "the fill needs to reach here." Hidden once the
+          composite has passed the cutoff (no next step to mark).
+        -->
+        <circle
+          cx={nextTickPosition.x}
+          cy={nextTickPosition.y}
+          r={3.5}
+          fill="var(--color-text-default)"
+          stroke="var(--color-surface)"
+          stroke-width={1.5}
+        />
+      {/if}
     </svg>
     <!--
       Centre stack — Tier badge + composite number. Absolutely
@@ -219,11 +271,11 @@
 
   <!--
     Sub-component bars. Two rows: reliability + economic percentile.
-    The label row uses the existing `text-subtle` token so the bars
-    pop visually. The bars themselves are 4px rounded rails over a
-    border-default track — minimal, no chart library.
+    `sm:max-w-xs` caps the bar width on the wider breakpoints so the
+    rails don't stretch the full card width — short enough to read
+    at a glance, alongside the ring rather than below it.
   -->
-  <dl class="flex flex-col gap-2 px-2">
+  <dl class="flex w-full flex-col gap-2 sm:max-w-xs sm:flex-1">
     <div class="flex flex-col gap-1">
       <div class="flex items-center justify-between text-xs">
         <dt class="text-[color:var(--color-text-subtle)] uppercase tracking-wide font-medium">
