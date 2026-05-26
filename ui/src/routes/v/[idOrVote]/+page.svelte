@@ -687,6 +687,24 @@
         {/if}
 
         <!--
+          Cross-link to /compare so a delegator researching "should I
+          delegate here vs. someone else" has a single-click path to
+          the side-by-side comparison flow. Without this the hub is a
+          dead-end for the comparison sub-task — they have to open
+          two /v/ tabs manually and switch. Generic /compare doesn't
+          take a seed-vote param yet, but the path becomes
+          discoverable here.
+        -->
+        <p class="mt-2 text-xs">
+          <a
+            href="/compare"
+            class="inline-flex min-h-11 items-center text-[color:var(--color-brand-500)] hover:underline"
+          >
+            Compare to peer validators →
+          </a>
+        </p>
+
+        <!--
           Freshness — oldest income/client timestamp in the window.
           12px (`text-xs`) at `--color-text-muted` clears WCAG 1.4.3
           comfortably; the previous 11px / `text-subtle` combo
@@ -1025,51 +1043,79 @@
     </Card>
   </div>
 
-  <!-- Tenure + Client stack — col-span-5 on desktop. -->
-  <div class="flex flex-col gap-6 lg:col-span-5">
-    <Card tone="panel">
-      <div class="flex flex-col gap-3">
-        <h2 class="text-lg font-semibold tracking-tight">Tenure</h2>
-        <TenureBadge tenure={scoring.tenure} size="md" />
+  <!--
+    Validator facts — col-span-5 on desktop. Consolidates Tenure +
+    Client into a single panel: one h2 instead of two, so the right
+    column doesn't visually compete with the Tier card on the left
+    (the 4-agent review flagged the "two h2s = peer of Tier" weight
+    issue). `lg:sticky` floats the panel alongside the dense Tier
+    card as the user scrolls; without sticky there's ~400px of empty
+    column below this card next to the Tier card's lower half.
+  -->
+  <div class="lg:col-span-5">
+    <Card tone="panel" class="lg:sticky lg:top-20">
+      <h2 class="text-lg font-semibold tracking-tight">Validator facts</h2>
+      <dl class="mt-4 flex flex-col gap-5">
         <!--
+          Tenure row.
+
           `tenure.firstSeenEpoch` carries the validator's TRUE first
           epoch with stake when the stakewiz ingester has backfilled
           `genesis_epoch`, falling back to the indexer-relative
           first-seen epoch otherwise — hence "Active since", not
-          "First seen". Mainnet epoch ≈ 2 days; the day-count gloss
-          makes the epoch number legible without teaching epoch math.
+          "First seen". Mainnet epoch ≈ 2 days; the year gloss
+          ("~5.1 years") gives a delegator a scale they can read
+          without doing epoch arithmetic.
         -->
-        <p class="text-xs text-[color:var(--color-text-muted)]">
-          Active since epoch <span class="tabular-nums">{scoring.tenure.firstSeenEpoch}</span> ·
-          <span class="tabular-nums">{scoring.tenure.activeEpochs.toLocaleString()}</span>
-          epochs (~{(scoring.tenure.activeEpochs * 2).toLocaleString()}d).
-        </p>
-      </div>
-    </Card>
+        <div>
+          <dt
+            class="text-xs font-semibold uppercase tracking-wider text-[color:var(--color-text-subtle)]"
+          >
+            Tenure
+          </dt>
+          <dd class="mt-1.5 flex flex-col gap-1.5">
+            <div><TenureBadge tenure={scoring.tenure} size="md" /></div>
+            <p class="text-xs text-[color:var(--color-text-muted)]">
+              Active since epoch <span class="tabular-nums">{scoring.tenure.firstSeenEpoch}</span> —
+              about
+              <span class="tabular-nums"
+                >{((scoring.tenure.activeEpochs * 2) / 365).toFixed(1)}</span
+              >
+              years (<span class="tabular-nums">{scoring.tenure.activeEpochs.toLocaleString()}</span
+              > epochs).
+            </p>
+          </dd>
+        </div>
 
-    <Card tone="panel">
-      <div class="flex flex-col gap-3">
-        <h2 class="text-lg font-semibold tracking-tight">Client</h2>
-        <ClientBadge client={scoring.client} size="md" />
         <!--
+          Client row.
+
           "Gossip" was internal Solana protocol vocabulary; the
           earlier rename to "last verified" was wrong in the
-          opposite direction — `verified` is reserved in this
-          project for cryptographic attestations (claim ceremony,
-          gist proof, dual-signature wallet). Gossip-reported
-          client banner is unauthenticated; calling it "verified"
-          implicitly promotes its trust signal. `last seen` is
-          accurate (we observed this self-reported value on the
-          cluster) without overloading the verified verb.
+          opposite direction — `verified` is reserved for
+          cryptographic attestations (claim ceremony, gist proof,
+          dual-signature wallet). `last seen` is accurate (we
+          observed the self-reported value on the cluster) without
+          overloading the verified verb.
         -->
-        {#if scoring.client.updatedAt !== null}
-          <p class="text-xs text-[color:var(--color-text-muted)]">
-            Version last seen {formatTimestamp(scoring.client.updatedAt)}.
-          </p>
-        {:else}
-          <p class="text-xs text-[color:var(--color-text-muted)]">Version not yet observed.</p>
-        {/if}
-      </div>
+        <div>
+          <dt
+            class="text-xs font-semibold uppercase tracking-wider text-[color:var(--color-text-subtle)]"
+          >
+            Client
+          </dt>
+          <dd class="mt-1.5 flex flex-col gap-1.5">
+            <div><ClientBadge client={scoring.client} size="md" /></div>
+            {#if scoring.client.updatedAt !== null}
+              <p class="text-xs text-[color:var(--color-text-muted)]">
+                Version last seen {formatTimestamp(scoring.client.updatedAt)}.
+              </p>
+            {:else}
+              <p class="text-xs text-[color:var(--color-text-muted)]">Version not yet observed.</p>
+            {/if}
+          </dd>
+        </div>
+      </dl>
     </Card>
   </div>
 </div>
