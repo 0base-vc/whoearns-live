@@ -806,11 +806,10 @@ paths:
 
         `txFeesLamports` is populated by the Phase 4-extension
         `WalletFeeBackfillService` (Solana-RPC `getTransactionFee`
-        once per signature, against `SOLANA_ARCHIVE_RPC_URL`).
-        Rows the backfill hasn't reached yet (or every row when the
-        archive endpoint is unconfigured) carry `null` — `null` is
-        intentional vs `"0"` so a consumer summing fees can detect
-        the unavailable-data case.
+        once per signature, against the primary `SOLANA_RPC_URL`).
+        Rows the backfill hasn't reached yet carry `null` — `null`
+        is intentional vs `"0"` so a consumer summing fees can
+        detect the unavailable-data case.
       parameters:
         - $ref: '#/components/parameters/WalletPath'
         - name: days
@@ -2446,15 +2445,13 @@ components:
                 type: [string, 'null']
                 description: |
                   Per-day fee total in lamports as a decimal string.
-                  Populated by the `WalletFeeBackfillService` when
-                  `SOLANA_ARCHIVE_RPC_URL` is configured. `null`
-                  until the backfill reaches this day (or when the
-                  archive RPC is not configured) — `null` is
-                  intentional vs `"0"` so a consumer summing fees
-                  can detect the unavailable-data case. Every
-                  landed tx pays at least the 5000-lamport base
-                  fee, so genuine `0` is impossible for a day with
-                  `txCount > 0`.
+                  Populated by the `WalletFeeBackfillService` using
+                  the primary `SOLANA_RPC_URL`. `null` until the
+                  backfill reaches this day — `null` is intentional
+                  vs `"0"` so a consumer summing fees can detect
+                  the unavailable-data case. Every landed tx pays
+                  at least the 5000-lamport base fee, so genuine
+                  `0` is impossible for a day with `txCount > 0`.
 
     # --- Phase 5 SIMD curation feed ---------------------------------------
 
@@ -2607,9 +2604,8 @@ components:
                 intensity to log-bucketed lamports/day. The flag is
                 evaluated by a single-row EXISTS query on
                 `wallet_daily_activity` so it has constant cost
-                regardless of table size. `false` in deployments
-                where `SOLANA_ARCHIVE_RPC_URL` is unset (the
-                backfill job is not registered).
+                regardless of table size. Stays `false` until the
+                backfill job's first successful tick.
 
     OperatorActivityIndex:
       type: object

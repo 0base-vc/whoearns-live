@@ -130,25 +130,14 @@ export async function startWorker(): Promise<void> {
           logExhaustedRetries: false,
         })
       : undefined;
-  // Archive RPC — dedicated to the wallet-fee-backfill job (Phase 4
-  // extension). The backfill issues `getTransactionFee` once per
-  // signature, which would be ruinous on the primary endpoint
-  // operators rely on for live ingest. Wired only when
-  // `SOLANA_ARCHIVE_RPC_URL` is set; when unset, the fee-backfill
-  // job is skipped entirely and `walletFeesIngestActive` stays false.
-  // No rate limiter is attached — the archive endpoint is expected
-  // to be a separate, idle-capacity provider (e.g. publicnode) where
-  // the backfill's per-tick budget is the limit.
-  const rpcArchive =
-    config.SOLANA_ARCHIVE_RPC_URL !== undefined
-      ? new SolanaRpcClient({
-          url: config.SOLANA_ARCHIVE_RPC_URL,
-          timeoutMs: config.SOLANA_RPC_TIMEOUT_MS,
-          concurrency: config.SOLANA_RPC_CONCURRENCY,
-          maxRetries: config.SOLANA_RPC_MAX_RETRIES,
-          logger,
-        })
-      : undefined;
+  // `SOLANA_ARCHIVE_RPC_URL` is retained as an env knob for the
+  // offline `refill-income` script (which creates its own
+  // SolanaRpcClient when invoked). The live worker itself doesn't
+  // use it — earlier revisions wired the wallet-fee backfill against
+  // archive, but public archive endpoints (publicnode) were observed
+  // returning only ~1 signature per wallet on `getSignaturesForAddress`,
+  // which made the backfill structurally incapable of producing more
+  // than one day of fee data. The job now uses the primary RPC.
   const blockFetcher =
     rpcFallback !== undefined
       ? new BlockFetcher({
@@ -355,50 +344,49 @@ export async function startWorker(): Promise<void> {
   });
 
   // Phase 4-extension — wallet fee backfill. Sibling to the activity
-  // indexer; runs against the ARCHIVE RPC (not primary) and is
-  // skipped entirely when no archive URL is configured. Once it's
-  // populated fee rows for any wallet the API flips
+  // indexer; runs against the PRIMARY RPC so historical signatures
+  // are actually retained (public archive endpoints like publicnode
+  // were observed retaining only ~1 sig per wallet, which left
+  // `walletFeesIngestActive` stuck at "1 day filled" forever).
+  // Once it's populated fee rows for any wallet the API flips
   // `walletFeesIngestActive` on and the UI heatmap switches its
   // intensity binding from tx-count to lamports/day.
-  if (rpcArchive !== undefined) {
-    const walletFeeBackfill = new WalletFeeBackfillService(
-      {
-        archiveRpc: rpcArchive,
-        repo: walletActivityRepo,
-        cursors: cursorsRepo,
-        logger,
-      },
-      { maxFeeFetchesPerTick: config.WALLET_FEE_BACKFILL_PER_TICK_LIMIT },
-    );
-    scheduler.register({
-      ...createWalletFeeBackfillJob({
-        operatorWalletsRepo,
-        backfill: walletFeeBackfill,
-        intervalMs: config.WALLET_FEE_BACKFILL_INTERVAL_MS,
-        logger,
-      }),
-      // +75s: last in the stagger. Heaviest per-tick RPC cost
-      // (one round-trip per signature, capped at the per-wallet
-      // ceiling) and uses a dedicated endpoint, so it shouldn't
-      // compete with the primary-path jobs at all — but the
-      // delayed start still keeps logs ordered with the other
-      // ingest jobs at boot.
-      initialDelayMs: 75_000,
-    });
-    logger.info(
-      {
-        archiveUrl: config.SOLANA_ARCHIVE_RPC_URL,
-        intervalMs: config.WALLET_FEE_BACKFILL_INTERVAL_MS,
-        perTickLimit: config.WALLET_FEE_BACKFILL_PER_TICK_LIMIT,
-      },
-      'wallet-fee-backfill enabled',
-    );
-  } else {
-    logger.info(
-      'wallet-fee-backfill disabled: SOLANA_ARCHIVE_RPC_URL is not set; ' +
-        'walletFeesIngestActive will stay false',
-    );
-  }
+  //
+  // Cost note: the per-tick budget
+  // (`WALLET_FEE_BACKFILL_PER_TICK_LIMIT`, default 500) caps the
+  // additional `getTransactionFee` load this job puts on the
+  // primary endpoint. At 500 fetches/wallet/hour × N wallets the
+  // primary's cost-aware rate limiter (when configured) still
+  // throttles the burst.
+  const walletFeeBackfill = new WalletFeeBackfillService(
+    {
+      archiveRpc: rpc,
+      repo: walletActivityRepo,
+      cursors: cursorsRepo,
+      logger,
+    },
+    { maxFeeFetchesPerTick: config.WALLET_FEE_BACKFILL_PER_TICK_LIMIT },
+  );
+  scheduler.register({
+    ...createWalletFeeBackfillJob({
+      operatorWalletsRepo,
+      backfill: walletFeeBackfill,
+      intervalMs: config.WALLET_FEE_BACKFILL_INTERVAL_MS,
+      logger,
+    }),
+    // +75s: last in the stagger. Heavy per-tick RPC cost (one
+    // round-trip per signature, capped at the per-wallet ceiling);
+    // delayed boot start keeps the primary endpoint from getting
+    // a synchronous burst alongside the other ingest jobs.
+    initialDelayMs: 75_000,
+  });
+  logger.info(
+    {
+      intervalMs: config.WALLET_FEE_BACKFILL_INTERVAL_MS,
+      perTickLimit: config.WALLET_FEE_BACKFILL_PER_TICK_LIMIT,
+    },
+    'wallet-fee-backfill enabled (primary RPC)',
+  );
 
   // Tenure true-age — pulls stakewiz `first_epoch_with_stake` into
   // `validators.genesis_epoch` so the hub Tenure card shows real

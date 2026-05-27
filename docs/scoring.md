@@ -474,12 +474,17 @@ overhaul) still planned.
   first walks, `backfillFrontier` to resume a per-tick-ceiling-
   truncated walk on the next tick. Per-tick `getTransactionFee`
   budget is `WALLET_FEE_BACKFILL_PER_TICK_LIMIT` (default 500).
-- Backfill runs against `SOLANA_ARCHIVE_RPC_URL`, NOT the primary
-  RPC — `getTransactionFee` is one round-trip per signature, so the
-  job would multiply the primary endpoint's RPC spend by ~10× if
-  not isolated. When `SOLANA_ARCHIVE_RPC_URL` is unset the worker
-  skips the job registration entirely and `txFeesLamports` stays
-  `null` everywhere.
+- Backfill runs against the PRIMARY RPC (`SOLANA_RPC_URL`). An
+  earlier revision split it onto a separate `SOLANA_ARCHIVE_RPC_URL`
+  endpoint to keep `getTransactionFee` load off the primary, but
+  free public archive endpoints (publicnode) were observed
+  returning only ~1 signature per wallet from
+  `getSignaturesForAddress` — the backfill could call
+  `getTransactionFee` cheaply but had nothing to call it on,
+  structurally capping the result at one day of fee data. The
+  primary RPC retains full history. The per-tick budget cap
+  (`WALLET_FEE_BACKFILL_PER_TICK_LIMIT`, default 500) keeps the
+  extra load on the primary endpoint bounded.
 - `OperatorActivityIndex.ingestStatus.walletFeesIngestActive` flips
   on once any `wallet_daily_activity` row has a positive fee value
   (`WalletActivityRepository.hasAnyFeeData()`). The UI heatmap

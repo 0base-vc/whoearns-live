@@ -9,11 +9,18 @@ import type {
 
 export interface WalletFeeBackfillDeps {
   /**
-   * Archive RPC client. Wired from `SOLANA_ARCHIVE_RPC_URL`, NOT
-   * `SOLANA_RPC_URL` — the live ingest workers own the primary
-   * endpoint and the backfill cannot be allowed to compete with
-   * them for tokens. The worker entrypoint refuses to register this
-   * job unless an archive URL is configured.
+   * Solana RPC client used for `getSignaturesForAddress` +
+   * `getTransactionFee` walks. The dep name is `archiveRpc` for
+   * historical reasons (earlier revisions wired this against
+   * `SOLANA_ARCHIVE_RPC_URL`), but the worker now passes the
+   * PRIMARY RPC client. Reason: public archive endpoints
+   * (publicnode) were observed returning only ~1 signature per
+   * wallet on `getSignaturesForAddress`, structurally capping the
+   * backfill at one day of fee data regardless of the per-tick
+   * budget. The primary RPC retains full history.
+   *
+   * Cost is bounded by `maxFeeFetchesPerTick` so the additional
+   * load on the primary endpoint stays predictable.
    */
   archiveRpc: Pick<SolanaRpcClient, 'getSignaturesForAddress' | 'getTransactionFee'>;
   repo: Pick<WalletActivityRepository, 'upsertFeesBatch'>;
@@ -33,13 +40,14 @@ export interface WalletFeeBackfillDeps {
  * (single-call cap → per-signature round-trip). So fee data was
  * deferred.
  *
- * This service does the deferred work on a separate cadence + RPC
- * endpoint:
+ * This service does the deferred work on a separate cadence:
  *
  *   1. For each registered wallet, walk its signature history
  *      newest-first via `getSignaturesForAddress` against the
- *      ARCHIVE RPC (`SOLANA_ARCHIVE_RPC_URL`, typically a public
- *      endpoint operators don't mind hammering).
+ *      PRIMARY RPC (`SOLANA_RPC_URL`). Earlier revisions tried
+ *      public archive endpoints (publicnode) but they were observed
+ *      returning only ~1 signature per wallet, structurally capping
+ *      the backfill at one day of fee data.
  *   2. For each in-window signature, call `getTransactionFee(sig)` —
  *      returns the raw `meta.fee` lamports as `bigint | null`.
  *   3. Sum fees per UTC date, then `upsertFeesBatch` the per-day

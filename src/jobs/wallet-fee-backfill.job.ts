@@ -16,18 +16,21 @@ export const WALLET_FEE_BACKFILL_JOB_NAME = 'wallet-fee-backfill';
  * Periodic per-wallet fee backfill.
  *
  * Sibling to `wallet-activity-ingester` — runs the same wallet
- * iteration loop, but on a different cadence + RPC endpoint:
+ * iteration loop on a longer cadence. Both jobs use the primary
+ * RPC (`SOLANA_RPC_URL`). Earlier revisions split this onto an
+ * archive endpoint (`SOLANA_ARCHIVE_RPC_URL`) but public archive
+ * endpoints (publicnode) were observed returning only ~1 signature
+ * per wallet from `getSignaturesForAddress`, structurally capping
+ * the backfill at one day of fee data per wallet. The primary RPC
+ * retains full history so the backfill can actually populate the
+ * 365-day window.
  *
- *   - The activity-ingester runs against the primary RPC, cheaply
- *     (`getSignaturesForAddress` is one round-trip per wallet,
- *     ~1000 sigs per call).
- *   - This backfill runs against `SOLANA_ARCHIVE_RPC_URL` because
- *     `getTransactionFee` is ONE round-trip per signature. A wallet
- *     with 365 days of busy activity is hundreds of thousands of
- *     calls — the worker entrypoint refuses to register this job
- *     unless an archive URL is configured, precisely to keep that
- *     cost off the primary endpoint operators rely on for live
- *     ingest.
+ * Cost note: `getTransactionFee` is one RPC round-trip per signature
+ * — significantly heavier than the activity-ingester's
+ * `getSignaturesForAddress` (1000 sigs per round-trip). The
+ * per-tick budget cap (`WALLET_FEE_BACKFILL_PER_TICK_LIMIT`,
+ * default 500 per wallet per tick) bounds the additional load on
+ * the primary endpoint.
  *
  * The service enforces a per-tick `getTransactionFee` ceiling per
  * wallet (default 500). Across N wallets that's ~500 × N fee
