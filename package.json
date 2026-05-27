@@ -48,6 +48,8 @@
     "backfill:income": "tsx src/scripts/refill-income.ts",
     "reset:wallet-fee-cursors": "tsx src/scripts/reset-wallet-fee-cursors.ts",
     "reset:wallet-fee-cursors:prod": "node dist/scripts/reset-wallet-fee-cursors.js",
+    "run-now:wallet-fee-backfill": "tsx src/scripts/run-wallet-fee-backfill.ts",
+    "run-now:wallet-fee-backfill:prod": "node dist/scripts/run-wallet-fee-backfill.js",
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
