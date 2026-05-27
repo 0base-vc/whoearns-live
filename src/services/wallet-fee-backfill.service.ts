@@ -9,20 +9,29 @@ import type {
 
 export interface WalletFeeBackfillDeps {
   /**
-   * Solana RPC client used for `getSignaturesForAddress` +
-   * `getTransactionFee` walks. The dep name is `archiveRpc` for
-   * historical reasons (earlier revisions wired this against
-   * `SOLANA_ARCHIVE_RPC_URL`), but the worker now passes the
-   * PRIMARY RPC client. Reason: public archive endpoints
-   * (publicnode) were observed returning only ~1 signature per
-   * wallet on `getSignaturesForAddress`, structurally capping the
-   * backfill at one day of fee data regardless of the per-tick
-   * budget. The primary RPC retains full history.
-   *
-   * Cost is bounded by `maxFeeFetchesPerTick` so the additional
-   * load on the primary endpoint stays predictable.
+   * Primary Solana RPC (full history). Used for the INITIAL
+   * 365-day backfill of a wallet — the one walk where the cursor
+   * is null and the walk needs to reach back beyond any public
+   * archive endpoint's retention window. Typically a paid endpoint
+   * the operator wants to spare; the per-wallet, once-only nature
+   * of the initial walk keeps that cost bounded.
    */
-  archiveRpc: Pick<SolanaRpcClient, 'getSignaturesForAddress' | 'getTransactionFee'>;
+  primaryRpc: Pick<SolanaRpcClient, 'getSignaturesForAddress' | 'getTransactionFee'>;
+  /**
+   * Optional secondary RPC (`SOLANA_ARCHIVE_RPC_URL`, e.g.
+   * publicnode). Used for INCREMENTAL walks once a wallet has
+   * already been backfilled — those walks only need the recent
+   * window (typically ~60h) and that's exactly what public
+   * endpoints like publicnode retain. Offloading incremental work
+   * here costs zero on the paid primary endpoint.
+   *
+   * When unset, the service falls back to `primaryRpc` for both
+   * walk modes (same as the pre-tiered behaviour). Callers
+   * (the worker entrypoint) pass `archiveRpc` only when the env
+   * configures one; the offline `refill-income` script doesn't
+   * use this service so doesn't need to plumb it.
+   */
+  archiveRpc?: Pick<SolanaRpcClient, 'getSignaturesForAddress' | 'getTransactionFee'>;
   repo: Pick<WalletActivityRepository, 'upsertFeesBatch'>;
   /** Per-wallet ingest checkpoint store — same table as the indexer. */
   cursors: Pick<CursorsRepository, 'get' | 'upsert'>;
@@ -40,17 +49,31 @@ export interface WalletFeeBackfillDeps {
  * (single-call cap → per-signature round-trip). So fee data was
  * deferred.
  *
- * This service does the deferred work on a separate cadence:
+ * This service does the deferred work on a separate cadence, with
+ * a TIERED RPC routing scheme tuned to public-archive retention
+ * windows:
  *
- *   1. For each registered wallet, walk its signature history
- *      newest-first via `getSignaturesForAddress` against the
- *      PRIMARY RPC (`SOLANA_RPC_URL`). Earlier revisions tried
- *      public archive endpoints (publicnode) but they were observed
- *      returning only ~1 signature per wallet, structurally capping
- *      the backfill at one day of fee data.
- *   2. For each in-window signature, call `getTransactionFee(sig)` —
+ *   - INITIAL walk (`cursor.newestFeeFilled === null`): the wallet
+ *     is fresh, the walk needs to reach the 365-day cutoff. We use
+ *     `primaryRpc` because public archive endpoints
+ *     (publicnode) only retain ~60h of signature history — any
+ *     paginating walk against them caps at one day of data.
+ *   - INCREMENTAL walks (cursor already set): we only need new
+ *     signatures since the last checkpoint, which is at most a
+ *     few hours/days behind. That fits comfortably inside
+ *     publicnode's ~60h window, so we route through `archiveRpc`
+ *     (when configured) and keep the paid primary endpoint idle.
+ *   - BACKFILL-MODE walks (frontier set, dirty exit from earlier
+ *     tick): we're paginating older than the current cursor —
+ *     could be deep history. Use `primaryRpc` so the walk can
+ *     reach historical sigs publicnode dropped.
+ *
+ *   1. Pick RPC client per the above table.
+ *   2. Walk signature history newest-first (or from the backfill
+ *      frontier) via `getSignaturesForAddress`.
+ *   3. For each in-window signature, call `getTransactionFee(sig)` —
  *      returns the raw `meta.fee` lamports as `bigint | null`.
- *   3. Sum fees per UTC date, then `upsertFeesBatch` the per-day
+ *   4. Sum fees per UTC date, then `upsertFeesBatch` the per-day
  *      aggregates. The repo's fee column is owned single-writer by
  *      this service (the indexer never touches the column on
  *      conflict — see `WalletActivityRepository.upsertBatch`
@@ -147,6 +170,10 @@ export interface WalletFeeBackfillOptions {
 }
 
 export class WalletFeeBackfillService {
+  private readonly primaryRpc: Pick<
+    SolanaRpcClient,
+    'getSignaturesForAddress' | 'getTransactionFee'
+  >;
   private readonly archiveRpc: Pick<
     SolanaRpcClient,
     'getSignaturesForAddress' | 'getTransactionFee'
@@ -157,7 +184,13 @@ export class WalletFeeBackfillService {
   private readonly maxFeeFetchesPerTick: number;
 
   constructor(deps: WalletFeeBackfillDeps, options: WalletFeeBackfillOptions = {}) {
-    this.archiveRpc = deps.archiveRpc;
+    this.primaryRpc = deps.primaryRpc;
+    // No archive configured → degrade to "primary for both paths"
+    // (the pre-tiered behaviour). The walk logic below routes via
+    // this field for incremental walks; falling back to primary
+    // keeps the service functional even without an archive endpoint
+    // configured, just at higher primary-RPC cost.
+    this.archiveRpc = deps.archiveRpc ?? deps.primaryRpc;
     this.repo = deps.repo;
     this.cursors = deps.cursors;
     this.logger = deps.logger;
@@ -165,6 +198,26 @@ export class WalletFeeBackfillService {
       1,
       options.maxFeeFetchesPerTick ?? DEFAULT_MAX_FEE_FETCHES_PER_TICK,
     );
+  }
+
+  /**
+   * Pick the RPC client for this walk based on cursor state.
+   * See the class docstring for the routing table:
+   *   - Initial (cursor=null)        → primary (need 365-day reach)
+   *   - Incremental (cursor set)     → archive (recent window only)
+   *   - Backfill (frontier set)      → primary (paginating deeper history)
+   */
+  private pickRpc(cursor: FeeBackfillCursor): {
+    rpc: Pick<SolanaRpcClient, 'getSignaturesForAddress' | 'getTransactionFee'>;
+    mode: 'primary-initial' | 'primary-backfill' | 'archive-incremental';
+  } {
+    if (cursor.newestFeeFilled === null) {
+      return { rpc: this.primaryRpc, mode: 'primary-initial' };
+    }
+    if (cursor.backfillFrontier !== null) {
+      return { rpc: this.primaryRpc, mode: 'primary-backfill' };
+    }
+    return { rpc: this.archiveRpc, mode: 'archive-incremental' };
   }
 
   /**
@@ -183,11 +236,23 @@ export class WalletFeeBackfillService {
     daysWritten: number;
     signatures: number;
     fetched: number;
+    /**
+     * Which RPC tier ran this walk. Surfaces in the job's
+     * tick-complete log line so an operator can see at a glance
+     * whether the load fell on the paid primary endpoint or the
+     * free archive endpoint. See `pickRpc` for the routing table.
+     */
+    rpcMode: 'primary-initial' | 'primary-backfill' | 'archive-incremental';
   }> {
     const cursor = await this.readCheckpoint(walletPubkey);
 
     const todayUtc = new Date();
     const cutoffMs = todayUtc.getTime() - WINDOW_DAYS * 24 * 60 * 60 * 1000;
+
+    // Pick RPC for this walk per the routing table in the class
+    // docstring. We capture both the rpc reference + the human-
+    // readable mode for the tick-complete log line.
+    const { rpc: rpcForWalk, mode: rpcMode } = this.pickRpc(cursor);
 
     const isBackfill = cursor.backfillFrontier !== null;
     const feeBuckets = new Map<string, bigint>(); // dateStr → fee sum
@@ -223,7 +288,7 @@ export class WalletFeeBackfillService {
 
       let page: RpcSignatureInfo[];
       try {
-        page = await this.archiveRpc.getSignaturesForAddress(walletPubkey, options);
+        page = await rpcForWalk.getSignaturesForAddress(walletPubkey, options);
       } catch (err) {
         this.logger.warn(
           { err, wallet: walletPubkey, before },
@@ -271,7 +336,7 @@ export class WalletFeeBackfillService {
 
         let fee: bigint | null;
         try {
-          fee = await this.archiveRpc.getTransactionFee(sig.signature);
+          fee = await rpcForWalk.getTransactionFee(sig.signature);
         } catch (err) {
           this.logger.warn(
             { err, wallet: walletPubkey, signature: sig.signature },
@@ -388,7 +453,7 @@ export class WalletFeeBackfillService {
     }
     await this.writeCheckpoint(walletPubkey, nextCursor);
 
-    return { daysWritten, signatures, fetched };
+    return { daysWritten, signatures, fetched, rpcMode };
   }
 
   /** Read the per-wallet two-cursor checkpoint, if any. */

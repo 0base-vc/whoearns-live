@@ -217,16 +217,15 @@ config:
   # provider. A fallback `getBlock` null is treated as ambiguous and
   # does not permanently mark a leader slot skipped.
   solanaFallbackRpcUrl: ''
-  # Optional secondary RPC retained for the offline `refill-income`
-  # script's best-effort hot path. The live worker no longer uses it
-  # — earlier revisions wired the wallet-fee backfill against this
-  # endpoint, but public archive endpoints (publicnode) were observed
-  # returning only ~1 signature per wallet on
-  # `getSignaturesForAddress`, structurally capping the backfill at
-  # one day of fee data. The backfill now uses the primary RPC
-  # (`solanaRpcUrl`) which retains full history. Normal deployments
-  # can leave this empty.
-  solanaArchiveRpcUrl: ''
+  # Secondary RPC used by the wallet-fee backfill's INCREMENTAL
+  # walks (routine newest-first polling once a wallet has been
+  # backfilled once). publicnode retains ~60h of signature history
+  # — too short for the initial 365-day backfill (that runs on the
+  # primary RPC) but more than enough for incremental polling.
+  # Tiered routing keeps the paid primary endpoint idle on the
+  # common-case tick. Setting this to '' falls back to "primary
+  # for everything" — functional but more expensive.
+  solanaArchiveRpcUrl: 'https://solana-rpc.publicnode.com'
 
   # Optional Yellowstone gRPC endpoint for LIVE block streaming.
   # When set, the worker subscribes to block updates and processes
@@ -304,13 +303,13 @@ config:
   # ~4× vs hourly. Idempotent so partial runs are safe.
   walletActivityIntervalMs: '21600000'
   # Phase 4-extension — wallet fee backfill cadence + per-tick
-  # `getTransactionFee` budget. Runs against the PRIMARY RPC
-  # (`solanaRpcUrl`); public archive endpoints were observed
-  # returning only ~1 signature per wallet which made the backfill
-  # structurally incapable of producing useful data. 1 hr cadence
-  # lets a freshly-registered wallet catch up its 365-day fee
-  # history within ~a day at the default per-tick ceiling; the
-  # ceiling caps the extra load on the primary endpoint.
+  # `getTransactionFee` budget. Tiered RPC routing: the initial
+  # 365-day backfill per fresh wallet hits the primary
+  # (`solanaRpcUrl`, full history); routine incremental polling
+  # hits `solanaArchiveRpcUrl` (publicnode, ~60h retention).
+  # 1 hr cadence lets a freshly-registered wallet catch up its
+  # 365-day fee history within ~a day at the default per-tick
+  # ceiling, then settles into cheap incremental polling.
   walletFeeBackfillIntervalMs: '3600000'
   walletFeeBackfillPerTickLimit: '500'
   # Phase 2-extension — validators.app canonical client-kind

@@ -84,6 +84,7 @@ describe('WalletFeeBackfillService.backfillWallet', () => {
     cursors = new FakeCursorsRepo();
     svc = new WalletFeeBackfillService(
       {
+        primaryRpc: rpc as unknown as SolanaRpcClient,
         archiveRpc: rpc as unknown as SolanaRpcClient,
         repo: repo as unknown as WalletActivityRepository,
         cursors: cursors as unknown as CursorsRepository,
@@ -256,6 +257,7 @@ describe('WalletFeeBackfillService.backfillWallet', () => {
     const ceiling = 2;
     svc = new WalletFeeBackfillService(
       {
+        primaryRpc: rpc as unknown as SolanaRpcClient,
         archiveRpc: rpc as unknown as SolanaRpcClient,
         repo: repo as unknown as WalletActivityRepository,
         cursors: cursors as unknown as CursorsRepository,
@@ -355,5 +357,144 @@ describe('WalletFeeBackfillService.backfillWallet', () => {
     expect(result.fetched).toBe(0);
     expect(result.daysWritten).toBe(0);
     expect(repo.feeWrites.length).toBe(0);
+  });
+});
+
+describe('WalletFeeBackfillService — tiered RPC routing', () => {
+  // These tests use TWO distinct fake clients to verify that the
+  // service picks the right one per cursor state. The instances
+  // record per-call options so we can assert which RPC handled
+  // the walk.
+  let primary: FakeArchiveRpc;
+  let archive: FakeArchiveRpc;
+  let repo: FakeWalletActivityRepo;
+  let cursors: FakeCursorsRepo;
+  let svc: WalletFeeBackfillService;
+
+  beforeEach(() => {
+    primary = new FakeArchiveRpc();
+    archive = new FakeArchiveRpc();
+    repo = new FakeWalletActivityRepo();
+    cursors = new FakeCursorsRepo();
+    svc = new WalletFeeBackfillService(
+      {
+        primaryRpc: primary as unknown as SolanaRpcClient,
+        archiveRpc: archive as unknown as SolanaRpcClient,
+        repo: repo as unknown as WalletActivityRepository,
+        cursors: cursors as unknown as CursorsRepository,
+        logger: silent,
+      },
+      { maxFeeFetchesPerTick: 1000 },
+    );
+  });
+
+  it('routes the INITIAL walk (cursor null) to primary RPC', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const sig = mkSig(now);
+    primary.signatures = [sig];
+    primary.feesBySignature.set(sig.signature, 5_000n);
+    // Archive is deliberately empty + would NOT serve this sig —
+    // failing this assertion would mean we mis-routed.
+    archive.signatures = [];
+
+    const result = await svc.backfillWallet(WALLET);
+
+    expect(result.rpcMode).toBe('primary-initial');
+    expect(primary.sigCalls.length).toBe(1);
+    expect(archive.sigCalls.length).toBe(0);
+    expect(result.fetched).toBe(1);
+  });
+
+  it('routes INCREMENTAL walks (cursor set, no frontier) to archive RPC', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const oldSig = mkSig(now);
+    const newSig = mkSig(now);
+    // Pre-seed cursor as if the initial backfill already completed:
+    // newestFeeFilled set, no frontier.
+    await cursors.upsert({
+      jobName: `wallet-fee-backfill:${WALLET}`,
+      epoch: null,
+      lastProcessedSlot: null,
+      payload: { newestFeeFilled: oldSig.signature, backfillFrontier: null },
+    });
+    // Archive has the new sig (within its retention window) but
+    // NOT the cursor sig — that's exactly the publicnode shape:
+    // only the recent few days are queryable.
+    archive.signatures = [newSig];
+    archive.feesBySignature.set(newSig.signature, 7_000n);
+    // Primary deliberately empty — failing this assertion means
+    // we routed the incremental walk to primary.
+    primary.signatures = [];
+
+    const result = await svc.backfillWallet(WALLET);
+
+    expect(result.rpcMode).toBe('archive-incremental');
+    expect(archive.sigCalls.length).toBeGreaterThanOrEqual(1);
+    expect(primary.sigCalls.length).toBe(0);
+    expect(result.fetched).toBe(1);
+  });
+
+  it('routes BACKFILL-MODE walks (frontier set) to primary RPC', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const olderSig = mkSig(now);
+    const newest = mkSig(now);
+    // Pre-seed cursor as if a previous incremental tick hit misses
+    // and saved a frontier.
+    await cursors.upsert({
+      jobName: `wallet-fee-backfill:${WALLET}`,
+      epoch: null,
+      lastProcessedSlot: null,
+      payload: {
+        newestFeeFilled: newest.signature,
+        backfillFrontier: newest.signature,
+      },
+    });
+    // Primary has the historical sig the backfill needs to reach.
+    primary.signatures = [olderSig];
+    primary.feesBySignature.set(olderSig.signature, 6_000n);
+    // Archive shouldn't be touched for the backfill walk.
+    archive.signatures = [];
+
+    const result = await svc.backfillWallet(WALLET);
+
+    expect(result.rpcMode).toBe('primary-backfill');
+    expect(primary.sigCalls.length).toBeGreaterThanOrEqual(1);
+    expect(archive.sigCalls.length).toBe(0);
+  });
+
+  it('falls back to primary when archive is unset (degrades to non-tiered behaviour)', async () => {
+    // Construct WITHOUT archive — same as a deployment with
+    // `SOLANA_ARCHIVE_RPC_URL` unset. The service should route
+    // every walk to primary instead of throwing.
+    svc = new WalletFeeBackfillService(
+      {
+        primaryRpc: primary as unknown as SolanaRpcClient,
+        repo: repo as unknown as WalletActivityRepository,
+        cursors: cursors as unknown as CursorsRepository,
+        logger: silent,
+      },
+      { maxFeeFetchesPerTick: 1000 },
+    );
+    const now = Math.floor(Date.now() / 1000);
+    const oldSig = mkSig(now);
+    const newSig = mkSig(now);
+    await cursors.upsert({
+      jobName: `wallet-fee-backfill:${WALLET}`,
+      epoch: null,
+      lastProcessedSlot: null,
+      payload: { newestFeeFilled: oldSig.signature, backfillFrontier: null },
+    });
+    primary.signatures = [newSig];
+    primary.feesBySignature.set(newSig.signature, 4_000n);
+
+    const result = await svc.backfillWallet(WALLET);
+
+    // Mode label still reads "archive-incremental" because that's
+    // what the cursor state called for; the routing internally
+    // fell back to primary.
+    expect(result.rpcMode).toBe('archive-incremental');
+    expect(primary.sigCalls.length).toBeGreaterThanOrEqual(1);
+    expect(archive.sigCalls.length).toBe(0);
+    expect(result.fetched).toBe(1);
   });
 });

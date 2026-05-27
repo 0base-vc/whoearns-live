@@ -474,17 +474,23 @@ overhaul) still planned.
   first walks, `backfillFrontier` to resume a per-tick-ceiling-
   truncated walk on the next tick. Per-tick `getTransactionFee`
   budget is `WALLET_FEE_BACKFILL_PER_TICK_LIMIT` (default 500).
-- Backfill runs against the PRIMARY RPC (`SOLANA_RPC_URL`). An
-  earlier revision split it onto a separate `SOLANA_ARCHIVE_RPC_URL`
-  endpoint to keep `getTransactionFee` load off the primary, but
-  free public archive endpoints (publicnode) were observed
-  returning only ~1 signature per wallet from
-  `getSignaturesForAddress` — the backfill could call
-  `getTransactionFee` cheaply but had nothing to call it on,
-  structurally capping the result at one day of fee data. The
-  primary RPC retains full history. The per-tick budget cap
-  (`WALLET_FEE_BACKFILL_PER_TICK_LIMIT`, default 500) keeps the
-  extra load on the primary endpoint bounded.
+- Tiered RPC routing keeps cost predictable. Public archive
+  endpoints (publicnode) retain only ~60h of signature history —
+  too short for the initial 365-day backfill but more than enough
+  for routine incremental polling. So the service picks the RPC
+  per cursor state:
+  - cursor null (fresh wallet) → primary RPC (`SOLANA_RPC_URL`,
+    full history), runs once per wallet
+  - cursor set, no frontier (steady-state incremental walk) →
+    archive RPC (`SOLANA_ARCHIVE_RPC_URL`, ~60h window
+    sufficient since cursor is at most a few hours old)
+  - frontier set (paginating deeper than archive's retention) →
+    primary RPC again
+    Per-walk choice is logged at `wallet-fee-backfill: tick complete`
+    via `rpcModeCounts` so operators see the routing mix at a
+    glance. When `SOLANA_ARCHIVE_RPC_URL` is unset the service falls
+    back to "primary for everything" — functional, just more
+    expensive on the paid endpoint.
 - `OperatorActivityIndex.ingestStatus.walletFeesIngestActive` flips
   on once any `wallet_daily_activity` row has a positive fee value
   (`WalletActivityRepository.hasAnyFeeData()`). The UI heatmap

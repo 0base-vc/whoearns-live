@@ -16,21 +16,26 @@ export const WALLET_FEE_BACKFILL_JOB_NAME = 'wallet-fee-backfill';
  * Periodic per-wallet fee backfill.
  *
  * Sibling to `wallet-activity-ingester` — runs the same wallet
- * iteration loop on a longer cadence. Both jobs use the primary
- * RPC (`SOLANA_RPC_URL`). Earlier revisions split this onto an
- * archive endpoint (`SOLANA_ARCHIVE_RPC_URL`) but public archive
- * endpoints (publicnode) were observed returning only ~1 signature
- * per wallet from `getSignaturesForAddress`, structurally capping
- * the backfill at one day of fee data per wallet. The primary RPC
- * retains full history so the backfill can actually populate the
- * 365-day window.
+ * iteration loop on a longer cadence with TIERED RPC routing (see
+ * `WalletFeeBackfillService` class docstring for the full table):
+ *   - Fresh wallet (no cursor) → primary RPC (needs 365-day reach)
+ *   - Wallet with cursor       → archive RPC (incremental, ~60h
+ *                                 window suffices)
+ *   - Backfill-mode (frontier) → primary RPC (paginating older
+ *                                 than archive's window)
+ *
+ * The routing comes from a measurement: publicnode retains ~60h of
+ * signature history, plenty for incremental polling but too short
+ * to back-walk a year. So the primary endpoint pays the once-per-
+ * wallet 365-day backfill; the archive endpoint pays every routine
+ * subsequent tick.
  *
  * Cost note: `getTransactionFee` is one RPC round-trip per signature
  * — significantly heavier than the activity-ingester's
  * `getSignaturesForAddress` (1000 sigs per round-trip). The
  * per-tick budget cap (`WALLET_FEE_BACKFILL_PER_TICK_LIMIT`,
- * default 500 per wallet per tick) bounds the additional load on
- * the primary endpoint.
+ * default 500 per wallet per tick) bounds the cost regardless of
+ * which RPC tier handles the walk.
  *
  * The service enforces a per-tick `getTransactionFee` ceiling per
  * wallet (default 500). Across N wallets that's ~500 × N fee
@@ -63,14 +68,24 @@ export function createWalletFeeBackfillJob(deps: WalletFeeBackfillJobDeps): Job 
       let totalSigs = 0;
       let totalFetched = 0;
       let walletsProcessed = 0;
+      // Count walks by RPC tier so the tick log makes the routing
+      // mix observable to operators (e.g. "all incremental, no
+      // primary load this tick").
+      const rpcModeCounts = {
+        'primary-initial': 0,
+        'primary-backfill': 0,
+        'archive-incremental': 0,
+      };
       for (const wallet of wallets) {
         if (signal.aborted) return;
         try {
-          const { daysWritten, signatures, fetched } = await deps.backfill.backfillWallet(wallet);
+          const { daysWritten, signatures, fetched, rpcMode } =
+            await deps.backfill.backfillWallet(wallet);
           totalDays += daysWritten;
           totalSigs += signatures;
           totalFetched += fetched;
           walletsProcessed += 1;
+          rpcModeCounts[rpcMode] += 1;
         } catch (err) {
           deps.logger.warn({ err, wallet }, 'wallet-fee-backfill: backfillWallet failed');
         }
@@ -80,12 +95,12 @@ export function createWalletFeeBackfillJob(deps: WalletFeeBackfillJobDeps): Job 
       // dashboards show progress.
       if (totalFetched === 0) {
         deps.logger.debug(
-          { walletsProcessed, totalDays, totalSigs, totalFetched },
+          { walletsProcessed, totalDays, totalSigs, totalFetched, rpcModeCounts },
           'wallet-fee-backfill: tick complete (no fees fetched)',
         );
       } else {
         deps.logger.info(
-          { walletsProcessed, totalDays, totalSigs, totalFetched },
+          { walletsProcessed, totalDays, totalSigs, totalFetched, rpcModeCounts },
           'wallet-fee-backfill: tick complete',
         );
       }
