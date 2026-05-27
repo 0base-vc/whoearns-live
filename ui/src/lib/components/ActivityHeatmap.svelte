@@ -272,6 +272,16 @@
     return parts.join(' · ');
   }
 
+  /**
+   * Tooltip text for the brightest-day star overlay. Prefixed with
+   * "Brightest day" so a reader who hovers a randomly-marked cell
+   * sees WHY the star is there, not just the day's data (which the
+   * underlying cell `<title>` already provides on its own hover).
+   */
+  function starTooltip(cell: HeatmapCell): string {
+    return `Brightest day · ${cellTooltip(cell)}`;
+  }
+
   const lastActiveLabel = $derived.by(() => {
     if (lastActive === null) return null;
     if (lastActive === 0) return 'Active today';
@@ -401,7 +411,7 @@
         Fri
       </text>
 
-      <!-- Cells -->
+      <!-- Cells (visible, 12×12) -->
       {#each cells as cell (cell.date)}
         <rect
           x={DAY_LABEL_WIDTH + cell.weekColumn * STEP}
@@ -412,21 +422,52 @@
           fill={cellFill(cell.intensity, cell.inWindow)}
           stroke={cell.isToday ? 'var(--color-brand-500)' : 'none'}
           stroke-width={cell.isToday ? 1.5 : 0}
+        />
+      {/each}
+
+      <!--
+        Per-cell hover hit area — a transparent overlay that covers
+        BOTH the cell + half of each gutter, so hovering the gap
+        between cells still lands on the nearer day's tooltip
+        instead of falling through to the SVG background. Native
+        SVG `<title>` is OS-rendered (~500ms hover delay, no fancy
+        styling), but it's the most robust cross-device option —
+        custom HTML tooltips on a 53×7 grid would need fixed-
+        position overlay management for the horizontal-scroll
+        container, which is more risk than reward at this size.
+      -->
+      {#each cells as cell (`hit-${cell.date}`)}
+        <rect
+          x={DAY_LABEL_WIDTH + cell.weekColumn * STEP - CELL_GAP / 2}
+          y={MONTH_LABEL_HEIGHT + cell.dayRow * STEP - CELL_GAP / 2}
+          width={CELL_SIZE + CELL_GAP}
+          height={CELL_SIZE + CELL_GAP}
+          fill="transparent"
+          pointer-events="all"
         >
           <title>{cellTooltip(cell)}</title>
         </rect>
       {/each}
 
-      <!-- Brightest-day star overlay — see `ariaSummary` for AT equivalent. -->
+      <!--
+        Brightest-day star overlay. Sits ABOVE the hit-area layer
+        so a hover on the star itself gets the star's "Brightest
+        day · ..." tooltip rather than the underlying cell's plain
+        tooltip. `aria-hidden` removed because the `<title>` is
+        meaningful content now; the AT summary still surfaces the
+        same info via `ariaSummary`.
+      -->
       {#if peakCell !== null && peakInWindow}
         {@const cx = DAY_LABEL_WIDTH + peakCell.weekColumn * STEP + CELL_SIZE / 2}
         {@const cy = MONTH_LABEL_HEIGHT + peakCell.dayRow * STEP + CELL_SIZE / 2}
-        <g transform="translate({cx - 4} {cy - 4})" aria-hidden="true">
+        <g transform="translate({cx - 4} {cy - 4})">
+          <title>{starTooltip(peakCell)}</title>
           <path
             d="M4 0 L5 3 L8 3 L5.5 5 L6.5 8 L4 6 L1.5 8 L2.5 5 L0 3 L3 3 Z"
             fill="var(--color-brand-500)"
             stroke="white"
             stroke-width="0.5"
+            pointer-events="all"
           />
         </g>
       {/if}
