@@ -124,7 +124,19 @@
   });
 </script>
 
-<div class="relative mx-auto" style="width: {size}px; height: {size}px;" aria-label={ariaLabel}>
+<!--
+  `role="img"` is required for `aria-label` to actually announce
+  on a bare `<div>` — without an explicit role, Chrome and Safari
+  treat the label as decorative and skip it. With the role, screen
+  readers reach the composite-and-tier label that the rest of the
+  card reinforces visually.
+-->
+<div
+  class="relative mx-auto"
+  style="width: {size}px; height: {size}px;"
+  role="img"
+  aria-label={ariaLabel}
+>
   <svg
     xmlns="http://www.w3.org/2000/svg"
     viewBox="0 0 {VIEWBOX_SIZE} {VIEWBOX_SIZE}"

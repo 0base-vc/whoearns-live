@@ -329,7 +329,13 @@
   const reliabilityFloor = $derived(
     isReliabilityFloorTriggered({
       slotsAssigned: tierWindow.slotsAssigned,
-      slotsSkipped: tierWindow.slotsSkipped,
+      // Wilson-upper alignment: the floor is checked against
+      // `1 − reliability` (the same wilsonUpper the backend uses)
+      // rather than the raw point-estimate skip rate. Earlier the
+      // UI used the point estimate and silently disagreed with the
+      // backend for small samples — the floor banner would not
+      // render for capped validators with thin windows.
+      reliability: tierComponents.reliability,
     }),
   );
   const tierLabel = $derived(TIER_LABEL[tier.tier]);
@@ -428,9 +434,14 @@
   const windowStillFilling = $derived(tierWindow.epochs < WINDOW_CLOSED_EPOCHS);
 
   // Skip-rate point estimate as a display percentage — used by the
-  // reliability-floor warn chip.
+  // reliability-floor warn chip and the Validator facts row. Returns
+  // null for zero-slot validators so consumers can render "—" rather
+  // than a misleading "0.0%" (a validator that never had a leader
+  // slot has no skip rate to report).
   const skipRatePctLabel = $derived(
-    ((tierWindow.slotsSkipped / Math.max(1, tierWindow.slotsAssigned)) * 100).toFixed(1),
+    tierWindow.slotsAssigned > 0
+      ? ((tierWindow.slotsSkipped / tierWindow.slotsAssigned) * 100).toFixed(1)
+      : null,
   );
   // Skip-rate floor 0.20 → "20" for the warn chip's recovery copy.
   const skipFloorPctLabel = (SKIP_RATE_FLOOR * 100).toFixed(0);
@@ -570,6 +581,24 @@
   -->
   <link rel="canonical" href="{SITE_URL}/income/{scoring.vote}" />
 </svelte:head>
+
+<!--
+  Back-breadcrumb to the canonical `/income/<vote>` surface. The hub
+  is reachable only from inside the income page via the "Operator
+  profile →" hand-off strip, so a delegator drilling down into this
+  page needs an obvious way out. `aria-label` names the destination
+  for screen readers; the visible glyph reads as a back chevron
+  rather than a generic link.
+-->
+<nav class="mb-4" aria-label="Breadcrumb">
+  <a
+    href={`/income/${scoring.vote}`}
+    class="inline-flex min-h-11 items-center gap-1 text-xs text-[color:var(--color-text-muted)] transition-colors hover:text-[color:var(--color-brand-500)]"
+  >
+    <span aria-hidden="true">←</span>
+    Back to income view
+  </a>
+</nav>
 
 <!-- ─────────── 1. Identity hero ─────────── -->
 <Card tone="raised">
@@ -843,9 +872,9 @@
           >
             <span aria-hidden="true">⚠</span>
             <span>
-              Skip rate {skipRatePctLabel}% is above the {skipFloorPctLabel}% reliability floor —
-              this hard-caps the tier at Kindling regardless of economic percentile. Bring it under
-              {skipFloorPctLabel}% to lift the cap.
+              Skip rate {skipRatePctLabel ?? '—'}% is above the {skipFloorPctLabel}% reliability
+              floor — this hard-caps the tier at Kindling regardless of economic percentile. Bring
+              it under {skipFloorPctLabel}% to lift the cap.
             </span>
           </div>
         {/if}
@@ -919,9 +948,21 @@
         -->
         {#if compositeMath}
           <div class="overflow-x-auto">
+            <!--
+              `<colgroup>` pins explicit widths so the metric-name
+              column doesn't eat the numeric columns when the
+              browser auto-distributes. Last column is widest to
+              fit "Contribution".
+            -->
             <table class="w-full text-sm">
+              <colgroup>
+                <col />
+                <col class="w-20" />
+                <col class="w-20" />
+                <col class="w-24" />
+              </colgroup>
               <thead
-                class="text-[10px] uppercase tracking-wider text-[color:var(--color-text-subtle)]"
+                class="text-[10px] uppercase tracking-wider text-[color:var(--color-text-muted)]"
               >
                 <tr class="border-b border-[color:var(--color-border-default)]">
                   <th scope="col" class="text-left py-1.5 pr-3 font-medium">Sub-component</th>
@@ -930,9 +971,20 @@
                   <th scope="col" class="text-right py-1.5 pl-2 font-medium">Contribution</th>
                 </tr>
               </thead>
-              <tbody class="divide-y divide-[color:var(--color-border-default)]">
-                <tr class="align-top">
-                  <th scope="row" class="text-left py-2.5 pr-3 font-medium">
+              <tbody>
+                <!--
+                  Each sub-component spans TWO rows: a data row with
+                  the row-header label + value/weight/contribution
+                  numerics, then a hint row with `<td colspan="4">`
+                  carrying the "what moves it" copy. Splitting the
+                  hint out of the `<th scope="row">` stops screen
+                  readers from re-announcing the entire hint as part
+                  of the row header for every numeric cell — the
+                  data row reads as a clean four-column row, the
+                  hint reads as an explanatory note.
+                -->
+                <tr class="align-baseline">
+                  <th scope="row" class="text-left pt-2.5 pr-3 font-medium">
                     <span class="inline-flex items-center gap-1.5">
                       Reliability
                       {#if reliabilityFloor}
@@ -942,82 +994,93 @@
                         >
                       {/if}
                     </span>
-                    <p class="mt-0.5 text-xs font-normal text-[color:var(--color-text-muted)]">
-                      Pessimistic skip-rate upper bound (Wilson 95%). Lower skip rate raises it;
-                      hard-capped at Kindling if skip exceeds 20%.
-                    </p>
                   </th>
-                  <td class="text-right tabular-nums py-2.5 px-2"
+                  <td class="text-right tabular-nums pt-2.5 px-2"
                     >{compositeMath.reliabilityPct.toFixed(1)}%</td
                   >
                   <td
-                    class="text-right tabular-nums py-2.5 px-2 text-[color:var(--color-text-muted)]"
+                    class="text-right tabular-nums pt-2.5 px-2 text-[color:var(--color-text-muted)]"
                     >0.30</td
                   >
-                  <td class="text-right tabular-nums py-2.5 pl-2 font-semibold"
+                  <td class="text-right tabular-nums pt-2.5 pl-2 font-semibold"
                     >{compositeMath.reliabilityTerm.toFixed(1)}</td
                   >
                 </tr>
-                <tr class="align-top">
-                  <th scope="row" class="text-left py-2.5 pr-3 font-medium">
-                    Economic percentile
-                    <p class="mt-0.5 text-xs font-normal text-[color:var(--color-text-muted)]">
-                      Cohort rank of median fee + Jito tip per leader slot vs
-                      {tierWindow.economicCohortSize.toLocaleString()} indexed peers. Higher fee + tip
-                      capture per slot raises it.
-                    </p>
-                  </th>
-                  <td class="text-right tabular-nums py-2.5 px-2"
+                <tr class="border-b border-[color:var(--color-border-default)]">
+                  <td colspan="4" class="pb-2.5 text-xs text-[color:var(--color-text-muted)]">
+                    Conservative reliability estimate — counts both skip rate AND sample size, so
+                    small windows can't claim 100%. Lower skip rate AND more leader slots raise it;
+                    tier is hard-capped at Kindling if reliability drops below 80%.
+                  </td>
+                </tr>
+                <tr class="align-baseline">
+                  <th scope="row" class="text-left pt-2.5 pr-3 font-medium">Economic percentile</th>
+                  <td class="text-right tabular-nums pt-2.5 px-2"
                     >{compositeMath.economicPct.toFixed(1)}%</td
                   >
                   <td
-                    class="text-right tabular-nums py-2.5 px-2 text-[color:var(--color-text-muted)]"
+                    class="text-right tabular-nums pt-2.5 px-2 text-[color:var(--color-text-muted)]"
                     >0.63</td
                   >
-                  <td class="text-right tabular-nums py-2.5 pl-2 font-semibold"
+                  <td class="text-right tabular-nums pt-2.5 pl-2 font-semibold"
                     >{compositeMath.economicTerm.toFixed(1)}</td
                   >
                 </tr>
-                <tr class="align-top">
-                  <th scope="row" class="text-left py-2.5 pr-3 font-medium">
-                    CU subscore
-                    <p class="mt-0.5 text-xs font-normal text-[color:var(--color-text-muted)]">
-                      {#if compositeMath.cuFallback}
-                        Validator produced no blocks in the window — defaults to economic percentile
-                        so it isn't penalised on a metric it had no chance to register.
-                      {:else}
-                        Cohort rank of producedBlock-weighted average compute units per block.
-                        Denser block packing raises it.
-                      {/if}
-                    </p>
-                  </th>
-                  <td class="text-right tabular-nums py-2.5 px-2"
+                <tr class="border-b border-[color:var(--color-border-default)]">
+                  <td colspan="4" class="pb-2.5 text-xs text-[color:var(--color-text-muted)]">
+                    Cohort rank of median fee + MEV tip per leader slot vs
+                    {tierWindow.economicCohortSize.toLocaleString()} indexed peers. Higher fee + tip capture
+                    per slot raises it.
+                  </td>
+                </tr>
+                <tr class="align-baseline">
+                  <th scope="row" class="text-left pt-2.5 pr-3 font-medium">CU subscore</th>
+                  <td class="text-right tabular-nums pt-2.5 px-2"
                     >{compositeMath.cuSubscorePct.toFixed(1)}%</td
                   >
                   <td
-                    class="text-right tabular-nums py-2.5 px-2 text-[color:var(--color-text-muted)]"
+                    class="text-right tabular-nums pt-2.5 px-2 text-[color:var(--color-text-muted)]"
                     >0.07</td
                   >
-                  <td class="text-right tabular-nums py-2.5 pl-2 font-semibold"
+                  <td class="text-right tabular-nums pt-2.5 pl-2 font-semibold"
                     >{compositeMath.cuTerm.toFixed(1)}</td
                   >
+                </tr>
+                <tr>
+                  <td colspan="4" class="pb-2.5 text-xs text-[color:var(--color-text-muted)]">
+                    {#if compositeMath.cuFallback}
+                      Validator produced no blocks in the window — defaults to economic percentile
+                      so it isn't penalised on a metric it had no chance to register.
+                    {:else}
+                      Cohort rank of average compute units per produced block. Denser block packing
+                      raises it.
+                    {/if}
+                  </td>
                 </tr>
               </tbody>
               <tfoot class="border-t-2 border-[color:var(--color-border-default)]">
                 <tr>
-                  <th scope="row" class="text-left pt-3 pr-3 font-semibold">
+                  <!--
+                    `colspan="3"` on the label cell pulls the
+                    composite total right against the Contribution
+                    column — the previous version left two empty
+                    `<td>`s between the label and the number, which
+                    screen readers announced as "blank, blank" and
+                    visually fragmented the row.
+                  -->
+                  <th scope="row" colspan="3" class="text-left pt-3 pr-3 font-semibold">
                     Composite
                     <span class="font-normal text-[color:var(--color-text-muted)]">
                       — {tierLabel}
                       {#if reliabilityFloor}
                         (capped by skip-rate floor)
-                      {:else if tier.tier !== 'kindling'}
+                      {:else if tier.tier === 'kindling'}
+                        &lt; {TIER_CUTOFFS.hearth}
+                      {:else if tier.tier !== 'unrated'}
                         ≥ {TIER_CUTOFFS[tier.tier as Exclude<NodeTier, 'kindling' | 'unrated'>]}
                       {/if}
                     </span>
                   </th>
-                  <td class="pt-3 px-2"></td>
-                  <td class="pt-3 px-2"></td>
                   <td class="text-right tabular-nums pt-3 pl-2 font-bold text-base"
                     >{compositeMath.composite}</td
                   >
@@ -1032,7 +1095,7 @@
             collapsible. Same facts, one screen-friendly row.
           -->
           <p class="text-xs text-[color:var(--color-text-muted)]">
-            <span class="text-[color:var(--color-text-subtle)]">Measurement:</span>
+            <span class="text-[color:var(--color-text-muted)]">Measurement:</span>
             {tierWindow.epochs} of {WINDOW_CLOSED_EPOCHS} closed epochs · {tierWindow.economicCohortSize.toLocaleString()}
             peers compared{#if economicMedianSol !== null}
               · median ◎{economicMedianSol} / slot{/if}{#if tierWindow.cohortAsOfEpoch}
@@ -1040,6 +1103,21 @@
                 .toEpoch}{/if}{#if windowStillFilling}
               (window still filling){/if}. Percentile is ranked against the validators WhoEarns
             indexes, not the whole cluster.
+          </p>
+          <!--
+            "Glossary →" deep-link so an operator or delegator
+            unfamiliar with terms ("Wilson upper bound", "CU
+            subscore", "cohort percentile") has a one-click path
+            to the definitions. Muted styling — supplementary, not
+            a CTA.
+          -->
+          <p class="text-xs">
+            <a
+              href="/glossary"
+              class="inline-flex min-h-11 items-center text-[color:var(--color-text-muted)] hover:text-[color:var(--color-brand-500)] hover:underline"
+            >
+              Glossary — definitions of every term on this card →
+            </a>
           </p>
         {/if}
       </div>
@@ -1164,7 +1242,13 @@
         <dt class="text-xs uppercase tracking-wider text-[color:var(--color-text-subtle)]">
           Skip rate
         </dt>
-        <dd class="text-right tabular-nums">{skipRatePctLabel}%</dd>
+        <dd class="text-right tabular-nums">
+          {#if skipRatePctLabel !== null}
+            {skipRatePctLabel}%
+          {:else}
+            <span class="text-[color:var(--color-text-muted)]">—</span>
+          {/if}
+        </dd>
 
         <dt class="text-xs uppercase tracking-wider text-[color:var(--color-text-subtle)]">
           Median income / slot

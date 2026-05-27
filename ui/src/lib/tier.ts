@@ -204,25 +204,26 @@ export function skipRate(window: NodeTierBody['window']): number | null {
 }
 
 /**
- * `true` when the reliability hard floor fired (skip rate above
- * `SKIP_RATE_FLOOR`). Used by the UI to show the "capped at kindling"
- * explanation chip even when the visible tier is, in fact, `kindling`
- * — the visible tier alone doesn't reveal whether the cap was the
- * cause or whether the validator simply scored low on economics.
+ * `true` when the reliability hard floor fired — the backend's
+ * `computeTier` caps the tier at `kindling` whenever the Wilson
+ * upper bound on skip rate exceeds `SKIP_RATE_FLOOR`. The UI uses
+ * the same check so the floor banner, warn glyph, and capped-suffix
+ * on the composite footer render on EXACTLY the same set of
+ * validators the backend caps.
  *
- * Reads the WILSON-UPPER skip rate, not the point estimate — the
- * backend's `computeTier` does the same.
+ * `reliability` from the API is already `1 − wilsonUpperSkip`, so
+ * `wilsonUpperSkip = 1 − reliability`. Earlier this used the point
+ * estimate (`slotsSkipped / slotsAssigned`) which silently
+ * disagrees with the backend for small samples — a validator
+ * capped by the backend's Wilson check could see no UI signal
+ * because the point estimate sat below the floor.
  */
-export function isReliabilityFloorTriggered(
-  window: Pick<NodeTierBody['window'], 'slotsAssigned' | 'slotsSkipped'>,
-): boolean {
-  if (window.slotsAssigned < MIN_LEADER_SLOTS_FOR_TIER) return false;
-  // Wilson upper bound is roughly the worst plausible skip rate. We
-  // could replicate the full Wilson math here, but for the floor check
-  // a slightly-conservative point estimate is fine — operators near
-  // the boundary need a real reason to investigate either way.
-  const pointEstimate = window.slotsAssigned === 0 ? 0 : window.slotsSkipped / window.slotsAssigned;
-  return pointEstimate > SKIP_RATE_FLOOR;
+export function isReliabilityFloorTriggered(args: {
+  slotsAssigned: number;
+  reliability: number;
+}): boolean {
+  if (args.slotsAssigned < MIN_LEADER_SLOTS_FOR_TIER) return false;
+  return 1 - args.reliability > SKIP_RATE_FLOOR;
 }
 
 /** The next tier above a composite + the exact integer gap to reach it. */
@@ -277,49 +278,12 @@ export function nextTierGap(composite: number): TierGap | null {
   return null;
 }
 
-/**
- * Reliability is treated as "near its ceiling" above this value —
- * past it the economic percentile is the only practical lever, so
- * `scoreLever` stops naming reliability as something to improve.
- */
-const RELIABILITY_NEAR_CEILING = 0.97;
-
-/**
- * One-line "what raises your score" guidance for the tier card —
- * names the underlying lever the operator actually controls
- * (skip rate / fee + tip capture / block density) rather than the
- * abstract sub-component label, so the copy reads as an action
- * rather than a glossary entry.
- *
- * Returns `null` when there is nothing constructive to say:
- *
- *   - unrated (`composite === null`): the `unratedReason` copy
- *     already states what's missing.
- *   - skip-floor capped: the warn chip owns the recovery message.
- *     Naming economic percentile here would be actively wrong — the
- *     tier is hard-capped regardless of it.
- *
- * Otherwise it weight-ranks the two live levers, surfacing the
- * income side alone once reliability is already near its ceiling.
- */
-export function scoreLever(args: {
-  composite: number | null;
-  reliability: number;
-  reliabilityFloorTriggered: boolean;
-}): string | null {
-  if (args.composite === null) return null;
-  if (args.reliabilityFloorTriggered) return null;
-  if (args.reliability >= RELIABILITY_NEAR_CEILING) {
-    // Reliability is near 100% — only the economic side moves the
-    // composite meaningfully. Name the operator-controlled lever
-    // (income per leader slot) rather than the abstract metric.
-    return 'Income per leader slot is the lever here — it drives the 70% economic portion. Capture more block fees + Jito tips per slot to climb; denser block packing also nudges the 7% CU subscore.';
-  }
-  // Both signals can move the score. Lead with skip rate because it's
-  // the more directly operator-controllable input (uptime, hardware,
-  // colocation, client tuning).
-  return 'Two operator-controllable inputs move this score: skip rate (30% weight via reliability) and income per leader slot (70% via economic percentile + CU subscore). Lowering skip rate AND raising per-slot income capture both push the composite.';
-}
+// `scoreLever` (one-line "what raises your score" guidance) was
+// retired in the b620300 hub refactor — the sub-component breakdown
+// table now names the lever inline under each metric name, so the
+// separate paragraph form is no longer wired. Constants kept here in
+// case another surface needs the helper; the function was removed
+// to delete dead code.
 
 /**
  * Compose a one-line trust summary for the hub's identity hero.
@@ -363,7 +327,11 @@ const TRUST_CLIENT_LABEL: Record<string, string> = {
  * scannable one-liner and the suffix carries no delegator signal.
  */
 function trimClientVersion(version: string): string {
-  return version.split(/[-+]/, 1)[0] ?? version;
+  // `String.split(regex, 1)` returns `['']` for an empty input
+  // (never undefined), so `?? version` was dead. `|| version`
+  // keeps the empty-string fallback returning the raw input
+  // verbatim rather than rendering as a blank.
+  return version.split(/[-+]/, 1)[0] || version;
 }
 
 export function trustSummary(parts: {
