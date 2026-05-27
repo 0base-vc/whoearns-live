@@ -194,6 +194,37 @@ export function intensityBucket(txCount: number): IntensityBucket {
 }
 
 /**
+ * Map a per-day fee total (lamports) to a visual intensity bucket.
+ * Same shape as `intensityBucket(txCount)`, with thresholds chosen
+ * for the operator-wallet population (not whale wallets):
+ *
+ *   0 lam                         → 0 (empty — no fee data yet OR genuinely zero)
+ *   1 - 10_000 lam (≤ 2 base fees) → 1 (very light)
+ *   10_001 - 100_000 lam           → 2 (light)
+ *   100_001 - 1_000_000 lam (~0.001 SOL) → 3 (medium)
+ *   > 1_000_000 lam                → 4 (heavy)
+ *
+ * Base fee on Solana is 5000 lamports per signature, so bucket 1
+ * approximates "1-2 simple txs" and bucket 4 "lots of priority-fee
+ * burn or hundreds of txs". The 10× steps match the tx-count
+ * function's log-aesthetic so the visual reading transfers cleanly
+ * between modes.
+ *
+ * Boundaries are FIXED (not cohort-percentile) for the same reason
+ * as `intensityBucket`: cross-wallet comparison works because every
+ * heatmap uses the same scale. A future iteration may switch to
+ * cohort percentile when there are enough claimed wallets for a
+ * meaningful sample (see `docs/scoring.md` Phase 4).
+ */
+export function feeIntensityBucket(lamports: bigint): IntensityBucket {
+  if (lamports <= 0n) return 0;
+  if (lamports <= 10_000n) return 1;
+  if (lamports <= 100_000n) return 2;
+  if (lamports <= 1_000_000n) return 3;
+  return 4;
+}
+
+/**
  * One cell in the grid. The component renders these into an SVG
  * `<rect>` per entry, then attaches per-cell hover handlers.
  *
@@ -210,7 +241,21 @@ export interface HeatmapCell {
   dayRow: number;
   /** Zero-filled count from the activity response, or 0 when out of window. */
   txCount: number;
-  /** Intensity bucket from `intensityBucket(txCount)`. */
+  /**
+   * Per-day fee total in lamports. `0n` when the wallet-fee backfill
+   * hasn't reached this day yet OR when the day genuinely has no
+   * activity. Combined with `txCount` you can distinguish "unfilled"
+   * (`txCount > 0 && txFeesLamports === 0n`) from "no activity"
+   * (`txCount === 0`).
+   */
+  txFeesLamports: bigint;
+  /**
+   * Intensity bucket. `intensityBucket(txCount)` in count mode,
+   * `feeIntensityBucket(txFeesLamports)` in fees mode. The mode is
+   * a parameter to `buildGridCells` because the same cell array
+   * is used to render both modes (the consumer flips the prop
+   * based on `ingestStatus.walletFeesIngestActive`).
+   */
   intensity: IntensityBucket;
   /** `true` when the date is within `[windowStartDate, endDate]`. */
   inWindow: boolean;
@@ -219,15 +264,67 @@ export interface HeatmapCell {
 }
 
 /**
+ * Which signal drives the intensity colour. `count` (default) is the
+ * Phase 4 ship — `tx_count` log-bucketed. `fees` is the Phase 4-
+ * extension once `WalletFeeBackfillService` has populated
+ * `tx_fees_lamports` and the API flips `walletFeesIngestActive`.
+ */
+export type HeatmapMode = 'count' | 'fees';
+
+/**
+ * Sparse → dense for fees. Mirrors `zeroFillWindow` but extracts
+ * `txFeesLamports` (parsed from the decimal-string API field) into
+ * a `Map<string, bigint>`. `null` and malformed strings collapse to
+ * `0n`. Days outside the window are filtered out so the caller's
+ * grid stays consistent with the count-side window.
+ */
+export function zeroFillFeeWindow(
+  entries: ReadonlyArray<OperatorWalletActivityEntry>,
+  endDate: Date,
+  days = 365,
+): Map<string, bigint> {
+  const out = new Map<string, bigint>();
+  const end = utcMidnight(endDate);
+  const start = windowStartDate(end, days);
+  const startTs = start.getTime();
+  const endTs = end.getTime();
+
+  for (let ts = startTs; ts <= endTs; ts += 86_400_000) {
+    out.set(formatUtcDate(new Date(ts)), 0n);
+  }
+  for (const entry of entries) {
+    const t = Date.parse(entry.date);
+    if (Number.isNaN(t) || t < startTs || t > endTs) continue;
+    if (entry.txFeesLamports === null) continue;
+    try {
+      const v = BigInt(entry.txFeesLamports);
+      out.set(entry.date, v < 0n ? 0n : v);
+    } catch {
+      // Malformed decimal string — treat as unfilled (0n). The day
+      // still renders, just with no fee signal until the next
+      // backfill pass writes a valid value.
+    }
+  }
+  return out;
+}
+
+/**
  * Build every cell in the 53 × 7 grid. The output order is
  * column-major (week 0 day 0, week 0 day 1, …, week 0 day 6,
  * week 1 day 0, …) — matches the visual scan order an SVG `<g>`
  * + `<rect>` pattern would render.
+ *
+ * `feesFilled` is optional — when omitted the cells carry `0n`
+ * fees and the `fees` mode degrades to all-empty cells. Pass it
+ * (via `zeroFillFeeWindow`) when the API has fee data and the
+ * caller plans to render in `mode='fees'`.
  */
 export function buildGridCells(
   zeroFilled: Map<string, number>,
   endDate: Date,
   days = 365,
+  mode: HeatmapMode = 'count',
+  feesFilled?: Map<string, bigint>,
 ): HeatmapCell[] {
   const cells: HeatmapCell[] = [];
   const end = utcMidnight(endDate);
@@ -241,12 +338,19 @@ export function buildGridCells(
       const dateStr = formatUtcDate(cellDate);
       const inWindow = cellDate >= windowStart && cellDate <= end;
       const txCount = inWindow ? (zeroFilled.get(dateStr) ?? 0) : 0;
+      const txFeesLamports = inWindow ? (feesFilled?.get(dateStr) ?? 0n) : 0n;
+      const intensity = inWindow
+        ? mode === 'fees'
+          ? feeIntensityBucket(txFeesLamports)
+          : intensityBucket(txCount)
+        : 0;
       cells.push({
         date: dateStr,
         weekColumn: week,
         dayRow: day,
         txCount,
-        intensity: inWindow ? intensityBucket(txCount) : 0,
+        txFeesLamports,
+        intensity,
         inWindow,
         isToday: dateStr === todayStr && inWindow,
       });

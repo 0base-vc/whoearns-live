@@ -1415,6 +1415,7 @@
         walletAddressShort={walletEntry.walletAddressShort}
         label={walletEntry.label}
         entries={walletEntry.activity?.entries ?? []}
+        mode={scoring.oai?.ingestStatus.walletFeesIngestActive ? 'fees' : 'count'}
       />
     {/each}
   </section>

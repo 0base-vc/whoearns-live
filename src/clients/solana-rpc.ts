@@ -702,6 +702,66 @@ export class SolanaRpcClient {
   }
 
   /**
+   * Fetch just the lamport-fee field of a single transaction.
+   *
+   * Used by the Phase 4 wallet-fee backfill job. Returns `null` when
+   * the signature isn't found (RPC missed the slot, archive node not
+   * yet caught up, signature invalid) OR when `meta.fee` is missing /
+   * malformed — both cases tell the caller "no authoritative fee
+   * available right now, try again later", so the day's row stays
+   * unfilled rather than silently locked at 0.
+   *
+   * Why a separate method from `getTransaction`: that one projects
+   * accountKeys + numRequiredSignatures + instructions for memo
+   * verification and has callers that depend on the exact shape.
+   * Fee-only readers don't need to pay for parsing the instruction
+   * list, and a parallel method keeps the contracts disjoint so
+   * neither caller leaks responsibility into the other.
+   *
+   * `meta.fee` is total lamports charged for the tx (base + priority
+   * fee combined). For wallet-activity backfill we don't decompose;
+   * the operator's interest is "how much SOL did this wallet burn on
+   * tx fees this day". `bigint` because a year of priority-fee burns
+   * can exceed `Number.MAX_SAFE_INTEGER`.
+   *
+   * Versioned txs are accepted via `maxSupportedTransactionVersion: 0`.
+   */
+  async getTransactionFee(signature: string): Promise<bigint | null> {
+    const raw = await this.enqueue<{
+      meta?: { fee?: unknown } | null;
+    } | null>('getTransaction', [
+      signature,
+      {
+        encoding: 'json',
+        maxSupportedTransactionVersion: 0,
+        commitment: 'finalized',
+      },
+    ]);
+    if (raw === null) return null;
+    const feeRaw = raw.meta?.fee;
+    if (feeRaw === null || feeRaw === undefined) return null;
+    if (typeof feeRaw === 'number') {
+      // RPC returns fee as a JSON number (lamports fits in JS number
+      // for any single tx, but we widen to bigint immediately for
+      // safety against future per-tx caps and for ergonomics when
+      // summing across thousands of txs).
+      if (!Number.isFinite(feeRaw) || feeRaw < 0) return null;
+      return BigInt(Math.floor(feeRaw));
+    }
+    if (typeof feeRaw === 'string') {
+      // Some providers JSON-encode large lamport amounts as strings.
+      // Tolerate both shapes; reject malformed (non-decimal) strings.
+      try {
+        const v = BigInt(feeRaw);
+        return v < 0n ? null : v;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Fetch gossip ContactInfo for every node currently in the cluster.
    * Used by Phase 2 client-kind indexing to map identity pubkeys to
    * their advertised version string.

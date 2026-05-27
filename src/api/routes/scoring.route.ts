@@ -41,7 +41,7 @@ export interface ScoringRoutesDeps {
   profilesRepo: Pick<ProfilesRepository, 'findOptedOutVotes'>;
   validatorGithubRepo: Pick<ValidatorGithubRepository, 'findActiveByVote'>;
   operatorWalletsRepo: Pick<OperatorWalletsRepository, 'listActiveByVote'>;
-  walletActivityRepo: Pick<WalletActivityRepository, 'listRecentForWallets'>;
+  walletActivityRepo: Pick<WalletActivityRepository, 'listRecentForWallets' | 'hasAnyFeeData'>;
   simdDiscussionsRepo: Pick<SimdDiscussionsRepository, 'statsByUsername' | 'hasAnyData'>;
 }
 

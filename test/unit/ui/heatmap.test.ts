@@ -8,12 +8,14 @@ import {
   buildGridCells,
   dayOfWeekUtc,
   daysSinceMostRecentActive,
+  feeIntensityBucket,
   formatUtcDate,
   gridStartDate,
   intensityBucket,
   monthLabels,
   utcMidnight,
   windowStartDate,
+  zeroFillFeeWindow,
   zeroFillWindow,
 } from '../../../ui/src/lib/heatmap.js';
 import type { OperatorWalletActivityEntry } from '../../../ui/src/lib/types.js';
@@ -201,6 +203,68 @@ describe('intensityBucket', () => {
   });
 });
 
+describe('feeIntensityBucket', () => {
+  // Bucket boundaries (lamports/day): 0 / ≤10k / ≤100k / ≤1M / >1M.
+  // Boundary values cover the cut points where a one-lamport
+  // difference would change the bucket — easy to silently break
+  // with a `<` / `<=` swap.
+  it('returns 0 for zero or negative', () => {
+    expect(feeIntensityBucket(0n)).toBe(0);
+    expect(feeIntensityBucket(-5n)).toBe(0);
+  });
+
+  it('maps 1 - 10_000 lam to bucket 1', () => {
+    expect(feeIntensityBucket(1n)).toBe(1);
+    expect(feeIntensityBucket(10_000n)).toBe(1);
+  });
+
+  it('maps 10_001 - 100_000 lam to bucket 2', () => {
+    expect(feeIntensityBucket(10_001n)).toBe(2);
+    expect(feeIntensityBucket(100_000n)).toBe(2);
+  });
+
+  it('maps 100_001 - 1_000_000 lam to bucket 3', () => {
+    expect(feeIntensityBucket(100_001n)).toBe(3);
+    expect(feeIntensityBucket(1_000_000n)).toBe(3);
+  });
+
+  it('maps > 1_000_000 lam to bucket 4', () => {
+    expect(feeIntensityBucket(1_000_001n)).toBe(4);
+    expect(feeIntensityBucket(10n ** 15n)).toBe(4);
+  });
+});
+
+describe('zeroFillFeeWindow', () => {
+  it('parses non-null decimal strings into bigint and zero-fills the rest', () => {
+    const entries: OperatorWalletActivityEntry[] = [
+      { date: '2026-05-17', txCount: 1, txFeesLamports: '12345' },
+      { date: '2026-05-16', txCount: 1, txFeesLamports: null },
+    ];
+    const out = zeroFillFeeWindow(entries, END_SUN, 7);
+    expect(out.get('2026-05-17')).toBe(12_345n);
+    // null → unfilled → 0n
+    expect(out.get('2026-05-16')).toBe(0n);
+    // Days untouched by entries pre-seed to 0n.
+    expect(out.get('2026-05-15')).toBe(0n);
+  });
+
+  it('tolerates malformed strings (treats them as unfilled)', () => {
+    const entries: OperatorWalletActivityEntry[] = [
+      { date: '2026-05-17', txCount: 1, txFeesLamports: 'not-a-number' },
+    ];
+    const out = zeroFillFeeWindow(entries, END_SUN, 7);
+    expect(out.get('2026-05-17')).toBe(0n);
+  });
+
+  it('clamps negative values to 0n', () => {
+    const entries: OperatorWalletActivityEntry[] = [
+      { date: '2026-05-17', txCount: 1, txFeesLamports: '-1000' },
+    ];
+    const out = zeroFillFeeWindow(entries, END_SUN, 7);
+    expect(out.get('2026-05-17')).toBe(0n);
+  });
+});
+
 describe('buildGridCells', () => {
   it('always emits HEATMAP_WEEKS × 7 cells', () => {
     const filled = zeroFillWindow([], END_SUN, 365);
@@ -234,6 +298,40 @@ describe('buildGridCells', () => {
     expect(c?.inWindow).toBe(true);
     expect(c?.txCount).toBe(12);
     expect(c?.intensity).toBe(3); // 11-30
+  });
+
+  it('renders intensity from fee buckets when mode = "fees"', () => {
+    // 12 tx (bucket 3 in count mode) but only 5000 lamports total
+    // (bucket 1 in fees mode) — switching modes should flip the
+    // intensity even though the day's other data is identical.
+    const entries: OperatorWalletActivityEntry[] = [
+      { date: '2026-05-15', txCount: 12, txFeesLamports: '5000' },
+    ];
+    const counts = zeroFillWindow(entries, END_SUN, 365);
+    const fees = zeroFillFeeWindow(entries, END_SUN, 365);
+    const inCountMode = buildGridCells(counts, END_SUN, 365, 'count', fees);
+    const inFeesMode = buildGridCells(counts, END_SUN, 365, 'fees', fees);
+    const c1 = inCountMode.find((c) => c.date === '2026-05-15');
+    const c2 = inFeesMode.find((c) => c.date === '2026-05-15');
+    expect(c1?.intensity).toBe(3); // 12 tx → bucket 3 (11-30)
+    expect(c2?.intensity).toBe(1); // 5000 lam → bucket 1 (≤10k)
+    // Both cells carry the SAME data — only the intensity binding
+    // differs. The component reads txFeesLamports for the tooltip
+    // regardless of mode.
+    expect(c1?.txFeesLamports).toBe(5000n);
+    expect(c2?.txFeesLamports).toBe(5000n);
+  });
+
+  it('falls back to 0n txFeesLamports when feesFilled is omitted', () => {
+    const filled = zeroFillWindow([entry('2026-05-15', 12)], END_SUN, 365);
+    const cells = buildGridCells(filled, END_SUN, 365);
+    const c = cells.find((cc) => cc.date === '2026-05-15');
+    expect(c?.txFeesLamports).toBe(0n);
+    // Without fee data the cell renders as empty under fees mode —
+    // verify the function picks bucket 0 in that case.
+    const fmode = buildGridCells(filled, END_SUN, 365, 'fees');
+    const cFees = fmode.find((cc) => cc.date === '2026-05-15');
+    expect(cFees?.intensity).toBe(0);
   });
 
   it('column-major order: (week*7 + day) iterates Sun→Sat within each week', () => {

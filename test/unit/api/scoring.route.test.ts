@@ -145,6 +145,7 @@ function buildDeps(
     },
     walletActivityRepo: {
       listRecentForWallets: async () => [],
+      hasAnyFeeData: async () => false,
     },
     simdDiscussionsRepo: {
       // Governance ingest active + the linked username has comments →

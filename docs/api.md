@@ -909,10 +909,14 @@ Response:
 
 Days with zero activity are omitted; clients zero-fill at render
 time. Newest-first. `txFeesLamports` is the per-day sum of tx fees
-the wallet paid as `feePayer`. Phase 4 ships counts only — the
-field is `null` today (not `"0"`) so a client summing fees can
-detect the unavailable-data state. Backfill ships in a follow-up
-indexer pass (see `docs/roadmap.md`).
+the wallet paid as `feePayer`, populated by the Phase 4-extension
+`WalletFeeBackfillService` (`getTransactionFee` per signature against
+`SOLANA_ARCHIVE_RPC_URL`). Rows the backfill hasn't reached yet (or
+every row when the archive endpoint is unconfigured) carry `null` —
+`null` is intentional vs `"0"` so a consumer summing fees can
+distinguish "unfilled" from "zero". Every landed tx pays at least
+5000 lamports of base fee, so a genuine `0` is impossible for a day
+with `txCount > 0`.
 
 The endpoint is gated on registered-wallet membership. Probes for
 unregistered or expired-registration wallets return HTTP 404
@@ -1048,9 +1052,11 @@ read it even when `governance.score` is `null`.
 
 - `governanceIngestActive` — has the GitHub Discussions ingest
   produced data? `false` until that worker job ships.
-- `walletFeesIngestActive` — does per-day `txFeesLamports` data
-  exist? P4 ships tx-counts only (`txFeesLamports` is structurally
-  `null` everywhere), so `false` until the fee backfill ships.
+- `walletFeesIngestActive` — has the `WalletFeeBackfillService`
+  populated any per-day `txFeesLamports` row? `false` when the
+  archive RPC is unconfigured or the backfill hasn't completed its
+  first pass yet. Drives the UI heatmap intensity binding (tx-count
+  vs lamports/day).
 
 `composite` is also `null` in the genuine cold-start case where
 neither half has any signal — clients should render an empty state

@@ -418,7 +418,9 @@ Storage:
 
 ### Phase 4 — Wallet Activity (365-day grid)
 
-**Status:** partial — tx-count indexing + read endpoint live; fee anchoring + activity score planned.
+**Status:** partial — tx-count indexing + read endpoint + per-day fee
+backfill live; cohort-percentile activity score (the OAI walletScore
+overhaul) still planned.
 
 #### Live now
 
@@ -437,19 +439,44 @@ Storage:
 > aggregate per-day counts, a single mis-bucketed tx is invisible at
 > that scale, and the drift averages out.
 
+#### Live now (Phase 4-extension)
+
+- `WalletFeeBackfillService` + `wallet-fee-backfill` job — walks each
+  registered wallet's `getSignaturesForAddress` history newest-first,
+  fetches `getTransactionFee(sig)` per signature, sums by UTC date,
+  writes via `WalletActivityRepository.upsertFeesBatch` (single-
+  writer ownership of `tx_fees_lamports`; the indexer's
+  placeholder `0n` never overwrites a backfilled value). Two-cursor
+  checkpoint mirrors the indexer's: `newestFeeFilled` for newest-
+  first walks, `backfillFrontier` to resume a per-tick-ceiling-
+  truncated walk on the next tick. Per-tick `getTransactionFee`
+  budget is `WALLET_FEE_BACKFILL_PER_TICK_LIMIT` (default 500).
+- Backfill runs against `SOLANA_ARCHIVE_RPC_URL`, NOT the primary
+  RPC — `getTransactionFee` is one round-trip per signature, so the
+  job would multiply the primary endpoint's RPC spend by ~10× if
+  not isolated. When `SOLANA_ARCHIVE_RPC_URL` is unset the worker
+  skips the job registration entirely and `txFeesLamports` stays
+  `null` everywhere.
+- `OperatorActivityIndex.ingestStatus.walletFeesIngestActive` flips
+  on once any `wallet_daily_activity` row has a positive fee value
+  (`WalletActivityRepository.hasAnyFeeData()`). The UI heatmap
+  reads this flag to switch intensity binding from log-bucketed
+  tx-count to log-bucketed lamports/day; the tooltip surfaces both
+  the daily fee sum AND the avg lamports/tx so a viewer can spot a
+  spam pattern (large count, tiny avg).
+
 #### Planned next
 
-- **Fee anchoring**: `txFeesLamports` is reserved at `null` today
-  because `getSignaturesForAddress` doesn't return fee data and
-  per-signature `getTransaction` would 10× the RPC cost. A
-  scheduled backfill batched against the priority-fee ingester's
-  existing block reads will populate fees without new round-trips.
-- **Activity score**: per-day intensity =
-  `log10(daily_tx_fees_lamports + 1)` percentile within the cohort
-  of claimed operator wallets. The fee anchor makes gaming the score
-  cost SOL — count alone could be inflated with 1-lamport spam tx.
-  Displayed as a GitHub-style 53×7 grid; the share asset is a
-  1200×630 PNG. Cannot ship without the fee data above.
+- **Cohort-percentile activity score**: today the heatmap intensity
+  uses fixed log-bucket thresholds for cross-wallet comparability;
+  the OAI `walletScore` still uses `saturate(activeDaysLast90, 30)`
+  (the count-based proxy that shipped in Phase 6). The intended end-
+  state is `walletScore = log10(daily_tx_fees_lamports + 1)`
+  percentile within the cohort of claimed operator wallets, which
+  needs a small claimed-wallet population before it's a meaningful
+  signal. The fee data exists now — the swap is purely the
+  computation in `services/operator-activity-index.ts` plus a new
+  repo query for the cohort distribution.
 
 ### Phase 5 — Pending SIMD widget + AI curation
 

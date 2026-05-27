@@ -18,7 +18,7 @@ export interface OaiRoutesDeps {
   profilesRepo: Pick<ProfilesRepository, 'findOptedOutVotes'>;
   validatorGithubRepo: Pick<ValidatorGithubRepository, 'findActiveByVote'>;
   operatorWalletsRepo: Pick<OperatorWalletsRepository, 'listActiveByVote'>;
-  walletActivityRepo: Pick<WalletActivityRepository, 'listRecentForWallets'>;
+  walletActivityRepo: Pick<WalletActivityRepository, 'listRecentForWallets' | 'hasAnyFeeData'>;
   simdDiscussionsRepo: Pick<SimdDiscussionsRepository, 'statsByUsername' | 'hasAnyData'>;
 }
 
@@ -154,8 +154,18 @@ export async function resolveOaiForValidator(
   //     username (expired attestations excluded).
   //   - `listActiveByVote`: the validator's ACTIVE registered
   //     wallets.
-  const [governanceIngestActive, githubLink, wallets] = await Promise.all([
+  const [governanceIngestActive, walletFeesIngestActive, githubLink, wallets] = await Promise.all([
     deps.simdDiscussionsRepo.hasAnyData(),
+    // Wallet-fee backfill liveness — true once
+    // `WalletFeeBackfillService` has produced any non-zero
+    // `tx_fees_lamports` row. Same shape as `hasAnyData`: a
+    // single-row EXISTS query, keyed on the table the read
+    // consumers depend on (not an `ingestion_cursors` job-name
+    // string), so it needs no coordination with the still-
+    // possibly-disabled backfill job. Drives the
+    // `ingestStatus.walletFeesIngestActive` flag the UI uses to
+    // pick between tx-count and fee-anchored heatmap intensity.
+    deps.walletActivityRepo.hasAnyFeeData(),
     deps.validatorGithubRepo.findActiveByVote(validator.votePubkey),
     deps.operatorWalletsRepo.listActiveByVote(validator.votePubkey),
   ]);
@@ -224,13 +234,13 @@ export async function resolveOaiForValidator(
     },
     ingestStatus: {
       governanceIngestActive,
-      // P4 ships tx-counts only; `wallet_daily_activity.txFeesLamports`
-      // is structurally `null` everywhere until the fee backfill
-      // ships (see `docs/scoring.md` Phase 4 — "Fee anchoring"
-      // planned). No per-day fee data exists to detect, so this is
-      // an honest constant `false` rather than an over-engineered
-      // detector for a provably-always-null field.
-      walletFeesIngestActive: false,
+      // True once the Phase 4-extension `WalletFeeBackfillService`
+      // has produced at least one non-zero `tx_fees_lamports` row
+      // (see `wallet-activity.repo.ts#hasAnyFeeData`). When false
+      // the column is structurally 0 everywhere and the UI heatmap
+      // intensity stays bound to `tx_count`; when true the UI
+      // switches to lamports/day intensity.
+      walletFeesIngestActive,
     },
   };
 }

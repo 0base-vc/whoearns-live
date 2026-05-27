@@ -122,8 +122,13 @@ function redactEventDetail(detail: unknown): unknown {
  * `GET /v1/claims/:vote?includeActivity=1`. `days` is the requested
  * window; `entries` are the sparse daily rows (zero-activity days
  * omitted — clients zero-fill at draw time). `txFeesLamports` is
- * `null` in this release — the indexer ships tx counts only; fee
- * backfill lands in a later pass.
+ * the per-day fee total as a decimal-string lamport amount once the
+ * `WalletFeeBackfillService` has touched the row; until then (or
+ * when `SOLANA_ARCHIVE_RPC_URL` is unset so the backfill never
+ * runs) it's `null` — `null` is intentional vs `"0"` so a consumer
+ * summing fees can detect the unavailable-data case. The API's
+ * `/v1/validators/:idOrVote/oai.ingestStatus.walletFeesIngestActive`
+ * flag flips on once any row has a non-null fee.
  *
  * Inline activity here is the ONLY public activity surface — there is
  * no per-wallet activity endpoint keyed on the full operator-wallet
@@ -418,9 +423,16 @@ const claimRoutes: FastifyPluginAsync<ClaimRoutesDeps> = async (
         const entry = {
           date: row.activityDate.toISOString().slice(0, 10),
           txCount: row.txCount,
-          // Counts-only release — `txFeesLamports` is null until the
-          // indexer backfill pass populates real values.
-          txFeesLamports: null as string | null,
+          // Rows the `WalletFeeBackfillService` hasn't reached yet
+          // carry `txFeesLamports = 0n` from the indexer's
+          // placeholder write. The API contract uses `null` for
+          // "no authoritative fee data" so consumers can distinguish
+          // "unfilled" from "genuinely zero" (impossible — every
+          // landed tx pays at least the 5000-lamport base fee).
+          // Once the backfill writes a positive value the column
+          // stays positive (single-writer per `upsertFeesBatch`
+          // semantics).
+          txFeesLamports: row.txFeesLamports > 0n ? row.txFeesLamports.toString() : null,
         };
         if (list === undefined) activityByWallet.set(row.walletPubkey, [entry]);
         else list.push(entry);

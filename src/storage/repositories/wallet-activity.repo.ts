@@ -34,8 +34,8 @@ export class WalletActivityRepository {
    * Batch-write per-day aggregates. Uses UNNEST so a 30-day backfill
    * is one round-trip.
    *
-   * **Last-writer-wins semantics (B6.b fix).** The previous version of
-   * this query used `GREATEST(existing, EXCLUDED)` for both
+   * **Last-writer-wins for `tx_count` (B6.b fix).** The previous version
+   * of this query used `GREATEST(existing, EXCLUDED)` for both
    * `tx_count` and `tx_fees_lamports`. The intent was "don't lose
    * count during partial backfills" but the effect was "lock in the
    * highest value ever seen, including bad ones." A single buggy
@@ -56,6 +56,19 @@ export class WalletActivityRepository {
    * `5` correctly settles to 5 (whatever the latest pass said).
    * Cross-day monotonicity is not a property this table is allowed
    * to claim — it's a daily aggregate, not a running total.
+   *
+   * **`tx_fees_lamports` is NOT touched on conflict.** The Phase 4
+   * indexer cannot read per-tx fees from `getSignaturesForAddress`
+   * (the RPC simply doesn't return them) so the indexer always passes
+   * `0n`. Letting that zero clobber a fee value written by the
+   * Phase 4-extension `WalletFeeBackfillService` would race the two
+   * jobs against each other forever — on every indexer tick the
+   * day's fee would reset to 0 until the next backfill pass restored
+   * it. So fee column ownership is single-writer: the backfill
+   * service (via `upsertFeesBatch`). The INSERT case still seeds
+   * `tx_fees_lamports` from EXCLUDED (which is `0` for indexer rows)
+   * so the column has a sane default; the UPDATE case preserves
+   * whatever the backfill wrote.
    */
   async upsertBatch(rows: ReadonlyArray<DailyActivityUpsert>): Promise<{ written: number }> {
     if (rows.length === 0) return { written: 0 };
@@ -88,12 +101,91 @@ export class WalletActivityRepository {
          FROM UNNEST($1::text[], $2::text[], $3::int[], $4::text[])
               AS v(wallet_pubkey, activity_date, tx_count, tx_fees_lamports)
        ON CONFLICT (wallet_pubkey, activity_date) DO UPDATE
-         SET tx_count         = EXCLUDED.tx_count,
-             tx_fees_lamports = EXCLUDED.tx_fees_lamports,
+         SET tx_count   = EXCLUDED.tx_count,
+             indexed_at = NOW()`,
+      [wallets, dates, counts, fees],
+    );
+    return { written: rowCount ?? 0 };
+  }
+
+  /**
+   * Batch-write per-day fee aggregates ONLY. Used by the Phase 4-
+   * extension `WalletFeeBackfillService` which walks a wallet's
+   * signature history via `SOLANA_ARCHIVE_RPC_URL`, fetches each
+   * signature's `meta.fee` via `getTransactionFee`, and sums by UTC
+   * day. The indexer never touches the fee column on conflict (see
+   * `upsertBatch` docstring) so this method is the sole writer of
+   * authoritative fee data.
+   *
+   * Insert vs update semantics:
+   *   - If a `(wallet, day)` row doesn't exist yet (e.g. a freshly
+   *     registered wallet whose backfill ran before the indexer), this
+   *     INSERTs with both `tx_count` AND `tx_fees_lamports` from the
+   *     backfill's walk. The backfill's `tx_count` is authoritative
+   *     for that day at that moment — it counted the same signatures
+   *     the fee fetches covered, so the count is internally consistent
+   *     with the fee.
+   *   - On conflict the row already exists; we update `tx_fees_lamports`
+   *     and **don't touch `tx_count`** so we don't fight the indexer's
+   *     last-writer-wins semantics. (The two counters can briefly
+   *     diverge — the backfill's count covers only signatures it
+   *     fetched fees for, while the indexer's count covers signatures
+   *     it observed including any that landed after the backfill.
+   *     That's acceptable: the indexer's count is the user-facing
+   *     "did this wallet do X tx today" answer, and fees follow on
+   *     the next backfill tick.)
+   */
+  async upsertFeesBatch(rows: ReadonlyArray<DailyActivityUpsert>): Promise<{ written: number }> {
+    if (rows.length === 0) return { written: 0 };
+    const wallets = rows.map((r) => r.walletPubkey);
+    const dates = rows.map((r) => r.activityDate);
+    const counts = rows.map((r) => r.txCount);
+    const fees = rows.map((r) => r.txFeesLamports.toString());
+    if (
+      wallets.length !== dates.length ||
+      wallets.length !== counts.length ||
+      wallets.length !== fees.length
+    ) {
+      throw new Error(
+        `upsertFeesBatch: array length mismatch ` +
+          `(wallets=${wallets.length}, dates=${dates.length}, ` +
+          `counts=${counts.length}, fees=${fees.length})`,
+      );
+    }
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO wallet_daily_activity
+         (wallet_pubkey, activity_date, tx_count, tx_fees_lamports, indexed_at)
+       SELECT v.wallet_pubkey, v.activity_date::date, v.tx_count::int,
+              v.tx_fees_lamports::numeric, NOW()
+         FROM UNNEST($1::text[], $2::text[], $3::int[], $4::text[])
+              AS v(wallet_pubkey, activity_date, tx_count, tx_fees_lamports)
+       ON CONFLICT (wallet_pubkey, activity_date) DO UPDATE
+         SET tx_fees_lamports = EXCLUDED.tx_fees_lamports,
              indexed_at       = NOW()`,
       [wallets, dates, counts, fees],
     );
     return { written: rowCount ?? 0 };
+  }
+
+  /**
+   * True iff at least one row in `wallet_daily_activity` has a
+   * non-zero `tx_fees_lamports`. Drives the API's
+   * `ingestStatus.walletFeesIngestActive` flag — once any backfill
+   * pass has produced real fee data, the flag flips on and the UI
+   * heatmap intensity switches from tx-count mode to fee mode.
+   *
+   * A `LIMIT 1` on a partial index over the same predicate keeps the
+   * cost constant regardless of table size.
+   */
+  async hasAnyFeeData(): Promise<boolean> {
+    const { rows } = await this.pool.query<{ has: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM wallet_daily_activity
+          WHERE tx_fees_lamports > 0
+          LIMIT 1
+       ) AS has`,
+    );
+    return rows[0]?.has === true;
   }
 
   /**

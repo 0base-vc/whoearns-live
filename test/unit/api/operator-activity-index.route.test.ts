@@ -50,6 +50,14 @@ function makeGithubLink(): ValidatorGithubLink {
  */
 function buildDeps(overrides: {
   governanceIngestActive?: boolean;
+  /**
+   * When `true`, `walletActivityRepo.hasAnyFeeData` resolves `true` —
+   * simulates the Phase 4-extension fee backfill having populated at
+   * least one row. Drives the `ingestStatus.walletFeesIngestActive`
+   * flag. Default `undefined` keeps the count-only release behaviour
+   * (`false`).
+   */
+  walletFeesIngestActive?: boolean;
   githubLink?: ValidatorGithubLink | null;
   statsRow?: { commentCount: number; reactionsReceived: number; activeWindowCount: number };
   /**
@@ -95,6 +103,7 @@ function buildDeps(overrides: {
     },
     walletActivityRepo: {
       listRecentForWallets: async () => [],
+      hasAnyFeeData: async () => overrides.walletFeesIngestActive ?? false,
     },
     simdDiscussionsRepo: {
       hasAnyData: async () => overrides.governanceIngestActive ?? false,
@@ -163,6 +172,26 @@ describe('GET /v1/validators/:idOrVote/operator-activity-index', () => {
     // is the governance-only blend, not null.
     expect(body.composite).not.toBeNull();
     expect(body.ingestStatus.governanceIngestActive).toBe(true);
+    await app.close();
+  });
+
+  it('flips walletFeesIngestActive on when the fee backfill has populated any row', async () => {
+    // The OAI route reads `walletActivityRepo.hasAnyFeeData()` as a
+    // single-query liveness signal — when it resolves `true` the
+    // ingest-status flag flips on regardless of whether this
+    // particular validator has wallet activity. The UI uses the
+    // flag to switch heatmap intensity from tx-count to lamports/day.
+    const app = await makeApp(buildDeps({ walletFeesIngestActive: true }));
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/operator-activity-index`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ingestStatus.walletFeesIngestActive).toBe(true);
+    // Governance stays gated out (no override) so the composite is
+    // null — independent of the wallet-fees flip.
+    expect(body.ingestStatus.governanceIngestActive).toBe(false);
     await app.close();
   });
 

@@ -12,6 +12,7 @@ import { GrpcBlockSubscriber } from '../services/grpc-block-subscriber.service.j
 import { SlotService } from '../services/slot.service.js';
 import { ValidatorService } from '../services/validator.service.js';
 import { WalletActivityIndexerService } from '../services/wallet-activity-indexer.service.js';
+import { WalletFeeBackfillService } from '../services/wallet-fee-backfill.service.js';
 import { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
 import { CursorsRepository } from '../storage/repositories/cursors.repo.js';
 import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
@@ -29,6 +30,7 @@ import { createClusterNodesIngesterJob } from '../jobs/cluster-nodes-ingester.jo
 import { createValidatorInfoRefreshJob } from '../jobs/validator-info-refresh.job.js';
 import { createSlotIngesterJob } from '../jobs/slot-ingester.job.js';
 import { createWalletActivityIngesterJob } from '../jobs/wallet-activity-ingester.job.js';
+import { createWalletFeeBackfillJob } from '../jobs/wallet-fee-backfill.job.js';
 import { createStakewizTenureIngesterJob } from '../jobs/stakewiz-tenure-ingester.job.js';
 import { StakewizClient } from '../clients/stakewiz.js';
 import { withRpcFallback } from '../jobs/rpc-fallback.js';
@@ -124,6 +126,25 @@ export async function startWorker(): Promise<void> {
           maxRetries: 0,
           logger,
           logExhaustedRetries: false,
+        })
+      : undefined;
+  // Archive RPC — dedicated to the wallet-fee-backfill job (Phase 4
+  // extension). The backfill issues `getTransactionFee` once per
+  // signature, which would be ruinous on the primary endpoint
+  // operators rely on for live ingest. Wired only when
+  // `SOLANA_ARCHIVE_RPC_URL` is set; when unset, the fee-backfill
+  // job is skipped entirely and `walletFeesIngestActive` stays false.
+  // No rate limiter is attached — the archive endpoint is expected
+  // to be a separate, idle-capacity provider (e.g. publicnode) where
+  // the backfill's per-tick budget is the limit.
+  const rpcArchive =
+    config.SOLANA_ARCHIVE_RPC_URL !== undefined
+      ? new SolanaRpcClient({
+          url: config.SOLANA_ARCHIVE_RPC_URL,
+          timeoutMs: config.SOLANA_RPC_TIMEOUT_MS,
+          concurrency: config.SOLANA_RPC_CONCURRENCY,
+          maxRetries: config.SOLANA_RPC_MAX_RETRIES,
+          logger,
         })
       : undefined;
   const blockFetcher =
@@ -330,6 +351,52 @@ export async function startWorker(): Promise<void> {
     // ingest jobs get RPC headroom first.
     initialDelayMs: 45_000,
   });
+
+  // Phase 4-extension — wallet fee backfill. Sibling to the activity
+  // indexer; runs against the ARCHIVE RPC (not primary) and is
+  // skipped entirely when no archive URL is configured. Once it's
+  // populated fee rows for any wallet the API flips
+  // `walletFeesIngestActive` on and the UI heatmap switches its
+  // intensity binding from tx-count to lamports/day.
+  if (rpcArchive !== undefined) {
+    const walletFeeBackfill = new WalletFeeBackfillService(
+      {
+        archiveRpc: rpcArchive,
+        repo: walletActivityRepo,
+        cursors: cursorsRepo,
+        logger,
+      },
+      { maxFeeFetchesPerTick: config.WALLET_FEE_BACKFILL_PER_TICK_LIMIT },
+    );
+    scheduler.register({
+      ...createWalletFeeBackfillJob({
+        operatorWalletsRepo,
+        backfill: walletFeeBackfill,
+        intervalMs: config.WALLET_FEE_BACKFILL_INTERVAL_MS,
+        logger,
+      }),
+      // +75s: last in the stagger. Heaviest per-tick RPC cost
+      // (one round-trip per signature, capped at the per-wallet
+      // ceiling) and uses a dedicated endpoint, so it shouldn't
+      // compete with the primary-path jobs at all — but the
+      // delayed start still keeps logs ordered with the other
+      // ingest jobs at boot.
+      initialDelayMs: 75_000,
+    });
+    logger.info(
+      {
+        archiveUrl: config.SOLANA_ARCHIVE_RPC_URL,
+        intervalMs: config.WALLET_FEE_BACKFILL_INTERVAL_MS,
+        perTickLimit: config.WALLET_FEE_BACKFILL_PER_TICK_LIMIT,
+      },
+      'wallet-fee-backfill enabled',
+    );
+  } else {
+    logger.info(
+      'wallet-fee-backfill disabled: SOLANA_ARCHIVE_RPC_URL is not set; ' +
+        'walletFeesIngestActive will stay false',
+    );
+  }
 
   // Tenure true-age — pulls stakewiz `first_epoch_with_stake` into
   // `validators.genesis_epoch` so the hub Tenure card shows real
