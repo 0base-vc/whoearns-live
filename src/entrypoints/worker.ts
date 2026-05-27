@@ -418,21 +418,18 @@ export async function startWorker(): Promise<void> {
 
   // Phase 2-extension — canonical client-kind classifier from
   // validators.app. Sibling to `cluster-nodes-ingester` (regex
-  // classifier from gossip version strings) but cadence is
-  // epoch-triggered rather than periodic. See the job's docstring
-  // for the two-classifier rationale.
+  // classifier from gossip version strings). Fixed 6 h cadence —
+  // see the job's docstring for the two-classifier rationale.
   scheduler.register({
     ...createValidatorsAppClientIngesterJob({
       validatorsAppClient: new ValidatorsAppClient({ logger }),
       validatorsRepo,
-      epochsRepo,
-      cursorsRepo,
       intervalMs: config.VALIDATORS_APP_INTERVAL_MS,
       logger,
     }),
     // +90s: last in the stagger. External HTTP, not RPC-critical,
-    // and the per-tick steady-state is two cheap DB queries until
-    // an epoch turns over.
+    // 6 h cadence so the boot tick doesn't compete with the
+    // primary-path jobs for outbound bandwidth.
     initialDelayMs: 90_000,
   });
 

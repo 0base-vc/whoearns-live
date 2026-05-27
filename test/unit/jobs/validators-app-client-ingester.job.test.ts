@@ -5,15 +5,8 @@ import type {
   ValidatorsAppProjection,
 } from '../../../src/clients/validators-app.js';
 import { createValidatorsAppClientIngesterJob } from '../../../src/jobs/validators-app-client-ingester.job.js';
-import type { CursorsRepository } from '../../../src/storage/repositories/cursors.repo.js';
-import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
 import type { ValidatorsRepository } from '../../../src/storage/repositories/validators.repo.js';
-import type {
-  EpochInfo,
-  IdentityPubkey,
-  IngestionCursor,
-  ValidatorClientUpsertInput,
-} from '../../../src/types/domain.js';
+import type { IdentityPubkey, ValidatorClientUpsertInput } from '../../../src/types/domain.js';
 
 const silent = pino({ level: 'silent' });
 
@@ -43,36 +36,6 @@ class FakeValidatorsRepo {
   }
 }
 
-class FakeEpochsRepo {
-  current: EpochInfo | null = null;
-  async findCurrent(): Promise<EpochInfo | null> {
-    return this.current;
-  }
-}
-
-class FakeCursorsRepo {
-  readonly rows = new Map<string, IngestionCursor>();
-  async get(jobName: string): Promise<IngestionCursor | null> {
-    return this.rows.get(jobName) ?? null;
-  }
-  async upsert(c: Omit<IngestionCursor, 'updatedAt'>): Promise<void> {
-    this.rows.set(c.jobName, { ...c, updatedAt: new Date() });
-  }
-}
-
-function mkEpoch(epoch: number): EpochInfo {
-  return {
-    epoch,
-    firstSlot: 0,
-    lastSlot: 100,
-    slotCount: 100,
-    currentSlot: null,
-    isClosed: false,
-    observedAt: new Date(),
-    closedAt: null,
-  };
-}
-
 function mkProjection(
   identity: string,
   clientId: number | null,
@@ -90,31 +53,24 @@ function mkProjection(
 describe('validators-app-client-ingester job', () => {
   let appClient: FakeValidatorsAppClient;
   let validatorsRepo: FakeValidatorsRepo;
-  let epochsRepo: FakeEpochsRepo;
-  let cursorsRepo: FakeCursorsRepo;
 
   beforeEach(() => {
     appClient = new FakeValidatorsAppClient();
     validatorsRepo = new FakeValidatorsRepo();
-    epochsRepo = new FakeEpochsRepo();
-    cursorsRepo = new FakeCursorsRepo();
   });
 
   function makeJob() {
     return createValidatorsAppClientIngesterJob({
       validatorsAppClient: appClient as unknown as ValidatorsAppClient,
       validatorsRepo: validatorsRepo as unknown as ValidatorsRepository,
-      epochsRepo: epochsRepo as unknown as EpochsRepository,
-      cursorsRepo: cursorsRepo as unknown as CursorsRepository,
-      intervalMs: 600_000,
+      intervalMs: 6 * 60 * 60 * 1000,
       logger: silent,
     });
   }
 
   const ctrl = new AbortController();
 
-  it('runs the fetch + classification on the first tick (no cursor)', async () => {
-    epochsRepo.current = mkEpoch(977);
+  it('fetches + classifies on every tick (fixed 6 h cadence)', async () => {
     appClient.validators.set(
       'IdHarmonic',
       mkProjection('IdHarmonic', 11, 'HarmonicFrankendancer', '0.909.0-rc.40001'),
@@ -132,67 +88,36 @@ describe('validators-app-client-ingester job', () => {
       'harmonic_frankendancer',
     );
     expect(byIdentity.get('IdAgaveBam' as IdentityPubkey)?.clientKind).toBe('agave_bam');
-    // Cursor is advanced to the current epoch — the next tick within
-    // the same epoch will short-circuit on the `<=` check.
-    const cursor = await cursorsRepo.get('validators-app-client-ingester');
-    expect(cursor?.epoch).toBe(977);
   });
 
-  it('short-circuits on subsequent ticks while the epoch is unchanged', async () => {
-    epochsRepo.current = mkEpoch(977);
-    await cursorsRepo.upsert({
-      jobName: 'validators-app-client-ingester',
-      epoch: 977,
-      lastProcessedSlot: null,
-      payload: null,
-    });
-    appClient.validators.set(
-      'IdHarmonic',
-      mkProjection('IdHarmonic', 11, 'HarmonicFrankendancer', '0.909.0-rc.40001'),
-    );
-
-    const job = makeJob();
-    await job.tick(ctrl.signal);
-
-    // The fetch never fires when the epoch hasn't advanced.
-    expect(appClient.callCount).toBe(0);
-    expect(validatorsRepo.upsertCalls.length).toBe(0);
-  });
-
-  it('re-runs the fetch on the next epoch transition', async () => {
-    epochsRepo.current = mkEpoch(978); // epoch advanced from 977 → 978
-    await cursorsRepo.upsert({
-      jobName: 'validators-app-client-ingester',
-      epoch: 977,
-      lastProcessedSlot: null,
-      payload: null,
-    });
+  it('runs again on the next tick without any cursor short-circuit', async () => {
     appClient.validators.set('IdRakurai', mkProjection('IdRakurai', 8, 'Rakurai', '2.1.0'));
 
     const job = makeJob();
     await job.tick(ctrl.signal);
+    await job.tick(ctrl.signal);
 
-    expect(appClient.callCount).toBe(1);
-    expect(validatorsRepo.upsertCalls[0]?.[0]?.clientKind).toBe('rakurai');
-    const cursor = await cursorsRepo.get('validators-app-client-ingester');
-    expect(cursor?.epoch).toBe(978);
+    // No epoch / cursor gate — both ticks fetch + write.
+    expect(appClient.callCount).toBe(2);
+    expect(validatorsRepo.upsertCalls.length).toBe(2);
   });
 
-  it('leaves the cursor untouched on a fetch failure (next tick retries)', async () => {
-    epochsRepo.current = mkEpoch(977);
+  it('swallows fetch failures and retries next tick', async () => {
     appClient.throwOnNextCall = new Error('upstream 503');
 
     const job = makeJob();
     await job.tick(ctrl.signal);
 
-    // No upsert, no cursor advance — next tick re-fires the same
-    // logic (no `<=` short-circuit because the cursor stays null).
+    // First tick failed → no upsert. Service stays up; next tick is
+    // a normal fetch.
     expect(validatorsRepo.upsertCalls.length).toBe(0);
-    expect(await cursorsRepo.get('validators-app-client-ingester')).toBeNull();
+
+    appClient.validators.set('IdAgave', mkProjection('IdAgave', 3, 'Agave', '4.0.0'));
+    await job.tick(ctrl.signal);
+    expect(validatorsRepo.upsertCalls.length).toBe(1);
   });
 
   it('degrades a row with no client info to "unknown" instead of dropping it', async () => {
-    epochsRepo.current = mkEpoch(977);
     // The validator exists in validators.app's response but with
     // no client_id and no recognisable name — we still want to
     // overwrite any stale classification with `unknown` rather
@@ -205,13 +130,12 @@ describe('validators-app-client-ingester job', () => {
     expect(validatorsRepo.upsertCalls[0]?.[0]?.clientKind).toBe('unknown');
   });
 
-  it('does nothing when the epochs table has no current epoch yet', async () => {
-    epochsRepo.current = null;
-
+  it('no-ops on an empty validators.app response', async () => {
+    appClient.validators.clear();
     const job = makeJob();
     await job.tick(ctrl.signal);
 
-    expect(appClient.callCount).toBe(0);
+    expect(appClient.callCount).toBe(1);
     expect(validatorsRepo.upsertCalls.length).toBe(0);
   });
 });

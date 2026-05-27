@@ -1,8 +1,6 @@
 import type { ValidatorsAppClient } from '../clients/validators-app.js';
 import type { Logger } from '../core/logger.js';
 import { clientKindFromValidatorsApp } from '../services/client-kind.js';
-import type { CursorsRepository } from '../storage/repositories/cursors.repo.js';
-import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import type { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import type { IdentityPubkey, ValidatorClientUpsertInput } from '../types/domain.js';
 import type { Job } from './scheduler.js';
@@ -10,8 +8,6 @@ import type { Job } from './scheduler.js';
 export interface ValidatorsAppClientIngesterJobDeps {
   validatorsAppClient: Pick<ValidatorsAppClient, 'fetchValidatorClients'>;
   validatorsRepo: Pick<ValidatorsRepository, 'upsertClientBatch'>;
-  epochsRepo: Pick<EpochsRepository, 'findCurrent'>;
-  cursorsRepo: Pick<CursorsRepository, 'get' | 'upsert'>;
   intervalMs: number;
   logger: Logger;
 }
@@ -19,7 +15,7 @@ export interface ValidatorsAppClientIngesterJobDeps {
 export const VALIDATORS_APP_CLIENT_INGESTER_JOB_NAME = 'validators-app-client-ingester';
 
 /**
- * Epoch-triggered ingester for canonical validator client kinds.
+ * Fixed-cadence ingester for canonical validator client kinds.
  *
  * Why a separate job (vs folding into `cluster-nodes-ingester`):
  *
@@ -32,21 +28,13 @@ export const VALIDATORS_APP_CLIENT_INGESTER_JOB_NAME = 'validators-app-client-in
  *     `ContactInfo.version.client` field that JSON-RPC drops. But
  *     it's an external dependency we'd rather not hit on every
  *     30-min tick.
- *   - Validator-client identity is sticky per epoch — operators
- *     don't fork upgrades on slot-timescales. Once an epoch turns
- *     over, a single refresh of validators.app's bulk endpoint
- *     captures the new client distribution; subsequent ticks within
- *     the same epoch would re-fetch the same data.
  *
- * So this job polls `intervalMs` (default 10 min) to CHECK the
- * current epoch, but only fetches + writes when the epoch has
- * advanced beyond the cursor. Steady-state during an epoch is one
- * cheap `findCurrent()` + one `cursors.get()` query per tick —
- * essentially free.
- *
- * Cursor schema: `ingestion_cursors.epoch` holds the last
- * fully-processed epoch. `null` means "never run" — the first
- * tick after deploy always does the work.
+ * 6 h cadence is the calibrated trade-off: operators upgrade on
+ * hour-scale cycles at fastest, and validators.app itself snapshots
+ * gossip on a similar timescale, so polling faster gives no extra
+ * signal while leaving a tighter latency budget against an external
+ * dependency. Same shape as the stakewiz tenure job — one bulk HTTP
+ * call per tick, idempotent upsert.
  *
  * Write semantics: both this job and the cluster-nodes job write
  * through `validators.upsertClientBatch`. The repo's `IS DISTINCT
@@ -55,12 +43,13 @@ export const VALIDATORS_APP_CLIENT_INGESTER_JOB_NAME = 'validators-app-client-in
  * common case). When they disagree, last-writer-wins on a per-tick
  * basis — the validators.app data is more authoritative, but it
  * runs much less often, so the steady state is "cluster-nodes
- * regex classification, replaced once per epoch by the canonical
+ * regex classification, replaced every 6 h by the canonical
  * validators.app classification".
  *
- * Failure mode: any throw is logged at warn and the cursor is NOT
- * advanced, so the next tick within the same epoch retries
- * (instead of waiting up to ~2-3 days for the next epoch turnover).
+ * Failure mode: any throw is logged at warn and the next tick
+ * retries. No cursor — the upsert is idempotent and the per-tick
+ * cost (one HTTP call + one batch write) is cheap enough that
+ * re-running is harmless.
  */
 export function createValidatorsAppClientIngesterJob(
   deps: ValidatorsAppClientIngesterJobDeps,
@@ -70,30 +59,6 @@ export function createValidatorsAppClientIngesterJob(
     intervalMs: deps.intervalMs,
     async tick(signal: AbortSignal): Promise<void> {
       try {
-        // 1. Cheap epoch-change check. Both reads are local DB —
-        //    no RPC, no network. The fetch + bulk write below only
-        //    runs once per epoch turnover.
-        const [current, cursor] = await Promise.all([
-          deps.epochsRepo.findCurrent(),
-          deps.cursorsRepo.get(VALIDATORS_APP_CLIENT_INGESTER_JOB_NAME),
-        ]);
-        if (current === null) {
-          deps.logger.debug('validators-app-client-ingester: no current epoch yet');
-          return;
-        }
-        const lastProcessedEpoch = cursor?.epoch ?? null;
-        if (lastProcessedEpoch !== null && current.epoch <= lastProcessedEpoch) {
-          deps.logger.debug(
-            { currentEpoch: current.epoch, lastProcessedEpoch },
-            'validators-app-client-ingester: epoch unchanged; skip',
-          );
-          return;
-        }
-
-        if (signal.aborted) return;
-
-        // 2. Epoch advanced (or first run) — fetch the canonical
-        //    classifications and reclassify the whole cluster.
         const validators = await deps.validatorsAppClient.fetchValidatorClients(signal);
         if (signal.aborted) return;
 
@@ -102,10 +67,10 @@ export function createValidatorsAppClientIngesterJob(
           return;
         }
 
-        // 3. Project to the `(identity, kind, version)` shape the
-        //    repo's UPDATE...FROM UNNEST expects. Same dedup-on-
-        //    identity guard as `cluster-nodes-ingester` in case the
-        //    upstream ever ships duplicates.
+        // Project to the `(identity, kind, version)` shape the
+        // repo's UPDATE...FROM UNNEST expects. Same dedup-on-
+        // identity guard as `cluster-nodes-ingester` in case the
+        // upstream ever ships duplicates.
         const byIdentity = new Map<IdentityPubkey, ValidatorClientUpsertInput>();
         for (const row of validators.values()) {
           const kind = clientKindFromValidatorsApp({
@@ -121,28 +86,22 @@ export function createValidatorsAppClientIngesterJob(
 
         const entries = [...byIdentity.values()];
         const { updated, attempted } = await deps.validatorsRepo.upsertClientBatch(entries);
+        const unchangedOrSkipped = attempted - updated;
 
-        // 4. Advance the cursor only after a successful write.
-        //    A throw in `upsertClientBatch` leaves the cursor at
-        //    `lastProcessedEpoch`, so the next tick re-tries the
-        //    same epoch instead of waiting for the next turnover.
-        await deps.cursorsRepo.upsert({
-          jobName: VALIDATORS_APP_CLIENT_INGESTER_JOB_NAME,
-          epoch: current.epoch,
-          lastProcessedSlot: null,
-          payload: null,
-        });
-
-        deps.logger.info(
-          {
-            epoch: current.epoch,
-            previousEpoch: lastProcessedEpoch,
-            observed: entries.length,
-            updated,
-            unchangedOrSkipped: attempted - updated,
-          },
-          'validators-app-client-ingester: epoch transition processed',
-        );
+        // Only log at `info` when the steady-state moves (mirrors
+        // the cluster-nodes ingester's heuristic). 6 h cadence means
+        // unchanged ticks would otherwise spam ~4 lines per day.
+        if (updated > 0) {
+          deps.logger.info(
+            { observed: entries.length, updated, unchangedOrSkipped },
+            'validators-app-client-ingester: classifications updated',
+          );
+        } else {
+          deps.logger.debug(
+            { observed: entries.length, unchangedOrSkipped },
+            'validators-app-client-ingester: no client drift this tick',
+          );
+        }
       } catch (err) {
         if (signal.aborted) return;
         deps.logger.warn({ err }, 'validators-app-client-ingester: tick failed');

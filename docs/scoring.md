@@ -369,12 +369,14 @@ deliberately separate from the tier.
     version-string format** (e.g. HarmonicFrankendancer publishes
     `0.909.0-rc.40001`, indistinguishable from upstream
     Frankendancer's `0.909.40001` by a trustworthy regex).
-  - `validators-app-client-ingester` runs at 10 min cadence but
-    only fetches when the epoch has advanced (steady-state is two
-    cheap DB queries per tick). validators.app runs a gossip CRDS
-    listener and decodes the 16-bit `ContactInfo.version.client`
-    field that JSON-RPC `getClusterNodes` drops — the canonical
-    Solana Foundation client ID, per the
+  - `validators-app-client-ingester` runs at a fixed 6 h cadence
+    (operators upgrade on hour-scale cycles at fastest, and the
+    upstream snapshots gossip on a similar timescale; polling
+    faster gives no extra signal). validators.app runs a gossip
+    CRDS listener and decodes the 16-bit
+    `ContactInfo.version.client` field that JSON-RPC
+    `getClusterNodes` drops — the canonical Solana Foundation
+    client ID, per the
     `solana-foundation/solana-validator-client-ids` registry.
     This source can distinguish all 14 registered variants
     (Solana Labs, Jito Labs, Frankendancer, Agave, Paladin,
@@ -384,8 +386,8 @@ deliberately separate from the tier.
     repo's `IS DISTINCT FROM` guard makes the no-drift case a
     no-op; on drift, last-writer-wins per tick. The validators.app
     classifier is more authoritative but runs much less often, so
-    the steady state is "cluster-nodes regex output, replaced once
-    per epoch by the canonical validators.app classification".
+    the steady state is "cluster-nodes regex output, refreshed
+    every 6 h by the canonical validators.app classification".
   - Surfaced on `/badges` and persisted on `validators.client_kind`
     for future category leaderboards.
 
