@@ -175,7 +175,7 @@ describe('WalletActivityIngesterService.ingestWallet', () => {
 
     await svc.ingestWallet(WALLET);
 
-    const after = await cursors.get(`wallet-activity-ingester:${WALLET}`);
+    const after = await cursors.get(`wallet-activity:${WALLET}`);
     expect(after?.payload?.['newestSignature']).toBe(good.signature);
     expect(after?.payload?.['backfillFrontier']).toBe(missed.signature);
   });
@@ -187,7 +187,7 @@ describe('WalletActivityIngesterService.ingestWallet', () => {
     rpc.feeAndPayerBySig.set(s1.signature, { fee: 5_000n, feePayer: WALLET });
     // Pre-seed checkpoint at s1 → walk visits s1, matches, exits.
     await cursors.upsert({
-      jobName: `wallet-activity-ingester:${WALLET}`,
+      jobName: `wallet-activity:${WALLET}`,
       epoch: null,
       lastProcessedSlot: null,
       payload: { newestSignature: s1.signature, backfillFrontier: null },
@@ -223,7 +223,7 @@ describe('WalletActivityIngesterService.ingestWallet', () => {
     const result = await svc.ingestWallet(WALLET);
 
     expect(result.fetched).toBe(ceiling);
-    const after = await cursors.get(`wallet-activity-ingester:${WALLET}`);
+    const after = await cursors.get(`wallet-activity:${WALLET}`);
     expect(after?.payload?.['newestSignature']).toBe(s1.signature);
     expect(after?.payload?.['backfillFrontier']).toBe(s2.signature);
   });
@@ -241,7 +241,7 @@ describe('WalletActivityIngesterService.ingestWallet', () => {
     await svc.ingestWallet(WALLET);
 
     expect(rpc.feeCalls).toEqual([recent.signature]);
-    const after = await cursors.get(`wallet-activity-ingester:${WALLET}`);
+    const after = await cursors.get(`wallet-activity:${WALLET}`);
     expect(after?.payload?.['newestSignature']).toBe(recent.signature);
     expect(after?.payload?.['backfillFrontier']).toBeNull();
   });
@@ -256,7 +256,7 @@ describe('WalletActivityIngesterService.ingestWallet', () => {
     // didn't ADVANCE the checkpoint past anything (both fields
     // stay null since no sigs were ever observed). A retry next
     // tick still acts as "never run".
-    const after = await cursors.get(`wallet-activity-ingester:${WALLET}`);
+    const after = await cursors.get(`wallet-activity:${WALLET}`);
     expect(after?.payload?.['newestSignature'] ?? null).toBeNull();
     expect(after?.payload?.['backfillFrontier'] ?? null).toBeNull();
   });
@@ -314,7 +314,7 @@ describe('WalletActivityIngesterService — tiered RPC routing', () => {
     const old = mkSig(now);
     const fresh = mkSig(now);
     await cursors.upsert({
-      jobName: `wallet-activity-ingester:${WALLET}`,
+      jobName: `wallet-activity:${WALLET}`,
       epoch: null,
       lastProcessedSlot: null,
       payload: { newestSignature: old.signature, backfillFrontier: null },
@@ -335,7 +335,7 @@ describe('WalletActivityIngesterService — tiered RPC routing', () => {
     const newest = mkSig(now);
     const older = mkSig(now);
     await cursors.upsert({
-      jobName: `wallet-activity-ingester:${WALLET}`,
+      jobName: `wallet-activity:${WALLET}`,
       epoch: null,
       lastProcessedSlot: null,
       payload: {
@@ -368,7 +368,7 @@ describe('WalletActivityIngesterService — tiered RPC routing', () => {
     const old = mkSig(now);
     const fresh = mkSig(now);
     await cursors.upsert({
-      jobName: `wallet-activity-ingester:${WALLET}`,
+      jobName: `wallet-activity:${WALLET}`,
       epoch: null,
       lastProcessedSlot: null,
       payload: { newestSignature: old.signature, backfillFrontier: null },

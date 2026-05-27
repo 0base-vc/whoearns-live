@@ -100,8 +100,20 @@ const DEFAULT_MAX_FEE_FETCHES_PER_TICK = 500;
 /** 365-day render window, matches the public API `?days` cap. */
 const WINDOW_DAYS = 365;
 
-/** `ingestion_cursors.job_name` prefix for the per-wallet checkpoint. */
-const CURSOR_JOB_PREFIX = 'wallet-activity-ingester:';
+/**
+ * `ingestion_cursors.job_name` prefix for the per-wallet checkpoint.
+ *
+ * Kept SHORT because `ingestion_cursors.job_name` is `VARCHAR(64)`
+ * (see `0026_wallet_daily_activity.sql`) and a Solana base58
+ * pubkey is up to 44 chars — a longer prefix overflows. The
+ * legacy `WalletActivityIndexerService` used the same prefix
+ * (16 chars total); reusing it is safe because that service was
+ * deleted in the unification refactor and its cursor schema
+ * (`{newestSignature: string | null}`) is a forward-compatible
+ * subset of ours (`readCursorPayload` reads missing
+ * `backfillFrontier` as null).
+ */
+const CURSOR_JOB_PREFIX = 'wallet-activity:';
 
 interface IngesterCursorPayload {
   newestSignature: string | null;

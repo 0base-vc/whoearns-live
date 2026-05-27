@@ -30,9 +30,16 @@ import { createLogger } from '../core/logger.js';
 import { closePool, createPool } from '../storage/db.js';
 
 const CURSOR_PREFIXES = [
-  'wallet-activity-ingester:', // current unified service
-  'wallet-activity:', // old WalletActivityIndexerService
-  'wallet-fee-backfill:', // old WalletFeeBackfillService
+  // Current unified `WalletActivityIngesterService`. Same prefix
+  // the legacy `WalletActivityIndexerService` used — the unified
+  // service reused it (kept short to fit the VARCHAR(64) job_name
+  // column under base58 pubkeys ≤44 chars), and forward-
+  // compatible cursor schema makes the reuse safe.
+  'wallet-activity:',
+  // Legacy `WalletFeeBackfillService` cursor — service deleted in
+  // the unification refactor. Cleanup so orphan rows don't sit
+  // forever.
+  'wallet-fee-backfill:',
 ] as const;
 
 async function main(): Promise<number> {
