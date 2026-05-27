@@ -47,6 +47,7 @@
     "migrate:down": "tsx src/scripts/migrate.ts down",
     "backfill:income": "tsx src/scripts/refill-income.ts",
     "reset:wallet-fee-cursors": "tsx src/scripts/reset-wallet-fee-cursors.ts",
+    "reset:wallet-fee-cursors:prod": "node dist/scripts/reset-wallet-fee-cursors.js",
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
