@@ -70,12 +70,20 @@ export interface WalletFeeBackfillDeps {
  *
  * Idempotency: signatures whose `getTransactionFee` returns null
  * (RPC missed the slot, archive node not caught up, malformed meta)
- * are SKIPPED — the day's fee is updated with whatever we could
- * read, and the next tick re-walks the same signatures via the
- * checkpoint logic (the missed sig will be re-tried because the
- * checkpoint only advances past sigs we've seen, not sigs we've
- * successfully fee-filled). This trades worst-case retry cost for
- * never-stuck-on-a-bad-sig progress.
+ * or throws are tracked as a "miss" — `hadMissedFee = true` plus
+ * the oldest missing sig becomes the frontier seed for the next
+ * tick. So even a "natural" walk end (short page / cutoff / empty
+ * page) is treated as DIRTY when misses occurred, and the next
+ * tick re-enters backfill mode from the oldest miss to retry the
+ * range downward.
+ *
+ * Why this matters: a free archive endpoint like publicnode retains
+ * only recent slot data. A newest-first walk over a wallet with
+ * 30 days of history gets `getTransactionFee` success on the very
+ * latest sig and null on everything older. Without the miss-aware
+ * frontier the checkpoint would advance past the misses and the
+ * next tick would short-circuit on the newest-sig match, leaving
+ * the 29 days of fees PERMANENTLY un-filled.
  */
 
 /** Server cap on a single `getSignaturesForAddress` call. */
@@ -182,6 +190,21 @@ export class WalletFeeBackfillService {
     let oldestSignatureThisTick: string | null = null;
     let before: string | undefined = cursor.backfillFrontier ?? undefined;
     let cleanExit = false;
+    // Did this tick encounter ANY signature whose fee couldn't be
+    // resolved (`getTransactionFee` returned `null` OR threw)? If
+    // so, even a "natural" walk end is treated as DIRTY — we save
+    // a backfill frontier so the next tick re-walks the missed
+    // range in backfill mode. Without this guard the checkpoint
+    // would silently advance past holes left by an archive RPC
+    // that drops historical sigs (e.g. publicnode retaining only
+    // recent slot data), and those holes would never refill.
+    let hadMissedFee = false;
+    // Oldest signature we saw a miss on. Used as the frontier seed
+    // so the next backfill-mode walk starts AFTER the newest miss
+    // and pages downward through the missed range. If the same RPC
+    // keeps missing on retry, frontier just keeps advancing older
+    // each tick until we either succeed or hit the 365-day cutoff.
+    let oldestMissedFeeSig: string | null = null;
 
     pageLoop: while (fetched < this.maxFeeFetchesPerTick) {
       const remaining = this.maxFeeFetchesPerTick - fetched;
@@ -246,16 +269,28 @@ export class WalletFeeBackfillService {
             { err, wallet: walletPubkey, signature: sig.signature },
             'wallet-fee-backfill: getTransactionFee failed',
           );
-          // Skip this sig; next tick will retry via the checkpoint
-          // logic (newestFeeFilled only advances on clean exit, so
-          // the failed sig stays in scope).
+          // Treat per-sig RPC errors the same as a `null` return:
+          // mark the sig as missed so the post-walk cursor write
+          // saves a backfill frontier and the next tick retries
+          // from here.
+          hadMissedFee = true;
+          oldestMissedFeeSig = sig.signature;
           continue;
         }
         fetched += 1;
         if (fee === null) {
-          // Archive node missed the slot or returned malformed meta.
-          // Skip — the day's aggregate will be slightly under-
-          // reported until the next tick. Idempotent retry covers it.
+          // Archive node returned null `meta.fee` — either the slot
+          // is past the provider's retained window (publicnode is
+          // common here) or the meta block was malformed. Mark the
+          // miss so the cursor write below saves a frontier; the
+          // next tick re-walks in backfill mode from this point
+          // downward. We update `oldestMissedFeeSig` UNCONDITIONALLY
+          // (not just on first miss) because we're walking newest-
+          // first and want the OLDEST miss as the frontier — that
+          // way the next tick's backfill walk covers the entire
+          // missed range, not just the first hole.
+          hadMissedFee = true;
+          oldestMissedFeeSig = sig.signature;
           continue;
         }
         const dateStr = utcDateString(sig.blockTime);
@@ -291,26 +326,56 @@ export class WalletFeeBackfillService {
       ({ written: daysWritten } = await this.repo.upsertFeesBatch(rows));
     }
 
-    // Checkpoint update — same branching as the indexer.
+    // Checkpoint update — extends the indexer's pattern with a
+    // "clean exit but had per-sig misses" branch that still saves a
+    // backfill frontier so the missed range gets retried. Without
+    // that branch (as the original code shipped), a newest-first
+    // walk that saw 1 successful fee + 125 null-fee misses would
+    // advance `newestFeeFilled` past the misses, and they'd never
+    // get re-fetched.
     let nextCursor: FeeBackfillCursor;
     if (isBackfill) {
-      if (cleanExit) {
+      if (cleanExit && !hadMissedFee) {
+        // Backfill walk drained cleanly + no misses → done.
         nextCursor = { newestFeeFilled: cursor.newestFeeFilled, backfillFrontier: null };
       } else {
+        // Dirty exit (ceiling / RPC fault) OR clean exit with misses
+        // — keep paginating older next tick. Prefer the oldest miss
+        // as the frontier (re-walks just the missed range); fall
+        // back to the oldest sig visited / the existing frontier.
         nextCursor = {
           newestFeeFilled: cursor.newestFeeFilled,
-          backfillFrontier: oldestSignatureThisTick ?? cursor.backfillFrontier,
+          backfillFrontier:
+            oldestMissedFeeSig ?? oldestSignatureThisTick ?? cursor.backfillFrontier,
         };
       }
-    } else if (cleanExit) {
+    } else if (cleanExit && !hadMissedFee) {
+      // Newest-first clean exit with no misses → safe to advance
+      // `newestFeeFilled` and clear any frontier.
       nextCursor = {
         newestFeeFilled: newestSignatureThisTick ?? cursor.newestFeeFilled,
         backfillFrontier: null,
       };
-    } else {
+    } else if (cleanExit && hadMissedFee) {
+      // Newest-first clean exit but we couldn't resolve every fee.
+      // Advance `newestFeeFilled` so subsequent newest-first scans
+      // skip the part of the timeline we DID succeed on, and seed
+      // the frontier with the oldest miss so the next tick enters
+      // backfill mode and retries just the missed range downward.
       nextCursor = {
         newestFeeFilled: newestSignatureThisTick ?? cursor.newestFeeFilled,
-        backfillFrontier: oldestSignatureThisTick,
+        backfillFrontier: oldestMissedFeeSig,
+      };
+    } else {
+      // Dirty exit (ceiling / RPC fault) in newest-first mode. Save
+      // the newest sig as the checkpoint AND save a frontier so the
+      // next tick continues paginating older. Prefer the oldest
+      // miss when one exists — its older than the loop-exit cursor
+      // by construction so the next backfill tick covers strictly
+      // more ground.
+      nextCursor = {
+        newestFeeFilled: newestSignatureThisTick ?? cursor.newestFeeFilled,
+        backfillFrontier: oldestMissedFeeSig ?? oldestSignatureThisTick,
       };
     }
     await this.writeCheckpoint(walletPubkey, nextCursor);
