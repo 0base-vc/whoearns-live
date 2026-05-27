@@ -45,6 +45,13 @@ data:
   VALIDATOR_INFO_INTERVAL_MS: {{ .Values.config.validatorInfoIntervalMs | default 21600000 | quote }}
   # Phase 4 — wallet daily-activity indexer cadence.
   WALLET_ACTIVITY_INTERVAL_MS: {{ .Values.config.walletActivityIntervalMs | default 21600000 | quote }}
+  # Phase 4-extension — wallet fee backfill cadence + per-tick
+  # `getTransactionFee` budget. Job is only registered when
+  # `SOLANA_ARCHIVE_RPC_URL` is set; otherwise these are inert.
+  WALLET_FEE_BACKFILL_INTERVAL_MS: {{ .Values.config.walletFeeBackfillIntervalMs | default 3600000 | quote }}
+  WALLET_FEE_BACKFILL_PER_TICK_LIMIT: {{ .Values.config.walletFeeBackfillPerTickLimit | default 500 | quote }}
+  # Phase 2-extension — validators.app canonical client-kind ingester cadence.
+  VALIDATORS_APP_INTERVAL_MS: {{ .Values.config.validatorsAppIntervalMs | default 21600000 | quote }}
   # Phase 5 — SIMD curation cadence. Anthropic API key itself is
   # injected via Secret reference in the StatefulSet (never via
   # ConfigMap). The interval drives the worker scheduler; the
