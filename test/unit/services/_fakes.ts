@@ -1644,38 +1644,15 @@ export class FakeWalletActivityRepo {
   async upsertBatch(rows: ReadonlyArray<DailyActivityUpsert>): Promise<{ written: number }> {
     this.writes.push([...rows]);
     for (const r of rows) {
-      // Mirror the real repo: last-writer-wins for tx_count, but the
-      // fee column is NOT touched on conflict — only seeded on insert.
-      // This keeps the indexer's `txFeesLamports: 0n` placeholder from
-      // clobbering values written by the backfill service via
-      // `upsertFeesBatch`.
+      // Mirror the real repo: last-writer-wins for BOTH columns.
+      // The unified `WalletActivityIngesterService` writes count +
+      // fee in the same call, computed from the same fee-payer-
+      // filtered sig set, so they can't drift from each other.
       const k = this.key(r.walletPubkey, r.activityDate);
-      const existing = this.rows.get(k);
       this.rows.set(k, {
         walletPubkey: r.walletPubkey,
         activityDate: new Date(`${r.activityDate}T00:00:00.000Z`),
         txCount: r.txCount,
-        txFeesLamports: existing?.txFeesLamports ?? r.txFeesLamports,
-        indexedAt: new Date(),
-      });
-    }
-    return { written: rows.length };
-  }
-
-  /** One entry per `upsertFeesBatch` call, in call order. */
-  readonly feeWrites: DailyActivityUpsert[][] = [];
-
-  async upsertFeesBatch(rows: ReadonlyArray<DailyActivityUpsert>): Promise<{ written: number }> {
-    this.feeWrites.push([...rows]);
-    for (const r of rows) {
-      // Mirror the real repo: on conflict update fee only; on insert
-      // write both count and fee from the backfill payload.
-      const k = this.key(r.walletPubkey, r.activityDate);
-      const existing = this.rows.get(k);
-      this.rows.set(k, {
-        walletPubkey: r.walletPubkey,
-        activityDate: new Date(`${r.activityDate}T00:00:00.000Z`),
-        txCount: existing?.txCount ?? r.txCount,
         txFeesLamports: r.txFeesLamports,
         indexedAt: new Date(),
       });

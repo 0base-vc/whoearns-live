@@ -1,12 +1,12 @@
 /**
- * On-demand wallet-fee backfill — runs ONE tick of the same logic
- * the periodic worker job runs, but immediately instead of waiting
- * for the next scheduled tick (default 1h cadence).
+ * On-demand wallet-activity ingester — runs ONE tick of the same
+ * logic the periodic worker job runs, but immediately instead of
+ * waiting for the next scheduled tick (default 1h cadence).
  *
  * When to use this:
- *   - Right after a deploy or a `reset:wallet-fee-cursors` run,
- *     when you want to see the result in seconds rather than wait
- *     for the next scheduler tick.
+ *   - Right after a deploy or a `reset:wallet-activity-cursors`
+ *     run, when you want to see the result in seconds rather than
+ *     wait for the next scheduler tick.
  *   - Debugging the tiered RPC routing — the per-wallet log line
  *     prints the `rpcMode` choice so you can verify primary vs
  *     archive routing without grepping production worker logs.
@@ -14,7 +14,7 @@
  * Operationally safe:
  *   - Runs as a SEPARATE process from the worker. The worker's
  *     scheduler continues ticking; this one-shot just executes
- *     the same `backfillWallet(...)` for each registered wallet.
+ *     the same `ingestWallet(...)` for each registered wallet.
  *   - Same cursor table the worker uses, so a tick here advances
  *     the cursor — the next scheduled worker tick will see the
  *     updated state and may short-circuit.
@@ -24,20 +24,23 @@
  *     initial + backfill-mode walks, archive RPC for incremental).
  *
  * Production usage (inside the container):
- *   pnpm run-now:wallet-fee-backfill:prod
+ *   pnpm run-now:wallet-activity-ingester:prod
  * or with the prod env vars exported (POSTGRES_URL composed by the
  * container entrypoint):
- *   node dist/scripts/run-wallet-fee-backfill.js
+ *   node dist/scripts/run-wallet-activity-ingester.js
  *
  * Dev usage:
- *   pnpm run-now:wallet-fee-backfill
+ *   pnpm run-now:wallet-activity-ingester
  */
 
 import { SolanaRpcClient } from '../clients/solana-rpc.js';
 import { TokenBucket } from '../clients/token-bucket.js';
 import { loadConfig } from '../core/config.js';
 import { createLogger } from '../core/logger.js';
-import { WalletFeeBackfillService } from '../services/wallet-fee-backfill.service.js';
+import {
+  type IngesterRpcMode,
+  WalletActivityIngesterService,
+} from '../services/wallet-activity-ingester.service.js';
 import { closePool, createPool } from '../storage/db.js';
 import { CursorsRepository } from '../storage/repositories/cursors.repo.js';
 import { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
@@ -46,7 +49,7 @@ import { WalletActivityRepository } from '../storage/repositories/wallet-activit
 async function main(): Promise<number> {
   const cfg = loadConfig();
   const log = createLogger(cfg);
-  log.info('run-wallet-fee-backfill: starting');
+  log.info('run-wallet-activity-ingester: starting');
 
   const pool = createPool(cfg);
   try {
@@ -87,7 +90,7 @@ async function main(): Promise<number> {
           })
         : undefined;
 
-    const service = new WalletFeeBackfillService(
+    const service = new WalletActivityIngesterService(
       {
         primaryRpc: rpc,
         ...(rpcArchive !== undefined ? { archiveRpc: rpcArchive } : {}),
@@ -102,22 +105,23 @@ async function main(): Promise<number> {
     try {
       wallets = await operatorWalletsRepo.listAllDistinctWallets();
     } catch (err) {
-      log.error({ err }, 'run-wallet-fee-backfill: listAllDistinctWallets failed');
+      log.error({ err }, 'run-wallet-activity-ingester: listAllDistinctWallets failed');
       return 1;
     }
     if (wallets.length === 0) {
-      log.info('run-wallet-fee-backfill: no registered wallets; nothing to do');
+      log.info('run-wallet-activity-ingester: no registered wallets; nothing to do');
       return 0;
     }
     log.info(
       { wallets: wallets.length, archiveRpcConfigured: rpcArchive !== undefined },
-      'run-wallet-fee-backfill: running one-shot tick',
+      'run-wallet-activity-ingester: running one-shot tick',
     );
 
     let totalDays = 0;
     let totalSigs = 0;
+    let totalOutgoing = 0;
     let totalFetched = 0;
-    const rpcModeCounts = {
+    const rpcModeCounts: Record<IngesterRpcMode, number> = {
       'primary-initial': 0,
       'primary-backfill': 0,
       'archive-incremental': 0,
@@ -125,9 +129,10 @@ async function main(): Promise<number> {
     let failures = 0;
     for (const wallet of wallets) {
       try {
-        const result = await service.backfillWallet(wallet);
+        const result = await service.ingestWallet(wallet);
         totalDays += result.daysWritten;
         totalSigs += result.signatures;
+        totalOutgoing += result.outgoing;
         totalFetched += result.fetched;
         rpcModeCounts[result.rpcMode] += 1;
         // Per-wallet line so operators see the routing choice +
@@ -137,14 +142,15 @@ async function main(): Promise<number> {
             wallet,
             rpcMode: result.rpcMode,
             signatures: result.signatures,
+            outgoing: result.outgoing,
             fetched: result.fetched,
             daysWritten: result.daysWritten,
           },
-          'run-wallet-fee-backfill: wallet complete',
+          'run-wallet-activity-ingester: wallet complete',
         );
       } catch (err) {
         failures += 1;
-        log.warn({ err, wallet }, 'run-wallet-fee-backfill: wallet failed');
+        log.warn({ err, wallet }, 'run-wallet-activity-ingester: wallet failed');
       }
     }
 
@@ -154,12 +160,13 @@ async function main(): Promise<number> {
         failures,
         totalDays,
         totalSigs,
+        totalOutgoing,
         totalFetched,
         rpcModeCounts,
       },
       failures > 0
-        ? 'run-wallet-fee-backfill: complete (with failures)'
-        : 'run-wallet-fee-backfill: complete',
+        ? 'run-wallet-activity-ingester: complete (with failures)'
+        : 'run-wallet-activity-ingester: complete',
     );
     return failures > 0 ? 1 : 0;
   } finally {
@@ -172,6 +179,6 @@ main()
     process.exit(code);
   })
   .catch((err: unknown) => {
-    console.error('fatal error in run-wallet-fee-backfill script', err);
+    console.error('fatal error in run-wallet-activity-ingester script', err);
     process.exit(1);
   });

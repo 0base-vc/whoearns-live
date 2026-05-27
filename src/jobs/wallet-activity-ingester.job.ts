@@ -1,11 +1,14 @@
 import type { Logger } from '../core/logger.js';
+import type {
+  IngesterRpcMode,
+  WalletActivityIngesterService,
+} from '../services/wallet-activity-ingester.service.js';
 import type { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
-import type { WalletActivityIndexerService } from '../services/wallet-activity-indexer.service.js';
 import type { Job } from './scheduler.js';
 
 export interface WalletActivityIngesterJobDeps {
   operatorWalletsRepo: Pick<OperatorWalletsRepository, 'listAllDistinctWallets'>;
-  indexer: Pick<WalletActivityIndexerService, 'indexWallet'>;
+  ingester: Pick<WalletActivityIngesterService, 'ingestWallet'>;
   intervalMs: number;
   logger: Logger;
 }
@@ -13,21 +16,28 @@ export interface WalletActivityIngesterJobDeps {
 export const WALLET_ACTIVITY_INGESTER_JOB_NAME = 'wallet-activity-ingester';
 
 /**
- * Periodic per-wallet activity indexer.
+ * Periodic per-wallet daily-activity ingester.
  *
- * Cadence: once every `intervalMs` (default 6 hours). Each tick walks
- * every registered operator wallet, fetches its newest signatures via
- * `getSignaturesForAddress`, and upserts daily aggregates into
- * `wallet_daily_activity`. Cheap enough at the current operator
- * scale (~hundreds of wallets max) that we don't checkpoint —
- * the upsert is idempotent, so a partially-completed tick is
- * resumed at the next tick.
+ * Single source of truth for the wallet-activity heatmap. Each
+ * tick walks every registered operator wallet, calls the
+ * `WalletActivityIngesterService` (which paginates
+ * `getSignaturesForAddress`, fetches `getTransactionFeeAndPayer`
+ * per sig, filters for outgoing-only via `feePayer === wallet`,
+ * and upserts the per-day rows).
+ *
+ * Tiered RPC routing happens INSIDE the service per cursor state
+ * (primary for initial 365-day + backfill-mode walks, archive for
+ * incremental). See the service docstring for the routing table.
  *
  * Per-wallet errors are swallowed and logged so one bad wallet
- * (e.g. closed account, rate-limited address) doesn't stall the
- * batch. RPC budget is bounded by the wallet count × 1 round-trip
- * per tick — for 200 wallets that's 200 calls every 6 hours, ~33
- * calls/hour, well within any sane RPC quota.
+ * doesn't stall the rest. The two-cursor checkpoint in the
+ * service keeps a failed tick recoverable from the same point
+ * next time.
+ *
+ * Cadence: the job's `intervalMs` (default 1 h via
+ * `WALLET_ACTIVITY_INTERVAL_MS`). One hour is a calibrated
+ * baseline — operators expecting near-real-time can lower it; the
+ * upsert is idempotent so partial / overlapping runs are safe.
  */
 export function createWalletActivityIngesterJob(deps: WalletActivityIngesterJobDeps): Job {
   return {
@@ -48,30 +58,56 @@ export function createWalletActivityIngesterJob(deps: WalletActivityIngesterJobD
 
       let totalDays = 0;
       let totalSigs = 0;
-      let walletsIndexed = 0;
+      let totalOutgoing = 0;
+      let totalFetched = 0;
+      let walletsProcessed = 0;
+      // Per-RPC-tier counts so the tick log makes the routing mix
+      // observable.
+      const rpcModeCounts: Record<IngesterRpcMode, number> = {
+        'primary-initial': 0,
+        'primary-backfill': 0,
+        'archive-incremental': 0,
+      };
       for (const wallet of wallets) {
         if (signal.aborted) return;
         try {
-          const { daysWritten, signatures } = await deps.indexer.indexWallet(wallet);
+          const { daysWritten, signatures, outgoing, fetched, rpcMode } =
+            await deps.ingester.ingestWallet(wallet);
           totalDays += daysWritten;
           totalSigs += signatures;
-          walletsIndexed += 1;
+          totalOutgoing += outgoing;
+          totalFetched += fetched;
+          walletsProcessed += 1;
+          rpcModeCounts[rpcMode] += 1;
         } catch (err) {
-          deps.logger.warn({ err, wallet }, 'wallet-activity-ingester: indexWallet failed');
+          deps.logger.warn({ err, wallet }, 'wallet-activity-ingester: ingestWallet failed');
         }
       }
-      // No new signatures across every wallet means the tick did no
-      // real work — at a 6 h cadence that's just noise in the log
-      // aggregator. Drop it to `debug`; keep `info` for ticks that
-      // actually wrote activity.
-      if (totalSigs === 0) {
+      // "Did no real work" tick — log at debug to avoid spamming
+      // the steady-state. Otherwise info so operator dashboards
+      // see progress.
+      if (totalOutgoing === 0) {
         deps.logger.debug(
-          { walletsIndexed, totalDays, totalSigs },
-          'wallet-activity-ingester: tick complete (no new activity)',
+          {
+            walletsProcessed,
+            totalDays,
+            totalSigs,
+            totalOutgoing,
+            totalFetched,
+            rpcModeCounts,
+          },
+          'wallet-activity-ingester: tick complete (no outgoing activity)',
         );
       } else {
         deps.logger.info(
-          { walletsIndexed, totalDays, totalSigs },
+          {
+            walletsProcessed,
+            totalDays,
+            totalSigs,
+            totalOutgoing,
+            totalFetched,
+            rpcModeCounts,
+          },
           'wallet-activity-ingester: tick complete',
         );
       }

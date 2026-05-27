@@ -11,8 +11,7 @@ import { FeeService } from '../services/fee.service.js';
 import { GrpcBlockSubscriber } from '../services/grpc-block-subscriber.service.js';
 import { SlotService } from '../services/slot.service.js';
 import { ValidatorService } from '../services/validator.service.js';
-import { WalletActivityIndexerService } from '../services/wallet-activity-indexer.service.js';
-import { WalletFeeBackfillService } from '../services/wallet-fee-backfill.service.js';
+import { WalletActivityIngesterService } from '../services/wallet-activity-ingester.service.js';
 import { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
 import { CursorsRepository } from '../storage/repositories/cursors.repo.js';
 import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
@@ -30,7 +29,6 @@ import { createClusterNodesIngesterJob } from '../jobs/cluster-nodes-ingester.jo
 import { createValidatorInfoRefreshJob } from '../jobs/validator-info-refresh.job.js';
 import { createSlotIngesterJob } from '../jobs/slot-ingester.job.js';
 import { createWalletActivityIngesterJob } from '../jobs/wallet-activity-ingester.job.js';
-import { createWalletFeeBackfillJob } from '../jobs/wallet-fee-backfill.job.js';
 import { createStakewizTenureIngesterJob } from '../jobs/stakewiz-tenure-ingester.job.js';
 import { createValidatorsAppClientIngesterJob } from '../jobs/validators-app-client-ingester.job.js';
 import { ValidatorsAppClient } from '../clients/validators-app.js';
@@ -328,43 +326,18 @@ export async function startWorker(): Promise<void> {
     initialDelayMs: 30_000,
   });
 
-  // Phase 4 — wallet-activity indexer. Runs alongside the validator
-  // jobs because it reads `operator_wallets` (a worker-owned writeable
-  // table) and writes `wallet_daily_activity`. The API process serves
-  // this data inline on `GET /v1/claims/:vote?includeActivity=1` —
-  // there is no per-wallet activity endpoint (such a URL would
-  // disclose the full operator-wallet pubkey).
+  // Phase 4 — wallet-activity ingester (unified). Single job that
+  // walks `getSignaturesForAddress` newest-first, calls
+  // `getTransactionFeeAndPayer` per sig, filters for outgoing-
+  // only via `feePayer === walletPubkey`, and writes both
+  // `tx_count` + `tx_fees_lamports` for the day in one upsert.
+  // Tiered RPC routing inside the service: primary for the
+  // once-per-wallet 365-day initial walk + backfill-mode walks,
+  // archive for routine incremental ticks. See the service
+  // docstring for the routing table.
   const operatorWalletsRepo = new OperatorWalletsRepository(pool);
   const walletActivityRepo = new WalletActivityRepository(pool);
-  const walletActivityIndexer = new WalletActivityIndexerService({
-    rpc,
-    repo: walletActivityRepo,
-    cursors: cursorsRepo,
-    logger,
-  });
-  scheduler.register({
-    ...createWalletActivityIngesterJob({
-      operatorWalletsRepo,
-      indexer: walletActivityIndexer,
-      intervalMs: config.WALLET_ACTIVITY_INTERVAL_MS,
-      logger,
-    }),
-    // +45s: the burstiest cold-start job — one
-    // `getSignaturesForAddress` per registered operator wallet
-    // (hundreds at scale). Last in the stagger so the live-path
-    // ingest jobs get RPC headroom first.
-    initialDelayMs: 45_000,
-  });
-
-  // Phase 4-extension — wallet fee backfill. Sibling to the activity
-  // indexer; tiered RPC routing — primary RPC for the once-per-
-  // wallet 365-day initial backfill + backfill-mode (deep history)
-  // walks, archive RPC for routine incremental newest-first walks
-  // (which only need to reach back as far as the cursor). See the
-  // `WalletFeeBackfillService` class docstring for the full
-  // routing table. The cost-aware rate limiter on the primary
-  // client still throttles bursts if the operator configured one.
-  const walletFeeBackfill = new WalletFeeBackfillService(
+  const walletActivityIngester = new WalletActivityIngesterService(
     {
       primaryRpc: rpc,
       ...(rpcArchive !== undefined ? { archiveRpc: rpcArchive } : {}),
@@ -375,27 +348,28 @@ export async function startWorker(): Promise<void> {
     { maxFeeFetchesPerTick: config.WALLET_FEE_BACKFILL_PER_TICK_LIMIT },
   );
   scheduler.register({
-    ...createWalletFeeBackfillJob({
+    ...createWalletActivityIngesterJob({
       operatorWalletsRepo,
-      backfill: walletFeeBackfill,
-      intervalMs: config.WALLET_FEE_BACKFILL_INTERVAL_MS,
+      ingester: walletActivityIngester,
+      intervalMs: config.WALLET_ACTIVITY_INTERVAL_MS,
       logger,
     }),
-    // +75s: last in the stagger. Heavy per-tick RPC cost (one
-    // round-trip per signature, capped at the per-wallet ceiling);
-    // delayed boot start keeps both RPC endpoints from getting a
-    // synchronous burst alongside the other ingest jobs.
-    initialDelayMs: 75_000,
+    // +45s: the burstiest cold-start job — one initial-walk per
+    // registered operator wallet calls hundreds of
+    // `getTransactionFeeAndPayer` against the primary endpoint.
+    // Delayed boot start keeps the primary RPC from getting a
+    // synchronous burst alongside the live-path ingest jobs.
+    initialDelayMs: 45_000,
   });
   logger.info(
     {
-      intervalMs: config.WALLET_FEE_BACKFILL_INTERVAL_MS,
+      intervalMs: config.WALLET_ACTIVITY_INTERVAL_MS,
       perTickLimit: config.WALLET_FEE_BACKFILL_PER_TICK_LIMIT,
       archiveRpcConfigured: rpcArchive !== undefined,
     },
     rpcArchive !== undefined
-      ? 'wallet-fee-backfill enabled (tiered: primary for initial/backfill, archive for incremental)'
-      : 'wallet-fee-backfill enabled (primary RPC only; SOLANA_ARCHIVE_RPC_URL not set)',
+      ? 'wallet-activity-ingester enabled (tiered: primary for initial/backfill, archive for incremental)'
+      : 'wallet-activity-ingester enabled (primary RPC only; SOLANA_ARCHIVE_RPC_URL not set)',
   );
 
   // Tenure true-age — pulls stakewiz `first_epoch_with_stake` into

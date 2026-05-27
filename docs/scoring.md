@@ -464,19 +464,30 @@ overhaul) still planned.
 
 #### Live now (Phase 4-extension)
 
-- `WalletFeeBackfillService` + `wallet-fee-backfill` job — walks each
-  registered wallet's `getSignaturesForAddress` history newest-first,
-  fetches `getTransactionFee(sig)` per signature, sums by UTC date,
-  writes via `WalletActivityRepository.upsertFeesBatch` (single-
-  writer ownership of `tx_fees_lamports`; the indexer's
-  placeholder `0n` never overwrites a backfilled value). Two-cursor
-  checkpoint mirrors the indexer's: `newestFeeFilled` for newest-
-  first walks, `backfillFrontier` to resume a per-tick-ceiling-
-  truncated walk on the next tick. Per-tick `getTransactionFee`
-  budget is `WALLET_FEE_BACKFILL_PER_TICK_LIMIT` (default 500).
+- `WalletActivityIngesterService` + `wallet-activity-ingester` job
+  — single source of truth for the wallet-activity heatmap. Walks
+  each registered wallet's `getSignaturesForAddress` history
+  newest-first, calls `getTransactionFeeAndPayer(sig)` per
+  signature, **filters to outgoing-only via `feePayer ===
+walletPubkey`**, and writes `tx_count` + `tx_fees_lamports` in
+  one upsert. Two-cursor checkpoint:
+  - `newestSignature` — newest sig EVER processed (regardless of
+    outgoing/incoming filter outcome)
+  - `backfillFrontier` — set when the previous tick hit the
+    per-tick ceiling OR encountered per-sig misses (RPC missed
+    slot, malformed meta), seeds the next-tick backfill walk
+- Outgoing-only is the operator-activity contract: "what did THIS
+  wallet do" not "what touched this wallet". Incoming and
+  reference-only sigs (someone else paid the fee) are counted in
+  the `signatures observed` metric for telemetry but don't
+  contribute to `tx_count` or `tx_fees_lamports`. Both columns
+  reflect the same outgoing-only set, so a delegator reading the
+  heatmap can trust that "30 days of activity" means 30 days
+  where the operator paid for a tx, not 30 days where someone
+  sent them a dust airdrop.
 - Tiered RPC routing keeps cost predictable. Public archive
   endpoints (publicnode) retain only ~60h of signature history —
-  too short for the initial 365-day backfill but more than enough
+  too short for the initial 365-day walk but more than enough
   for routine incremental polling. So the service picks the RPC
   per cursor state:
   - cursor null (fresh wallet) → primary RPC (`SOLANA_RPC_URL`,
@@ -486,11 +497,20 @@ overhaul) still planned.
     sufficient since cursor is at most a few hours old)
   - frontier set (paginating deeper than archive's retention) →
     primary RPC again
-    Per-walk choice is logged at `wallet-fee-backfill: tick complete`
-    via `rpcModeCounts` so operators see the routing mix at a
-    glance. When `SOLANA_ARCHIVE_RPC_URL` is unset the service falls
-    back to "primary for everything" — functional, just more
-    expensive on the paid endpoint.
+    Per-walk choice is logged at `wallet-activity-ingester: tick
+complete` via `rpcModeCounts` so operators see the routing mix
+    at a glance. When `SOLANA_ARCHIVE_RPC_URL` is unset the
+    service falls back to "primary for everything" — functional,
+    just more expensive on the paid endpoint.
+- Per-tick `getTransactionFeeAndPayer` budget is
+  `WALLET_FEE_BACKFILL_PER_TICK_LIMIT` (default 500). Earlier
+  revisions of this code shipped as a separate
+  `WalletActivityIndexerService` (cheap `getSignaturesForAddress`-
+  only, no fee data, counted incoming + outgoing) plus a
+  `WalletFeeBackfillService` (fee data only); they were merged
+  because the per-sig `getTransaction` call needed for fees ALSO
+  gives the fee payer for free, making the outgoing-only filter
+  free to apply across both columns.
 - `OperatorActivityIndex.ingestStatus.walletFeesIngestActive` flips
   on once any `wallet_daily_activity` row has a positive fee value
   (`WalletActivityRepository.hasAnyFeeData()`). The UI heatmap

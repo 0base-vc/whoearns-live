@@ -702,33 +702,52 @@ export class SolanaRpcClient {
   }
 
   /**
-   * Fetch just the lamport-fee field of a single transaction.
+   * Fetch the lamport-fee + fee-payer of a single transaction.
    *
-   * Used by the Phase 4 wallet-fee backfill job. Returns `null` when
-   * the signature isn't found (RPC missed the slot, archive node not
-   * yet caught up, signature invalid) OR when `meta.fee` is missing /
-   * malformed — both cases tell the caller "no authoritative fee
-   * available right now, try again later", so the day's row stays
-   * unfilled rather than silently locked at 0.
+   * Used by the Phase 4 wallet-activity ingester. Returns `null`
+   * when the signature isn't found (RPC missed the slot, archive
+   * node not yet caught up, signature invalid) OR when `meta.fee`
+   * is missing / malformed OR when the fee-payer can't be resolved
+   * — all cases tell the caller "no authoritative result right
+   * now, try again later".
+   *
+   * **Why both fields in one call.** The Phase 4 ingester needs
+   * BOTH the fee total AND the fee-payer pubkey to filter outgoing
+   * vs incoming txs (only sigs where `feePayer === walletPubkey`
+   * count as the wallet's own activity). The two pieces live in
+   * the same `getTransaction` response, so it would be wasteful to
+   * issue two separate calls. The fee-payer is the account at
+   * position 0 of `message.accountKeys` — Solana's convention is
+   * that the fee payer is always the FIRST signer, and the first
+   * signer is always at index 0.
    *
    * Why a separate method from `getTransaction`: that one projects
    * accountKeys + numRequiredSignatures + instructions for memo
    * verification and has callers that depend on the exact shape.
-   * Fee-only readers don't need to pay for parsing the instruction
-   * list, and a parallel method keeps the contracts disjoint so
-   * neither caller leaks responsibility into the other.
+   * Keeping the wallet-activity reader on its own method keeps the
+   * two contracts disjoint so neither caller leaks responsibility
+   * into the other.
    *
    * `meta.fee` is total lamports charged for the tx (base + priority
-   * fee combined). For wallet-activity backfill we don't decompose;
-   * the operator's interest is "how much SOL did this wallet burn on
-   * tx fees this day". `bigint` because a year of priority-fee burns
-   * can exceed `Number.MAX_SAFE_INTEGER`.
+   * fee combined). For wallet-activity bucketing we don't
+   * decompose; the operator's interest is "how much SOL did this
+   * wallet burn on tx fees this day". `bigint` because a year of
+   * priority-fee burns can exceed `Number.MAX_SAFE_INTEGER`.
    *
    * Versioned txs are accepted via `maxSupportedTransactionVersion: 0`.
+   * LUT-loaded addresses are NOT included in `accountKeys`, but the
+   * fee-payer is always a static key (signers can't be LUT-loaded),
+   * so the position-0 read is correct for both legacy and v0 txs.
    */
-  async getTransactionFee(signature: string): Promise<bigint | null> {
+  async getTransactionFeeAndPayer(signature: string): Promise<{
+    fee: bigint;
+    feePayer: string;
+  } | null> {
     const raw = await this.enqueue<{
       meta?: { fee?: unknown } | null;
+      transaction?: {
+        message?: { accountKeys?: unknown };
+      };
     } | null>('getTransaction', [
       signature,
       {
@@ -740,25 +759,48 @@ export class SolanaRpcClient {
     if (raw === null) return null;
     const feeRaw = raw.meta?.fee;
     if (feeRaw === null || feeRaw === undefined) return null;
+    let fee: bigint;
     if (typeof feeRaw === 'number') {
       // RPC returns fee as a JSON number (lamports fits in JS number
       // for any single tx, but we widen to bigint immediately for
       // safety against future per-tx caps and for ergonomics when
       // summing across thousands of txs).
       if (!Number.isFinite(feeRaw) || feeRaw < 0) return null;
-      return BigInt(Math.floor(feeRaw));
-    }
-    if (typeof feeRaw === 'string') {
+      fee = BigInt(Math.floor(feeRaw));
+    } else if (typeof feeRaw === 'string') {
       // Some providers JSON-encode large lamport amounts as strings.
       // Tolerate both shapes; reject malformed (non-decimal) strings.
       try {
         const v = BigInt(feeRaw);
-        return v < 0n ? null : v;
+        if (v < 0n) return null;
+        fee = v;
       } catch {
         return null;
       }
+    } else {
+      return null;
     }
-    return null;
+
+    // Fee-payer extraction. `accountKeys[0]` is the fee payer by
+    // protocol convention. Versioned txs may serialise an
+    // accountKey as `{ pubkey, signer, writable, source }`; legacy
+    // txs use bare strings. Accept both shapes.
+    const keysRaw = raw.transaction?.message?.accountKeys;
+    if (!Array.isArray(keysRaw) || keysRaw.length === 0) return null;
+    const first = keysRaw[0];
+    let feePayer: string | null = null;
+    if (typeof first === 'string') {
+      feePayer = first;
+    } else if (
+      first !== null &&
+      typeof first === 'object' &&
+      typeof (first as { pubkey?: unknown }).pubkey === 'string'
+    ) {
+      feePayer = (first as { pubkey: string }).pubkey;
+    }
+    if (feePayer === null || feePayer.length === 0) return null;
+
+    return { fee, feePayer };
   }
 
   /**

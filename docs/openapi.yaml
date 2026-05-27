@@ -805,11 +805,12 @@ paths:
         wallet set.
 
         `txFeesLamports` is populated by the Phase 4-extension
-        `WalletFeeBackfillService` (Solana-RPC `getTransactionFee`
-        once per signature, against the primary `SOLANA_RPC_URL`).
-        Rows the backfill hasn't reached yet carry `null` — `null`
-        is intentional vs `"0"` so a consumer summing fees can
-        detect the unavailable-data case.
+        `WalletActivityIngesterService` (Solana-RPC
+        `getTransactionFeeAndPayer` once per signature, filtered to
+        outgoing-only via `feePayer === walletPubkey`). Rows the
+        ingester hasn't reached yet carry `null` — `null` is
+        intentional vs `"0"` so a consumer summing fees can detect
+        the unavailable-data case.
       parameters:
         - $ref: '#/components/parameters/WalletPath'
         - name: days
@@ -2445,7 +2446,7 @@ components:
                 type: [string, 'null']
                 description: |
                   Per-day fee total in lamports as a decimal string.
-                  Populated by the `WalletFeeBackfillService` using
+                  Populated by the `WalletActivityIngesterService` using
                   the primary `SOLANA_RPC_URL`. `null` until the
                   backfill reaches this day — `null` is intentional
                   vs `"0"` so a consumer summing fees can detect
@@ -2597,7 +2598,7 @@ components:
             walletFeesIngestActive:
               type: boolean
               description: |
-                True once the `WalletFeeBackfillService` has populated
+                True once the `WalletActivityIngesterService` has populated
                 at least one row of per-day `txFeesLamports`. When
                 `false` the heatmap intensity stays bound to
                 `tx_count`; when `true` the UI switches the

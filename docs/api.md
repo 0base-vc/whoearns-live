@@ -910,7 +910,7 @@ Response:
 Days with zero activity are omitted; clients zero-fill at render
 time. Newest-first. `txFeesLamports` is the per-day sum of tx fees
 the wallet paid as `feePayer`, populated by the Phase 4-extension
-`WalletFeeBackfillService` (`getTransactionFee` per signature against
+`WalletActivityIngesterService` (`getTransactionFeeAndPayer` per signature, outgoing-only via `feePayer === walletPubkey`, against
 the primary `SOLANA_RPC_URL`). Rows the backfill hasn't reached yet
 carry `null` — `null` is intentional vs `"0"` so a consumer summing
 fees can distinguish "unfilled" from "zero". Every landed tx pays at
@@ -1051,7 +1051,7 @@ read it even when `governance.score` is `null`.
 
 - `governanceIngestActive` — has the GitHub Discussions ingest
   produced data? `false` until that worker job ships.
-- `walletFeesIngestActive` — has the `WalletFeeBackfillService`
+- `walletFeesIngestActive` — has the `WalletActivityIngesterService`
   populated any per-day `txFeesLamports` row? `false` until the
   backfill's first successful tick. Drives the UI heatmap intensity
   binding (tx-count vs lamports/day).
