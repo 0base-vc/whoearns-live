@@ -69,6 +69,10 @@ export class FakeValidatorsRepo {
       clientKind: existing?.clientKind ?? 'unknown',
       clientVersion: existing?.clientVersion ?? null,
       clientUpdatedAt: existing?.clientUpdatedAt ?? null,
+      // Mirror the real repo's `COALESCE(EXCLUDED, existing)`
+      // semantic: the caller's `v.commission` wins when supplied,
+      // the previous row's value is preserved otherwise.
+      commission: v.commission ?? existing?.commission ?? null,
     });
   }
 

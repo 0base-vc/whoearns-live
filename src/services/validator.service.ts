@@ -126,13 +126,29 @@ export class ValidatorService {
     const accounts = await this.rpc.getVoteAccounts('confirmed');
     const merged = new Map<
       VotePubkey,
-      { vote: VotePubkey; identity: IdentityPubkey; stake: number }
+      {
+        vote: VotePubkey;
+        identity: IdentityPubkey;
+        stake: number;
+        commission: number | null;
+      }
     >();
+    // Commission is on the same `getVoteAccounts` row as
+    // `activatedStake` — capture it in lockstep. Clamp to 0-100 so
+    // an out-of-spec RPC reply can't poison the DB; treat anything
+    // outside the expected range as `null` (unknown).
+    function normaliseCommission(raw: number | null | undefined): number | null {
+      if (raw === null || raw === undefined) return null;
+      if (!Number.isFinite(raw)) return null;
+      const clamped = Math.round(Math.max(0, Math.min(100, raw)));
+      return clamped;
+    }
     for (const row of accounts.current) {
       merged.set(row.votePubkey, {
         vote: row.votePubkey,
         identity: row.nodePubkey,
         stake: row.activatedStake,
+        commission: normaliseCommission(row.commission),
       });
     }
     for (const row of accounts.delinquent) {
@@ -140,17 +156,19 @@ export class ValidatorService {
         vote: row.votePubkey,
         identity: row.nodePubkey,
         stake: row.activatedStake,
+        commission: normaliseCommission(row.commission),
       });
     }
 
     const out: Validator[] = [];
     const stakeByVote = new Map<VotePubkey, number>();
-    for (const { vote, identity, stake } of merged.values()) {
+    for (const { vote, identity, stake, commission } of merged.values()) {
       await this.validatorsRepo.upsert({
         votePubkey: vote,
         identityPubkey: identity,
         firstSeenEpoch: epoch,
         lastSeenEpoch: epoch,
+        commission,
       });
       out.push({
         votePubkey: vote,
@@ -182,6 +200,7 @@ export class ValidatorService {
         clientKind: 'unknown',
         clientVersion: null,
         clientUpdatedAt: null,
+        commission,
       });
       stakeByVote.set(vote, stake);
     }

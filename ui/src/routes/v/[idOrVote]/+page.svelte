@@ -1321,6 +1321,23 @@
         <dd class="text-right tabular-nums">
           {voteCreditsTotalLabel}
         </dd>
+
+        <!--
+          On-chain vote-account commission. WhoEarns's own income
+          metrics stay commission-NEUTRAL (see /faq) — the value is
+          surfaced here as a delegator-facing fact, not as an input
+          to any scoring on this page.
+        -->
+        <dt class="text-xs uppercase tracking-wider text-[color:var(--color-text-subtle)]">
+          Commission
+        </dt>
+        <dd class="text-right tabular-nums">
+          {#if tierWindow.commission !== null}
+            {tierWindow.commission}%
+          {:else}
+            <span class="text-[color:var(--color-text-muted)]">—</span>
+          {/if}
+        </dd>
       </dl>
     </Card>
   </div>

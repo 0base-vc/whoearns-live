@@ -271,6 +271,15 @@ export interface NodeTierBody {
      * precision string). Sum of per-epoch credits; window-aggregate.
      */
     voteCreditsTotal: string;
+    /**
+     * On-chain vote-account commission as an integer 0-100. Sourced
+     * from `getVoteAccounts.commission`. **NOTE**: WhoEarns frames
+     * operator-side income as commission-NEUTRAL — delegator-yield
+     * math that uses commission is the consumer's responsibility,
+     * not WhoEarns's. `null` for legacy rows the backend refresh
+     * tick hasn't yet covered.
+     */
+    commission: number | null;
     cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
   };
   tier: NodeTier;

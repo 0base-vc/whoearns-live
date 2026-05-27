@@ -27,6 +27,7 @@ function makeValidator(identityPubkey: string = IDENTITY_1): Validator {
     clientKind: 'unknown',
     clientVersion: null,
     clientUpdatedAt: null,
+    commission: null,
   };
 }
 

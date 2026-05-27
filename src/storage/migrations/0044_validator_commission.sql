@@ -1,0 +1,25 @@
+-- 0044_validator_commission.sql
+--
+-- Persist the on-chain vote-account commission so the hub + delegator
+-- surfaces can show "operator takes N%" alongside the income / tier
+-- numbers. Until now the data WAS available — `getVoteAccounts`
+-- already returns commission as an integer 0-100, and the slot
+-- ingester already calls that RPC every refresh tick — but no
+-- column existed to write it into.
+--
+-- Column choice: `commission` is a 0-100 integer per the Solana
+-- vote-program spec. Smallint is plenty (1 byte vs `numeric`'s
+-- variable footprint) and matches the RPC schema. Nullable because
+-- the column is forward-populated by `refreshFromRpc`; existing rows
+-- write `NULL` until the next refresh covers them, at which point
+-- the value lands inline with the next `UPDATE`.
+--
+-- Out-of-bounds rows are clamped on the way in (the service layer
+-- already does `Math.max(0, Math.min(100, value))` for activated
+-- stake), so a CHECK constraint isn't required at the DB level —
+-- adding one would require a careful migration on legacy rows and
+-- buys nothing the application can't already enforce.
+--
+-- NULLABLE column adds are metadata-only on Postgres 11+.
+ALTER TABLE validators
+  ADD COLUMN IF NOT EXISTS commission SMALLINT;

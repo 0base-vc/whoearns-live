@@ -205,6 +205,7 @@ class FakeValidatorsRepo implements Pick<ValidatorsRepository, 'findByVote' | 'f
       clientKind: 'unknown',
       clientVersion: null,
       clientUpdatedAt: null,
+      commission: null,
     });
   }
 }

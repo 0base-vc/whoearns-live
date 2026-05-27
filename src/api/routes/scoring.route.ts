@@ -170,7 +170,7 @@ const scoringRoutes: FastifyPluginAsync<ScoringRoutesDeps> = async (
       return {
         vote: validator.votePubkey,
         identity: validator.identityPubkey,
-        tier: tierBodyFromResolved(resolvedTier),
+        tier: tierBodyFromResolved(resolvedTier, validator),
         tenure,
         client,
         // `null` when the validator is gated out of the OAI surface

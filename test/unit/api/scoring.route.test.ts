@@ -35,6 +35,7 @@ function makeValidator(): Validator {
     clientKind: 'unknown',
     clientVersion: null,
     clientUpdatedAt: null,
+    commission: null,
   };
 }
 

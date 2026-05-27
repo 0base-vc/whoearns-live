@@ -252,7 +252,10 @@ export type TierBody = Omit<NodeTierResponse, 'vote' | 'identity'>;
  * stringify lamport totals — JSON numeric precision is unsafe past
  * 2^53. Consumers that want SOL/slot can divide by 10^9 themselves.
  */
-export function tierBodyFromResolved(resolved: ResolvedTier): TierBody {
+export function tierBodyFromResolved(
+  resolved: ResolvedTier,
+  validator: Pick<Validator, 'commission'>,
+): TierBody {
   const { result, input, closedRows, economicLookup, cohortAsOfEpoch } = resolved;
   const incomeFreshness = oldestIncomeFreshness(closedRows);
   // Latest closed-epoch row carries the stake snapshot — `closedRows`
@@ -283,6 +286,11 @@ export function tierBodyFromResolved(resolved: ResolvedTier): TierBody {
       incomeFreshness: incomeFreshness?.toISOString() ?? null,
       activatedStakeLamports,
       voteCreditsTotal,
+      // On-chain vote-account commission (integer 0-100). Sourced
+      // from `getVoteAccounts.commission` and persisted on every
+      // refresh tick — see `migrations/0044_validator_commission.sql`.
+      // `null` for legacy rows the refresh hasn't covered yet.
+      commission: validator.commission,
       // Closed-epoch window bounds the cohort was evaluated over. A
       // consumer can compare these against the leaderboard's current
       // epoch to detect drift between a CDN-cached tier and a fresh
@@ -595,7 +603,7 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       return {
         vote: validator.votePubkey,
         identity: validator.identityPubkey,
-        ...tierBodyFromResolved(resolved),
+        ...tierBodyFromResolved(resolved, validator),
       };
     },
   );
@@ -746,6 +754,18 @@ export interface NodeTierResponse {
      * 0 when none of the rows have credit data ingested.
      */
     voteCreditsTotal: string;
+    /**
+     * On-chain vote-account commission as an integer 0-100. Sourced
+     * from `getVoteAccounts.commission` and persisted by
+     * `ValidatorService.refreshFromRpc` (see migration 0044).
+     * **NOTE**: WhoEarns frames operator-side income as commission-
+     * NEUTRAL (see `docs/scoring.md` Phase 1 + the income FAQ);
+     * delegator-yield math that USES commission is the consumer's
+     * responsibility, not WhoEarns's. The field is exposed so a
+     * delegator-facing surface can do the multiplication itself.
+     * `null` for legacy rows the refresh tick hasn't covered yet.
+     */
+    commission: number | null;
     /**
      * Closed-epoch window bounds the percentile cohort was evaluated
      * over (`fromEpoch` = oldest closed epoch in the window,

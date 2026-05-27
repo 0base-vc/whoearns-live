@@ -51,6 +51,15 @@ export interface Validator {
   clientKind: string;
   clientVersion: string | null;
   clientUpdatedAt: Date | null;
+  /**
+   * Vote-account commission percentage (0-100). Sourced from
+   * `getVoteAccounts.commission` and refreshed on every
+   * `ValidatorService.refreshFromRpc` tick. `null` for legacy rows
+   * that predate the column (migration 0044 was forward-only); a
+   * subsequent refresh fills them in. Stored as a smallint at the
+   * DB level — see `migrations/0044_validator_commission.sql`.
+   */
+  commission: number | null;
 }
 
 /**
@@ -65,6 +74,13 @@ export interface ValidatorUpsertInput {
   identityPubkey: IdentityPubkey;
   firstSeenEpoch: Epoch;
   lastSeenEpoch: Epoch;
+  /**
+   * Optional. Pass-through from `getVoteAccounts.commission`. Omit
+   * to leave the existing value untouched (the column carries
+   * forward across refreshes that don't supply commission, e.g.
+   * unit-test callers that only set the identity columns).
+   */
+  commission?: number | null;
 }
 
 /**

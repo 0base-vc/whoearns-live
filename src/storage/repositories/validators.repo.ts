@@ -24,12 +24,13 @@ interface ValidatorRow {
   client_kind: string;
   client_version: string | null;
   client_updated_at: Date | null;
+  commission: number | null;
 }
 
 /** Column list shared by every SELECT so new info columns stay in sync. */
 const VALIDATOR_COLS = `vote_pubkey, identity_pubkey, first_seen_epoch, last_seen_epoch,
   genesis_epoch, updated_at, name, details, website, keybase_username, icon_url, info_updated_at,
-  COALESCE(client_kind, 'unknown') AS client_kind, client_version, client_updated_at`;
+  COALESCE(client_kind, 'unknown') AS client_kind, client_version, client_updated_at, commission`;
 
 function rowToValidator(row: ValidatorRow): Validator {
   return {
@@ -54,6 +55,11 @@ function rowToValidator(row: ValidatorRow): Validator {
     clientKind: row.client_kind,
     clientVersion: row.client_version,
     clientUpdatedAt: row.client_updated_at,
+    // Same `null`-or-`undefined` defensive collapse as `genesis_epoch`
+    // — a partial-projection SELECT or a row written before
+    // migration 0044 yields a missing field; either way the domain
+    // value is "we don't know commission yet."
+    commission: row.commission ?? null,
   };
 }
 
@@ -73,14 +79,22 @@ export class ValidatorsRepository {
    * moniker data that may have just been written by the info job.
    */
   async upsert(v: ValidatorUpsertInput): Promise<void> {
+    // `commission` uses `COALESCE(EXCLUDED.commission, validators.commission)`
+    // on UPDATE so a caller that omits the field (e.g. a unit-test
+    // upsert that only sets identity columns) doesn't blow away the
+    // last-known value. Callers that DO supply it — currently only
+    // `ValidatorService.refreshFromRpc` from `getVoteAccounts` —
+    // overwrite each tick, which is the right semantic for a value
+    // the operator can change on-chain at any time.
     await this.pool.query(
-      `INSERT INTO validators (vote_pubkey, identity_pubkey, first_seen_epoch, last_seen_epoch, updated_at)
-       VALUES ($1, $2, $3, $4, NOW())
+      `INSERT INTO validators (vote_pubkey, identity_pubkey, first_seen_epoch, last_seen_epoch, commission, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
        ON CONFLICT (vote_pubkey) DO UPDATE SET
          identity_pubkey = EXCLUDED.identity_pubkey,
          last_seen_epoch = GREATEST(validators.last_seen_epoch, EXCLUDED.last_seen_epoch),
+         commission      = COALESCE(EXCLUDED.commission, validators.commission),
          updated_at = NOW()`,
-      [v.votePubkey, v.identityPubkey, v.firstSeenEpoch, v.lastSeenEpoch],
+      [v.votePubkey, v.identityPubkey, v.firstSeenEpoch, v.lastSeenEpoch, v.commission ?? null],
     );
   }
 
