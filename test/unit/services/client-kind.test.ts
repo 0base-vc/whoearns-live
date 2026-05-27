@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { classifyClient, compareVersions } from '../../../src/services/client-kind.js';
+import {
+  classifyClient,
+  clientKindFromValidatorsApp,
+  compareVersions,
+} from '../../../src/services/client-kind.js';
 
 describe('classifyClient', () => {
   it('classifies plain semver Agave releases', () => {
@@ -74,5 +78,65 @@ describe('compareVersions', () => {
   it('handles Firedancer-style longer versions', () => {
     expect(compareVersions('0.405.20218', '0.405.20219')).toBe(-1);
     expect(compareVersions('0.405.20218-jito-1', '0.405.20218-jito-2')).toBe(-1);
+  });
+});
+
+describe('clientKindFromValidatorsApp', () => {
+  // Numeric IDs are the wire format — most authoritative. Every
+  // registered ID in `solana-foundation/solana-validator-client-ids`
+  // is mapped here; a regression that drops one would silently
+  // collapse a real fork into `unknown`.
+  it('resolves each canonical numeric ID to its enum slug', () => {
+    expect(clientKindFromValidatorsApp({ clientId: 0, clientName: null })).toBe('solana_labs');
+    expect(clientKindFromValidatorsApp({ clientId: 1, clientName: null })).toBe('jito_solana');
+    expect(clientKindFromValidatorsApp({ clientId: 2, clientName: null })).toBe('frankendancer');
+    expect(clientKindFromValidatorsApp({ clientId: 3, clientName: null })).toBe('agave');
+    expect(clientKindFromValidatorsApp({ clientId: 4, clientName: null })).toBe('paladin');
+    expect(clientKindFromValidatorsApp({ clientId: 5, clientName: null })).toBe('firedancer');
+    expect(clientKindFromValidatorsApp({ clientId: 6, clientName: null })).toBe('agave_bam');
+    expect(clientKindFromValidatorsApp({ clientId: 7, clientName: null })).toBe('sig');
+    expect(clientKindFromValidatorsApp({ clientId: 8, clientName: null })).toBe('rakurai');
+    expect(clientKindFromValidatorsApp({ clientId: 9, clientName: null })).toBe(
+      'harmonic_firedancer',
+    );
+    expect(clientKindFromValidatorsApp({ clientId: 10, clientName: null })).toBe('harmonic_agave');
+    expect(clientKindFromValidatorsApp({ clientId: 11, clientName: null })).toBe(
+      'harmonic_frankendancer',
+    );
+    expect(clientKindFromValidatorsApp({ clientId: 12, clientName: null })).toBe('firebam');
+    expect(clientKindFromValidatorsApp({ clientId: 13, clientName: null })).toBe('raiku');
+  });
+
+  it('falls back to the string name when no numeric ID is present', () => {
+    // The exact case + spacing combinations validators.app has been
+    // observed emitting (lower-case, mixed-case, with spaces).
+    expect(
+      clientKindFromValidatorsApp({ clientId: null, clientName: 'HarmonicFrankendancer' }),
+    ).toBe('harmonic_frankendancer');
+    expect(clientKindFromValidatorsApp({ clientId: null, clientName: 'Agave Bam' })).toBe(
+      'agave_bam',
+    );
+    expect(clientKindFromValidatorsApp({ clientId: null, clientName: 'jitolabs' })).toBe(
+      'jito_solana',
+    );
+  });
+
+  it('returns unknown for both fields null', () => {
+    expect(clientKindFromValidatorsApp({ clientId: null, clientName: null })).toBe('unknown');
+  });
+
+  it('returns unknown for a numeric ID not in the registry yet', () => {
+    // A future Foundation-registered client gets ID 14+; the
+    // ingester surfaces it but until we update the table we map
+    // to `'unknown'` rather than inventing a slug.
+    expect(clientKindFromValidatorsApp({ clientId: 999, clientName: null })).toBe('unknown');
+  });
+
+  it('falls back to the name when the numeric ID is unknown but the name resolves', () => {
+    // validators.app added a new ID before we updated the table,
+    // but they also emit a canonical name we already know.
+    expect(clientKindFromValidatorsApp({ clientId: 999, clientName: 'HarmonicAgave' })).toBe(
+      'harmonic_agave',
+    );
   });
 });

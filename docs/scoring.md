@@ -361,12 +361,33 @@ deliberately separate from the tier.
   `GET /v1/validators/:idOrVote/badges` with one of 8 landmark
   classifications (Genesis Operator → Recent Operator). The oldest
   landmark the validator predates wins (no double-counting).
-- **Client identification.** Pulled from `getClusterNodes.version`
-  by the `cluster-nodes-ingester` worker job. Classified via
-  `services/client-kind.ts` into agave / jito_solana / firedancer /
-  frankendancer / paladin / sig / unknown. Surfaced on
-  `/badges` and persisted on `validators.client_kind` for future
-  category leaderboards.
+- **Client identification.** Two-tier classifier:
+  - `cluster-nodes-ingester` runs every 30 min, pulls the gossip
+    `getClusterNodes.version` string per identity and classifies
+    via `services/client-kind.ts` regex. Cheap, always available,
+    but **can't distinguish forks that share the upstream
+    version-string format** (e.g. HarmonicFrankendancer publishes
+    `0.909.0-rc.40001`, indistinguishable from upstream
+    Frankendancer's `0.909.40001` by a trustworthy regex).
+  - `validators-app-client-ingester` runs at 10 min cadence but
+    only fetches when the epoch has advanced (steady-state is two
+    cheap DB queries per tick). validators.app runs a gossip CRDS
+    listener and decodes the 16-bit `ContactInfo.version.client`
+    field that JSON-RPC `getClusterNodes` drops — the canonical
+    Solana Foundation client ID, per the
+    `solana-foundation/solana-validator-client-ids` registry.
+    This source can distinguish all 14 registered variants
+    (Solana Labs, Jito Labs, Frankendancer, Agave, Paladin,
+    Firedancer, Agave BAM, Sig, Rakurai, HarmonicFiredancer,
+    HarmonicAgave, HarmonicFrankendancer, FireBAM, Raiku).
+  - Both writers go through `validators.upsertClientBatch`. The
+    repo's `IS DISTINCT FROM` guard makes the no-drift case a
+    no-op; on drift, last-writer-wins per tick. The validators.app
+    classifier is more authoritative but runs much less often, so
+    the steady state is "cluster-nodes regex output, replaced once
+    per epoch by the canonical validators.app classification".
+  - Surfaced on `/badges` and persisted on `validators.client_kind`
+    for future category leaderboards.
 
 #### Planned next
 

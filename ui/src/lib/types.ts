@@ -222,7 +222,18 @@ export interface ClaimStatus {
 /** Closed-set tier names from the Node Tier composite. */
 export type NodeTier = 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
 
-/** Documented client-kind classifier output. */
+/**
+ * Documented client-kind classifier output. Mirrors the backend
+ * `ClientKind` enum in `src/services/client-kind.ts`. Two source
+ * tiers produce these values:
+ *   - Gossip-version-string regex (cluster-nodes ingester) — can
+ *     only emit the original 7: agave / jito_solana / firedancer /
+ *     frankendancer / paladin / sig / unknown.
+ *   - validators.app canonical IDs (epoch-triggered ingester) — can
+ *     also emit the forks below, decoded from the 16-bit
+ *     `ContactInfo.version.client` gossip-CRDS field that JSON-RPC
+ *     `getClusterNodes` drops.
+ */
 export type ClientKind =
   | 'agave'
   | 'jito_solana'
@@ -230,6 +241,14 @@ export type ClientKind =
   | 'frankendancer'
   | 'paladin'
   | 'sig'
+  | 'solana_labs'
+  | 'agave_bam'
+  | 'rakurai'
+  | 'harmonic_firedancer'
+  | 'harmonic_agave'
+  | 'harmonic_frankendancer'
+  | 'firebam'
+  | 'raiku'
   | 'unknown';
 
 /** Documented tenure-landmark enum (matches `docs/openapi.yaml`). */

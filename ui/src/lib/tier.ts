@@ -310,12 +310,26 @@ const TRUST_SEPARATOR = ' • ';
  * public-surface convention; the lowercased enum stays on the wire.
  */
 const TRUST_CLIENT_LABEL: Record<string, string> = {
+  // Original 7 — gossip-version-string classifier output
   agave: 'Agave',
   jito_solana: 'Jito-Solana',
   firedancer: 'Firedancer',
   frankendancer: 'Frankendancer',
   paladin: 'Paladin',
   sig: 'Sig',
+  // Canonical client variants from validators.app gossip-CRDS decode
+  // (`solana-foundation/solana-validator-client-ids` registry).
+  // Trust-strip uses the shorter "Harmonic FD" instead of "Harmonic
+  // Firedancer" because the strip is space-constrained — the full
+  // name appears on the ClientBadge pill below.
+  solana_labs: 'Solana Labs',
+  agave_bam: 'Agave (BAM)',
+  rakurai: 'Rakurai',
+  harmonic_firedancer: 'Harmonic FD',
+  harmonic_agave: 'Harmonic Agave',
+  harmonic_frankendancer: 'Harmonic Frankendancer',
+  firebam: 'FireBAM',
+  raiku: 'Raiku',
   unknown: 'Unknown client',
 };
 

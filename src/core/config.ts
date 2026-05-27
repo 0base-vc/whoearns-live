@@ -233,6 +233,15 @@ export const ConfigSchema = z.object({
   // sustained). Operators with a paid archive node can raise this
   // to pull faster; lower it if the public endpoint starts 429ing.
   WALLET_FEE_BACKFILL_PER_TICK_LIMIT: PositiveInt.default(500),
+  // Phase 2-extension — validators.app canonical client-kind ingester
+  // cadence. Solana epochs turn over every ~2-3 days; this job's
+  // steady-state is two cheap DB queries per tick to check whether
+  // the epoch has advanced. The bulk fetch + classification write
+  // only fires after an epoch boundary, so a 10 min cadence gives
+  // us at most ~10 min latency from epoch transition to the
+  // refreshed canonical classification — well below the badge /
+  // leaderboard freshness expectations.
+  VALIDATORS_APP_INTERVAL_MS: PositiveInt.default(10 * 60 * 1000),
   // Phase 5 — Anthropic Claude API key for SIMD curation. When
   // unset, the SIMD curation pipeline is disabled (the route still
   // serves already-curated rows, but new SIMDs stay pre-review

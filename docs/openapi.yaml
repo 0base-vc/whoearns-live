@@ -1101,7 +1101,38 @@ components:
       properties:
         kind:
           type: string
-          enum: [agave, jito_solana, firedancer, frankendancer, paladin, sig, unknown]
+          description: |
+            Closed-set validator client identifier. Two source tiers
+            populate this:
+              - Gossip-version-string regex (cluster-nodes ingester)
+                produces the original 7: `agave`, `jito_solana`,
+                `firedancer`, `frankendancer`, `paladin`, `sig`,
+                `unknown`.
+              - validators.app canonical IDs (epoch-triggered
+                ingester) decoded from the 16-bit
+                `ContactInfo.version.client` gossip-CRDS field that
+                JSON-RPC `getClusterNodes` drops, producing the
+                additional fork variants (`solana_labs`, `agave_bam`,
+                `rakurai`, `harmonic_firedancer`, `harmonic_agave`,
+                `harmonic_frankendancer`, `firebam`, `raiku`).
+          enum:
+            [
+              agave,
+              jito_solana,
+              firedancer,
+              frankendancer,
+              paladin,
+              sig,
+              solana_labs,
+              agave_bam,
+              rakurai,
+              harmonic_firedancer,
+              harmonic_agave,
+              harmonic_frankendancer,
+              firebam,
+              raiku,
+              unknown,
+            ]
         version:
           type: string
           nullable: true

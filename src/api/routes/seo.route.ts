@@ -399,9 +399,13 @@ Composite profile badges in one round-trip: { vote, identity,
 tenure, client, tier }. tenure carries firstSeenEpoch, activeEpochs,
 and the oldest landmark the validator predates (MAINNET_BETA_LAUNCH,
 CYCLE_1_OG, etc.). client carries the node-software kind (agave,
-jito_solana, firedancer, frankendancer, paladin, sig, unknown) and
-version from getClusterNodes. tier mirrors GET /tier. Accepts a vote
-OR identity pubkey; no query params.
+jito_solana, firedancer, frankendancer, paladin, sig, solana_labs,
+agave_bam, rakurai, harmonic_firedancer, harmonic_agave,
+harmonic_frankendancer, firebam, raiku, unknown) and version. The
+original 7 kinds come from gossip version-string classification
+(cluster-nodes ingester); the fork variants come from validators.app's
+gossip-CRDS decode (epoch-triggered ingester). tier mirrors GET
+/tier. Accepts a vote OR identity pubkey; no query params.
 
 ### GET /v1/validators/{idOrVote}/operator-activity-index
 Operator Activity Index (OAI) — a 0-100 composite blending

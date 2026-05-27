@@ -32,6 +32,8 @@ import { createSlotIngesterJob } from '../jobs/slot-ingester.job.js';
 import { createWalletActivityIngesterJob } from '../jobs/wallet-activity-ingester.job.js';
 import { createWalletFeeBackfillJob } from '../jobs/wallet-fee-backfill.job.js';
 import { createStakewizTenureIngesterJob } from '../jobs/stakewiz-tenure-ingester.job.js';
+import { createValidatorsAppClientIngesterJob } from '../jobs/validators-app-client-ingester.job.js';
+import { ValidatorsAppClient } from '../clients/validators-app.js';
 import { StakewizClient } from '../clients/stakewiz.js';
 import { withRpcFallback } from '../jobs/rpc-fallback.js';
 import { Scheduler } from '../jobs/scheduler.js';
@@ -412,6 +414,26 @@ export async function startWorker(): Promise<void> {
     // +60s: not on the RPC path and not latency-sensitive (genesis
     // epoch is immutable) — last in the stagger.
     initialDelayMs: 60_000,
+  });
+
+  // Phase 2-extension — canonical client-kind classifier from
+  // validators.app. Sibling to `cluster-nodes-ingester` (regex
+  // classifier from gossip version strings) but cadence is
+  // epoch-triggered rather than periodic. See the job's docstring
+  // for the two-classifier rationale.
+  scheduler.register({
+    ...createValidatorsAppClientIngesterJob({
+      validatorsAppClient: new ValidatorsAppClient({ logger }),
+      validatorsRepo,
+      epochsRepo,
+      cursorsRepo,
+      intervalMs: config.VALIDATORS_APP_INTERVAL_MS,
+      logger,
+    }),
+    // +90s: last in the stagger. External HTTP, not RPC-critical,
+    // and the per-tick steady-state is two cheap DB queries until
+    // an epoch turns over.
+    initialDelayMs: 90_000,
   });
 
   shutdown.register('scheduler', async () => {
