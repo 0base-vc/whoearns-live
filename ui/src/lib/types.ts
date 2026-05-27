@@ -260,6 +260,17 @@ export interface NodeTierBody {
     economicMeasuredEpochs: number;
     economicMedianLamportsPerSlot: string | null;
     incomeFreshness: string | null;
+    /**
+     * Validator's activated stake (lamports, decimal-precision string)
+     * as of the most recent closed epoch in the window. `null` for
+     * windows that span only pre-stake-snapshot epochs.
+     */
+    activatedStakeLamports: string | null;
+    /**
+     * Total vote credits across the closed-epoch window (decimal-
+     * precision string). Sum of per-epoch credits; window-aggregate.
+     */
+    voteCreditsTotal: string;
     cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
   };
   tier: NodeTier;

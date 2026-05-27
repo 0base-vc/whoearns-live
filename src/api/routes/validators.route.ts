@@ -255,6 +255,23 @@ export type TierBody = Omit<NodeTierResponse, 'vote' | 'identity'>;
 export function tierBodyFromResolved(resolved: ResolvedTier): TierBody {
   const { result, input, closedRows, economicLookup, cohortAsOfEpoch } = resolved;
   const incomeFreshness = oldestIncomeFreshness(closedRows);
+  // Latest closed-epoch row carries the stake snapshot — `closedRows`
+  // is sorted newest-first by the repo. Pre-stake-snapshot epochs
+  // emit `null` per the migration-0006 forward-only column.
+  const activatedStakeLamports =
+    closedRows[0]?.activatedStakeLamports !== undefined &&
+    closedRows[0].activatedStakeLamports !== null
+      ? closedRows[0].activatedStakeLamports.toString()
+      : null;
+  // Window-total vote credits — sum across the closed rows. Each row
+  // is per-epoch credits (cumulative within the epoch, reset per
+  // epoch by Solana). Summing gives the window's total vote-landing
+  // productivity, parallel to the income totals. Reads `null` for
+  // pre-migration-0021 epochs where the column defaults to 0; the
+  // sum collapses to 0 in that case which is the right answer.
+  const voteCreditsTotal = closedRows
+    .reduce((acc, row) => acc + (row.voteCredits ?? 0n), 0n)
+    .toString();
   return {
     window: {
       epochs: closedRows.length,
@@ -264,6 +281,8 @@ export function tierBodyFromResolved(resolved: ResolvedTier): TierBody {
       economicMeasuredEpochs: input.economicMeasuredEpochs,
       economicMedianLamportsPerSlot: economicLookup.medianIncomePerSlotLamports,
       incomeFreshness: incomeFreshness?.toISOString() ?? null,
+      activatedStakeLamports,
+      voteCreditsTotal,
       // Closed-epoch window bounds the cohort was evaluated over. A
       // consumer can compare these against the leaderboard's current
       // epoch to detect drift between a CDN-cached tier and a fresh
@@ -711,6 +730,22 @@ export interface NodeTierResponse {
      * separate health surface.
      */
     incomeFreshness: string | null;
+    /**
+     * Validator's activated stake (lamports, decimal-precision
+     * string) as of the most recent closed epoch in the window.
+     * `null` for windows that span only pre-stake-snapshot epochs
+     * (migration 0006 is forward-only — no historical backfill of
+     * `getVoteAccounts`). Surfaced so a delegator hub can show
+     * stake alongside the score without a second API call.
+     */
+    activatedStakeLamports: string | null;
+    /**
+     * Total vote credits earned across the closed-epoch window
+     * (decimal-precision string). Each row is per-epoch credits;
+     * summed gives the window's vote-landing productivity. Reads
+     * 0 when none of the rows have credit data ingested.
+     */
+    voteCreditsTotal: string;
     /**
      * Closed-epoch window bounds the percentile cohort was evaluated
      * over (`fromEpoch` = oldest closed epoch in the window,

@@ -451,6 +451,25 @@
   // pessimistic floor that drives the tier).
   const skipRateValue = $derived(skipRate(tierWindow));
 
+  // Activated stake in SOL — formatted to 0 decimals (millions of SOL
+  // rounds cleanly without losing information at this magnitude).
+  // `null` when the window spans only pre-stake-snapshot epochs.
+  const activatedStakeSol = $derived.by<string | null>(() => {
+    const lamports = tierWindow.activatedStakeLamports;
+    if (lamports === null) return null;
+    const sol = lamportsStringToSolNumber(lamports);
+    if (sol === null) return null;
+    return new Intl.NumberFormat('en', { maximumFractionDigits: 0 }).format(sol);
+  });
+
+  // Vote credits total across the scoring window — Solana epochs
+  // produce up to ~432,000 credits per validator, so the window total
+  // is ≤ ~4.3M for a 10-epoch window. Locale-formatted integer for
+  // legibility (commas).
+  const voteCreditsTotalLabel = $derived(
+    new Intl.NumberFormat('en').format(BigInt(tierWindow.voteCreditsTotal)),
+  );
+
   // Income last 30d — SSR-aggregated LAMPORTS total. Convert to SOL
   // via `lamportsStringToSolNumber` before formatting. Earlier
   // revision passed the lamports string directly to `formatSolFixed`
@@ -1270,6 +1289,37 @@
           {:else}
             <span class="text-[color:var(--color-text-muted)]">—</span>
           {/if}
+        </dd>
+
+        <!--
+          Active stake — snapshot from the most recent closed
+          epoch's `epoch_validator_stats` row (per the scoring
+          response). `null` for pre-stake-snapshot epochs; we render
+          an em-dash so a delegator doesn't see a misleading "0".
+        -->
+        <dt class="text-xs uppercase tracking-wider text-[color:var(--color-text-subtle)]">
+          Active stake
+        </dt>
+        <dd class="text-right tabular-nums">
+          {#if activatedStakeSol !== null}
+            ◎{activatedStakeSol}
+          {:else}
+            <span class="text-[color:var(--color-text-muted)]">—</span>
+          {/if}
+        </dd>
+
+        <!--
+          Vote credits across the scoring window. Source is
+          `getVoteAccounts.epochCredits`; under SIMD-0033 (Timely
+          Vote Credits) the count is implicitly latency-weighted —
+          a high ratio of credits to max-possible reads as "votes
+          landed on time." Surfaced here as the window total.
+        -->
+        <dt class="text-xs uppercase tracking-wider text-[color:var(--color-text-subtle)]">
+          Vote credits
+        </dt>
+        <dd class="text-right tabular-nums">
+          {voteCreditsTotalLabel}
         </dd>
       </dl>
     </Card>
