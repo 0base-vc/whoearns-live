@@ -25,7 +25,6 @@ import { createAggregatesComputerJob } from '../jobs/aggregates-computer.job.js'
 import { createEpochWatcherJob } from '../jobs/epoch-watcher.job.js';
 import { createFeeIngesterJob } from '../jobs/fee-ingester.job.js';
 import { createIncomeReconcilerJob } from '../jobs/income-reconciler.job.js';
-import { createClusterNodesIngesterJob } from '../jobs/cluster-nodes-ingester.job.js';
 import { createValidatorInfoRefreshJob } from '../jobs/validator-info-refresh.job.js';
 import { createSlotIngesterJob } from '../jobs/slot-ingester.job.js';
 import { createWalletActivityIngesterJob } from '../jobs/wallet-activity-ingester.job.js';
@@ -314,17 +313,35 @@ export async function startWorker(): Promise<void> {
     initialDelayMs: 20_000,
   });
 
-  scheduler.register({
-    ...createClusterNodesIngesterJob({
-      rpc,
-      validatorsRepo,
-      intervalMs: config.CLUSTER_NODES_INTERVAL_MS,
-      logger,
-    }),
-    // +30s: single ~500 KB `getClusterNodes` response; pull it well
-    // clear of the boot RPC burst.
-    initialDelayMs: 30_000,
-  });
+  // DEPRECATED — `cluster-nodes-ingester` registration removed.
+  //
+  // The gossip-version-string regex classifier in
+  // `services/client-kind.ts#classifyClient` can only emit 7 base
+  // kinds (agave / jito_solana / firedancer / frankendancer / paladin
+  // / sig / unknown); it CANNOT distinguish the 7 additional
+  // fork variants (agave_bam, harmonic_*, firebam, raiku, …) that
+  // ship the same upstream version string as their base client.
+  // Running this job alongside `validators-app-client-ingester`
+  // (which CAN distinguish all 14 canonical variants via gossip
+  // CRDS decoding) produced a livelock: validators-app would write
+  // `agave_bam`, cluster-nodes would overwrite it with `agave`
+  // 30 minutes later, validators-app would re-write 6 h after that,
+  // cluster-nodes again — average steady state was the WRONG
+  // classification because cluster-nodes runs 12× more often.
+  //
+  // Disabling cluster-nodes-ingester eliminates the livelock.
+  // Cost: a brand-new validator joining the cluster waits up to
+  // `VALIDATORS_APP_INTERVAL_MS` (2 h) before getting its first
+  // canonical classification instead of up to
+  // `CLUSTER_NODES_INTERVAL_MS` (30 min) for its first regex
+  // classification. The DB column has a `'unknown'` default for
+  // the interim period.
+  //
+  // The job + service code is intentionally kept in-tree so an
+  // operator can re-register here in one line if validators.app
+  // becomes unreliable (the regex classifier degrades gracefully
+  // — base kind is still a useful signal even without specific
+  // variants).
 
   // Phase 4 — wallet-activity ingester (unified). Single job that
   // walks `getSignaturesForAddress` newest-first, calls

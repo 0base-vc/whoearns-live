@@ -313,11 +313,12 @@ config:
   walletFeeBackfillIntervalMs: '3600000'
   walletFeeBackfillPerTickLimit: '500'
   # Phase 2-extension — validators.app canonical client-kind
-  # ingester cadence. Fixed 6 hr refresh — operators upgrade on
-  # hour-scale cycles at fastest and the upstream snapshots gossip
-  # on a similar timescale, so polling faster gives no extra signal.
+  # ingester cadence. 2 hr refresh. Sole source of client_kind
+  # data since `cluster-nodes-ingester` was disabled (regex
+  # classifier was overwriting validators.app's specific variants
+  # like AgaveBam with the base 'agave' kind 12× per 6 h).
   # One bulk HTTP call per tick; off the RPC path entirely.
-  validatorsAppIntervalMs: '21600000'
+  validatorsAppIntervalMs: '7200000'
   # Phase 5 — SIMD curation cadence. 12 hr keeps Anthropic token
   # spend modest while still catching newly-listed SIMDs within
   # half a day. Set to a longer interval (e.g. 24 hr) if your token

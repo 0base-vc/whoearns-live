@@ -15,6 +15,27 @@ export interface ClusterNodesIngesterJobDeps {
 export const CLUSTER_NODES_INGESTER_JOB_NAME = 'cluster-nodes-ingester';
 
 /**
+ * DEPRECATED — currently NOT registered by `worker.ts`.
+ *
+ * The gossip-version-string regex classifier in
+ * `services/client-kind.ts#classifyClient` only emits 7 base kinds
+ * (agave / jito_solana / firedancer / frankendancer / paladin /
+ * sig / unknown) and was overwriting `validators-app-client-ingester`'s
+ * canonical 14-variant classifications — a node validators.app
+ * had classified as `agave_bam` became `agave` 30 minutes later,
+ * then back to `agave_bam` 6 h later, etc. Average steady state
+ * was wrong because the regex job ran 12× more often. See the
+ * worker entrypoint comment + `docs/scoring.md` Phase 2 section.
+ *
+ * Code kept in-tree (with this docstring) so an operator can
+ * re-register it from the worker entry in one line if
+ * validators.app becomes unreliable. The regex classifier
+ * degrades gracefully — a base kind is still a useful signal
+ * even without specific-variant resolution — so this is a
+ * legitimate fallback worth preserving rather than deleting.
+ *
+ * Original docstring follows:
+ *
  * Periodically polls `getClusterNodes` for the full gossip ContactInfo
  * list and writes each identity's `(client_kind, client_version)` to
  * the `validators` table. Drives the "Firedancer Pioneer" / "Jito-MEV

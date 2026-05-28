@@ -361,35 +361,30 @@ deliberately separate from the tier.
   `GET /v1/validators/:idOrVote/badges` with one of 8 landmark
   classifications (Genesis Operator → Recent Operator). The oldest
   landmark the validator predates wins (no double-counting).
-- **Client identification.** Two-tier classifier:
-  - `cluster-nodes-ingester` runs every 30 min, pulls the gossip
-    `getClusterNodes.version` string per identity and classifies
-    via `services/client-kind.ts` regex. Cheap, always available,
-    but **can't distinguish forks that share the upstream
-    version-string format** (e.g. HarmonicFrankendancer publishes
-    `0.909.0-rc.40001`, indistinguishable from upstream
-    Frankendancer's `0.909.40001` by a trustworthy regex).
-  - `validators-app-client-ingester` runs at a fixed 6 h cadence
-    (operators upgrade on hour-scale cycles at fastest, and the
-    upstream snapshots gossip on a similar timescale; polling
-    faster gives no extra signal). validators.app runs a gossip
-    CRDS listener and decodes the 16-bit
-    `ContactInfo.version.client` field that JSON-RPC
-    `getClusterNodes` drops — the canonical Solana Foundation
-    client ID, per the
-    `solana-foundation/solana-validator-client-ids` registry.
-    This source can distinguish all 14 registered variants
-    (Solana Labs, Jito Labs, Frankendancer, Agave, Paladin,
-    Firedancer, Agave BAM, Sig, Rakurai, HarmonicFiredancer,
-    HarmonicAgave, HarmonicFrankendancer, FireBAM, Raiku).
-  - Both writers go through `validators.upsertClientBatch`. The
-    repo's `IS DISTINCT FROM` guard makes the no-drift case a
-    no-op; on drift, last-writer-wins per tick. The validators.app
-    classifier is more authoritative but runs much less often, so
-    the steady state is "cluster-nodes regex output, refreshed
-    every 6 h by the canonical validators.app classification".
-  - Surfaced on `/badges` and persisted on `validators.client_kind`
-    for future category leaderboards.
+- **Client identification.** Single-source via
+  `validators-app-client-ingester` (2 h cadence). validators.app
+  runs a gossip CRDS listener and decodes the 16-bit
+  `ContactInfo.version.client` field that JSON-RPC
+  `getClusterNodes` drops — the canonical Solana Foundation
+  client ID, per the
+  `solana-foundation/solana-validator-client-ids` registry. This
+  source distinguishes all 14 registered variants (Solana Labs,
+  Jito Labs, Frankendancer, Agave, Paladin, Firedancer, Agave
+  BAM, Sig, Rakurai, HarmonicFiredancer, HarmonicAgave,
+  HarmonicFrankendancer, FireBAM, Raiku).
+- **Why not two sources.** An earlier revision ran a
+  `cluster-nodes-ingester` alongside (30 min cadence,
+  `getClusterNodes.version` string + `services/client-kind.ts`
+  regex). The regex can only emit 7 base kinds and was
+  overwriting validators.app's specific variants — a node
+  classified as `agave_bam` (validators.app) became `agave`
+  (regex) within 30 minutes, then back to `agave_bam` 6 h later,
+  then `agave` again 30 min after that. Average steady state
+  was wrong because the regex job runs 12× more often. The
+  cluster-nodes job is disabled (code retained for future
+  toggle) so the canonical source is the only writer.
+- Surfaced on `/badges` and persisted on `validators.client_kind`
+  for future category leaderboards.
 
 #### Planned next
 
