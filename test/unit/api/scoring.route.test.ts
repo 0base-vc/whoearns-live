@@ -108,13 +108,21 @@ function buildDeps(
       findHistoryByVote: async () => makeTierHistory(),
       // Top economic + large cohort + full window coverage → forge
       // on the happy path. `unknownValidator` cases never reach this
-      // stub (the route 404s on the validators lookup).
+      // stub (the route 404s on the validators lookup). The cohort-
+      // quantile + CU-target fields below were added by the per-
+      // component evidence work — every test stub carries the full
+      // EconomicPercentileLookup shape now.
       findEconomicPercentile: async () => ({
         percentile: 1.0,
         cohortSize: 200,
         measuredEpochs: 10,
         medianIncomePerSlotLamports: '50000000',
+        cohortMedianLamportsPerSlot: '12100000',
+        cohortP25LamportsPerSlot: '6200000',
+        cohortP75LamportsPerSlot: '22800000',
         cuPercentile: 1.0,
+        validatorAvgCuPerBlock: 14_820_000,
+        cohortMedianCuPerBlock: 11_200_000,
       }),
     },
     epochsRepo: {
@@ -198,7 +206,41 @@ describe('GET /v1/validators/:idOrVote/scoring', () => {
           economicMeasuredEpochs: number;
           cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
         };
-        components: { reliability: number; economicPercentile: number | null };
+        components: {
+          reliability: {
+            score: number;
+            evidence: {
+              wilsonSkipRateUpper: number;
+              wilsonSkipRateLower: number;
+              skipRateFloor: number;
+              floorEngaged: boolean;
+              perEpoch: Array<{ epoch: number; slotsAssigned: number; slotsSkipped: number }>;
+            };
+          };
+          economicPercentile: {
+            score: number | null;
+            evidence: {
+              validatorMedianLamportsPerSlot: string | null;
+              cohortMedianLamportsPerSlot: string | null;
+              cohortP25LamportsPerSlot: string | null;
+              cohortP75LamportsPerSlot: string | null;
+              rank: { position: number; of: number } | null;
+              perEpoch: Array<{ epoch: number; lamportsPerSlot: string | null }>;
+              incomeBreakdown: {
+                baseFeesLamports: string;
+                priorityFeesLamports: string;
+                jitoTipsLamports: string;
+              };
+            };
+          };
+          cuPercentile: {
+            score: number | null;
+            evidence: {
+              validatorAvgCuPerBlock: number | null;
+              cohortMedianCuPerBlock: number | null;
+            };
+          };
+        };
       };
       tenure: { firstSeenEpoch: number; landmark: string; badge: string };
       client: { kind: string; version: string | null };
@@ -223,8 +265,30 @@ describe('GET /v1/validators/:idOrVote/scoring', () => {
     // count as closed, window picks the 10 newest (496..505).
     expect(body.tier.window.cohortAsOfEpoch).toEqual({ fromEpoch: 496, toEpoch: 505 });
     expect(body.tier.composite).toBeGreaterThanOrEqual(95);
-    expect(body.tier.components.economicPercentile).toBe(1.0);
-    expect(typeof body.tier.components.reliability).toBe('number');
+    expect(body.tier.components.economicPercentile.score).toBe(1.0);
+    expect(typeof body.tier.components.reliability.score).toBe('number');
+
+    // Evidence propagation: each sub-component carries its breakdown
+    // through `tierBodyFromResolved` to the aggregate /scoring body.
+    expect(body.tier.components.reliability.evidence.skipRateFloor).toBe(0.2);
+    expect(body.tier.components.reliability.evidence.floorEngaged).toBe(false);
+    expect(body.tier.components.reliability.evidence.perEpoch).toHaveLength(10);
+    expect(body.tier.components.economicPercentile.evidence.validatorMedianLamportsPerSlot).toBe(
+      '50000000',
+    );
+    expect(body.tier.components.economicPercentile.evidence.cohortMedianLamportsPerSlot).toBe(
+      '12100000',
+    );
+    expect(body.tier.components.economicPercentile.evidence.rank).toEqual({
+      position: 1,
+      of: 200,
+    });
+    expect(body.tier.components.economicPercentile.evidence.perEpoch).toHaveLength(10);
+    expect(body.tier.components.economicPercentile.evidence.incomeBreakdown.baseFeesLamports).toBe(
+      '0',
+    );
+    expect(body.tier.components.cuPercentile.evidence.validatorAvgCuPerBlock).toBe(14_820_000);
+    expect(body.tier.components.cuPercentile.evidence.cohortMedianCuPerBlock).toBe(11_200_000);
 
     // tenure + client blocks from /badges (NOT the badges tier).
     expect(body.tenure.firstSeenEpoch).toBe(100);

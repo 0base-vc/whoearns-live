@@ -457,29 +457,91 @@ Response shape:
     "slotsSkipped": 3,
     "economicCohortSize": 1247,
     "economicMeasuredEpochs": 10,
-    "economicMedianLamportsPerSlot": "8421337",
+    "economicMedianLamportsPerSlot": "48425333",
     "incomeFreshness": "2026-05-12T08:00:00.000Z",
     "cohortAsOfEpoch": { "fromEpoch": 815, "toEpoch": 824 }
   },
-  "tier": "forge | anvil | hearth | kindling | unrated",
+  "tier": "forge",
   "composite": 96,
   "components": {
-    "reliability": 0.988,
-    "economicPercentile": 0.97
+    "reliability": {
+      "score": 0.996,
+      "evidence": {
+        "wilsonSkipRateUpper": 0.004,
+        "wilsonSkipRateLower": 0.001,
+        "skipRateFloor": 0.2,
+        "floorEngaged": false,
+        "perEpoch": [
+          { "epoch": 815, "slotsAssigned": 44, "slotsSkipped": 0 },
+          { "epoch": 816, "slotsAssigned": 41, "slotsSkipped": 1 },
+          { "epoch": 817, "slotsAssigned": 43, "slotsSkipped": 0 },
+          { "epoch": 818, "slotsAssigned": 45, "slotsSkipped": 0 },
+          { "epoch": 819, "slotsAssigned": 42, "slotsSkipped": 1 },
+          { "epoch": 820, "slotsAssigned": 44, "slotsSkipped": 0 },
+          { "epoch": 821, "slotsAssigned": 43, "slotsSkipped": 0 },
+          { "epoch": 822, "slotsAssigned": 41, "slotsSkipped": 1 },
+          { "epoch": 823, "slotsAssigned": 45, "slotsSkipped": 0 },
+          { "epoch": 824, "slotsAssigned": 44, "slotsSkipped": 0 }
+        ]
+      }
+    },
+    "economicPercentile": {
+      "score": 1.0,
+      "evidence": {
+        "validatorMedianLamportsPerSlot": "48425333",
+        "cohortMedianLamportsPerSlot": "12100000",
+        "cohortP25LamportsPerSlot": "8200000",
+        "cohortP75LamportsPerSlot": "18900000",
+        "rank": { "position": 1, "of": 1247 },
+        "perEpoch": [
+          { "epoch": 815, "lamportsPerSlot": "47105420" },
+          { "epoch": 824, "lamportsPerSlot": "49780112" }
+        ],
+        "incomeBreakdown": {
+          "baseFeesLamports": "2104300000",
+          "priorityFeesLamports": "18452100000",
+          "jitoTipsLamports": "415200000"
+        }
+      }
+    },
+    "cuPercentile": {
+      "score": 0.889,
+      "evidence": {
+        "validatorAvgCuPerBlock": 14820000,
+        "cohortMedianCuPerBlock": 11200000
+      }
+    }
   }
 }
 ```
 
-The composite is `0.3 × reliability + 0.7 × economicPercentile`,
-scaled to 0-100. `reliability` is the pessimistic block-production
-success rate (`1 − wilsonInterval(slotsSkipped, slotsAssigned).upper`);
-`economicPercentile` is the cohort rank of this validator's median
-per-leader-slot income (`(blockFeesTotalLamports +
-blockTipsTotalLamports) / slotsAssigned`) across the 10-epoch window,
-computed against the **indexed-validator cohort** (the deployment's
-`WatchMode` set — `top:N`, an explicit list, or `*` for every active
-validator). Tier cutoffs: `forge ≥ 95`, `anvil ≥ 80`, `hearth ≥ 40`,
+The composite is
+`0.3 × components.reliability.score + 0.7 × economicScore`
+(`economicScore = 0.9 × components.economicPercentile.score +
+0.1 × cuSubscore`), scaled to 0-100. `components.reliability.score`
+is the pessimistic block-production success rate
+(`1 − wilsonInterval(slotsSkipped, slotsAssigned).upper`);
+`components.economicPercentile.score` is the cohort rank of this
+validator's median per-leader-slot income
+(`(blockFeesTotalLamports + blockTipsTotalLamports) /
+slotsAssigned`) across the 10-epoch window, computed against the
+**indexed-validator cohort** (the deployment's `WatchMode` set —
+`top:N`, an explicit list, or `*` for every active validator).
+Tier cutoffs: `forge ≥ 95`, `anvil ≥ 80`, `hearth ≥ 40`,
 `kindling < 40`.
+
+**Per-component `evidence`.** Each sub-component carries an
+`evidence` block alongside its `score`. The evidence describes the
+on-chain inputs the score was derived from — Wilson interval bounds
+and per-epoch slot accounting for reliability, cohort quartiles and
+the validator's rank-of-N for economic percentile, the validator's
+weighted CU vs the cohort median for CU percentile — so a delegator
+auditing the composite can trace each number to its raw inputs in
+one fetch. The shape of every `evidence` field is documented in the
+`/scoring.md` Phase 1 "Evidence schema" subsection and in the
+OpenAPI `NodeTierBody.components` schema. Evidence is descriptive,
+not prescriptive: it surfaces what was measured, not what an
+operator should change.
 
 `window.epochs` is the count of closed-epoch rows actually indexed
 for this validator (`≤ 10`) — **not** the configured window, which is
@@ -1100,13 +1162,42 @@ duplication**:
       "slotsSkipped": 3,
       "economicCohortSize": 1247,
       "economicMeasuredEpochs": 10,
-      "economicMedianLamportsPerSlot": "8421337",
+      "economicMedianLamportsPerSlot": "48425333",
       "incomeFreshness": "2026-05-12T08:00:00.000Z",
-      "cohortAsOfEpoch": { "fromEpoch": 820, "toEpoch": 824 }
+      "cohortAsOfEpoch": { "fromEpoch": 815, "toEpoch": 824 }
     },
     "tier": "forge",
     "composite": 96,
-    "components": { "reliability": 0.988, "economicPercentile": 0.97 }
+    "components": {
+      "reliability": {
+        "score": 0.996,
+        "evidence": {
+          "wilsonSkipRateUpper": 0.004,
+          "wilsonSkipRateLower": 0.001,
+          "skipRateFloor": 0.2,
+          "floorEngaged": false,
+          "perEpoch": [{ "epoch": 815, "slotsAssigned": 44, "slotsSkipped": 0 }]
+        }
+      },
+      "economicPercentile": {
+        "score": 1.0,
+        "evidence": {
+          "validatorMedianLamportsPerSlot": "48425333",
+          "cohortMedianLamportsPerSlot": "12100000",
+          "cohortP25LamportsPerSlot": "8200000",
+          "cohortP75LamportsPerSlot": "18900000",
+          "rank": { "position": 1, "of": 1247 },
+          "perEpoch": [{ "epoch": 815, "lamportsPerSlot": "47105420" }]
+        }
+      },
+      "cuPercentile": {
+        "score": 0.889,
+        "evidence": {
+          "validatorAvgCuPerBlock": 14820000,
+          "cohortMedianCuPerBlock": 11200000
+        }
+      }
+    }
   },
   "tenure": {
     "firstSeenEpoch": 100,

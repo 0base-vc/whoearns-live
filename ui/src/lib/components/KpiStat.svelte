@@ -20,7 +20,13 @@
 
   interface Props {
     label: string;
-    size?: 'md' | 'lg';
+    /**
+     * `sm` is for the EvidenceRow's inputs grid — 3 raw figures sit
+     * side-by-side inside a Card and the regular `md` tile dominates
+     * the row. `md` is the default for income/wallet sections. `lg`
+     * is reserved for hero numbers (the income page top strip).
+     */
+    size?: 'sm' | 'md' | 'lg';
     accent?: boolean;
     /** Optional tiny suffix label rendered next to the value (e.g., "SOL", "per epoch"). */
     suffix?: string;
@@ -34,7 +40,9 @@
   // Wrap in $derived so prop changes (e.g. parent toggling `accent`
   // based on a live value) actually re-render; a plain const captures
   // the initial value only under runes mode.
-  const valueSizeClass = $derived(size === 'lg' ? 'text-3xl font-semibold' : 'text-lg');
+  const valueSizeClass = $derived(
+    size === 'lg' ? 'text-3xl font-semibold' : size === 'sm' ? 'text-sm font-medium' : 'text-lg',
+  );
   const accentClass = $derived(accent ? 'text-[color:var(--color-brand-500)]' : '');
 </script>
 

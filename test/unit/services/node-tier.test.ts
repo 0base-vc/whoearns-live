@@ -397,6 +397,74 @@ describe('computeTier', () => {
     });
     expect(result.components.cuPercentile).toBe(0.4242);
   });
+
+  // --- Wilson bound + reliability-floor exposure ---
+  // The result carries the Wilson interval bounds AND the floor-
+  // engaged flag so the route can compose per-component "evidence"
+  // without re-computing.
+
+  it('exposes the Wilson interval bounds alongside the reliability score', () => {
+    // Healthy sample with a known skip rate — both bounds finite,
+    // upper > lower, and `reliability === 1 - upper` exactly.
+    const result = computeTier({
+      votePubkey: VOTE,
+      slotsAssigned: 1000,
+      slotsSkipped: 50,
+      economicPercentile: 0.5,
+      economicCohortSize: 500,
+      economicMeasuredEpochs: 10,
+      cuPercentile: 0.5,
+    });
+    expect(result.wilsonSkipRateUpper).toBeGreaterThan(0);
+    expect(result.wilsonSkipRateUpper).toBeLessThan(1);
+    expect(result.wilsonSkipRateLower).toBeGreaterThanOrEqual(0);
+    expect(result.wilsonSkipRateLower).toBeLessThan(result.wilsonSkipRateUpper);
+    // Reliability is exactly 1 - upper, by construction.
+    expect(result.components.reliability).toBeCloseTo(1 - result.wilsonSkipRateUpper, 12);
+  });
+
+  it('reports both Wilson bounds at zero when no slots were assigned', () => {
+    const result = computeTier({
+      votePubkey: VOTE,
+      slotsAssigned: 0,
+      slotsSkipped: 0,
+      economicPercentile: 0.5,
+      economicCohortSize: 500,
+      economicMeasuredEpochs: 10,
+      cuPercentile: 0.5,
+    });
+    expect(result.wilsonSkipRateUpper).toBe(0);
+    expect(result.wilsonSkipRateLower).toBe(0);
+  });
+
+  it('floorEngaged is true when Wilson upper sits above SKIP_RATE_FLOOR', () => {
+    // 25% point estimate, upper well above SKIP_RATE_FLOOR (0.20).
+    const result = computeTier({
+      votePubkey: VOTE,
+      slotsAssigned: 1000,
+      slotsSkipped: 250,
+      economicPercentile: 1.0,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 10,
+      cuPercentile: 1.0,
+    });
+    expect(result.floorEngaged).toBe(true);
+    expect(result.wilsonSkipRateUpper).toBeGreaterThan(SKIP_RATE_FLOOR);
+  });
+
+  it('floorEngaged is false when Wilson upper sits at or below SKIP_RATE_FLOOR', () => {
+    const result = computeTier({
+      votePubkey: VOTE,
+      slotsAssigned: 1000,
+      slotsSkipped: 100,
+      economicPercentile: 1.0,
+      economicCohortSize: 1500,
+      economicMeasuredEpochs: 10,
+      cuPercentile: 1.0,
+    });
+    expect(result.floorEngaged).toBe(false);
+    expect(result.wilsonSkipRateUpper).toBeLessThanOrEqual(SKIP_RATE_FLOOR);
+  });
 });
 
 describe('slotCountersFromHistory', () => {

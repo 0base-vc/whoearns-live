@@ -268,6 +268,81 @@ come from — so it adds no new ingestion path. `composite` surfaces
 `cuPercentile` alongside `economicPercentile` in `components` for a
 per-component breakdown.
 
+#### Evidence schema
+
+Design Principle #5 — _per-component breakdown is mandatory_ —
+extends one layer deeper than a flat sub-score. Each entry under
+`components` carries both its `score` AND an `evidence` block that
+records the on-chain inputs the score was computed from. The
+delegator who reads "composite 96, economic 1.0" can, in the same
+fetch, see the median lamports/slot the percentile was drawn from,
+the cohort quartiles around it, and the rank-of-N position the
+validator occupies. No second round-trip, no separate auditor query
+— the audit trail ships with the number.
+
+The voice rule across every evidence field is **descriptive math**.
+A field name reports what was measured (`wilsonSkipRateUpper`,
+`cohortMedianLamportsPerSlot`, `validatorAvgCuPerBlock`); a field
+description states the calculation that produced it. No field
+suggests what the operator should do about the value. This is the
+project's promise to operators: WhoEarns measures, it does not
+coach. A `floorEngaged: true` flag reports that the Wilson upper
+bound on skip rate has crossed 0.20; it does not instruct.
+
+Per sub-component:
+
+- **`reliability.evidence`** carries `wilsonSkipRateUpper`,
+  `wilsonSkipRateLower`, the `skipRateFloor` constant (0.20),
+  `floorEngaged` (true when the upper bound exceeds the floor), and
+  a `perEpoch` array of `{epoch, slotsAssigned, slotsSkipped}` rows
+  the Wilson interval was computed over. The width between lower
+  and upper narrows as the validator accumulates leader slots.
+
+- **`economicPercentile.evidence`** carries
+  `validatorMedianLamportsPerSlot` (the validator's own median —
+  identical to `window.economicMedianLamportsPerSlot`),
+  `cohortMedianLamportsPerSlot` / `cohortP25LamportsPerSlot` /
+  `cohortP75LamportsPerSlot` (the cohort's 50th / 25th / 75th
+  percentiles, locating the validator against the indexed-cohort
+  distribution), `rank: {position, of}` (1-indexed position with
+  cohort size), a `perEpoch` array of `{epoch, lamportsPerSlot}`
+  rows the median was taken across, and an optional
+  `incomeBreakdown` of `{baseFeesLamports, priorityFeesLamports,
+jitoTipsLamports}` that decomposes the window's aggregate income
+  into its three on-chain components. The `incomeBreakdown` field
+  is present when the per-component sums are in memory at response
+  time and omitted otherwise — a consumer that needs the
+  decomposition for every validator should not assume the field is
+  always populated.
+
+- **`cuPercentile.evidence`** carries `validatorAvgCuPerBlock` (this
+  validator's produced-block-count-weighted average compute units
+  per produced block across the window) and `cohortMedianCuPerBlock`
+  (the 50th percentile of the cohort's per-validator weighted
+  averages). Two numbers — they place the validator's CU throughput
+  against the cohort's middle without the rank apparatus the
+  income side needs.
+
+Worked example. A top-tier validator with `composite: 96`, tier
+`forge`, returns evidence in this shape (illustrative values):
+`reliability.score = 0.996` with `wilsonSkipRateUpper = 0.004` and
+`floorEngaged = false` — the validator's skip rate sits well below
+the 20% cap, so the reliability floor does not engage and
+reliability contributes ~0.299 toward the composite (0.996 × 0.3).
+`economicPercentile.score = 1.0` with
+`validatorMedianLamportsPerSlot = "48425333"` against
+`cohortMedianLamportsPerSlot = "12100000"` — the validator's median
+per-slot income sits roughly 4× the cohort median, and the
+`rank: {position: 1, of: 1247}` shows it tops every indexed peer in
+the 10-epoch window. `cuPercentile.score = 0.889` with
+`validatorAvgCuPerBlock = 14820000` against
+`cohortMedianCuPerBlock = 11200000` — the validator packs about 1.3×
+the cohort median's compute units into each produced block, placing
+it in the upper decile of CU throughput. The operator reading these
+three blocks sees not just where they sit on each axis but the cohort
+distribution they sit within; the math from the three scores to the
+96 composite is reproducible from the evidence alone.
+
 #### Reliability floor
 
 Regardless of how high `economicPercentile` is, **a validator whose

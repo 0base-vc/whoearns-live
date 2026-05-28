@@ -1003,7 +1003,12 @@ export class FakeStatsRepo {
       cohortSize: peerVotes.size,
       measuredEpochs: 0,
       medianIncomePerSlotLamports: null,
+      cohortMedianLamportsPerSlot: null,
+      cohortP25LamportsPerSlot: null,
+      cohortP75LamportsPerSlot: null,
       cuPercentile: null,
+      validatorAvgCuPerBlock: null,
+      cohortMedianCuPerBlock: null,
     };
   }
 }

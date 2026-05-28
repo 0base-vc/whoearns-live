@@ -29,6 +29,7 @@ import {
   computeTier,
   oldestIncomeFreshness,
   slotCountersFromHistory,
+  SKIP_RATE_FLOOR,
   WINDOW_CLOSED_EPOCHS,
   WINDOW_FETCH_ROWS,
 } from '../../services/node-tier.js';
@@ -275,6 +276,69 @@ export function tierBodyFromResolved(
   const voteCreditsTotal = closedRows
     .reduce((acc, row) => acc + (row.voteCredits ?? 0n), 0n)
     .toString();
+
+  // ── Per-component evidence assembly ──────────────────────────────
+  //
+  // Reliability evidence: one entry per closed-epoch row (newest first)
+  // carrying the same slot counters the Wilson computation pooled. The
+  // route emits the bounds + floor info `computeTier` already derived.
+  const reliabilityPerEpoch = closedRows.map((row) => ({
+    epoch: row.epoch,
+    slotsAssigned: row.slotsAssigned,
+    slotsSkipped: row.slotsSkipped,
+  }));
+
+  // Economic-percentile evidence: per-epoch lamports per leader slot
+  // (`(blockFees + blockTips) / slotsAssigned`), with `null` when the
+  // row has no leader slots OR its income timestamps are missing — the
+  // same exclusion `findEconomicPercentile`'s cohort filter uses,
+  // surfaced here so the per-epoch breakdown matches what counted
+  // toward the median. Income breakdown sums the four-way fee
+  // decomposition across closed rows in the window; pre-migration-0010
+  // rows surface `0n` from the `NOT NULL DEFAULT 0` columns.
+  const economicPerEpoch = closedRows.map((row) => {
+    const hasIncomeMeasurement =
+      row.slotsAssigned > 0 && row.feesUpdatedAt !== null && row.tipsUpdatedAt !== null;
+    return {
+      epoch: row.epoch,
+      lamportsPerSlot: hasIncomeMeasurement
+        ? (
+            (row.blockFeesTotalLamports + row.blockTipsTotalLamports) /
+            BigInt(row.slotsAssigned)
+          ).toString()
+        : null,
+    };
+  });
+  const baseFeesLamportsSum = closedRows.reduce(
+    (acc, row) => acc + (row.blockBaseFeesTotalLamports ?? 0n),
+    0n,
+  );
+  const priorityFeesLamportsSum = closedRows.reduce(
+    (acc, row) => acc + (row.blockPriorityFeesTotalLamports ?? 0n),
+    0n,
+  );
+  const jitoTipsLamportsSum = closedRows.reduce(
+    (acc, row) => acc + (row.blockTipsTotalLamports ?? 0n),
+    0n,
+  );
+
+  // Derived ordinal rank from `percentile × (cohortSize - 1)`.
+  // PERCENT_RANK gives 0 for the lowest peer and 1 for the highest, so
+  // position 1 = highest, position `of` = lowest. `Math.round` matches
+  // the spec; a cohort of size 1 has an undefined ordinal so we return
+  // null there too (PERCENT_RANK is 0 for that case but a rank of "1
+  // of 1" carries no information).
+  const economicRank =
+    result.components.economicPercentile !== null && input.economicCohortSize > 1
+      ? {
+          position:
+            Math.round(
+              (1 - result.components.economicPercentile) * (input.economicCohortSize - 1),
+            ) + 1,
+          of: input.economicCohortSize,
+        }
+      : null;
+
   return {
     window: {
       epochs: closedRows.length,
@@ -301,9 +365,39 @@ export function tierBodyFromResolved(
     tier: result.tier,
     composite: result.composite,
     components: {
-      reliability: result.components.reliability,
-      economicPercentile: result.components.economicPercentile,
-      cuPercentile: result.components.cuPercentile,
+      reliability: {
+        score: result.components.reliability,
+        evidence: {
+          wilsonSkipRateUpper: result.wilsonSkipRateUpper,
+          wilsonSkipRateLower: result.wilsonSkipRateLower,
+          skipRateFloor: SKIP_RATE_FLOOR,
+          floorEngaged: result.floorEngaged,
+          perEpoch: reliabilityPerEpoch,
+        },
+      },
+      economicPercentile: {
+        score: result.components.economicPercentile,
+        evidence: {
+          validatorMedianLamportsPerSlot: economicLookup.medianIncomePerSlotLamports,
+          cohortMedianLamportsPerSlot: economicLookup.cohortMedianLamportsPerSlot,
+          cohortP25LamportsPerSlot: economicLookup.cohortP25LamportsPerSlot,
+          cohortP75LamportsPerSlot: economicLookup.cohortP75LamportsPerSlot,
+          rank: economicRank,
+          perEpoch: economicPerEpoch,
+          incomeBreakdown: {
+            baseFeesLamports: baseFeesLamportsSum.toString(),
+            priorityFeesLamports: priorityFeesLamportsSum.toString(),
+            jitoTipsLamports: jitoTipsLamportsSum.toString(),
+          },
+        },
+      },
+      cuPercentile: {
+        score: result.components.cuPercentile,
+        evidence: {
+          validatorAvgCuPerBlock: economicLookup.validatorAvgCuPerBlock,
+          cohortMedianCuPerBlock: economicLookup.cohortMedianCuPerBlock,
+        },
+      },
     },
   };
 }
@@ -785,31 +879,151 @@ export interface NodeTierResponse {
   composite: number | null;
   components: {
     /**
-     * 0-1, pessimistic block-production reliability — equals
-     * `1 − Wilson(skipped, assigned).upper`. Always populated
-     * (never null) because we always have slot counters; small-
-     * sample validators get a sub-1.0 value rather than an
-     * inflated 1.0.
+     * Reliability sub-component: pessimistic block-production rate
+     * derived from Wilson 95% upper bound on skip rate, plus the raw
+     * inputs that produced it.
      */
-    reliability: number;
+    reliability: {
+      /**
+       * 0-1, pessimistic block-production reliability — equals
+       * `1 − Wilson(skipped, assigned).upper`. Always populated
+       * (never null) because we always have slot counters; small-
+       * sample validators get a sub-1.0 value rather than an
+       * inflated 1.0.
+       */
+      score: number;
+      evidence: {
+        /** Wilson 95% UPPER bound on the window's skip rate. */
+        wilsonSkipRateUpper: number;
+        /** Wilson 95% LOWER bound on the window's skip rate. */
+        wilsonSkipRateLower: number;
+        /**
+         * Hard skip-rate floor (Wilson upper bound) above which the
+         * tier is capped at `kindling`. Exposed alongside the bound
+         * itself so a consumer can describe the cap geometry without
+         * importing the constant.
+         */
+        skipRateFloor: number;
+        /**
+         * True when `wilsonSkipRateUpper > skipRateFloor` — the
+         * tier was capped at `kindling` by the reliability floor.
+         */
+        floorEngaged: boolean;
+        /**
+         * Per-closed-epoch leader slot counters that fed the Wilson
+         * computation, newest epoch first (matching the
+         * `findHistoryByVote` order). One entry per row in the tier
+         * window; empty when the window has no closed rows.
+         */
+        perEpoch: Array<{
+          epoch: number;
+          slotsAssigned: number;
+          slotsSkipped: number;
+        }>;
+      };
+    };
     /**
-     * 0-1, percentile rank of this validator's median income per
-     * leader slot vs the indexed cohort. **`null`** when the
-     * cohort is too small or this validator had too few measured
-     * epochs — and in that case `tier === 'unrated'`.
+     * Economic-percentile sub-component: cohort rank of median per-
+     * leader-slot income plus the cohort distribution context the
+     * rank was drawn from.
      */
-    economicPercentile: number | null;
+    economicPercentile: {
+      /**
+       * 0-1, percentile rank of this validator's median income per
+       * leader slot vs the indexed cohort. **`null`** when the
+       * cohort is too small or this validator had too few measured
+       * epochs — and in that case `tier === 'unrated'`.
+       */
+      score: number | null;
+      evidence: {
+        /**
+         * Target validator's median income per slot, lamports as a
+         * decimal-precision string. `null` when the validator has no
+         * measurable income in the window. Mirrors
+         * `window.economicMedianLamportsPerSlot` for per-component
+         * readability.
+         */
+        validatorMedianLamportsPerSlot: string | null;
+        /**
+         * Cohort median of per-validator median per-slot income,
+         * lamports as a decimal-precision string. `null` when the
+         * cohort is empty.
+         */
+        cohortMedianLamportsPerSlot: string | null;
+        /**
+         * Cohort 25th percentile of per-validator median per-slot
+         * income, lamports as a decimal-precision string. `null`
+         * when the cohort is empty.
+         */
+        cohortP25LamportsPerSlot: string | null;
+        /**
+         * Cohort 75th percentile of per-validator median per-slot
+         * income, lamports as a decimal-precision string. `null`
+         * when the cohort is empty.
+         */
+        cohortP75LamportsPerSlot: string | null;
+        /**
+         * Derived rank inside the cohort. `position` is
+         * `Math.round((1 - percentile) × (cohortSize - 1)) + 1` —
+         * top-of-cohort = 1, bottom = `of`. `null` when `score` is
+         * null OR `cohortSize <= 1` (rank is undefined).
+         */
+        rank: { position: number; of: number } | null;
+        /**
+         * Per-closed-epoch per-leader-slot income (lamports as a
+         * decimal-precision string) for this validator, newest
+         * epoch first. `null` for epochs with no measurable income
+         * (no leader slots, or a partial-ingest row). One entry per
+         * row in the tier window.
+         */
+        perEpoch: Array<{ epoch: number; lamportsPerSlot: string | null }>;
+        /**
+         * Window-total income decomposition for the target validator
+         * across all closed-epoch rows in the tier window. Each
+         * field is a lamports decimal-precision string summed from
+         * the per-epoch facts. `priorityFeesLamports` AND
+         * `baseFeesLamports` come from the four-way income
+         * decomposition (migration 0010); pre-migration epochs read
+         * `0` from the `NOT NULL DEFAULT 0` column.
+         */
+        incomeBreakdown: {
+          baseFeesLamports: string;
+          priorityFeesLamports: string;
+          jitoTipsLamports: string;
+        };
+      };
+    };
     /**
-     * 0-1, percentile rank of this validator's produced-block-count-
-     * weighted compute units per produced block, over the same window
-     * and indexed cohort as `economicPercentile` but ranked only
-     * among the cohort's block-producing validators. **`null`** when
-     * the validator produced no blocks in the window. Contributes 10% of the
-     * composite's economic component
-     * (`0.9 × economicPercentile + 0.1 × cuSubscore`); a `null` here
-     * means a CU subscore of 0.
+     * CU-percentile sub-component: cohort rank of windowed average
+     * compute units per produced block plus the absolute averages
+     * that drove the rank.
      */
-    cuPercentile: number | null;
+    cuPercentile: {
+      /**
+       * 0-1, percentile rank of this validator's produced-block-count-
+       * weighted compute units per produced block, over the same window
+       * and indexed cohort as `economicPercentile` but ranked only
+       * among the cohort's block-producing validators. **`null`** when
+       * the validator produced no blocks in the window. Contributes 10% of the
+       * composite's economic component
+       * (`0.9 × economicPercentile + 0.1 × cuSubscore`); a `null` here
+       * means a CU subscore of 0.
+       */
+      score: number | null;
+      evidence: {
+        /**
+         * Target validator's produced-block-count-weighted average
+         * compute units per produced block across the window.
+         * `null` when the validator produced no blocks.
+         */
+        validatorAvgCuPerBlock: number | null;
+        /**
+         * Cohort median of per-validator avg CU per produced block.
+         * `null` when no cohort validator produced any blocks.
+         */
+        cohortMedianCuPerBlock: number | null;
+      };
+    };
   };
 }
 

@@ -1261,61 +1261,288 @@ components:
           minimum: 0
           maximum: 100
           description: |
-            `0.3 × reliability + 0.7 × economicScore` (where
-            `economicScore = 0.9 × economicPercentile + 0.1 ×
-            cuSubscore`), scaled to 0-100. `null` when
+            `0.3 × components.reliability.score + 0.7 × economicScore`
+            (where `economicScore = 0.9 × components.economicPercentile.score +
+            0.1 × cuSubscore`), scaled to 0-100. `null` when
             `tier === "unrated"` — no half-shown
             scores. Cutoffs: forge ≥ 95, anvil ≥ 80, hearth ≥ 40,
             kindling < 40. **Tier-capped at `kindling` when
-            `skip_rate > 0.20`** regardless of `economicPercentile` —
+            `components.reliability.evidence.wilsonSkipRateUpper > 0.20`**
+            regardless of `components.economicPercentile.score` —
             see the schema-level description for the reliability-floor
             rationale.
         components:
           type: object
           required: [reliability, economicPercentile, cuPercentile]
+          description: |
+            Each sub-component carries its score AND the on-chain
+            evidence the score was derived from, so a delegator
+            reading the composite can trace from the number to the
+            raw inputs without a second round-trip. Evidence fields
+            describe what was measured; they never prescribe action.
           properties:
             reliability:
-              type: number
-              minimum: 0
-              maximum: 1
-              description: |
-                Pessimistic block-production reliability =
-                `1 − wilsonInterval(slotsSkipped, slotsAssigned).upper`.
-                Small-sample validators with 0 measured skips get a
-                meaningfully sub-1.0 value here (e.g. ~0.75 at 11
-                leader slots), preventing reliability inflation.
+              type: object
+              required: [score, evidence]
+              properties:
+                score:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+                  description: |
+                    Pessimistic block-production reliability =
+                    `1 − wilsonInterval(slotsSkipped, slotsAssigned).upper`.
+                    Small-sample validators with 0 measured skips get a
+                    meaningfully sub-1.0 value here (e.g. ~0.75 at 11
+                    leader slots), preventing reliability inflation.
+                evidence:
+                  type: object
+                  required:
+                    [
+                      wilsonSkipRateUpper,
+                      wilsonSkipRateLower,
+                      skipRateFloor,
+                      floorEngaged,
+                      perEpoch,
+                    ]
+                  properties:
+                    wilsonSkipRateUpper:
+                      type: number
+                      minimum: 0
+                      maximum: 1
+                      description: |
+                        Wilson 95% UPPER bound on the validator's
+                        skip rate across the window — the
+                        worst-plausible-given-sample skip rate.
+                        `score = 1 − wilsonSkipRateUpper`.
+                    wilsonSkipRateLower:
+                      type: number
+                      minimum: 0
+                      maximum: 1
+                      description: |
+                        Wilson 95% LOWER bound on the validator's
+                        skip rate across the window — the
+                        best-plausible-given-sample skip rate. The
+                        width between lower and upper widens for
+                        small samples, narrowing as more leader
+                        slots are observed.
+                    skipRateFloor:
+                      type: number
+                      minimum: 0
+                      maximum: 1
+                      description: |
+                        Constant `0.20`. The reliability-floor
+                        threshold: when `wilsonSkipRateUpper`
+                        exceeds this value, the tier is hard-capped
+                        at `kindling` regardless of
+                        `economicPercentile`.
+                    floorEngaged:
+                      type: boolean
+                      description: |
+                        True when `wilsonSkipRateUpper > skipRateFloor`
+                        — the case in which the 20% Wilson-upper cap
+                        forces `tier=kindling` regardless of
+                        economic percentile.
+                    perEpoch:
+                      type: array
+                      description: |
+                        Per-epoch slot accounting across the
+                        10-epoch window the Wilson interval was
+                        computed over. One row per epoch the
+                        validator had a leader-schedule presence
+                        in, oldest first.
+                      items:
+                        type: object
+                        required: [epoch, slotsAssigned, slotsSkipped]
+                        properties:
+                          epoch: { type: integer, minimum: 0 }
+                          slotsAssigned: { type: integer, minimum: 0 }
+                          slotsSkipped: { type: integer, minimum: 0 }
             economicPercentile:
-              type: number
-              nullable: true
-              minimum: 0
-              maximum: 1
-              description: |
-                Percentile rank of this validator's median income per
-                leader slot vs the indexed cohort in the same window.
-                `null` when the cohort is too small
-                (`< economicCohortSize`) or this validator had too
-                few measured epochs (`< economicMeasuredEpochs`),
-                in which case `tier === "unrated"`. Income medians
-                are computed across the closed-epoch window per
-                validator, then ranked with PostgreSQL's
-                `PERCENT_RANK()` — 0 = lowest in cohort, 1 = highest.
+              type: object
+              required: [score, evidence]
+              properties:
+                score:
+                  type: number
+                  nullable: true
+                  minimum: 0
+                  maximum: 1
+                  description: |
+                    Percentile rank of this validator's median income
+                    per leader slot vs the indexed cohort in the same
+                    window. `null` when the cohort is too small
+                    (`< economicCohortSize`) or this validator had
+                    too few measured epochs
+                    (`< economicMeasuredEpochs`), in which case
+                    `tier === "unrated"`. Income medians are
+                    computed across the closed-epoch window per
+                    validator, then ranked with PostgreSQL's
+                    `PERCENT_RANK()` — 0 = lowest in cohort,
+                    1 = highest.
+                evidence:
+                  type: object
+                  required:
+                    [
+                      validatorMedianLamportsPerSlot,
+                      cohortMedianLamportsPerSlot,
+                      cohortP25LamportsPerSlot,
+                      cohortP75LamportsPerSlot,
+                      rank,
+                      perEpoch,
+                    ]
+                  properties:
+                    validatorMedianLamportsPerSlot:
+                      type: string
+                      description: |
+                        This validator's median per-leader-slot
+                        income across the window, in lamports as a
+                        decimal string. Stringified because
+                        lamport-scale numbers exceed JSON
+                        safe-integer range. Equals
+                        `window.economicMedianLamportsPerSlot`.
+                    cohortMedianLamportsPerSlot:
+                      type: string
+                      description: |
+                        Median per-leader-slot income across the
+                        cohort the validator was ranked against
+                        (lamports, decimal string). The 50th
+                        percentile of the cohort's per-validator
+                        medians.
+                    cohortP25LamportsPerSlot:
+                      type: string
+                      description: |
+                        25th-percentile per-leader-slot income across
+                        the cohort (lamports, decimal string). The
+                        lower quartile boundary — half the cohort
+                        falls between this value and the median.
+                    cohortP75LamportsPerSlot:
+                      type: string
+                      description: |
+                        75th-percentile per-leader-slot income across
+                        the cohort (lamports, decimal string). The
+                        upper quartile boundary — half the cohort
+                        falls between the median and this value.
+                    rank:
+                      type: object
+                      required: [position, of]
+                      description: |
+                        The validator's ordinal position within the
+                        ranked cohort, alongside the cohort size.
+                        `position = 1` is the highest median income
+                        per slot; `position = of` is the lowest.
+                      properties:
+                        position:
+                          type: integer
+                          minimum: 1
+                          description: |
+                            1-indexed position of the validator
+                            within the cohort, highest income per
+                            slot first.
+                        of:
+                          type: integer
+                          minimum: 1
+                          description: |
+                            Total cohort size — equals
+                            `window.economicCohortSize`.
+                    perEpoch:
+                      type: array
+                      description: |
+                        Per-epoch per-leader-slot income the
+                        validator's median was computed from, oldest
+                        first. One row per epoch with measurable
+                        income for this validator.
+                      items:
+                        type: object
+                        required: [epoch, lamportsPerSlot]
+                        properties:
+                          epoch: { type: integer, minimum: 0 }
+                          lamportsPerSlot:
+                            type: string
+                            description: |
+                              Per-leader-slot income for this epoch
+                              in lamports (decimal string;
+                              lamport-scale numbers exceed JSON
+                              safe-integer range).
+                    incomeBreakdown:
+                      type: object
+                      required: [baseFeesLamports, priorityFeesLamports, jitoTipsLamports]
+                      description: |
+                        Aggregate income decomposition across the
+                        window, in lamports as decimal strings.
+                        Optional — present when the backend has the
+                        per-component sums in memory, omitted
+                        otherwise. The sum equals
+                        `validatorMedianLamportsPerSlot ×
+                        window.slotsAssigned` only approximately
+                        because the median is taken across
+                        per-epoch values, not the raw aggregate.
+                      properties:
+                        baseFeesLamports:
+                          type: string
+                          description: |
+                            Aggregate post-burn base-fee share
+                            across the window's produced blocks
+                            (lamports, decimal string).
+                        priorityFeesLamports:
+                          type: string
+                          description: |
+                            Aggregate post-burn priority-fee share
+                            across the window's produced blocks
+                            (lamports, decimal string).
+                        jitoTipsLamports:
+                          type: string
+                          description: |
+                            Aggregate on-chain Jito tips deposited
+                            in the eight public tip accounts
+                            during the window's produced blocks
+                            (lamports, decimal string).
             cuPercentile:
-              type: number
-              nullable: true
-              minimum: 0
-              maximum: 1
-              description: |
-                Percentile rank of this validator's
-                produced-block-count-weighted compute units per
-                produced block, over the same window and indexed
-                cohort as `economicPercentile` but ranked only among
-                the cohort's block-producing validators. `null` when
-                the validator produced no blocks in the window.
-                Contributes 10% of the economic component of `composite`
-                (`economicScore = 0.9 × economicPercentile + 0.1 ×
-                cuSubscore`, where `cuSubscore` is `cuPercentile` for a
-                validator with produced blocks and 0 — a `null`
-                `cuPercentile` — otherwise).
+              type: object
+              required: [score, evidence]
+              properties:
+                score:
+                  type: number
+                  nullable: true
+                  minimum: 0
+                  maximum: 1
+                  description: |
+                    Percentile rank of this validator's
+                    produced-block-count-weighted compute units per
+                    produced block, over the same window and indexed
+                    cohort as `economicPercentile` but ranked only
+                    among the cohort's block-producing validators.
+                    `null` when the validator produced no blocks in
+                    the window. Contributes 10% of the economic
+                    component of `composite`
+                    (`economicScore = 0.9 × economicPercentile + 0.1 ×
+                    cuSubscore`, where `cuSubscore` is `cuPercentile`
+                    for a validator with produced blocks and falls
+                    back to `economicPercentile` — a `null`
+                    `cuPercentile` — otherwise).
+                evidence:
+                  type: object
+                  required: [validatorAvgCuPerBlock, cohortMedianCuPerBlock]
+                  properties:
+                    validatorAvgCuPerBlock:
+                      type: number
+                      minimum: 0
+                      description: |
+                        This validator's produced-block-count-weighted
+                        average compute units per produced block
+                        across the window
+                        (`SUM(compute_units_consumed) /
+                        COUNT(produced blocks)`). CU values are
+                        within JSON safe-integer range at typical
+                        produced-block counts, so this stays a
+                        number rather than a stringified bigint.
+                    cohortMedianCuPerBlock:
+                      type: number
+                      minimum: 0
+                      description: |
+                        Median CU-per-produced-block across the
+                        cohort the percentile was computed against
+                        — the 50th percentile of the cohort's
+                        per-validator weighted averages.
 
     Badges:
       type: object

@@ -686,7 +686,12 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
       cohortSize: 200,
       measuredEpochs: 10,
       medianIncomePerSlotLamports: '50000000',
+      cohortMedianLamportsPerSlot: '12100000',
+      cohortP25LamportsPerSlot: '6200000',
+      cohortP75LamportsPerSlot: '22800000',
       cuPercentile: 1.0,
+      validatorAvgCuPerBlock: 14_820_000,
+      cohortMedianCuPerBlock: 11_200_000,
     });
     const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
     expect(res.statusCode).toBe(200);
@@ -700,20 +705,100 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
         economicMeasuredEpochs: number;
         cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
       };
-      components: { reliability: number; economicPercentile: number };
+      components: {
+        reliability: {
+          score: number;
+          evidence: {
+            wilsonSkipRateUpper: number;
+            wilsonSkipRateLower: number;
+            skipRateFloor: number;
+            floorEngaged: boolean;
+            perEpoch: Array<{ epoch: number; slotsAssigned: number; slotsSkipped: number }>;
+          };
+        };
+        economicPercentile: {
+          score: number | null;
+          evidence: {
+            validatorMedianLamportsPerSlot: string | null;
+            cohortMedianLamportsPerSlot: string | null;
+            cohortP25LamportsPerSlot: string | null;
+            cohortP75LamportsPerSlot: string | null;
+            rank: { position: number; of: number } | null;
+            perEpoch: Array<{ epoch: number; lamportsPerSlot: string | null }>;
+            incomeBreakdown: {
+              baseFeesLamports: string;
+              priorityFeesLamports: string;
+              jitoTipsLamports: string;
+            };
+          };
+        };
+        cuPercentile: {
+          score: number | null;
+          evidence: {
+            validatorAvgCuPerBlock: number | null;
+            cohortMedianCuPerBlock: number | null;
+          };
+        };
+      };
     };
     expect(body.tier).toBe('forge');
     expect(body.window.epochs).toBe(10);
     expect(body.window.slotsAssigned).toBe(1000);
     expect(body.window.economicCohortSize).toBe(200);
     expect(body.window.economicMeasuredEpochs).toBe(10);
-    expect(body.components.economicPercentile).toBe(1.0);
+    expect(body.components.economicPercentile.score).toBe(1.0);
     expect(body.composite).toBeGreaterThanOrEqual(95);
     // cohortAsOfEpoch reflects the closed-epoch window the percentile
     // was evaluated against: oldest closed epoch in [495..505] and
     // newest, with current epoch 600 bumping all eleven into the
     // closed set and the route picking the 10 newest (496..505).
     expect(body.window.cohortAsOfEpoch).toEqual({ fromEpoch: 496, toEpoch: 505 });
+
+    // ── New per-component `evidence` propagation ──────────────────
+    // Reliability evidence: the Wilson bounds + floor info come from
+    // computeTier; perEpoch one entry per closed-epoch row in window.
+    expect(body.components.reliability.score).toBeGreaterThan(0.95);
+    expect(body.components.reliability.evidence.wilsonSkipRateUpper).toBeGreaterThanOrEqual(0);
+    expect(body.components.reliability.evidence.wilsonSkipRateUpper).toBeLessThanOrEqual(1);
+    expect(body.components.reliability.evidence.wilsonSkipRateLower).toBeGreaterThanOrEqual(0);
+    expect(body.components.reliability.evidence.wilsonSkipRateLower).toBeLessThanOrEqual(
+      body.components.reliability.evidence.wilsonSkipRateUpper,
+    );
+    expect(body.components.reliability.evidence.skipRateFloor).toBe(0.2);
+    expect(body.components.reliability.evidence.floorEngaged).toBe(false);
+    expect(body.components.reliability.evidence.perEpoch).toHaveLength(10);
+    expect(body.components.reliability.evidence.perEpoch[0]?.slotsAssigned).toBe(100);
+    expect(body.components.reliability.evidence.perEpoch[0]?.slotsSkipped).toBe(0);
+
+    // Economic-percentile evidence: cohort quantiles come from the
+    // repo stub above; perEpoch + incomeBreakdown derived in-route
+    // from `closedRows`. Rank: percentile 1.0 of cohort 200 → position 1.
+    expect(body.components.economicPercentile.evidence.validatorMedianLamportsPerSlot).toBe(
+      '50000000',
+    );
+    expect(body.components.economicPercentile.evidence.cohortMedianLamportsPerSlot).toBe(
+      '12100000',
+    );
+    expect(body.components.economicPercentile.evidence.cohortP25LamportsPerSlot).toBe('6200000');
+    expect(body.components.economicPercentile.evidence.cohortP75LamportsPerSlot).toBe('22800000');
+    expect(body.components.economicPercentile.evidence.rank).toEqual({ position: 1, of: 200 });
+    expect(body.components.economicPercentile.evidence.perEpoch).toHaveLength(10);
+    // Fixture rows have zero fees + zero tips with positive slots — so
+    // per-epoch lamports/slot is "0" (still measured: fees + tips
+    // timestamps populated) and the income breakdown sums to zero.
+    for (const entry of body.components.economicPercentile.evidence.perEpoch) {
+      expect(entry.lamportsPerSlot).toBe('0');
+    }
+    expect(body.components.economicPercentile.evidence.incomeBreakdown.baseFeesLamports).toBe('0');
+    expect(body.components.economicPercentile.evidence.incomeBreakdown.priorityFeesLamports).toBe(
+      '0',
+    );
+    expect(body.components.economicPercentile.evidence.incomeBreakdown.jitoTipsLamports).toBe('0');
+
+    // CU-percentile evidence: pulled straight from the repo stub.
+    expect(body.components.cuPercentile.score).toBe(1.0);
+    expect(body.components.cuPercentile.evidence.validatorAvgCuPerBlock).toBe(14_820_000);
+    expect(body.components.cuPercentile.evidence.cohortMedianCuPerBlock).toBe(11_200_000);
   });
 
   it('cohortAsOfEpoch is null when the validator has no closed history', async () => {

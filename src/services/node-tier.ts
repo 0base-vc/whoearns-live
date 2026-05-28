@@ -129,6 +129,22 @@ export interface TierResult {
      */
     cuPercentile: number | null;
   };
+  /**
+   * Wilson 95% interval bounds on the skip rate over the window's
+   * pooled `(slotsSkipped, slotsAssigned)`. The composite's
+   * `reliability` is `1 - upper`; the lower bound is exposed for
+   * UI breakdown of "best plausible" skip rate. Both bounds are 0
+   * when `slotsAssigned <= 0`.
+   */
+  wilsonSkipRateUpper: number;
+  wilsonSkipRateLower: number;
+  /**
+   * True when `wilsonSkipRateUpper > SKIP_RATE_FLOOR` — the hard
+   * skip-rate floor capped the tier at `kindling` regardless of the
+   * economic composite. Surfaced so a consumer can render the cap
+   * cause alongside `tier`.
+   */
+  floorEngaged: boolean;
 }
 
 /**
@@ -315,8 +331,12 @@ export function computeTier(input: TierInput): TierResult {
   // best. Using `upper` of the Wilson interval here means a
   // small-sample validator with 0 measured skips still surfaces a
   // meaningfully non-zero skip rate, so reliability does not inflate
-  // to 1.0 on thin samples.
-  const wilsonSkipUpper = wilsonInterval(input.slotsSkipped, input.slotsAssigned).upper;
+  // to 1.0 on thin samples. The lower bound is computed alongside —
+  // free since `wilsonInterval` returns both — and exposed on the
+  // result for evidence rendering.
+  const wilsonBounds = wilsonInterval(input.slotsSkipped, input.slotsAssigned);
+  const wilsonSkipUpper = wilsonBounds.upper;
+  const wilsonSkipLower = wilsonBounds.lower;
   const reliability = 1 - wilsonSkipUpper;
 
   // Hard reliability floor — independent of the economic-percentile
@@ -378,6 +398,9 @@ export function computeTier(input: TierInput): TierResult {
       economicPercentile: input.economicPercentile,
       cuPercentile: input.cuPercentile,
     },
+    wilsonSkipRateUpper: wilsonSkipUpper,
+    wilsonSkipRateLower: wilsonSkipLower,
+    floorEngaged: tooManySkips,
   };
 }
 

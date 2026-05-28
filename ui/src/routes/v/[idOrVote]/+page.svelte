@@ -58,6 +58,7 @@
   import OaiPanel from '$lib/components/OaiPanel.svelte';
   import ActivityHeatmap from '$lib/components/ActivityHeatmap.svelte';
   import AuditLogList from '$lib/components/AuditLogList.svelte';
+  import EvidenceRow from '$lib/components/EvidenceRow.svelte';
   import IncomeSummaryStrip from '$lib/components/IncomeSummaryStrip.svelte';
   import SimdProposalCard from '$lib/components/SimdProposalCard.svelte';
   import StickyHubHeader from '$lib/components/StickyHubHeader.svelte';
@@ -326,6 +327,42 @@
   const tier = $derived(scoring.tier);
   const tierWindow = $derived(scoring.tier.window);
   const tierComponents = $derived(scoring.tier.components);
+  // Per-sub-component score extracts — the gamification backend bump
+  // moved each sub-component into `{ score, evidence }`, so consumers
+  // that used to read a bare number now read `.score`. Hoisted into
+  // dedicated $derived values so downstream math reads cleanly.
+  const reliabilityScore = $derived(tierComponents.reliability.score);
+  const economicPercentileScore = $derived(tierComponents.economicPercentile.score);
+  const cuPercentileScore = $derived(tierComponents.cuPercentile.score);
+
+  // Evidence-panel accordion. ONE sub-component expanded at a time —
+  // clicking the chevron on a different row swaps the visible panel.
+  // The closed state ('none') is the default for a fresh page paint
+  // so the card stays under ~900px on mobile per the IA brief.
+  //
+  // Clicking the same row toggles it shut; clicking another row
+  // swaps the panel without a "close-then-open" intermediate paint.
+  // `<tr>` accordion uses button-based expand (not `<details>`)
+  // because the panel content has to render inside a `<td>` with
+  // `colspan=4` to span the breakdown table — `<details>` cannot
+  // be a child of `<tbody>` legally, and the screen-reader read
+  // order also reads more predictably from explicit `aria-expanded`
+  // / `aria-controls` than from `<summary>` inside a table cell.
+  type EvidenceKind = 'reliability' | 'economic' | 'cu';
+  let openEvidence = $state<EvidenceKind | 'none'>('none');
+  function toggleEvidence(kind: EvidenceKind): void {
+    openEvidence = openEvidence === kind ? 'none' : kind;
+  }
+
+  // Shared evidence-window prop — same window for all three EvidenceRow
+  // instances; hoisted so each instance reads from the same derivation
+  // (and a refactor of which window fields surface only touches one
+  // place).
+  const evidenceWindow = $derived({
+    epochs: tierWindow.epochs,
+    economicCohortSize: tierWindow.economicCohortSize,
+    cohortAsOfEpoch: tierWindow.cohortAsOfEpoch,
+  });
   const reliabilityFloor = $derived(
     isReliabilityFloorTriggered({
       slotsAssigned: tierWindow.slotsAssigned,
@@ -335,7 +372,7 @@
       // UI used the point estimate and silently disagreed with the
       // backend for small samples — the floor banner would not
       // render for capped validators with thin windows.
-      reliability: tierComponents.reliability,
+      reliability: reliabilityScore,
     }),
   );
   const tierLabel = $derived(TIER_LABEL[tier.tier]);
@@ -395,16 +432,16 @@
   // shows only tier bands + measurement, never a phantom sum.
   const compositeMath = $derived.by(() => {
     const composite = tier.composite;
-    const economicPercentile = tierComponents.economicPercentile;
+    const economicPercentile = economicPercentileScore;
     if (composite === null || economicPercentile === null) return null;
-    const reliabilityPct = tierComponents.reliability * 100;
+    const reliabilityPct = reliabilityScore * 100;
     const economicPct = economicPercentile * 100;
-    // Non-producer fallback: when `cuPercentile` is null, the
-    // composite uses `economicPercentile` as the CU subscore so the
-    // validator is judged on income alone. Mirror that here so the
+    // Non-producer fallback: when `cuPercentile.score` is null, the
+    // composite uses `economicPercentile.score` as the CU subscore so
+    // the validator is judged on income alone. Mirror that here so the
     // breakdown matches the displayed composite even for non-
     // producers.
-    const cuPercentileRaw = tierComponents.cuPercentile;
+    const cuPercentileRaw = cuPercentileScore;
     const cuFallback = cuPercentileRaw === null;
     const cuSubscoreFraction = cuPercentileRaw ?? economicPercentile;
     const cuSubscorePct = cuSubscoreFraction * 100;
@@ -992,27 +1029,39 @@
               </thead>
               <tbody>
                 <!--
-                  Each sub-component spans TWO rows: a data row with
-                  the row-header label + value/weight/contribution
-                  numerics, then a hint row with `<td colspan="4">`
-                  carrying the "what moves it" copy. Splitting the
-                  hint out of the `<th scope="row">` stops screen
-                  readers from re-announcing the entire hint as part
-                  of the row header for every numeric cell — the
-                  data row reads as a clean four-column row, the
-                  hint reads as an explanatory note.
+                  Each sub-component is a button-row (the row-header
+                  has the expand chevron + label) followed by an
+                  evidence row that mounts only when the user
+                  expands it. Tabbing into the chevron + pressing
+                  Enter / Space toggles `openEvidence`; the panel
+                  reads aria-expanded + aria-controls from the
+                  button so screen readers announce state changes.
                 -->
+                <!-- ── Reliability ── -->
                 <tr class="align-baseline">
                   <th scope="row" class="text-left pt-2.5 pr-3 font-medium">
-                    <span class="inline-flex items-center gap-1.5">
-                      Reliability
+                    <button
+                      type="button"
+                      class="inline-flex min-h-11 items-center gap-1.5 text-left text-[color:var(--color-text-default)] hover:text-[color:var(--color-brand-500)]"
+                      aria-expanded={openEvidence === 'reliability'}
+                      aria-controls="evidence-row-reliability"
+                      onclick={() => toggleEvidence('reliability')}
+                    >
+                      <span
+                        class="inline-block text-[color:var(--color-text-subtle)] transition-transform motion-reduce:transition-none"
+                        class:rotate-90={openEvidence === 'reliability'}
+                        aria-hidden="true"
+                      >
+                        ›
+                      </span>
+                      <span>Reliability</span>
                       {#if reliabilityFloor}
                         <span
                           class="text-[color:var(--color-status-warn-fg)]"
                           aria-label="Reliability floor triggered">⚠</span
                         >
                       {/if}
-                    </span>
+                    </button>
                   </th>
                   <td class="text-right tabular-nums pt-2.5 px-2"
                     >{compositeMath.reliabilityPct.toFixed(1)}%</td
@@ -1025,15 +1074,47 @@
                     >{compositeMath.reliabilityTerm.toFixed(1)}</td
                   >
                 </tr>
-                <tr class="border-b border-[color:var(--color-border-default)]">
-                  <td colspan="4" class="pb-2.5 text-xs text-[color:var(--color-text-muted)]">
-                    Conservative reliability estimate — counts both skip rate AND sample size, so
-                    small windows can't claim 100%. Lower skip rate AND more leader slots raise it;
-                    tier is hard-capped at Kindling if reliability drops below 80%.
-                  </td>
-                </tr>
+                {#if openEvidence === 'reliability'}
+                  <tr class="border-b border-[color:var(--color-border-default)]">
+                    <td id="evidence-row-reliability" colspan="4" class="pb-3 pt-1">
+                      <EvidenceRow
+                        kind="reliability"
+                        evidence={tierComponents.reliability.evidence}
+                        window={evidenceWindow}
+                        score={reliabilityScore}
+                      />
+                    </td>
+                  </tr>
+                {:else}
+                  <tr class="border-b border-[color:var(--color-border-default)]">
+                    <td colspan="4" class="pb-2.5 text-xs text-[color:var(--color-text-muted)]">
+                      Conservative reliability estimate — counts both skip rate AND sample size, so
+                      small windows can't claim 100%. Lower skip rate AND more leader slots raise
+                      it; tier is hard-capped at Kindling if reliability drops below 80%.
+                    </td>
+                  </tr>
+                {/if}
+
+                <!-- ── Economic percentile ── -->
                 <tr class="align-baseline">
-                  <th scope="row" class="text-left pt-2.5 pr-3 font-medium">Economic percentile</th>
+                  <th scope="row" class="text-left pt-2.5 pr-3 font-medium">
+                    <button
+                      type="button"
+                      class="inline-flex min-h-11 items-center gap-1.5 text-left text-[color:var(--color-text-default)] hover:text-[color:var(--color-brand-500)]"
+                      aria-expanded={openEvidence === 'economic'}
+                      aria-controls="evidence-row-economic"
+                      onclick={() => toggleEvidence('economic')}
+                    >
+                      <span
+                        class="inline-block text-[color:var(--color-text-subtle)] transition-transform motion-reduce:transition-none"
+                        class:rotate-90={openEvidence === 'economic'}
+                        aria-hidden="true"
+                      >
+                        ›
+                      </span>
+                      <span>Economic percentile</span>
+                    </button>
+                  </th>
                   <td class="text-right tabular-nums pt-2.5 px-2"
                     >{compositeMath.economicPct.toFixed(1)}%</td
                   >
@@ -1045,15 +1126,47 @@
                     >{compositeMath.economicTerm.toFixed(1)}</td
                   >
                 </tr>
-                <tr class="border-b border-[color:var(--color-border-default)]">
-                  <td colspan="4" class="pb-2.5 text-xs text-[color:var(--color-text-muted)]">
-                    Cohort rank of median fee + MEV tip per leader slot vs
-                    {tierWindow.economicCohortSize.toLocaleString()} indexed peers. Higher fee + tip capture
-                    per slot raises it.
-                  </td>
-                </tr>
+                {#if openEvidence === 'economic'}
+                  <tr class="border-b border-[color:var(--color-border-default)]">
+                    <td id="evidence-row-economic" colspan="4" class="pb-3 pt-1">
+                      <EvidenceRow
+                        kind="economic"
+                        evidence={tierComponents.economicPercentile.evidence}
+                        window={evidenceWindow}
+                        score={economicPercentileScore}
+                      />
+                    </td>
+                  </tr>
+                {:else}
+                  <tr class="border-b border-[color:var(--color-border-default)]">
+                    <td colspan="4" class="pb-2.5 text-xs text-[color:var(--color-text-muted)]">
+                      Cohort rank of median fee + MEV tip per leader slot vs
+                      {tierWindow.economicCohortSize.toLocaleString()} indexed peers. Higher fee + tip
+                      capture per slot raises it.
+                    </td>
+                  </tr>
+                {/if}
+
+                <!-- ── CU subscore ── -->
                 <tr class="align-baseline">
-                  <th scope="row" class="text-left pt-2.5 pr-3 font-medium">CU subscore</th>
+                  <th scope="row" class="text-left pt-2.5 pr-3 font-medium">
+                    <button
+                      type="button"
+                      class="inline-flex min-h-11 items-center gap-1.5 text-left text-[color:var(--color-text-default)] hover:text-[color:var(--color-brand-500)]"
+                      aria-expanded={openEvidence === 'cu'}
+                      aria-controls="evidence-row-cu"
+                      onclick={() => toggleEvidence('cu')}
+                    >
+                      <span
+                        class="inline-block text-[color:var(--color-text-subtle)] transition-transform motion-reduce:transition-none"
+                        class:rotate-90={openEvidence === 'cu'}
+                        aria-hidden="true"
+                      >
+                        ›
+                      </span>
+                      <span>CU subscore</span>
+                    </button>
+                  </th>
                   <td class="text-right tabular-nums pt-2.5 px-2"
                     >{compositeMath.cuSubscorePct.toFixed(1)}%</td
                   >
@@ -1065,17 +1178,30 @@
                     >{compositeMath.cuTerm.toFixed(1)}</td
                   >
                 </tr>
-                <tr>
-                  <td colspan="4" class="pb-2.5 text-xs text-[color:var(--color-text-muted)]">
-                    {#if compositeMath.cuFallback}
-                      Validator produced no blocks in the window — defaults to economic percentile
-                      so it isn't penalised on a metric it had no chance to register.
-                    {:else}
-                      Cohort rank of average compute units per produced block. Denser block packing
-                      raises it.
-                    {/if}
-                  </td>
-                </tr>
+                {#if openEvidence === 'cu'}
+                  <tr>
+                    <td id="evidence-row-cu" colspan="4" class="pb-3 pt-1">
+                      <EvidenceRow
+                        kind="cu"
+                        evidence={tierComponents.cuPercentile.evidence}
+                        window={evidenceWindow}
+                        score={cuPercentileScore}
+                      />
+                    </td>
+                  </tr>
+                {:else}
+                  <tr>
+                    <td colspan="4" class="pb-2.5 text-xs text-[color:var(--color-text-muted)]">
+                      {#if compositeMath.cuFallback}
+                        Validator produced no blocks in the window — defaults to economic percentile
+                        so it isn't penalised on a metric it had no chance to register.
+                      {:else}
+                        Cohort rank of average compute units per produced block. Denser block
+                        packing raises it.
+                      {/if}
+                    </td>
+                  </tr>
+                {/if}
               </tbody>
               <tfoot class="border-t-2 border-[color:var(--color-border-default)]">
                 <tr>
@@ -1365,7 +1491,14 @@
   validators).
 -->
 {#if history !== null && !(isUnrated && historyIsColdStart)}
-  <div class="mt-6">
+  <!--
+    `id="income-strip"` targets the in-page anchor that the
+    EvidenceRow's economic branch links to ("See full income
+    history ↓"). The id sits on the wrapping div rather than the
+    Card itself so the anchor jump aligns the top of the income
+    summary with the top of the viewport, not the inner padding.
+  -->
+  <div id="income-strip" class="mt-6">
     <IncomeSummaryStrip vote={scoring.vote} items={history.items} />
   </div>
 {/if}

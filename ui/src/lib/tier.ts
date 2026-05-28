@@ -170,7 +170,7 @@ export const TIER_TAGLINE: Record<NodeTier, string> = {
  */
 export function unratedReason(body: Pick<NodeTierBody, 'window' | 'components'>): string {
   const { window: w, components: c } = body;
-  if (c.economicPercentile === null) {
+  if (c.economicPercentile.score === null) {
     if (w.economicCohortSize < MIN_COHORT_FOR_PERCENTILE) {
       return `Cohort still warming up (${w.economicCohortSize}/${MIN_COHORT_FOR_PERCENTILE} peers measured).`;
     }
