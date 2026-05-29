@@ -49,7 +49,7 @@
   interface Props extends Pick<EvidenceProps, 'kind' | 'evidence'> {
     /**
      * The scoring window the evidence was measured over — the
-     * EvidenceRow weaves it into the prose ("across 5 closed epochs",
+     * EvidenceRow weaves it into the prose ("across 10 closed epochs",
      * "ranked against 19 indexed peers") so the row reads as a
      * stand-alone sentence even when collapsed back into a card.
      */

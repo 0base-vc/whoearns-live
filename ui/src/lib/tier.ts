@@ -30,7 +30,7 @@ import type { NodeTier, NodeTierBody, NodeTierTrend } from './types.js';
 export const MIN_LEADER_SLOTS_FOR_TIER = 10;
 
 /**
- * Minimum closed epochs (of the 5-epoch window) this validator must
+ * Minimum closed epochs (of the 10-epoch window) this validator must
  * have measurable income on. Below this the median is too noisy.
  * Mirrors `MIN_MEASURED_EPOCHS_FOR_ECONOMIC` in
  * `src/services/node-tier.ts` — raised from 3 to 4 in commit `b726daa`.
@@ -55,7 +55,7 @@ export const MIN_COHORT_FOR_PERCENTILE = 10;
  * {WINDOW_CLOSED_EPOCHS}" so a still-filling dataset reads as a
  * cold start, not as a deliberately tiny window.
  */
-export const WINDOW_CLOSED_EPOCHS = 5;
+export const WINDOW_CLOSED_EPOCHS = 10;
 
 /**
  * Skip-rate hard floor — when `wilson.upper(skip)` exceeds this value

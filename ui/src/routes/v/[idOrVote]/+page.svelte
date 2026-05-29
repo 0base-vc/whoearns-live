@@ -567,7 +567,7 @@
   });
 
   // Cold start — fewer closed-epoch rows indexed than the configured
-  // 5-epoch window. Drives the honest "{n} of 5 (window still
+  // 10-epoch window. Drives the honest "{n} of 10 (window still
   // filling)" copy (the screenshot's bare "4" read as a tiny window).
   const windowStillFilling = $derived(tierWindow.epochs < WINDOW_CLOSED_EPOCHS);
 
