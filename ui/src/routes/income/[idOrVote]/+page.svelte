@@ -655,7 +655,7 @@
             Total income · last month
             <Tooltip
               label="About last-month income"
-              content="Block fees + on-chain Jito tips summed across the most recent month-sized window we have indexed. Pre-commission — this is what the operator earned, not what delegators received."
+              content="Block fees + on-chain Jito tips over the most recent month-sized indexed window. This is OPERATOR income — it accrues to the validator identity, not to delegators. A delegator's staking yield is inflation rewards (not tracked here) minus the validator's commission; block fees go to the operator and only MEV tips are partly shared."
             />
           </p>
           <p
@@ -671,34 +671,16 @@
             </p>
           {/if}
           <!--
-            Persistent, always-visible honesty caption (replaces relying
-            on the hover tooltip alone). States plainly that this number
-            is OPERATOR income, NOT the delegator's staking yield — block
-            fees + tips accrue to the operator identity; only MEV tips
-            are partly shared; the delegator's actual yield is inflation
-            rewards (which we do not track) minus this validator's
-            commission. We deliberately do NOT compute a fabricated
-            "delegator yield" — `(1 − commission) × operatorIncome` is
-            the wrong formula (commission applies to inflation, not to
-            the fee/tip income shown here). See `docs/scoring.md`
-            design-principle #1 (commission-neutral).
-
-            `max-w-xs` keeps the multi-line caption from sprawling the
-            full hero width; `lg:ml-auto` right-aligns the block under
-            the right-aligned income number on desktop.
+            The "operator income, not delegator yield" honesty note now
+            lives in the income-label tooltip above (it was a long
+            always-visible caption here, but that read as a defensive
+            disclaimer on what is primarily an operator-facing surface;
+            the tooltip carries the same content on demand). We still
+            deliberately do NOT compute a fabricated "delegator yield":
+            `(1 − commission) × operatorIncome` is the wrong formula —
+            commission applies to inflation rewards, not to the fee/tip
+            income shown here (see `docs/scoring.md` principle #1).
           -->
-          <p
-            class="mt-2 max-w-xs text-xs leading-relaxed text-[color:var(--color-text-muted)] lg:ml-auto"
-          >
-            Operator income — fees + tips the validator earns. Not your staking yield: delegators
-            earn inflation rewards (not shown here) minus
-            {#if commissionPct !== null}
-              this validator's {commissionPct}% commission;
-            {:else}
-              the validator's commission;
-            {/if}
-            block fees go to the operator, only MEV tips are partly shared.
-          </p>
         </div>
       {/if}
     </div>
