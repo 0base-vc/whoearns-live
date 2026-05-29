@@ -256,6 +256,15 @@ export const ConfigSchema = z.object({
   // re-run is to pick up validators newly added to our watched set.
   // One bulk HTTP call per tick regardless of watched-set size.
   STAKEWIZ_TENURE_INTERVAL_MS: PositiveInt.default(24 * 60 * 60 * 1000),
+  // Tier-snapshot ingester cadence (migration 0045). Persists each
+  // tracked validator's tier composite for the latest CLOSED epoch so
+  // the profile surface can show movement + history. 30 min is the
+  // calibrated trade-off: a closed epoch only appears every ~2 days, so
+  // most ticks are a cheap cursor check (two indexed point reads) that
+  // skips before any per-validator work; 30 min just bounds the latency
+  // between an epoch closing and its snapshot landing. Forward-only —
+  // never backfills.
+  TIER_SNAPSHOT_INTERVAL_MS: PositiveInt.default(30 * 60 * 1000),
 
   SLOT_FINALITY_BUFFER: NonNegativeInt.default(32),
 

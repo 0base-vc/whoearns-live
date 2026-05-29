@@ -172,6 +172,26 @@ export class FakeValidatorsRepo {
     return out;
   }
 
+  /**
+   * Mirror of `ValidatorsRepository.findVotesForBracket`. Client
+   * bracket → exact `clientKind` match; newcomer bracket → genesis-
+   * preferred tenure origin at/after the supplied epoch.
+   */
+  async findVotesForBracket(
+    bracket: { clientKind: string } | { newcomerFromEpoch: number },
+  ): Promise<VotePubkey[]> {
+    const out: VotePubkey[] = [];
+    for (const row of this.rows.values()) {
+      if ('clientKind' in bracket) {
+        if (row.clientKind === bracket.clientKind) out.push(row.votePubkey);
+      } else {
+        const effectiveFirst = row.genesisEpoch ?? row.firstSeenEpoch;
+        if (effectiveFirst >= bracket.newcomerFromEpoch) out.push(row.votePubkey);
+      }
+    }
+    return out;
+  }
+
   async searchByText(
     query: string,
     limit: number,
@@ -781,11 +801,28 @@ export class FakeStatsRepo {
     minWindowSlots?: number;
     requiredClosedEpochs?: number;
     excludedVotes?: string[];
+    maxActivatedStakeLamports?: bigint;
+    candidateVotes?: readonly string[] | null;
   }): Promise<WindowedLeaderboardStats[]> {
+    // Mirror the real repo's empty-allowlist short-circuit: an
+    // explicit empty `candidateVotes` is "a bracket with no members".
+    if (
+      args.candidateVotes !== undefined &&
+      args.candidateVotes !== null &&
+      args.candidateVotes.length === 0
+    ) {
+      return [];
+    }
     const safeLimit = Math.max(1, Math.min(args.limit, 500));
     const minWindowSlots = Math.max(1, args.minWindowSlots ?? 4);
     const requiredClosedEpochs = Math.max(0, args.requiredClosedEpochs ?? 0);
     const excludedVotes = new Set(args.excludedVotes ?? []);
+    // Bracket allowlist (newcomer / client:<kind>); undefined/null
+    // means no allowlist. Applied before aggregation, like the SQL.
+    const candidateVotes =
+      args.candidateVotes === undefined || args.candidateVotes === null
+        ? null
+        : new Set(args.candidateVotes);
     const epochs = new Map(args.epochs.map((e) => [e.epoch, e.isCurrent]));
     const byVote = new Map<VotePubkey, WindowedLeaderboardStats>();
 
@@ -793,6 +830,7 @@ export class FakeStatsRepo {
       const isCurrent = epochs.get(row.epoch);
       if (isCurrent === undefined) continue;
       if (excludedVotes.has(row.votePubkey)) continue;
+      if (candidateVotes !== null && !candidateVotes.has(row.votePubkey)) continue;
       if (row.slotsUpdatedAt === null) continue;
       const denominator = isCurrent ? row.slotsElapsedAssigned : row.slotsAssigned;
       const currentIncome = isCurrent
@@ -845,9 +883,18 @@ export class FakeStatsRepo {
       byVote.set(row.votePubkey, next);
     }
 
-    const rows = [...byVote.values()].filter(
-      (r) => r.windowSlots >= minWindowSlots && r.closedEpochsIncluded >= requiredClosedEpochs,
-    );
+    const rows = [...byVote.values()].filter((r) => {
+      if (r.windowSlots < minWindowSlots) return false;
+      if (r.closedEpochsIncluded < requiredClosedEpochs) return false;
+      // Stake bracket: window-representative stake STRICTLY below the
+      // ceiling; NULL stake excluded — matches the real repo's outer
+      // WHERE.
+      if (args.maxActivatedStakeLamports !== undefined) {
+        if (r.activatedStakeLamports === null) return false;
+        if (r.activatedStakeLamports >= args.maxActivatedStakeLamports) return false;
+      }
+      return true;
+    });
     const total = (r: WindowedLeaderboardStats) =>
       r.blockFeesTotalLamports + r.blockTipsTotalLamports;
     const compareBigIntDesc = (a: bigint, b: bigint): number => (a === b ? 0 : a > b ? -1 : 1);
@@ -1010,6 +1057,26 @@ export class FakeStatsRepo {
       validatorAvgCuPerBlock: null,
       cohortMedianCuPerBlock: null,
     };
+  }
+
+  /**
+   * Mirror of `StatsRepository.findEconomicCohortVotes` (cohort
+   * disclosure). Returns the DISTINCT votes with a measured row in the
+   * window — `slotsAssigned > 0` AND both fees + tips timestamps
+   * present — matching the production cohort filter. Includes the
+   * target vote itself (the production cohort does too). Sorted for
+   * determinism. Opt-out is not modelled here (the fake's
+   * `findEconomicPercentile` doesn't model it either).
+   */
+  async findEconomicCohortVotes(fromEpoch: Epoch, toEpoch: Epoch): Promise<VotePubkey[]> {
+    const votes = new Set<VotePubkey>();
+    for (const row of this.rows.values()) {
+      if (row.epoch < fromEpoch || row.epoch > toEpoch) continue;
+      if (row.slotsAssigned > 0 && row.feesUpdatedAt !== null && row.tipsUpdatedAt !== null) {
+        votes.add(row.votePubkey);
+      }
+    }
+    return [...votes].sort();
   }
 }
 

@@ -42,8 +42,22 @@ const tierPercentileCache = new TtlCache<string, EconomicPercentileLookup>(
   TIER_PERCENTILE_MAX_ENTRIES,
 );
 
+/**
+ * Module-local cache for the cohort vote-membership list (cohort
+ * disclosure). Keyed on the `(fromEpoch, toEpoch)` WINDOW only — unlike
+ * the percentile cache, the cohort member set is identical for EVERY
+ * validator in the same window, so per-validator calls all collapse to
+ * one entry. Small bound: only a handful of distinct windows are live
+ * at once. Same TTL / single-StatefulSet rationale as above.
+ */
+const tierCohortVotesCache = new TtlCache<string, VotePubkey[]>(64);
+
 function cacheKey(fromEpoch: Epoch, toEpoch: Epoch, vote: VotePubkey): string {
   return `${fromEpoch}:${toEpoch}:${vote}`;
+}
+
+function windowKey(fromEpoch: Epoch, toEpoch: Epoch): string {
+  return `${fromEpoch}:${toEpoch}`;
 }
 
 /**
@@ -76,6 +90,30 @@ export async function findEconomicPercentileCached(
 }
 
 /**
+ * Memoized wrapper around `statsRepo.findEconomicCohortVotes` — the
+ * cohort vote-membership list for a closed-epoch window (cohort
+ * disclosure). Window-keyed, so the first validator in a window warms
+ * the cache for the rest. Same bypass + TTL contract as the percentile
+ * wrapper above.
+ */
+export async function findEconomicCohortVotesCached(
+  statsRepo: Pick<StatsRepository, 'findEconomicCohortVotes'>,
+  fromEpoch: Epoch,
+  toEpoch: Epoch,
+  bypass = false,
+): Promise<VotePubkey[]> {
+  if (bypass) {
+    return statsRepo.findEconomicCohortVotes(fromEpoch, toEpoch);
+  }
+  const key = windowKey(fromEpoch, toEpoch);
+  const cached = tierCohortVotesCache.get(key);
+  if (cached !== undefined) return cached;
+  const result = await statsRepo.findEconomicCohortVotes(fromEpoch, toEpoch);
+  tierCohortVotesCache.set(key, result, TIER_PERCENTILE_TTL_MS);
+  return result;
+}
+
+/**
  * Test hook: flush the entire cache. Called from `beforeEach` in the
  * route tests to keep test runs deterministic across files — each
  * test file builds a fresh app + fresh stats stub, but the cache is
@@ -86,4 +124,5 @@ export async function findEconomicPercentileCached(
  */
 export function resetTierPercentileCache(): void {
   (tierPercentileCache as unknown as { entries: Map<string, unknown> }).entries.clear();
+  (tierCohortVotesCache as unknown as { entries: Map<string, unknown> }).entries.clear();
 }

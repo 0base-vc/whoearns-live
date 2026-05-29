@@ -14,6 +14,7 @@
   import type {
     CurrentEpoch,
     Leaderboard,
+    LeaderboardBracket,
     LeaderboardItem,
     LeaderboardSort,
     LeaderboardWindow,
@@ -56,6 +57,52 @@
       label: 'Final epoch',
       detail: 'Latest closed epoch only',
     },
+  ];
+
+  // Bracket filter (I). The four non-client brackets render as a
+  // segmented control; "By client" is a fifth segment that reveals a
+  // sub-dropdown of the 14 canonical client kinds. `key` is the value
+  // sent on `?bracket=` (the client segment carries no key — it just
+  // toggles the dropdown). Default `all` keeps first-load behavior
+  // byte-identical to the pre-bracket leaderboard.
+  const BRACKET_OPTIONS: Array<{ key: LeaderboardBracket; label: string; detail: string }> = [
+    { key: 'all', label: 'All', detail: 'Every indexed validator, unfiltered.' },
+    {
+      key: 'stake_lt_100k',
+      label: 'Small (<100k)',
+      detail: 'Validators with under 100,000 SOL activated stake.',
+    },
+    {
+      key: 'stake_lt_500k',
+      label: 'Small (<500k)',
+      detail: 'Validators with under 500,000 SOL activated stake.',
+    },
+    {
+      key: 'newcomer',
+      label: 'Newcomers',
+      detail: 'Validators new to the indexed set.',
+    },
+  ];
+
+  // The 14 canonical client kinds the backend accepts as
+  // `?bracket=client:<kind>`. Sentence-case labels for the dropdown;
+  // the lowercased enum rides on the wire. Mirrors the `ClientKind`
+  // union in `$lib/types` (minus `unknown` / `solana_labs`, which
+  // aren't bracketable cohorts).
+  const CLIENT_BRACKET_KINDS: Array<{ kind: string; label: string }> = [
+    { kind: 'agave', label: 'Agave' },
+    { kind: 'jito_solana', label: 'Jito-Solana' },
+    { kind: 'firedancer', label: 'Firedancer' },
+    { kind: 'frankendancer', label: 'Frankendancer' },
+    { kind: 'paladin', label: 'Paladin' },
+    { kind: 'sig', label: 'Sig' },
+    { kind: 'agave_bam', label: 'Agave (BAM)' },
+    { kind: 'rakurai', label: 'Rakurai' },
+    { kind: 'harmonic_firedancer', label: 'Harmonic Firedancer' },
+    { kind: 'harmonic_agave', label: 'Harmonic Agave' },
+    { kind: 'harmonic_frankendancer', label: 'Harmonic Frankendancer' },
+    { kind: 'firebam', label: 'FireBAM' },
+    { kind: 'raiku', label: 'Raiku' },
   ];
 
   const COLUMNS: Array<{
@@ -111,17 +158,53 @@
   let error = $state<string | null>(null);
   let sort = $state<LeaderboardSort>('income_per_slot');
   let window = $state<LeaderboardWindow>('live_trend');
+  // Bracket filter (I). `all` on first load so behavior is unchanged.
+  let bracket = $state<LeaderboardBracket>('all');
+  // Selected client kind for the `client:<kind>` bracket. Held
+  // separately from `bracket` so the dropdown remembers the last pick
+  // when the user toggles the "By client" segment off and back on.
+  let clientKind = $state<string>(CLIENT_BRACKET_KINDS[0]!.kind);
+  // Whether the "By client" segment is active (drives the sub-dropdown
+  // + means the effective bracket is `client:<clientKind>`).
+  let clientBracketActive = $state(false);
 
   const activeCol = $derived(COLUMNS.find((c) => c.key === sort) ?? COLUMNS[0]!);
   const activeWindow = $derived(
     WINDOW_OPTIONS.find((option) => option.key === window) ?? WINDOW_OPTIONS[0]!,
   );
 
-  async function load(nextSort: LeaderboardSort = sort, nextWindow: LeaderboardWindow = window) {
+  // The bracket value actually sent to the API — the segmented
+  // `bracket` state, OR `client:<kind>` when the client segment is on.
+  const effectiveBracket = $derived<LeaderboardBracket>(
+    clientBracketActive ? (`client:${clientKind}` as LeaderboardBracket) : bracket,
+  );
+
+  // Validators in the selected bracket, independent of `limit`. Falls
+  // back to `count` (rows returned) for pre-bracket API responses that
+  // don't carry `bracketCount`.
+  const bracketCount = $derived<number | null>(
+    data === null ? null : (data.bracketCount ?? data.count),
+  );
+
+  // Whether the current view is filtered to a non-`all` bracket — gates
+  // the "{n} validators in this bracket" line so the default view
+  // (every validator) doesn't show a redundant count.
+  const isFiltered = $derived(effectiveBracket !== 'all');
+
+  async function load(
+    nextSort: LeaderboardSort = sort,
+    nextWindow: LeaderboardWindow = window,
+    nextBracket: LeaderboardBracket = effectiveBracket,
+  ) {
     loading = true;
     error = null;
     try {
-      data = await fetchLeaderboard({ limit, sort: nextSort, window: nextWindow });
+      data = await fetchLeaderboard({
+        limit,
+        sort: nextSort,
+        window: nextWindow,
+        bracket: nextBracket,
+      });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -159,6 +242,31 @@
   function handleWindowClick(next: LeaderboardWindow): void {
     window = next;
     void load(sort, next);
+  }
+
+  // Select one of the four non-client bracket segments. Turns off the
+  // client segment so the two selectors are mutually exclusive.
+  function handleBracketClick(next: LeaderboardBracket): void {
+    clientBracketActive = false;
+    bracket = next;
+    void load(sort, window, next);
+  }
+
+  // Toggle the "By client" segment. Switching it ON loads the remembered
+  // `client:<clientKind>`; switching it OFF returns to the last
+  // non-client `bracket` (defaults to `all`).
+  function handleClientSegmentClick(): void {
+    clientBracketActive = true;
+    void load(sort, window, `client:${clientKind}` as LeaderboardBracket);
+  }
+
+  // The client dropdown changed — refetch with the new kind. Only
+  // meaningful while the client segment is active (the dropdown is
+  // hidden otherwise), but guard anyway so a stray change is a no-op
+  // on the wire when the segment is off.
+  function handleClientKindChange(): void {
+    if (!clientBracketActive) return;
+    void load(sort, window, `client:${clientKind}` as LeaderboardBracket);
   }
 
   function skipRateText(item: LeaderboardItem): string {
@@ -277,6 +385,22 @@
           Ranked by <span class="font-semibold">{activeCol.label.toLowerCase()}</span> across
           <span class="font-semibold">{activeWindow.label.toLowerCase()}</span>.
         </p>
+        <!--
+          Bracket population (I). Renders only for a non-`all` bracket
+          so the unfiltered default doesn't show a redundant "N
+          validators" line. `bracketCount` is the size of the WHOLE
+          bracket (not the `limit`-capped rows shown), so a delegator
+          knows whether they're seeing the top slice of 12 or of 1,200.
+          `aria-live` announces the new count when the bracket changes.
+        -->
+        {#if isFiltered && bracketCount !== null}
+          <p class="mt-0.5 text-xs text-[color:var(--color-text-subtle)]" aria-live="polite">
+            <span class="font-semibold tabular-nums text-[color:var(--color-text-default)]">
+              {bracketCount.toLocaleString()}
+            </span>
+            {bracketCount === 1 ? 'validator' : 'validators'} in this bracket.
+          </p>
+        {/if}
       </div>
 
       {#if data}
@@ -316,6 +440,84 @@
             </div>
           {/if}
         </div>
+      {/if}
+    </div>
+
+    <!--
+      Bracket selector (I). A segmented control over the four
+      non-client brackets plus a "By client" toggle that reveals the
+      client-kind dropdown. `flex-wrap` collapses the segments onto
+      multiple lines on a narrow viewport rather than overflowing —
+      the mobile card layout below already handles the rows, so the
+      selector just needs to stay readable. `role="group"` names the
+      cluster for AT.
+    -->
+    <div
+      class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center"
+      role="group"
+      aria-label="Filter validators by bracket"
+    >
+      <span class="text-xs text-[color:var(--color-text-subtle)]">Bracket</span>
+      <div
+        class="inline-flex w-fit max-w-full flex-wrap gap-1 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-1"
+      >
+        {#each BRACKET_OPTIONS as option (option.key)}
+          <button
+            type="button"
+            class="rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
+            class:bg-[color:var(--color-brand-500)]={!clientBracketActive && bracket === option.key}
+            class:text-white={!clientBracketActive && bracket === option.key}
+            class:text-[color:var(--color-text-muted)]={clientBracketActive ||
+              bracket !== option.key}
+            class:hover:text-[color:var(--color-text-default)]={clientBracketActive ||
+              bracket !== option.key}
+            onclick={() => handleBracketClick(option.key)}
+            aria-pressed={!clientBracketActive && bracket === option.key}
+            title={option.detail}
+          >
+            {option.label}
+          </button>
+        {/each}
+        <!--
+          "By client" segment — turns the bracket into a
+          `client:<kind>` filter and reveals the dropdown to its right.
+          Pressed-state styling mirrors the four segments above so the
+          control reads as one mutually-exclusive group.
+        -->
+        <button
+          type="button"
+          class="rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
+          class:bg-[color:var(--color-brand-500)]={clientBracketActive}
+          class:text-white={clientBracketActive}
+          class:text-[color:var(--color-text-muted)]={!clientBracketActive}
+          class:hover:text-[color:var(--color-text-default)]={!clientBracketActive}
+          onclick={handleClientSegmentClick}
+          aria-pressed={clientBracketActive}
+          title="Filter to a single Solana client kind."
+        >
+          By client
+        </button>
+      </div>
+
+      <!--
+        Client-kind dropdown — only shown when the "By client" segment
+        is active. `min-h-11` keeps the WCAG 2.5.5 touch target on
+        mobile; the base font-size avoids iOS zoom-on-focus.
+      -->
+      {#if clientBracketActive}
+        <label class="flex items-center gap-2 text-xs">
+          <span class="sr-only">Client kind</span>
+          <select
+            bind:value={clientKind}
+            onchange={handleClientKindChange}
+            class="min-h-11 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-1.5 text-sm"
+            aria-label="Filter by client kind"
+          >
+            {#each CLIENT_BRACKET_KINDS as ck (ck.kind)}
+              <option value={ck.kind}>{ck.label}</option>
+            {/each}
+          </select>
+        </label>
       {/if}
     </div>
 
@@ -588,7 +790,11 @@
         class="border-t border-[color:var(--color-border-default)] px-5 py-3 text-xs text-[color:var(--color-text-subtle)]"
       >
         Showing top {data.items.length}. The public API returns up to 500 rows at
-        <code>/v1/leaderboard?window={window}&amp;limit=500&amp;sort={sort}</code>.
+        <code
+          >/v1/leaderboard?window={window}&amp;limit=500&amp;sort={sort}{isFiltered
+            ? `&bracket=${effectiveBracket}`
+            : ''}</code
+        >.
       </footer>
     {/if}
   {/if}

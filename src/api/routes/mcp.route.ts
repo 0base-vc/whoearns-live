@@ -53,7 +53,11 @@ export interface McpRoutesDeps {
   >;
   statsRepo: Pick<
     StatsRepository,
-    'findHistoryByVote' | 'findTopNByWindow' | 'findByVoteEpoch' | 'findEconomicPercentile'
+    | 'findHistoryByVote'
+    | 'findTopNByWindow'
+    | 'findByVoteEpoch'
+    | 'findEconomicPercentile'
+    | 'findEconomicCohortVotes'
   >;
   processedBlocksRepo: Pick<
     ProcessedBlocksRepository,

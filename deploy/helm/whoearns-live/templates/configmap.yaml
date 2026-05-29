@@ -57,6 +57,10 @@ data:
   # ConfigMap). The interval drives the worker scheduler; the
   # public read endpoint is unaffected by this value.
   SIMD_CURATION_INTERVAL_MS: {{ .Values.config.simdCurationIntervalMs | default 43200000 | quote }}
+  # Tier-snapshot ingester cadence (migration 0045). Forward-only
+  # per-closed-epoch tier composite snapshots for the profile
+  # movement + history surfaces. Cheap cursor check on most ticks.
+  TIER_SNAPSHOT_INTERVAL_MS: {{ .Values.config.tierSnapshotIntervalMs | default 1800000 | quote }}
   # Phase 5 — Anthropic model identifier. Non-secret; goes in ConfigMap.
   ANTHROPIC_MODEL: {{ .Values.anthropic.model | default "claude-sonnet-4-6" | quote }}
   SLOT_FINALITY_BUFFER: {{ .Values.config.slotFinalityBuffer | quote }}

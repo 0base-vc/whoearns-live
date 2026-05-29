@@ -18,7 +18,8 @@ truth and the docs need a PR**.
 > percentile vs the indexed cohort; vote credits intentionally
 > excluded — see Phase 1 section for the rationale), the **tenure + client
 > badges** at `/v1/validators/:idOrVote/badges` (Phase 2 partial —
-> category leaderboards still planned), **Claim v2** (Phase 3 — GitHub
+> bracket leaderboards live for stake / client / newcomer, region
+> bracket still planned), **Claim v2** (Phase 3 — GitHub
 > Gist + co-signed operator-wallet verification), the **wallet
 > activity** read surface (Phase 4 — tx-count indexing live, fee
 > anchoring planned), the **SIMD curation** scaffolding (Phase 5 —
@@ -230,6 +231,19 @@ window had no closed-epoch data) so a client can tell exactly which
 gate fired, how stale the underlying income data is, and which
 closed-epoch range the percentile reflects.
 
+**Tier history is persisted.** The composite is no longer a
+point-in-time read. A per-epoch snapshot (tier + composite +
+component percentiles) is recorded forward-only as each epoch closes,
+so an operator can see how their composite moved over epochs — a slow
+drift down on the reliability component reads differently from a
+one-epoch dip. The `/tier` response carries a top-level `trend`
+(`prevComposite`, `delta`, `prevTier`, `epochsTracked`) summarising
+the change since the prior snapshot, and the full series is at
+`GET /v1/validators/:idOrVote/tier/history`. Because snapshots are
+forward-only with no backfill, the recorded history begins at the
+snapshot job's first run rather than at genesis — a freshly deployed
+instance has little or no movement to show until enough epochs close.
+
 #### Compute units in the economic score
 
 The economic half of the composite is itself a blend of income
@@ -306,7 +320,8 @@ Per sub-component:
   percentiles, locating the validator against the indexed-cohort
   distribution), `rank: {position, of}` (1-indexed position with
   cohort size), a `perEpoch` array of `{epoch, lamportsPerSlot}`
-  rows the median was taken across, and an optional
+  rows the median was taken across, a `cohortVotes` array of the
+  vote pubkeys the percentile was ranked against, and an optional
   `incomeBreakdown` of `{baseFeesLamports, priorityFeesLamports,
 jitoTipsLamports}` that decomposes the window's aggregate income
   into its three on-chain components. The `incomeBreakdown` field
@@ -314,6 +329,18 @@ jitoTipsLamports}` that decomposes the window's aggregate income
   time and omitted otherwise — a consumer that needs the
   decomposition for every validator should not assume the field is
   always populated.
+
+  `cohortVotes` closes the reproducibility gap the cohort-scope
+  discussion left open. A percentile is only as auditable as its
+  denominator: previously a reader could see the rank-of-N and the
+  cohort quartiles but not _which_ N validators the rank was drawn
+  against, so the percentile could not be recomputed from outside.
+  Disclosing the exact cohort — every vote pubkey ranked, the same
+  set whose size is reported as `economicCohortSize` — makes the
+  number independently verifiable: re-fetch each listed validator's
+  median per-leader-slot income and re-run the `PERCENT_RANK()`. The
+  array is empty under the same condition that nulls the score (no
+  ranked cohort: fresh DB or full income outage).
 
 - **`cuPercentile.evidence`** carries `validatorAvgCuPerBlock` (this
   validator's produced-block-count-weighted average compute units
@@ -428,7 +455,7 @@ deliberately separate from the tier.
 
 ### Phase 2 — Tenure, Client, Categories
 
-**Status:** partial — tenure + client badges live; category leaderboards planned.
+**Status:** partial — tenure + client badges live; bracket leaderboards live for stake / client / newcomer; region bracket still planned.
 
 #### Live now
 
@@ -458,17 +485,30 @@ deliberately separate from the tier.
   was wrong because the regex job runs 12× more often. The
   cluster-nodes job is disabled (code retained for future
   toggle) so the canonical source is the only writer.
-- Surfaced on `/badges` and persisted on `validators.client_kind`
-  for future category leaderboards.
+- Surfaced on `/badges` and persisted on `validators.client_kind`,
+  which now backs the live client bracket on `/v1/leaderboard`.
+- **Bracket leaderboards.** `GET /v1/leaderboard?bracket=…` narrows
+  the candidate set BEFORE ranking, so ranks are bracket-relative
+  (`rank: 1` is best-in-bracket, not best-globally) — the
+  KOM-style framing Design Principle #3 calls for. Live brackets:
+  `stake_lt_100k` / `stake_lt_500k` (activated-stake ceilings),
+  `newcomer` (`COALESCE(genesis_epoch, first_seen_epoch)` within the
+  last 30 epochs), and `client:<kind>` (one canonical client kind).
+  The response echoes the applied `bracket` and adds `bracketCount`,
+  the bracket size independent of `limit`. Each draws from the same
+  windowed ranking as the unbracketed board; the bracket only
+  changes which validators are candidates.
 
 #### Planned next
 
-- **Category leaderboards.** Small-validator (<100k SOL stake),
-  newcomer (<30 epochs active), client-specific, regional. Each
-  category gets its own KOM-style leaderboard so the gamification
-  rewards being best-in-bracket, not best-globally. The
-  `client_kind` index and `first_seen_epoch` column already exist;
-  the leaderboard route extension is the remaining work.
+- **Region bracket.** The remaining bracket from Design Principle
+  #3's set. Not yet shipped because the indexer holds no
+  per-validator geo data — there is no region field to filter on,
+  and (per the Anti-patterns note) Solana's latency-centric design
+  means a region bracket would be framed strictly as a
+  best-in-region flex, never a "closer-is-better" ranking. The
+  stake, newcomer, and client brackets are already live (see "Live
+  now"); adding a region bracket waits on a geo-data source.
 - **Behavioural Jito-Solana cross-check.** The on-chain
   `TipDistributionAccount` PDA is the high-confidence signal for Jito
   participation. Gossip version says "0.18.22-jito" but the PDA says

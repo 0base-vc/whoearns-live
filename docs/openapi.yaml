@@ -262,6 +262,18 @@ paths:
         to label small denominators. Validators that ranked #1-#3 by
         `income_per_slot` in the latest complete 10-epoch block include
         `decadeEpochStart`, `decadeEpochEnd`, and `decadeRank` badge metadata.
+
+        **Brackets.** The optional `bracket` param narrows the candidate
+        set BEFORE ranking, so `rank` positions become bracket-relative
+        (`rank: 1` is the top earner within the bracket). Brackets cover
+        `stake_lt_100k` / `stake_lt_500k` (activated-stake ceilings),
+        `newcomer` (validators whose `COALESCE(genesis_epoch,
+        first_seen_epoch)` falls within the last 30 epochs), and
+        `client:<kind>` (one canonical client kind). The response echoes
+        the applied `bracket` and adds `bracketCount`, the bracket's size
+        independent of `limit`. There is no region bracket — no
+        per-validator geo data is indexed.
+
         Compatibility: bare `?epoch=N` is treated as
         `window=final_epoch&epoch=N`; legacy sort aliases `performance` and
         `income_per_stake` map to `income_per_slot`, and `median_fee` maps to
@@ -302,6 +314,23 @@ paths:
           required: false
           schema:
             $ref: '#/components/schemas/LeaderboardSort'
+        - name: bracket
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/LeaderboardBracket'
+          description: |
+            Narrows the candidate set BEFORE ranking, so the returned
+            `rank` positions are bracket-relative — `rank: 1` is the
+            top earner WITHIN the bracket, not the cluster. Default
+            `all` (no narrowing). `stake_lt_100k` / `stake_lt_500k`
+            keep validators under 100k / 500k SOL activated stake;
+            `newcomer` keeps validators whose
+            `COALESCE(genesis_epoch, first_seen_epoch)` falls within
+            the last 30 epochs; `client:<kind>` keeps validators on
+            one client kind, where `<kind>` is one of the 14 canonical
+            client identifiers. No region bracket is offered — the
+            indexer has no per-validator geo data.
       responses:
         '200':
           description: Ranked validator list for the selected window.
@@ -351,6 +380,56 @@ paths:
                 $ref: '#/components/schemas/NodeTier'
         '400':
           description: Invalid pubkey.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Validator not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/validators/{idOrVote}/tier/history:
+    get:
+      summary: Newest-first per-epoch Node Tier history for a validator
+      description: |
+        Returns the recorded per-epoch Node Tier snapshots for one
+        validator, newest first. Each snapshot is the tier + composite
+        + component percentiles as they stood when that epoch closed,
+        letting a consumer chart composite movement over time without
+        recomputing each historical window.
+
+        Snapshots are written forward-only by the
+        `tier-snapshot-ingester` job (one row per validator per closed
+        epoch); there is no backfill. History therefore begins
+        accruing from the job's first run — a brand-new deployment
+        returns few or zero snapshots, and the per-validator count
+        grows roughly one row every ~2 days as epochs close. The
+        top-level `trend` on `GET /v1/validators/{idOrVote}/tier` is
+        the single-step view of this same series.
+      parameters:
+        - $ref: '#/components/parameters/IdOrVotePath'
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 60
+            default: 16
+          description: Maximum snapshots to return, newest first.
+      responses:
+        '200':
+          description: |
+            Recorded tier snapshots, newest first. `snapshots` is
+            empty when the validator is known but the snapshot job has
+            not yet recorded a closed epoch for it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeTierHistory'
+        '400':
+          description: Invalid pubkey or limit.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -1147,7 +1226,7 @@ components:
     # its `tier` key.
     NodeTierBody:
       type: object
-      required: [window, tier, composite, components]
+      required: [window, tier, composite, components, trend]
       description: |
         Node Tier composite. Built from two on-chain-anchored signals
         only — block-production reliability and economic productivity
@@ -1389,6 +1468,7 @@ components:
                       cohortP75LamportsPerSlot,
                       rank,
                       perEpoch,
+                      cohortVotes,
                     ]
                   properties:
                     validatorMedianLamportsPerSlot:
@@ -1463,6 +1543,23 @@ components:
                               in lamports (decimal string;
                               lamport-scale numbers exceed JSON
                               safe-integer range).
+                    cohortVotes:
+                      type: array
+                      description: |
+                        The vote pubkeys of every validator the
+                        percentile was ranked against — the indexed
+                        cohort in this window (typically ~19-200
+                        depending on `WatchMode` and how many indexed
+                        validators had measurable income). Disclosing
+                        the exact denominator makes the percentile
+                        independently reproducible: a consumer can
+                        re-fetch each listed validator's median
+                        per-leader-slot income and recompute the
+                        `PERCENT_RANK()`. Empty when the window had no
+                        ranked cohort (fresh DB or full income
+                        outage), the same condition under which
+                        `score` is `null` and the tier is `unrated`.
+                      items: { type: string }
                     incomeBreakdown:
                       type: object
                       required: [baseFeesLamports, priorityFeesLamports, jitoTipsLamports]
@@ -1543,6 +1640,56 @@ components:
                         cohort the percentile was computed against
                         — the 50th percentile of the cohort's
                         per-validator weighted averages.
+        trend:
+          type: object
+          nullable: true
+          required: [prevComposite, delta, prevTier, epochsTracked]
+          description: |
+            Composite movement since the prior recorded tier
+            snapshot. `null` when fewer than one prior snapshot
+            exists for this validator — a brand-new deployment, or
+            a validator first observed after the snapshot job's most
+            recent tick, has no point of comparison yet. Snapshots
+            are taken forward-only per closed epoch by the
+            `tier-snapshot-ingester` job; history begins accruing
+            from the job's first run and is never backfilled, so the
+            number of comparable snapshots grows over the deployment's
+            lifetime.
+          properties:
+            prevComposite:
+              type: integer
+              nullable: true
+              minimum: 0
+              maximum: 100
+              description: |
+                Composite recorded on the prior snapshot, or `null`
+                when that snapshot was `unrated` (no composite to
+                compare against).
+            delta:
+              type: integer
+              nullable: true
+              description: |
+                Current `composite` minus `prevComposite`. Positive
+                is an improvement, negative a regression. `null` when
+                either the current composite or `prevComposite` is
+                `null` (an `unrated` endpoint on the current tier or
+                the prior snapshot leaves the difference undefined).
+            prevTier:
+              type: string
+              nullable: true
+              enum: [forge, anvil, hearth, kindling, unrated]
+              description: |
+                Tier recorded on the prior snapshot, letting a
+                consumer show a tier transition (e.g. anvil → forge)
+                alongside the numeric delta. `null` when no tier was
+                recorded on that snapshot.
+            epochsTracked:
+              type: integer
+              minimum: 0
+              description: |
+                Number of recorded tier snapshots for this validator,
+                including the current one — the length of the
+                comparable history accrued so far.
 
     Badges:
       type: object
@@ -1574,6 +1721,71 @@ components:
         identity: { type: string }
       allOf:
         - $ref: '#/components/schemas/NodeTierBody'
+
+    NodeTierHistory:
+      type: object
+      required: [vote, identity, snapshots]
+      description: |
+        Newest-first per-epoch Node Tier snapshots for one validator,
+        from `GET /v1/validators/{idOrVote}/tier/history`. Forward-only
+        — `snapshots` carries only epochs the `tier-snapshot-ingester`
+        recorded after its first run, never backfilled history.
+      properties:
+        vote: { type: string }
+        identity: { type: string }
+        snapshots:
+          type: array
+          description: |
+            Recorded snapshots, newest epoch first. Empty when the
+            validator is known but no closed-epoch snapshot has been
+            recorded for it yet.
+          items:
+            type: object
+            required: [epoch, composite, tier, reliability, economicPercentile, cuPercentile]
+            properties:
+              epoch: { type: integer, minimum: 0 }
+              composite:
+                type: integer
+                nullable: true
+                minimum: 0
+                maximum: 100
+                description: |
+                  Composite as it stood when this epoch closed.
+                  `null` when the tier was `unrated` for this epoch —
+                  the same no-half-shown-scores rule the live `/tier`
+                  composite follows.
+              tier:
+                type: string
+                enum: [forge, anvil, hearth, kindling, unrated]
+              reliability:
+                type: number
+                nullable: true
+                minimum: 0
+                maximum: 1
+                description: |
+                  The reliability component score recorded for this
+                  epoch (`1 − wilsonSkipRateUpper`). `null` when not
+                  recorded for the snapshot.
+              economicPercentile:
+                type: number
+                nullable: true
+                minimum: 0
+                maximum: 1
+                description: |
+                  The economic-percentile component score recorded for
+                  this epoch. `null` when the cohort was too small or
+                  this validator had too few measured epochs at the
+                  time — the conditions under which the tier was
+                  `unrated`.
+              cuPercentile:
+                type: number
+                nullable: true
+                minimum: 0
+                maximum: 1
+                description: |
+                  The CU-percentile component score recorded for this
+                  epoch. `null` when the validator produced no blocks
+                  in that window.
 
     Error:
       type: object
@@ -2289,6 +2501,23 @@ components:
         Ranking mode for `/v1/leaderboard`. See endpoint doc for semantics.
         `income_per_slot` (default) is the stake-neutral live trend metric.
 
+    LeaderboardBracket:
+      type: string
+      default: all
+      pattern: '^(all|stake_lt_100k|stake_lt_500k|newcomer|client:(agave|jito_solana|firedancer|frankendancer|paladin|sig|agave_bam|rakurai|harmonic_firedancer|harmonic_agave|harmonic_frankendancer|firebam|raiku))$'
+      description: |
+        Candidate-set bracket for `/v1/leaderboard`, applied BEFORE
+        ranking so ranks are bracket-relative. One of the fixed
+        tokens `all` (default), `stake_lt_100k`, `stake_lt_500k`,
+        `newcomer`, or the templated `client:<kind>` where `<kind>`
+        is one of the 14 canonical client kinds (`agave`,
+        `jito_solana`, `firedancer`, `frankendancer`, `paladin`,
+        `sig`, `agave_bam`, `rakurai`, `harmonic_firedancer`,
+        `harmonic_agave`, `harmonic_frankendancer`, `firebam`,
+        `raiku`). `newcomer` = `COALESCE(genesis_epoch,
+        first_seen_epoch)` within the last 30 epochs. No region
+        bracket — no per-validator geo data is indexed.
+
     LeaderboardItem:
       type: object
       required:
@@ -2435,6 +2664,8 @@ components:
         - epochClosedAt
         - window
         - sort
+        - bracket
+        - bracketCount
         - isFinal
         - currentEpoch
         - closedEpochsIncluded
@@ -2451,6 +2682,22 @@ components:
         epochClosedAt: { type: [string, 'null'], format: date-time }
         window: { $ref: '#/components/schemas/LeaderboardWindow' }
         sort: { $ref: '#/components/schemas/LeaderboardSort' }
+        bracket:
+          allOf:
+            - $ref: '#/components/schemas/LeaderboardBracket'
+          description: |
+            Echo of the applied bracket token (`all` when none was
+            requested). `rank` positions in `items` are relative to
+            this bracket.
+        bracketCount:
+          type: integer
+          minimum: 0
+          description: |
+            Number of validators in the bracket BEFORE `limit` is
+            applied — the true bracket size, independent of how many
+            rows `items` carries. With `bracket=all` this is the full
+            ranked candidate count; equals `count` only when the
+            bracket fits within `limit`.
         isFinal: { type: boolean }
         currentEpoch: { type: [integer, 'null'], minimum: 0 }
         closedEpochsIncluded:

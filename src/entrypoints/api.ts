@@ -17,6 +17,7 @@ import { OperatorWalletsRepository } from '../storage/repositories/operator-wall
 import { ProfilesRepository } from '../storage/repositories/profiles.repo.js';
 import { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
 import { StatsRepository } from '../storage/repositories/stats.repo.js';
+import { TierSnapshotsRepository } from '../storage/repositories/tier-snapshots.repo.js';
 import { ValidatorGithubRepository } from '../storage/repositories/validator-github.repo.js';
 import { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import { SimdDiscussionsRepository } from '../storage/repositories/simd-discussions.repo.js';
@@ -54,6 +55,7 @@ export async function startApi(): Promise<void> {
     walletActivity: new WalletActivityRepository(pool),
     simdProposals: new SimdProposalsRepository(pool),
     simdDiscussions: new SimdDiscussionsRepository(pool),
+    tierSnapshots: new TierSnapshotsRepository(pool),
   };
 
   // The API process needs its own `ValidatorService` so the history

@@ -19,7 +19,7 @@
  * pin the backend values.
  */
 
-import type { NodeTier, NodeTierBody } from './types.js';
+import type { NodeTier, NodeTierBody, NodeTierTrend } from './types.js';
 
 /**
  * Minimum leader slots in the window for the reliability half to be
@@ -346,6 +346,77 @@ function trimClientVersion(version: string): string {
   // keeps the empty-string fallback returning the raw input
   // verbatim rather than rendering as a blank.
   return version.split(/[-+]/, 1)[0] || version;
+}
+
+/**
+ * The visual tone of the composite delta badge (H). Maps to the
+ * existing status tone tokens in the hub:
+ *   - `up`   → composite rose (status-ok green)
+ *   - `down` → composite fell (status-warn — muted/red, NOT alarmist)
+ *   - `flat` → no change (neutral muted text)
+ *
+ * The voice rule for this surface: STATE the movement, never coach it.
+ * "down" is not "bad" — a validator's economic percentile can dip
+ * because the cohort got stronger, not because they regressed. The
+ * tone differentiates direction for scannability only.
+ */
+export type TierDeltaTone = 'up' | 'down' | 'flat';
+
+/**
+ * Pre-formatted composite delta badge (H), or `null` when there's
+ * nothing honest to show. The hub renders the returned `{ arrow,
+ * deltaLabel }` as a small badge near the composite number and
+ * appends `transition` when the tier itself changed.
+ *
+ * Returns `null` (badge omitted) when:
+ *   - `trend` is `null` / `undefined` (fewer than one prior snapshot —
+ *     brand-new validator, nothing to compare against), OR
+ *   - `trend.delta` is `null` (a composite was unmeasurable on one
+ *     side — we do NOT fabricate a "± 0").
+ *
+ * `deltaLabel` uses a real unicode minus (U+2212) for negatives so
+ * the badge aligns with the rest of the app's typographic minus and
+ * doesn't read as a hyphen. `transition` is non-null only when the
+ * prior tier differs from the current tier (e.g. "anvil → forge").
+ */
+export interface TierDeltaBadge {
+  tone: TierDeltaTone;
+  /** "▲" / "▼" / "±" — the leading direction glyph. */
+  arrow: string;
+  /** "+3" / "−2" / "0" — the signed magnitude (unicode minus for negatives). */
+  deltaLabel: string;
+  /** "anvil → forge" when the tier changed since the prior snapshot, else null. */
+  transition: string | null;
+}
+
+export function tierDeltaBadge(
+  currentTier: NodeTier,
+  trend: NodeTierTrend | null | undefined,
+): TierDeltaBadge | null {
+  // No prior snapshot → nothing to compare. The UI shows nothing
+  // (honest cold start), never a fabricated flat line.
+  if (trend === null || trend === undefined) return null;
+  // A null delta means one side's composite was unmeasurable; don't
+  // invent a "± 0" the data can't support.
+  if (trend.delta === null) return null;
+
+  const delta = trend.delta;
+  // Tier transition is only meaningful when the prior tier is known
+  // AND differs from the current one. Same-tier movement (composite
+  // shifted but stayed in-band) renders the delta alone.
+  const transition =
+    trend.prevTier !== null && trend.prevTier !== currentTier
+      ? `${trend.prevTier} → ${currentTier}`
+      : null;
+
+  if (delta > 0) {
+    return { tone: 'up', arrow: '▲', deltaLabel: `+${delta}`, transition };
+  }
+  if (delta < 0) {
+    // U+2212 MINUS SIGN (not ASCII hyphen) for typographic alignment.
+    return { tone: 'down', arrow: '▼', deltaLabel: `−${Math.abs(delta)}`, transition };
+  }
+  return { tone: 'flat', arrow: '±', deltaLabel: '0', transition };
 }
 
 export function trustSummary(parts: {

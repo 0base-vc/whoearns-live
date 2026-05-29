@@ -6,10 +6,12 @@ import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
 import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
+import type { TierSnapshotsRepository } from '../../storage/repositories/tier-snapshots.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import type {
   EpochInfo,
   EpochValidatorStats,
+  TierSnapshot,
   Validator,
   ValidatorCurrentEpochResponse,
   VotePubkey,
@@ -38,7 +40,7 @@ import {
   EMPTY_ECONOMIC_LOOKUP,
   type EconomicPercentileLookup,
 } from '../../storage/repositories/stats.repo.js';
-import { findEconomicPercentileCached } from '../tier-cache.js';
+import { findEconomicCohortVotesCached, findEconomicPercentileCached } from '../tier-cache.js';
 import { narrowToDocumentedKind } from '../../services/client-kind.js';
 import { summariseTenure } from '../../services/tenure.js';
 
@@ -50,6 +52,7 @@ export interface ValidatorsRoutesDeps {
     | 'findManyByVotesEpoch'
     | 'findHistoryByVote'
     | 'findEconomicPercentile'
+    | 'findEconomicCohortVotes'
   >;
   validatorsRepo: Pick<
     ValidatorsRepository,
@@ -58,6 +61,14 @@ export interface ValidatorsRoutesDeps {
   epochsRepo: Pick<EpochsRepository, 'findCurrent' | 'findByEpoch'>;
   profilesRepo: Pick<ProfilesRepository, 'findOptedOutVotes'>;
   claimsRepo?: Pick<ClaimsRepository, 'findClaimedVotes'>;
+  /**
+   * Per-(epoch, vote) tier snapshots (migration 0045). Optional so the
+   * route still boots when the snapshot ingester isn't wired (the
+   * `trend` block degrades to `null` and the `/tier/history` endpoint
+   * returns an empty `snapshots` array). Drives the `/tier` trend delta
+   * and the `/tier/history` endpoint.
+   */
+  tierSnapshotsRepo?: Pick<TierSnapshotsRepository, 'findByVote' | 'findLatestTwo'>;
 }
 
 interface BatchResponse {
@@ -71,6 +82,17 @@ const SearchQuerySchema = z.object({
   limit: z
     .preprocess((value) => value ?? 10, z.coerce.number().int())
     .transform((value) => Math.min(25, Math.max(1, value))),
+});
+
+/**
+ * `/tier/history?limit=N` — default 16 (≈ a month of ~2-day epochs),
+ * clamped to 1..60. Same defensive `preprocess` + `transform` shape as
+ * the search limit so a missing / out-of-range value never errors.
+ */
+const TierHistoryQuerySchema = z.object({
+  limit: z
+    .preprocess((value) => value ?? 16, z.coerce.number().int())
+    .transform((value) => Math.min(60, Math.max(1, value))),
 });
 
 interface ValidatorSearchResponse {
@@ -151,6 +173,13 @@ export interface ResolvedTier {
    * empty-lookup branch.
    */
   cohortAsOfEpoch: CohortAsOfEpoch | null;
+  /**
+   * Vote pubkeys of the economic-percentile cohort — exactly which
+   * validators the `economicPercentile` rank was computed against in
+   * this window (cohort disclosure). Empty when the window was empty.
+   * Makes the percentile independently reproducible — descriptive only.
+   */
+  cohortVotes: string[];
 }
 
 /**
@@ -175,7 +204,10 @@ export interface ResolvedTier {
  * and synthesise an empty cohort result that forces `unrated`.
  */
 export async function resolveTierForValidator(
-  statsRepo: Pick<StatsRepository, 'findHistoryByVote' | 'findEconomicPercentile'>,
+  statsRepo: Pick<
+    StatsRepository,
+    'findHistoryByVote' | 'findEconomicPercentile' | 'findEconomicCohortVotes'
+  >,
   epochsRepo: Pick<EpochsRepository, 'findCurrent'>,
   votePubkey: VotePubkey,
 ): Promise<ResolvedTier> {
@@ -196,9 +228,11 @@ export async function resolveTierForValidator(
   // no DB round-trip.
   let economicLookup: EconomicPercentileLookup;
   let cohortAsOfEpoch: CohortAsOfEpoch | null;
+  let cohortVotes: string[];
   if (closedRows.length === 0) {
     economicLookup = EMPTY_ECONOMIC_LOOKUP;
     cohortAsOfEpoch = null;
+    cohortVotes = [];
   } else {
     const newest = closedRows[0] as EpochValidatorStats;
     const oldest = closedRows[closedRows.length - 1] as EpochValidatorStats;
@@ -206,13 +240,16 @@ export async function resolveTierForValidator(
     // `findEconomicPercentile` is identical for every validator in the
     // same window, so a 60s TTL deduplicates the hot-page burst (e.g.
     // a profile page + a leaderboard hover prefetch firing within a
-    // second of each other against the same closed-epoch window).
-    economicLookup = await findEconomicPercentileCached(
-      statsRepo,
-      votePubkey,
-      oldest.epoch,
-      newest.epoch,
-    );
+    // second of each other against the same closed-epoch window). The
+    // cohort vote-membership list (cohort disclosure) shares that same
+    // window and is fetched concurrently — its cache is window-keyed so
+    // the first validator in a window warms it for the rest.
+    const [lookup, votes] = await Promise.all([
+      findEconomicPercentileCached(statsRepo, votePubkey, oldest.epoch, newest.epoch),
+      findEconomicCohortVotesCached(statsRepo, oldest.epoch, newest.epoch),
+    ]);
+    economicLookup = lookup;
+    cohortVotes = votes;
     cohortAsOfEpoch = { fromEpoch: oldest.epoch, toEpoch: newest.epoch };
   }
 
@@ -230,7 +267,71 @@ export async function resolveTierForValidator(
     cuPercentile: economicLookup.cuPercentile,
   };
   const result = computeTier(input);
-  return { result, input, closedRows, economicLookup, cohortAsOfEpoch };
+  return { result, input, closedRows, economicLookup, cohortAsOfEpoch, cohortVotes };
+}
+
+/**
+ * Tier MOVEMENT block (migration 0045). Sourced from the two newest
+ * `tier_snapshots` rows for the validator — `[0]` the latest closed
+ * epoch, `[1]` the one before. `null` (on the response) when fewer than
+ * two snapshots exist, so a UI shows nothing rather than a spurious
+ * "no change". Descriptive: `delta` is `composite[0] − composite[1]`.
+ */
+export interface TierTrend {
+  /**
+   * Composite at the PREVIOUS snapshot (the older of the two). `null`
+   * when that snapshot's tier was `unrated` (it carries no composite).
+   */
+  prevComposite: number | null;
+  /**
+   * `latestComposite − prevComposite`. `null` when either composite is
+   * null (an `unrated` endpoint can't move by a number) — the consumer
+   * then falls back to the tier-name change. Positive = improved.
+   */
+  delta: number | null;
+  /** Tier label at the previous snapshot (e.g. `anvil`). */
+  prevTier: string | null;
+  /**
+   * How many snapshots exist for this validator total (NOT just the
+   * two read here). Lets a UI say "tracked for N epochs" — sourced from
+   * the count, capped at the read limit by the caller.
+   */
+  epochsTracked: number;
+}
+
+/**
+ * Build the `/tier` trend block from the validator's snapshot history.
+ * `latestComposite` is the composite the live `/tier` response just
+ * computed (which, on a freshly-closed epoch, may be one epoch AHEAD of
+ * the newest snapshot — the snapshot ingester runs on a cadence). We
+ * compare it against the most recent PRIOR snapshot so the delta
+ * reflects "this epoch vs last".
+ *
+ * `snapshots` is `findLatestTwo`'s result (newest-first, 0-2 rows).
+ * Returns `null` when there's no prior snapshot to compare against
+ * (< 1 historical row), matching the "UI shows nothing" contract.
+ *
+ * Pure so it's unit-testable without a DB and reusable by `/scoring`.
+ */
+export function trendFromSnapshots(
+  latestComposite: number | null,
+  snapshots: TierSnapshot[],
+  totalTracked: number,
+): TierTrend | null {
+  // Need at least ONE historical snapshot to show movement. The newest
+  // snapshot is the prior closed epoch's recorded tier; we compare the
+  // live composite against it.
+  const prior = snapshots[0];
+  if (prior === undefined) return null;
+  const prevComposite = prior.composite;
+  const delta =
+    latestComposite !== null && prevComposite !== null ? latestComposite - prevComposite : null;
+  return {
+    prevComposite,
+    delta,
+    prevTier: prior.tier,
+    epochsTracked: totalTracked,
+  };
 }
 
 /**
@@ -240,6 +341,10 @@ export async function resolveTierForValidator(
  * tier object from the exact same code (the only difference between
  * the two endpoints' tier data is that `/scoring` nests it under a
  * `tier` key and drops the top-level `vote` / `identity`).
+ *
+ * `trend` is layered on AFTER the pure body assembly by the handler
+ * (it requires an async snapshot read), so `tierBodyFromResolved`
+ * itself stays pure — see the `/tier` handler.
  */
 export type TierBody = Omit<NodeTierResponse, 'vote' | 'identity'>;
 
@@ -257,7 +362,7 @@ export function tierBodyFromResolved(
   resolved: ResolvedTier,
   validator: Pick<Validator, 'commission'>,
 ): TierBody {
-  const { result, input, closedRows, economicLookup, cohortAsOfEpoch } = resolved;
+  const { result, input, closedRows, economicLookup, cohortAsOfEpoch, cohortVotes } = resolved;
   const incomeFreshness = oldestIncomeFreshness(closedRows);
   // Latest closed-epoch row carries the stake snapshot — `closedRows`
   // is sorted newest-first by the repo. Pre-stake-snapshot epochs
@@ -364,6 +469,10 @@ export function tierBodyFromResolved(
     },
     tier: result.tier,
     composite: result.composite,
+    // `trend` requires an async snapshot read, so this pure body
+    // assembly leaves it null; the /tier + /scoring handlers layer the
+    // real trend on after fetching `tierSnapshotsRepo.findLatestTwo`.
+    trend: null,
     components: {
       reliability: {
         score: result.components.reliability,
@@ -389,6 +498,10 @@ export function tierBodyFromResolved(
             priorityFeesLamports: priorityFeesLamportsSum.toString(),
             jitoTipsLamports: jitoTipsLamportsSum.toString(),
           },
+          // Cohort disclosure: the exact vote pubkeys the percentile was
+          // ranked against in this window, so the rank is independently
+          // reproducible. Empty when the window had no closed rows.
+          cohortVotes,
         },
       },
       cuPercentile: {
@@ -448,7 +561,8 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
   app: FastifyInstance,
   opts: ValidatorsRoutesDeps,
 ) => {
-  const { statsRepo, validatorsRepo, epochsRepo, profilesRepo, claimsRepo } = opts;
+  const { statsRepo, validatorsRepo, epochsRepo, profilesRepo, claimsRepo, tierSnapshotsRepo } =
+    opts;
   const serialCtx = {};
 
   app.get('/v1/validators/search', async (request, _reply): Promise<ValidatorSearchResponse> => {
@@ -683,8 +797,23 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       // with /badges via `resolveTierForValidator`, and the body
       // assembly itself (window numerics + oldest-credit reduce)
       // shared with /scoring via `tierBodyFromResolved`, so neither
-      // the window logic nor the response shape can drift.
-      const resolved = await resolveTierForValidator(statsRepo, epochsRepo, validator.votePubkey);
+      // the window logic nor the response shape can drift. The tier
+      // snapshot read (for the trend block) is independent given the
+      // resolved vote, so run it concurrently.
+      const [resolved, latestTwoSnapshots] = await Promise.all([
+        resolveTierForValidator(statsRepo, epochsRepo, validator.votePubkey),
+        tierSnapshotsRepo?.findLatestTwo(validator.votePubkey) ?? Promise.resolve([]),
+      ]);
+
+      const body = tierBodyFromResolved(resolved, validator);
+      // Layer the trend block onto the pure body. `findLatestTwo`
+      // returns the two newest snapshots; we compare the live composite
+      // against the most recent PRIOR snapshot. < 1 snapshot → null.
+      const trend = trendFromSnapshots(
+        body.composite,
+        latestTwoSnapshots,
+        latestTwoSnapshots.length,
+      );
 
       // SCORING tier — tier is derived purely from CLOSED-epoch rows,
       // so it only moves on an epoch boundary (~2 days); a few minutes
@@ -697,7 +826,58 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       return {
         vote: validator.votePubkey,
         identity: validator.identityPubkey,
-        ...tierBodyFromResolved(resolved, validator),
+        ...body,
+        trend,
+      };
+    },
+  );
+
+  /**
+   * GET /v1/validators/:idOrVote/tier/history?limit=N
+   *
+   * Newest-first list of the validator's persisted Node Tier snapshots
+   * (migration 0045) — one row per CLOSED epoch the snapshot ingester
+   * recorded. Backs the profile "tier over time" view. `limit` defaults
+   * to 16 (≈ a month of epochs) and is capped at 60.
+   *
+   * FORWARD-ONLY: snapshots accumulate from the ingester's first run,
+   * so a validator added recently (or a fresh DB) returns a short or
+   * empty list rather than a backfilled history. Returns an empty
+   * `snapshots` array when the snapshot repo isn't wired.
+   *
+   * Status codes mirror `/tier`: 400 invalid pubkey, 404 unknown
+   * pubkey, 200 otherwise (even with zero snapshots).
+   */
+  app.get(
+    '/v1/validators/:idOrVote/tier/history',
+    async (request, reply): Promise<TierHistoryResponse> => {
+      const params = unwrap(VoteOrIdentityParamSchema.safeParse(request.params), 'path parameters');
+      const query = unwrap(TierHistoryQuerySchema.safeParse(request.query), 'query parameter');
+      const validator = await findValidatorByVoteOrIdentity(validatorsRepo, params.idOrVote);
+      if (validator === null) {
+        throw new NotFoundError('validator', params.idOrVote);
+      }
+
+      const snapshots =
+        tierSnapshotsRepo === undefined
+          ? []
+          : await tierSnapshotsRepo.findByVote(validator.votePubkey, query.limit);
+
+      // Same closed-epoch-derived data class as /tier — snapshots only
+      // change on an epoch boundary, so the SCORING cache horizon is
+      // safe here too.
+      void reply.header('cache-control', cacheControl('SCORING'));
+      return {
+        vote: validator.votePubkey,
+        identity: validator.identityPubkey,
+        snapshots: snapshots.map((s) => ({
+          epoch: s.epoch,
+          composite: s.composite,
+          tier: s.tier,
+          reliability: s.reliability,
+          economicPercentile: s.economicPercentile,
+          cuPercentile: s.cuPercentile,
+        })),
       };
     },
   );
@@ -877,6 +1057,18 @@ export interface NodeTierResponse {
    * unrated classification.
    */
   composite: number | null;
+  /**
+   * Epoch-over-epoch tier MOVEMENT (migration 0045), sourced from the
+   * persisted `tier_snapshots` history. `null` when fewer than one
+   * prior snapshot exists (a fresh validator, or before the snapshot
+   * ingester has recorded a closed epoch) OR when the snapshot repo
+   * isn't wired — a UI shows nothing in that case rather than a
+   * spurious "no change". When present, `delta` is the live composite
+   * minus the previous snapshot's composite (positive = improved);
+   * `prevTier` lets the UI describe a tier-name change even when
+   * `delta` is null (an `unrated` endpoint can't move by a number).
+   */
+  trend: TierTrend | null;
   components: {
     /**
      * Reliability sub-component: pessimistic block-production rate
@@ -991,6 +1183,18 @@ export interface NodeTierResponse {
           priorityFeesLamports: string;
           jitoTipsLamports: string;
         };
+        /**
+         * Cohort disclosure: the vote pubkeys of the cohort this
+         * validator's economic percentile was ranked against in the
+         * window — exactly the validators with measured income in the
+         * same closed-epoch window (the same population
+         * `findEconomicPercentile`'s `PERCENT_RANK()` ran over). Makes
+         * the percentile independently reproducible: pull each member's
+         * income and re-derive the rank. Bounded by the indexed set
+         * (~19-200). Empty when the window had no closed rows.
+         * Descriptive only.
+         */
+        cohortVotes: string[];
       };
     };
     /**
@@ -1025,6 +1229,32 @@ export interface NodeTierResponse {
       };
     };
   };
+}
+
+/**
+ * `GET /v1/validators/:idOrVote/tier/history` response. Newest-first
+ * list of persisted tier snapshots (migration 0045) — each entry is the
+ * tier composite + component sub-scores as they stood when the snapshot
+ * ingester recorded that closed epoch. `snapshots` is empty for a
+ * validator with no recorded history (recently added, fresh DB, or the
+ * snapshot repo unwired).
+ */
+export interface TierHistoryResponse {
+  vote: string;
+  identity: string;
+  snapshots: Array<{
+    epoch: number;
+    /** 0-100, or `null` when the tier was `unrated` at that epoch. */
+    composite: number | null;
+    /** Tier label at that epoch (forge / anvil / hearth / kindling / unrated). */
+    tier: string;
+    /** Reliability sub-score (0..1) at snapshot time, or `null`. */
+    reliability: number | null;
+    /** Economic-percentile sub-score (0..1) at snapshot time, or `null`. */
+    economicPercentile: number | null;
+    /** CU-percentile sub-score (0..1) at snapshot time, or `null`. */
+    cuPercentile: number | null;
+  }>;
 }
 
 export default validatorsRoutes;

@@ -29,7 +29,12 @@
   import Card from './Card.svelte';
   import KpiStat from './KpiStat.svelte';
   import type { CuEvidence, EconomicEvidence, ReliabilityEvidence } from '$lib/types';
-  import { formatComputeUnits, formatFractionAsPercent, formatLamports } from '$lib/format';
+  import {
+    formatComputeUnits,
+    formatFractionAsPercent,
+    formatLamports,
+    shortenPubkey,
+  } from '$lib/format';
 
   /**
    * `kind` discriminates which evidence shape `evidence` is. Each
@@ -98,6 +103,18 @@
     if (kind !== 'economic') return null;
     const ev = evidence as EconomicEvidence;
     return `${ev.rank.position} of ${ev.rank.of}`;
+  });
+
+  // Cohort disclosure (J) — the exact vote pubkeys the percentile was
+  // ranked against. `undefined` on older payloads (cohort not
+  // disclosed) → null here so the template skips the affordance
+  // entirely rather than rendering an empty `<details>`. An empty
+  // array is treated the same as absent (nothing to reproduce).
+  const cohortVotes = $derived.by<string[] | null>(() => {
+    if (kind !== 'economic') return null;
+    const votes = (evidence as EconomicEvidence).cohortVotes;
+    if (votes === undefined || votes.length === 0) return null;
+    return votes;
   });
 
   // Ordinal suffix for the rank ("1st", "2nd", "3rd", "11th") so the
@@ -337,6 +354,48 @@
         See full income history ↓
       </a>
     </p>
+
+    {#if cohortVotes !== null}
+      <!--
+        Cohort disclosure (J). The exact peer set the percentile was
+        ranked against, so the rank is independently reproducible — a
+        delegator can pull each peer's per-slot income and re-derive
+        the percentile themselves. Collapsed by default (`<details>`)
+        because the list runs ~19-200 long; the summary carries the
+        count so the affordance is honest before expansion. Descriptive
+        label only — no editorialising on who's "better".
+
+        Each pubkey links to that validator's hub (`/v/<vote>`). The
+        list is `max-h` + `overflow-y-auto` so a 200-deep cohort
+        scrolls inside the panel instead of stretching the card.
+      -->
+      <details class="mt-3 text-xs">
+        <summary
+          class="inline-flex min-h-11 cursor-pointer items-center text-[color:var(--color-brand-500)] hover:underline"
+        >
+          View cohort ({cohortVotes.length})
+        </summary>
+        <div class="mt-2">
+          <p class="text-[color:var(--color-text-muted)]">
+            Ranked against these {cohortVotes.length} indexed validators:
+          </p>
+          <ul
+            class="mt-1.5 max-h-48 space-y-0.5 overflow-y-auto rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-2"
+          >
+            {#each cohortVotes as voteKey (voteKey)}
+              <li>
+                <a
+                  href={`/v/${voteKey}`}
+                  class="font-mono text-[color:var(--color-text-default)] hover:text-[color:var(--color-brand-500)] hover:underline"
+                >
+                  {shortenPubkey(voteKey, 8, 6)}
+                </a>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      </details>
+    {/if}
 
     {#if eco.perEpoch.length > 0}
       <div class="mt-3 overflow-x-auto">

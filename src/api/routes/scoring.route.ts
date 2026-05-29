@@ -6,6 +6,7 @@ import type { OperatorWalletsRepository } from '../../storage/repositories/opera
 import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
 import type { SimdDiscussionsRepository } from '../../storage/repositories/simd-discussions.repo.js';
 import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
+import type { TierSnapshotsRepository } from '../../storage/repositories/tier-snapshots.repo.js';
 import type { ValidatorGithubRepository } from '../../storage/repositories/validator-github.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
 import type { WalletActivityRepository } from '../../storage/repositories/wallet-activity.repo.js';
@@ -19,6 +20,7 @@ import {
   resolveTierForValidator,
   tenureClientBlocks,
   tierBodyFromResolved,
+  trendFromSnapshots,
 } from './validators.route.js';
 import { type OaiComponents, resolveOaiForValidator } from './operator-activity-index.route.js';
 
@@ -35,7 +37,10 @@ import { type OaiComponents, resolveOaiForValidator } from './operator-activity-
  */
 export interface ScoringRoutesDeps {
   validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>;
-  statsRepo: Pick<StatsRepository, 'findHistoryByVote' | 'findEconomicPercentile'>;
+  statsRepo: Pick<
+    StatsRepository,
+    'findHistoryByVote' | 'findEconomicPercentile' | 'findEconomicCohortVotes'
+  >;
   epochsRepo: Pick<EpochsRepository, 'findCurrent'>;
   claimsRepo: Pick<ClaimsRepository, 'findByVote'>;
   profilesRepo: Pick<ProfilesRepository, 'findOptedOutVotes'>;
@@ -43,6 +48,13 @@ export interface ScoringRoutesDeps {
   operatorWalletsRepo: Pick<OperatorWalletsRepository, 'listActiveByVote'>;
   walletActivityRepo: Pick<WalletActivityRepository, 'listRecentForWallets' | 'hasAnyFeeData'>;
   simdDiscussionsRepo: Pick<SimdDiscussionsRepository, 'statsByUsername' | 'hasAnyData'>;
+  /**
+   * Per-(epoch, vote) tier snapshots (migration 0045). Optional — when
+   * unwired the nested `tier.trend` degrades to `null`. Drives the tier
+   * trend delta embedded in the aggregate `tier` block (the separate
+   * `/tier/history` endpoint is not part of this aggregate).
+   */
+  tierSnapshotsRepo?: Pick<TierSnapshotsRepository, 'findLatestTwo'>;
 }
 
 /**
@@ -105,7 +117,7 @@ const scoringRoutes: FastifyPluginAsync<ScoringRoutesDeps> = async (
   app: FastifyInstance,
   opts: ScoringRoutesDeps,
 ) => {
-  const { statsRepo, epochsRepo, validatorsRepo } = opts;
+  const { statsRepo, epochsRepo, validatorsRepo, tierSnapshotsRepo } = opts;
 
   // Return type is `ScoringResponse | void`: the GET path resolves
   // the structured body, the HEAD short-circuit calls
@@ -148,13 +160,25 @@ const scoringRoutes: FastifyPluginAsync<ScoringRoutesDeps> = async (
       // same two-read shape `/badges` already has — kept rather than
       // threading the epoch out of the tier resolver, which would
       // leak the resolver's internals across the helper boundary.
-      const [resolvedTier, currentEpoch, oai] = await Promise.all([
+      const [resolvedTier, currentEpoch, oai, latestTwoSnapshots] = await Promise.all([
         resolveTierForValidator(statsRepo, epochsRepo, validator.votePubkey),
         epochsRepo.findCurrent(),
         resolveOaiForValidator(opts, validator),
+        tierSnapshotsRepo?.findLatestTwo(validator.votePubkey) ?? Promise.resolve([]),
       ]);
 
       const { tenure, client } = tenureClientBlocks(validator, currentEpoch);
+
+      // Layer the tier trend onto the nested tier body — same helper +
+      // shape as the granular `/tier` endpoint so the two can't drift.
+      // The separate `/tier/history` endpoint is NOT part of this
+      // aggregate (it's a list, not a per-render summary).
+      const tier = tierBodyFromResolved(resolvedTier, validator);
+      tier.trend = trendFromSnapshots(
+        tier.composite,
+        latestTwoSnapshots,
+        latestTwoSnapshots.length,
+      );
 
       // SCORING cache tier. `/scoring` BUNDLES the OAI — the
       // shortest-lived of the three components in freshness terms —
@@ -170,7 +194,7 @@ const scoringRoutes: FastifyPluginAsync<ScoringRoutesDeps> = async (
       return {
         vote: validator.votePubkey,
         identity: validator.identityPubkey,
-        tier: tierBodyFromResolved(resolvedTier, validator),
+        tier,
         tenure,
         client,
         // `null` when the validator is gated out of the OAI surface

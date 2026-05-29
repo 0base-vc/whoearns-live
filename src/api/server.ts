@@ -26,6 +26,7 @@ import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import type { ProfilesRepository } from '../storage/repositories/profiles.repo.js';
 import type { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
 import type { StatsRepository } from '../storage/repositories/stats.repo.js';
+import type { TierSnapshotsRepository } from '../storage/repositories/tier-snapshots.repo.js';
 import type { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import type { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
 import { setErrorHandler } from './error-handler.js';
@@ -103,6 +104,12 @@ export interface BuildServerDeps {
     simdProposals: SimdProposalsRepository;
     /** Phase 6 — GitHub Discussions comments mirror. */
     simdDiscussions: SimdDiscussionsRepository;
+    /**
+     * Migration 0045 — per-(epoch, vote) Node Tier snapshots. Backs the
+     * `/tier` trend delta + the `/tier/history` endpoint. Written
+     * forward-only by the worker's `tier-snapshot-ingester`.
+     */
+    tierSnapshots: TierSnapshotsRepository;
   };
   services: {
     validator: ValidatorService;
@@ -284,6 +291,7 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       epochsRepo: deps.repos.epochs,
       profilesRepo: deps.repos.profiles,
       claimsRepo: deps.repos.claims,
+      tierSnapshotsRepo: deps.repos.tierSnapshots,
     });
     await scope.register(validatorLeaderSlotsRoutes, {
       statsRepo: deps.repos.stats,
@@ -389,6 +397,7 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       operatorWalletsRepo: deps.repos.operatorWallets,
       walletActivityRepo: deps.repos.walletActivity,
       simdDiscussionsRepo: deps.repos.simdDiscussions,
+      tierSnapshotsRepo: deps.repos.tierSnapshots,
     });
     // SEO + AI-discovery surfaces. Registered BEFORE `fastifyStatic`
     // (below, outside this register scope) so dynamic /sitemap.xml,

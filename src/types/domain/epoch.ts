@@ -301,6 +301,38 @@ export interface IngestionCursor {
 }
 
 /**
+ * One persisted Node Tier composite for a validator at a CLOSED epoch
+ * (migration 0045). Written forward-only by the tier-snapshot-ingester
+ * so the profile surface can render tier MOVEMENT (delta vs the prior
+ * snapshot) and a rolling history without recomputing the cohort at
+ * read time.
+ *
+ * The component sub-scores are the values AS THEY STOOD when the
+ * snapshot was taken — a history row is self-describing and does not
+ * depend on the cohort still existing. `composite` is `null` exactly
+ * when `tier === 'unrated'`, matching the API contract.
+ */
+export interface TierSnapshot {
+  votePubkey: VotePubkey;
+  epoch: Epoch;
+  /** 0..100, or `null` when `tier === 'unrated'`. */
+  composite: number | null;
+  /**
+   * Closed tier enum as stored — `forge` / `anvil` / `hearth` /
+   * `kindling` / `unrated`. Typed as the wide string at the domain
+   * layer (the DB column is TEXT); the public boundary re-narrows.
+   */
+  tier: string;
+  /** Reliability sub-score (0..1) at snapshot time; `null` if absent. */
+  reliability: number | null;
+  /** Economic-percentile sub-score (0..1) at snapshot time; `null` if absent. */
+  economicPercentile: number | null;
+  /** CU-percentile sub-score (0..1) at snapshot time; `null` if absent. */
+  cuPercentile: number | null;
+  createdAt: Date;
+}
+
+/**
  * API response for a single validator-at-epoch. See docs/api.md for the
  * public completeness contract.
  */

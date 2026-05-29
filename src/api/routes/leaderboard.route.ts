@@ -1,9 +1,10 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { AppError, NotFoundError } from '../../core/errors.js';
-import { lamportsToSol, lamportsToString } from '../../core/lamports.js';
+import { AppError, NotFoundError, ValidationError } from '../../core/errors.js';
+import { LAMPORTS_PER_SOL, lamportsToSol, lamportsToString } from '../../core/lamports.js';
 import { TtlCache } from '../../core/ttl-cache.js';
 import { normaliseHttpUrlOrNull } from '../../core/url.js';
+import { narrowToDocumentedKind } from '../../services/client-kind.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
@@ -28,6 +29,26 @@ const LEADERBOARD_CACHE_TTL_MS = 10_000;
 const LEADERBOARD_CACHE_MAX_ENTRIES = 256;
 const DECADE_EPOCH_COUNT = 10;
 const DECADE_RANK_LIMIT = 3;
+
+/**
+ * Bracket filter (operator-primary leaderboard) — narrows the
+ * candidate set BEFORE ranking so a small operator can be "#1 among
+ * small validators". Uses only data already present in the store; no
+ * new ingest. Region brackets are deliberately absent (no geo data).
+ */
+const CLIENT_BRACKET_PREFIX = 'client:';
+/** Activated-stake ceilings, in SOL, for the small-operator brackets. */
+const STAKE_BRACKET_CEILING_SOL: Record<'stake_lt_100k' | 'stake_lt_500k', bigint> = {
+  stake_lt_100k: 100_000n,
+  stake_lt_500k: 500_000n,
+};
+/**
+ * Newcomer window, in epochs. A validator is a "newcomer" when its
+ * genesis-preferred tenure origin (`COALESCE(genesis_epoch,
+ * first_seen_epoch)`, mirroring `summariseTenure`) is within this many
+ * epochs of the current epoch — i.e. `activeEpochs <= 30`.
+ */
+const NEWCOMER_WINDOW_EPOCHS = 30;
 
 const WindowEnumSchema = z.enum([
   'live_trend',
@@ -54,6 +75,35 @@ const SortEnumSchema = z.preprocess(
     .default('income_per_slot'),
 );
 
+/**
+ * Bracket filter. Either one of the fixed tokens or a
+ * `client:<kind>` form whose `<kind>` is one of the 14 documented,
+ * non-`unknown` client kinds (validated via `narrowToDocumentedKind`
+ * — its single source of truth is `client-kind.ts`'s documented set,
+ * so no kind list is duplicated here). Any other value — including a
+ * bare `client:`, `client:unknown`, or an unrecognised kind — fails
+ * validation and surfaces as `validation_error`. Defaults to `all`
+ * (no filter, the historical behaviour).
+ */
+const BracketSchema = z
+  .string()
+  .default('all')
+  .refine(
+    (value) => {
+      if (value === 'all' || value === 'newcomer') return true;
+      if (value === 'stake_lt_100k' || value === 'stake_lt_500k') return true;
+      if (value.startsWith(CLIENT_BRACKET_PREFIX)) {
+        const kind = value.slice(CLIENT_BRACKET_PREFIX.length);
+        return kind !== 'unknown' && narrowToDocumentedKind(kind) === kind;
+      }
+      return false;
+    },
+    {
+      message:
+        "bracket must be 'all', 'stake_lt_100k', 'stake_lt_500k', 'newcomer', or 'client:<kind>' for a documented client kind",
+    },
+  );
+
 const LeaderboardQuerySchema = z
   .object({
     epoch: z.coerce.number().int().nonnegative().optional(),
@@ -61,6 +111,7 @@ const LeaderboardQuerySchema = z
     minWindowSlots: z.coerce.number().int().positive().max(500).default(DEFAULT_MIN_WINDOW_SLOTS),
     sort: SortEnumSchema,
     window: WindowEnumSchema.optional(),
+    bracket: BracketSchema,
   })
   .transform((query) => ({
     ...query,
@@ -83,7 +134,7 @@ export interface LeaderboardRoutesDeps {
    * ingestion path.
    */
   processedBlocksRepo: Pick<ProcessedBlocksRepository, 'getWindowedComputeUnitsByVote'>;
-  validatorsRepo?: Pick<ValidatorsRepository, 'getInfosByIdentities'>;
+  validatorsRepo?: Pick<ValidatorsRepository, 'getInfosByIdentities' | 'findVotesForBracket'>;
   profilesRepo?: Pick<ProfilesRepository, 'findOptedOutVotes'>;
   claimsRepo?: Pick<ClaimsRepository, 'findClaimedVotes'>;
 }
@@ -166,6 +217,22 @@ interface LeaderboardResponse {
     mediumBelow: number;
   };
   count: number;
+  /**
+   * Echo of the applied bracket filter. `all` when unfiltered;
+   * otherwise the normalised bracket token (e.g. `stake_lt_100k`,
+   * `newcomer`, `client:firedancer`). Additive — operator-primary
+   * bracket leaderboard.
+   */
+  bracket: string;
+  /**
+   * Number of validators in this bracket with rankable data in the
+   * active window — i.e. the size of the bracket-relative candidate
+   * pool the ranking drew from, independent of `limit` (bounded by
+   * the repo's internal 500-row ceiling). For `bracket=all` this
+   * equals `count` (no over-fetch is performed on the default path).
+   * Lets the UI render "N validators in this bracket".
+   */
+  bracketCount: number;
   limit: number;
   items: LeaderboardRow[];
   cluster: {
@@ -381,6 +448,60 @@ async function resolveWindowEpochs(
   };
 }
 
+/**
+ * Bracket params passed through to `StatsRepository.findTopNByWindow`.
+ * A stake bracket sets `maxActivatedStakeLamports`; a candidate
+ * bracket (`newcomer` / `client:<kind>`) sets `candidateVotes` to an
+ * allowlist. `bracket=all` sets neither. Exactly one (or neither) is
+ * ever populated.
+ */
+interface BracketFilter {
+  maxActivatedStakeLamports?: bigint;
+  candidateVotes?: readonly string[] | null;
+}
+
+/**
+ * Resolve a validated bracket token into the candidate-narrowing
+ * params for `findTopNByWindow`. Stake brackets convert their SOL
+ * ceiling to lamports; candidate brackets (`newcomer`, `client:<kind>`)
+ * resolve a vote allowlist from `validators`.
+ *
+ * `currentEpoch` anchors the `newcomer` window. When the validators
+ * repo is unavailable a candidate bracket resolves to an empty
+ * allowlist (no members) rather than silently falling back to the
+ * global set — a `newcomer`/`client` query must never leak
+ * out-of-bracket validators.
+ */
+async function resolveBracketFilter(
+  bracket: string,
+  currentEpoch: number,
+  validatorsRepo: Pick<ValidatorsRepository, 'findVotesForBracket'> | undefined,
+): Promise<BracketFilter> {
+  if (bracket === 'all') return {};
+  if (bracket === 'stake_lt_100k' || bracket === 'stake_lt_500k') {
+    return {
+      maxActivatedStakeLamports: STAKE_BRACKET_CEILING_SOL[bracket] * LAMPORTS_PER_SOL,
+    };
+  }
+  if (validatorsRepo === undefined) return { candidateVotes: [] };
+  if (bracket === 'newcomer') {
+    // Genesis-preferred tenure origin within the last
+    // NEWCOMER_WINDOW_EPOCHS epochs (inclusive), mirroring
+    // `summariseTenure`'s `activeEpochs <= 30` semantics. `Math.max`
+    // floors the threshold at 0 for very-early-epoch environments.
+    const newcomerFromEpoch = Math.max(0, currentEpoch - NEWCOMER_WINDOW_EPOCHS);
+    return { candidateVotes: await validatorsRepo.findVotesForBracket({ newcomerFromEpoch }) };
+  }
+  if (bracket.startsWith(CLIENT_BRACKET_PREFIX)) {
+    const clientKind = bracket.slice(CLIENT_BRACKET_PREFIX.length);
+    return { candidateVotes: await validatorsRepo.findVotesForBracket({ clientKind }) };
+  }
+  // Unreachable: BracketSchema rejects everything else with a
+  // validation_error before we get here. Defend anyway so a future
+  // schema-widen can't silently degrade to an unfiltered result.
+  throw new ValidationError('unsupported bracket', { bracket });
+}
+
 const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
   app: FastifyInstance,
   opts: LeaderboardRoutesDeps,
@@ -422,6 +543,8 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
         slotDenominator: 'window_slots',
         samplePolicy: { minWindowSlots: query.minWindowSlots, lowBelow: 16, mediumBelow: 64 },
         count: 0,
+        bracket: query.bracket,
+        bracketCount: 0,
         limit: query.limit,
         items: [],
         cluster: null,
@@ -434,20 +557,51 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
     const requiredClosedEpochs = requiredClosedEpochsForWindow(query.window);
     const optedOutVotes =
       profilesRepo === undefined ? new Set<string>() : await profilesRepo.findOptedOutVotes();
+
+    // Anchor the `newcomer` window on the true network epoch. It's
+    // available on most windows via `resolved.current`; for the
+    // override / final / decade paths (`current === null`) fall back
+    // to `findCurrent()`. Only fetched when the bracket actually needs
+    // it, so non-newcomer queries keep their round-trip count.
+    let newcomerCurrentEpoch = resolved.current?.epoch ?? null;
+    if (query.bracket === 'newcomer' && newcomerCurrentEpoch === null) {
+      newcomerCurrentEpoch = (await epochsRepo.findCurrent())?.epoch ?? null;
+    }
+    const bracketFilter = await resolveBracketFilter(
+      query.bracket,
+      newcomerCurrentEpoch ?? 0,
+      validatorsRepo,
+    );
+
+    // For the default `all` bracket, fetch exactly the requested
+    // limit (unchanged hot path). For any active bracket, over-fetch
+    // to the repo ceiling so `bracketCount` reflects the full
+    // bracket-relative pool, then slice to `limit` for the rows we
+    // render.
+    const fetchLimit = query.bracket === 'all' ? query.limit : MAX_LIMIT;
     const rows = await statsRepo.findTopNByWindow({
       epochs: resolved.epochs,
-      limit: query.limit,
+      limit: fetchLimit,
       sort: query.sort,
       minWindowSlots: query.minWindowSlots,
       requiredClosedEpochs,
       excludedVotes: Array.from(optedOutVotes),
+      // Spread so `exactOptionalPropertyTypes` is honoured — only the
+      // keys the bracket actually sets are present, never `undefined`.
+      ...bracketFilter,
     });
+    const bracketCount = rows.length;
     const visibleRows = rows.slice(0, query.limit);
 
     const identities = Array.from(new Set(visibleRows.map((r) => r.identityPubkey)));
     const votes = visibleRows.map((r) => r.votePubkey);
+    // Decade badges are an ABSOLUTE all-time-top-3 achievement, so
+    // they stay cluster-wide even under a bracket filter. The
+    // build-from-rows fast path is only valid when the fetched `rows`
+    // ARE the full cluster ranking — i.e. the default `all` bracket;
+    // otherwise fall back to the dedicated unfiltered decade query.
     const decadeRanksPromise =
-      query.window === 'decade_epoch' && query.sort === 'income_per_slot'
+      query.window === 'decade_epoch' && query.sort === 'income_per_slot' && query.bracket === 'all'
         ? Promise.resolve(buildDecadeRankMapFromRows(rows, resolved.closed))
         : buildDecadeRankMap(statsRepo, epochsRepo, optedOutVotes, query.minWindowSlots);
     const [infoByIdentity, claimedVotes, decadeRanks, windowedCuByVote] = await Promise.all([
@@ -531,6 +685,8 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
       slotDenominator: 'window_slots',
       samplePolicy: { minWindowSlots: query.minWindowSlots, lowBelow: 16, mediumBelow: 64 },
       count: items.length,
+      bracket: query.bracket,
+      bracketCount,
       limit: query.limit,
       items,
       cluster,

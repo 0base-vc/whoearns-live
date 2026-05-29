@@ -1418,6 +1418,48 @@ export class StatsRepository {
     };
   }
 
+  /**
+   * The VOTE PUBKEYS of the economic-percentile cohort for a closed-
+   * epoch window — i.e. exactly which validators the percentile in
+   * `findEconomicPercentile` was ranked against. Surfaced so the
+   * percentile is independently reproducible (cohort disclosure): a
+   * consumer can re-derive the rank by pulling each member's income.
+   *
+   * Cohort membership MIRRORS `findEconomicPercentile`'s
+   * `per_validator_per_epoch` filter EXACTLY (non-zero `slots_assigned`,
+   * slot data ingested, BOTH fees + tips timestamps present, opt-out
+   * respected) so the returned set is the same population the
+   * `PERCENT_RANK()` was computed over. A validator is in the cohort if
+   * it has at least one measured epoch in the window.
+   *
+   * Bounded by the indexed validator set (~19-200 in production), so a
+   * single `array`-free row-per-vote scan is cheap and returned whole;
+   * sorted for deterministic output.
+   *
+   * @param fromEpoch Inclusive lower bound of the closed-epoch window.
+   * @param toEpoch   Inclusive upper bound (most recent closed epoch).
+   */
+  async findEconomicCohortVotes(fromEpoch: Epoch, toEpoch: Epoch): Promise<VotePubkey[]> {
+    const { rows } = await this.pool.query<{ vote_pubkey: string }>(
+      `SELECT DISTINCT evs.vote_pubkey
+         FROM epoch_validator_stats evs
+        WHERE evs.epoch BETWEEN $1::bigint AND $2::bigint
+          AND evs.slots_assigned > 0
+          AND evs.slots_updated_at IS NOT NULL
+          AND evs.fees_updated_at IS NOT NULL
+          AND evs.tips_updated_at IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+              FROM validator_profiles vp
+             WHERE vp.vote_pubkey = evs.vote_pubkey
+               AND vp.opted_out = TRUE
+          )
+        ORDER BY evs.vote_pubkey`,
+      [fromEpoch, toEpoch],
+    );
+    return rows.map((r) => r.vote_pubkey as VotePubkey);
+  }
+
   async findIndexedIncomePerSlotBenchmarks(
     requested: IndexedIncomePerSlotBenchmarkRequest[],
   ): Promise<EpochPeerBenchmark[]> {
@@ -1616,8 +1658,36 @@ export class StatsRepository {
     minWindowSlots?: number;
     requiredClosedEpochs?: number;
     excludedVotes?: string[];
+    /**
+     * Bracket filter (operator-primary leaderboard): when set, only
+     * votes whose window-representative `activated_stake_lamports` is
+     * STRICTLY LESS than this ceiling are ranked. Applied AFTER the
+     * per-vote window aggregation but BEFORE `ORDER BY … LIMIT`, so
+     * rank positions stay bracket-relative ("1st of N in bracket")
+     * rather than slicing a globally-ranked top-N. Rows with NULL
+     * stake (pre-stake-snapshot epochs) are excluded from a stake
+     * bracket — they can't be proven to be under the ceiling.
+     */
+    maxActivatedStakeLamports?: bigint;
+    /**
+     * Bracket filter: when a non-null array is supplied, only these
+     * votes are eligible (an allowlist). Used by the `newcomer` and
+     * `client:<kind>` brackets, which the route resolves to a vote
+     * set from the `validators` table first, then ranks within. An
+     * empty array yields an empty result (a bracket with no members).
+     * Applied in the windowed CTE WHERE — i.e. before aggregation,
+     * ordering, and LIMIT. `undefined`/omitted means no allowlist
+     * (the `all` and stake brackets).
+     */
+    candidateVotes?: readonly string[] | null;
   }): Promise<WindowedLeaderboardStats[]> {
     if (args.epochs.length === 0) return [];
+    // An explicit empty allowlist means "a bracket with no members" —
+    // short-circuit before issuing a query whose `ANY('{}')` would
+    // match nothing anyway.
+    if (args.candidateVotes !== undefined && args.candidateVotes !== null) {
+      if (args.candidateVotes.length === 0) return [];
+    }
 
     const safeLimit = Math.max(1, Math.min(args.limit, 500));
     const minWindowSlots = Math.max(1, args.minWindowSlots ?? 4);
@@ -1661,6 +1731,30 @@ export class StatsRepository {
     const excludedVotesParam = params.length + 3;
     const limitParam = params.length + 4;
     params.push(minWindowSlots, requiredClosedEpochs, args.excludedVotes ?? [], safeLimit);
+
+    // Optional bracket params, appended after the fixed four so the
+    // base placeholder numbering above is untouched. Each contributes
+    // a SQL clause fragment only when the corresponding arg is set.
+    const hasCandidateAllowlist = args.candidateVotes !== undefined && args.candidateVotes !== null;
+    let candidateVotesClause = '';
+    if (hasCandidateAllowlist) {
+      const candidateVotesParam = params.length + 1;
+      // Restrict the candidate set to the bracket's allowlist BEFORE
+      // aggregation, so ranks are bracket-relative.
+      candidateVotesClause = `AND evs.vote_pubkey = ANY($${candidateVotesParam}::text[])`;
+      params.push(args.candidateVotes as string[]);
+    }
+    let maxStakeClause = '';
+    if (args.maxActivatedStakeLamports !== undefined) {
+      const maxStakeParam = params.length + 1;
+      // Stake is aggregated per window row (priority-ordered, same
+      // value the API displays). Filter in the OUTER query so it
+      // applies to the window-representative stake, NULL excluded,
+      // STRICTLY less than the ceiling (`stake_lt_*` is exclusive).
+      maxStakeClause = `AND activated_stake_lamports IS NOT NULL
+         AND activated_stake_lamports < $${maxStakeParam}::numeric`;
+      params.push(args.maxActivatedStakeLamports.toString());
+    }
 
     const { rows } = await this.pool.query<WindowedLeaderboardStatsRow>(
       `WITH included(epoch, is_current, priority) AS (
@@ -1721,6 +1815,7 @@ export class StatsRepository {
          JOIN epoch_validator_stats evs ON evs.epoch = included.epoch
          WHERE evs.slots_updated_at IS NOT NULL
            AND NOT (evs.vote_pubkey = ANY($${excludedVotesParam}::text[]))
+           ${candidateVotesClause}
            AND (
              evs.fees_updated_at IS NOT NULL
              OR evs.tips_updated_at IS NOT NULL
@@ -1754,6 +1849,7 @@ export class StatsRepository {
          activated_stake_lamports
         FROM windowed
        WHERE window_slots >= $${minParam}
+         ${maxStakeClause}
        ORDER BY ${order}
        LIMIT $${limitParam}`,
       params,

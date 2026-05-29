@@ -4,10 +4,12 @@ import type {
   ClaimStatus,
   CurrentEpoch,
   Leaderboard,
+  LeaderboardBracket,
   LeaderboardSort,
   LeaderboardWindow,
   ScoringResponse,
   SimdProposalListResponse,
+  TierHistoryResponse,
   ValidatorEpochRecord,
   ValidatorEpochLeaderSlots,
   ValidatorHistory,
@@ -154,6 +156,14 @@ export function fetchLeaderboard(
     sort?: LeaderboardSort;
     window?: LeaderboardWindow;
     minWindowSlots?: number;
+    /**
+     * Bracket filter (I). `'all'` (or omitted) = unfiltered. Other
+     * values restrict the ranked set to a stake / newcomer / client
+     * cohort and return a bracket-relative rank. The server echoes
+     * the applied bracket back on `Leaderboard.bracket` and the
+     * bracket population on `Leaderboard.bracketCount`.
+     */
+    bracket?: LeaderboardBracket;
   } = {},
   fetchFn: typeof fetch = fetch,
 ): Promise<Leaderboard> {
@@ -163,6 +173,10 @@ export function fetchLeaderboard(
   if (opts.sort !== undefined) params.set('sort', opts.sort);
   if (opts.window !== undefined) params.set('window', opts.window);
   if (opts.minWindowSlots !== undefined) params.set('minWindowSlots', String(opts.minWindowSlots));
+  // Only send a non-default bracket — keeps the `all` request URL
+  // byte-identical to the pre-bracket request so the homepage's
+  // `<link rel=preload>` for the default view still matches.
+  if (opts.bracket !== undefined && opts.bracket !== 'all') params.set('bracket', opts.bracket);
   const qs = params.toString();
   return call<Leaderboard>(`/v1/leaderboard${qs ? `?${qs}` : ''}`, fetchFn);
 }
@@ -505,6 +519,28 @@ export function fetchScoring(
 ): Promise<ScoringResponse> {
   const safe = encodeURIComponent(idOrVote);
   return call<ScoringResponse>(`/v1/validators/${safe}/scoring`, opts);
+}
+
+/**
+ * Forward-only tier snapshot history (H). Drives the hub's composite
+ * sparkline. Accepts either a vote or an identity pubkey. Snapshots
+ * come back newest-first; the series begins when the backend snapshot
+ * job first ran, so a short / empty list is a cold start — the UI
+ * omits the sparkline rather than fabricating a flat line.
+ *
+ * `limit` defaults to 16 (the sparkline window) and is clamped to the
+ * backend's accepted 1-60 range so a stray value can't 400 the call.
+ */
+export function fetchTierHistory(
+  idOrVote: string,
+  limit = 16,
+  opts: CallOptions | typeof fetch = {},
+): Promise<TierHistoryResponse> {
+  const safe = encodeURIComponent(idOrVote);
+  // Clamp to the documented 1-60 server range. `Math.trunc` drops any
+  // fractional limit a caller might pass through from a config knob.
+  const clamped = Math.min(60, Math.max(1, Math.trunc(limit)));
+  return call<TierHistoryResponse>(`/v1/validators/${safe}/tier/history?limit=${clamped}`, opts);
 }
 
 /**

@@ -176,6 +176,9 @@ Query params:
   or `skip_rate`.
 - `minWindowSlots` — 1-500, default 4. Rows below this denominator are
   filtered.
+- `bracket` — `all` (default), `stake_lt_100k`, `stake_lt_500k`,
+  `newcomer`, or `client:<kind>`. Narrows the candidate set before
+  ranking; see "Brackets" below.
 
 Compatibility notes:
 
@@ -193,11 +196,36 @@ Windows:
 - `decade_epoch` — latest complete 10-epoch block. Validators must have
   rows in all 10 epochs to rank.
 
-Example:
+Brackets:
+
+The `bracket` param narrows the candidate set **before** ranking, so the
+returned `rank` positions are bracket-relative — `rank: 1` is the top
+earner within the bracket, not the cluster.
+
+- `all` (default) — no narrowing.
+- `stake_lt_100k` / `stake_lt_500k` — validators under 100k / 500k SOL
+  activated stake.
+- `newcomer` — validators whose `COALESCE(genesis_epoch,
+first_seen_epoch)` falls within the last 30 epochs.
+- `client:<kind>` — validators on one client kind, where `<kind>` is one
+  of the 14 canonical client kinds (`agave`, `jito_solana`, `firedancer`,
+  `frankendancer`, `paladin`, `sig`, `agave_bam`, `rakurai`,
+  `harmonic_firedancer`, `harmonic_agave`, `harmonic_frankendancer`,
+  `firebam`, `raiku`).
+
+There is no region bracket — the indexer has no per-validator geo data.
+
+Examples:
 
 ```bash
 curl "https://whoearns.live/v1/leaderboard?window=decade_epoch&sort=income_per_slot&limit=25"
+curl "https://whoearns.live/v1/leaderboard?bracket=stake_lt_100k"
 ```
+
+The response envelope echoes the applied `bracket` and adds
+`bracketCount` — the number of validators in the bracket before `limit`
+is applied (the true bracket size, independent of how many rows `items`
+carries). With `bracket=all` this is the full ranked candidate count.
 
 Rows include validator identity metadata, slot counts, block fee/tip totals,
 window income fields, `incomeSolPerSlot`, stake snapshot fields when
@@ -511,6 +539,12 @@ Response shape:
         "cohortMedianCuPerBlock": 11200000
       }
     }
+  },
+  "trend": {
+    "prevComposite": 94,
+    "delta": 2,
+    "prevTier": "anvil",
+    "epochsTracked": 7
   }
 }
 ```
@@ -542,6 +576,30 @@ one fetch. The shape of every `evidence` field is documented in the
 OpenAPI `NodeTierBody.components` schema. Evidence is descriptive,
 not prescriptive: it surfaces what was measured, not what an
 operator should change.
+
+`components.economicPercentile.evidence.cohortVotes` lists the vote
+pubkeys of every validator the percentile was ranked against — the
+indexed cohort for this window (typically ~19-200). Disclosing the
+exact denominator makes the percentile independently reproducible: a
+consumer can re-fetch each listed validator's median per-leader-slot
+income and recompute the rank. The array is empty when the window
+had no ranked cohort, the same condition under which the economic
+score is `null` and the tier is `unrated`.
+
+**Tier trend.** The top-level `trend` reports composite movement
+since the prior recorded tier snapshot:
+`{ prevComposite, delta, prevTier, epochsTracked }`, or `null` when
+fewer than one prior snapshot exists (a brand-new deployment, or a
+validator first observed after the snapshot job's most recent tick).
+`delta` is the current `composite` minus `prevComposite`; it is
+`null` when either composite is `null` (an `unrated` current tier or
+prior snapshot leaves the difference undefined). `prevTier` lets a
+consumer show a tier transition (e.g. `anvil → forge`) alongside the
+number, and `epochsTracked` is the count of recorded snapshots for
+this validator, including the current one. Snapshots are written
+forward-only per closed epoch by the `tier-snapshot-ingester` job —
+the per-epoch series itself is at
+`GET /v1/validators/:idOrVote/tier/history`.
 
 `window.epochs` is the count of closed-epoch rows actually indexed
 for this validator (`≤ 10`) — **not** the configured window, which is
@@ -592,6 +650,70 @@ Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
 `SCORING` tier — see `src/api/cache-control.ts`). `tier` and `badges`
 serve the same closed-epoch-derived data class and now share this
 single named tier.
+
+## `GET /v1/validators/:idOrVote/tier/history`
+
+Returns the recorded per-epoch Node Tier snapshots for one validator,
+newest first. Each snapshot is the tier + composite + component
+percentiles as they stood when that epoch closed, so a profile page
+can chart composite movement over epochs without recomputing each
+historical window. `idOrVote` accepts a vote account pubkey or
+identity/node pubkey.
+
+Query params:
+
+- `limit` — 1-60, default 16. Newest snapshots first.
+
+Response shape:
+
+```json
+{
+  "vote": "5BAi9YGCipHq4ZcXuen5vagRQqRTVTRszXNqBZC6uBPZ",
+  "identity": "IDENTITY_PUBKEY",
+  "snapshots": [
+    {
+      "epoch": 824,
+      "composite": 96,
+      "tier": "forge",
+      "reliability": 0.996,
+      "economicPercentile": 1.0,
+      "cuPercentile": 0.889
+    },
+    {
+      "epoch": 823,
+      "composite": 94,
+      "tier": "anvil",
+      "reliability": 0.994,
+      "economicPercentile": 0.97,
+      "cuPercentile": 0.871
+    }
+  ]
+}
+```
+
+Each `composite` is `null` when the tier was `unrated` for that
+epoch — the same no-half-shown-scores rule the live `/tier` composite
+follows. `reliability` / `economicPercentile` / `cuPercentile` are
+the per-component scores recorded for the epoch and may each be
+`null` (a `null` `economicPercentile` is the `unrated` condition; a
+`null` `cuPercentile` means the validator produced no blocks that
+window).
+
+Snapshots are written **forward-only** — one row per validator per
+closed epoch by the `tier-snapshot-ingester` job, with no backfill.
+History begins accruing from the job's first run, so a brand-new
+deployment returns few or zero snapshots and the per-validator count
+grows roughly one row every ~2 days as epochs close. `snapshots` is
+empty (still `200`) when the validator is known but no closed-epoch
+snapshot has been recorded for it yet. The single-step view of this
+same series is the `trend` field on
+`GET /v1/validators/:idOrVote/tier`.
+
+`HEAD` is supported and short-circuits after the validator existence
+check, before the snapshot read.
+
+Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
+`SCORING` tier — see `src/api/cache-control.ts`), matching `/tier`.
 
 ## `GET /v1/validators/:idOrVote/badges`
 

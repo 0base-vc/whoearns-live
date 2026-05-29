@@ -11,11 +11,14 @@ import type { EpochsRepository } from '../../../src/storage/repositories/epochs.
 import type { ProcessedBlocksRepository } from '../../../src/storage/repositories/processed-blocks.repo.js';
 import type { ProfilesRepository } from '../../../src/storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
+import type { ValidatorsRepository } from '../../../src/storage/repositories/validators.repo.js';
+import type { Validator } from '../../../src/types/domain.js';
 import {
   FakeAggregatesRepo,
   FakeEpochsRepo,
   FakeProcessedBlocksRepo,
   FakeStatsRepo,
+  FakeValidatorsRepo,
   IDENTITY_1,
   IDENTITY_2,
   IDENTITY_3,
@@ -628,6 +631,241 @@ describe('GET /v1/leaderboard', () => {
       // join keyed on the single recorded 960 identity (IDENTITY_3)
       // would see only 10M.
       expect(items.find((r) => r.vote === VOTE_1)?.windowedCu).toBe('30000000');
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+const LAMPORTS_PER_SOL = 1_000_000_000n;
+
+function makeValidator(
+  vote: string,
+  identity: string,
+  overrides: Partial<Validator> = {},
+): Validator {
+  return {
+    votePubkey: vote,
+    identityPubkey: identity,
+    firstSeenEpoch: 100,
+    lastSeenEpoch: 961,
+    genesisEpoch: null,
+    updatedAt: new Date('2026-04-28T00:00:00.000Z'),
+    name: null,
+    details: null,
+    website: null,
+    keybaseUsername: null,
+    iconUrl: null,
+    infoUpdatedAt: null,
+    clientKind: 'unknown',
+    clientVersion: null,
+    clientUpdatedAt: null,
+    commission: null,
+    ...overrides,
+  };
+}
+
+/**
+ * Bracket fixture on the live_trend window (current epoch 961 + closed
+ * 960). Each vote gets stake on its CURRENT-epoch row so the windowed
+ * stake the fake exposes is deterministic. Stakes are chosen to
+ * straddle the 100k/500k SOL ceilings:
+ *   VOTE_1 →  50k SOL (under both ceilings)
+ *   VOTE_2 → 300k SOL (under 500k, over 100k)
+ *   VOTE_3 → 800k SOL (over both ceilings)
+ * Global income_per_slot order is VOTE_2 > VOTE_1 (VOTE_3 has no
+ * current row but ranks on its closed income).
+ */
+function seedBracketWindow(stats: FakeStatsRepo, epochs: FakeEpochsRepo): void {
+  seedLiveWindow(stats, epochs);
+  const v1 = stats.rows.get(`961:${VOTE_1}`)!;
+  v1.activatedStakeLamports = 50_000n * LAMPORTS_PER_SOL;
+  const v2 = stats.rows.get(`961:${VOTE_2}`)!;
+  v2.activatedStakeLamports = 300_000n * LAMPORTS_PER_SOL;
+  // VOTE_3 only has a closed (960) row in seedLiveWindow; the fake
+  // seeds initial stake from the first-seen row, so set it there.
+  const v3 = stats.rows.get(`960:${VOTE_3}`)!;
+  v3.activatedStakeLamports = 800_000n * LAMPORTS_PER_SOL;
+}
+
+describe('GET /v1/leaderboard — bracket filter', () => {
+  it('defaults bracket to all and echoes it with bracketCount', async () => {
+    const { stats, epochs, deps } = buildDeps();
+    seedBracketWindow(stats, epochs);
+    const app = await makeApp(deps);
+    try {
+      const res = await app.inject({ method: 'GET', url: '/v1/leaderboard' });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as {
+        bracket: string;
+        bracketCount: number;
+        count: number;
+        items: Array<{ vote: string }>;
+      };
+      expect(body.bracket).toBe('all');
+      // Default path: bracketCount mirrors count (all three votes).
+      expect(body.bracketCount).toBe(3);
+      expect(body.count).toBe(3);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('stake_lt_100k keeps only sub-100k-SOL validators, ranks bracket-relative', async () => {
+    const { stats, epochs, deps } = buildDeps();
+    seedBracketWindow(stats, epochs);
+    const app = await makeApp(deps);
+    try {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/leaderboard?bracket=stake_lt_100k',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as {
+        bracket: string;
+        bracketCount: number;
+        items: Array<{ vote: string; rank: number }>;
+      };
+      expect(body.bracket).toBe('stake_lt_100k');
+      // Only VOTE_1 (50k SOL) qualifies; it becomes rank 1 of the bracket.
+      expect(body.items.map((r) => r.vote)).toEqual([VOTE_1]);
+      expect(body.items[0]?.rank).toBe(1);
+      expect(body.bracketCount).toBe(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('stake_lt_500k admits mid-size validators but excludes the largest', async () => {
+    const { stats, epochs, deps } = buildDeps();
+    seedBracketWindow(stats, epochs);
+    const app = await makeApp(deps);
+    try {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/leaderboard?bracket=stake_lt_500k',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { bracketCount: number; items: Array<{ vote: string }> };
+      // VOTE_1 (50k) + VOTE_2 (300k) qualify; VOTE_3 (800k) is excluded.
+      // Global income_per_slot order is VOTE_1 > VOTE_2 (see the
+      // "defaults to live_trend" test), preserved within the bracket.
+      expect(body.items.map((r) => r.vote)).toEqual([VOTE_1, VOTE_2]);
+      expect(body.bracketCount).toBe(2);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('client:<kind> filters to a client_kind via the validators repo allowlist', async () => {
+    const { stats, epochs, deps } = buildDeps();
+    seedBracketWindow(stats, epochs);
+    const validators = new FakeValidatorsRepo();
+    validators.rows.set(VOTE_1, makeValidator(VOTE_1, IDENTITY_1, { clientKind: 'firedancer' }));
+    validators.rows.set(VOTE_2, makeValidator(VOTE_2, IDENTITY_2, { clientKind: 'agave' }));
+    validators.rows.set(VOTE_3, makeValidator(VOTE_3, IDENTITY_3, { clientKind: 'firedancer' }));
+    deps.validatorsRepo = validators as unknown as ValidatorsRepository;
+    const app = await makeApp(deps);
+    try {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/leaderboard?bracket=client:firedancer',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as {
+        bracket: string;
+        bracketCount: number;
+        items: Array<{ vote: string }>;
+      };
+      expect(body.bracket).toBe('client:firedancer');
+      // VOTE_1 + VOTE_3 are firedancer; VOTE_2 (agave) excluded.
+      // VOTE_3 outranks VOTE_1 on income_per_slot.
+      expect(body.items.map((r) => r.vote)).toEqual([VOTE_3, VOTE_1]);
+      expect(body.bracketCount).toBe(2);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('newcomer filters by genesis-preferred tenure within 30 epochs', async () => {
+    const { stats, epochs, deps } = buildDeps();
+    seedBracketWindow(stats, epochs);
+    // current epoch is 961 → newcomer threshold is firstSeen >= 931.
+    const validators = new FakeValidatorsRepo();
+    // VOTE_1: indexer first-seen recently (940) → newcomer.
+    validators.rows.set(VOTE_1, makeValidator(VOTE_1, IDENTITY_1, { firstSeenEpoch: 940 }));
+    // VOTE_2: first-seen recently (950) BUT a genesis_epoch of 100
+    // (true on-chain origin) — genesis wins, so NOT a newcomer.
+    validators.rows.set(
+      VOTE_2,
+      makeValidator(VOTE_2, IDENTITY_2, { firstSeenEpoch: 950, genesisEpoch: 100 }),
+    );
+    // VOTE_3: old operator (first-seen 100) → not a newcomer.
+    validators.rows.set(VOTE_3, makeValidator(VOTE_3, IDENTITY_3, { firstSeenEpoch: 100 }));
+    deps.validatorsRepo = validators as unknown as ValidatorsRepository;
+    const app = await makeApp(deps);
+    try {
+      const res = await app.inject({ method: 'GET', url: '/v1/leaderboard?bracket=newcomer' });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { bracketCount: number; items: Array<{ vote: string }> };
+      expect(body.items.map((r) => r.vote)).toEqual([VOTE_1]);
+      expect(body.bracketCount).toBe(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects an unknown client kind and a bare client: with validation_error', async () => {
+    const { stats, epochs, deps } = buildDeps();
+    seedBracketWindow(stats, epochs);
+    const app = await makeApp(deps);
+    try {
+      const bogusKind = await app.inject({
+        method: 'GET',
+        url: '/v1/leaderboard?bracket=client:notaclient',
+      });
+      expect(bogusKind.statusCode).toBe(400);
+      expect((bogusKind.json() as { error?: { code?: string } }).error?.code).toBe(
+        'validation_error',
+      );
+
+      // `client:unknown` is rejected — `unknown` is not one of the 14
+      // canonical kinds.
+      const unknownKind = await app.inject({
+        method: 'GET',
+        url: '/v1/leaderboard?bracket=client:unknown',
+      });
+      expect(unknownKind.statusCode).toBe(400);
+
+      const bareClient = await app.inject({
+        method: 'GET',
+        url: '/v1/leaderboard?bracket=client:',
+      });
+      expect(bareClient.statusCode).toBe(400);
+
+      const bogusBracket = await app.inject({
+        method: 'GET',
+        url: '/v1/leaderboard?bracket=region_eu',
+      });
+      expect(bogusBracket.statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('candidate brackets resolve to an empty pool when the validators repo is absent', async () => {
+    const { stats, epochs, deps } = buildDeps();
+    seedBracketWindow(stats, epochs);
+    // No validatorsRepo wired → newcomer/client cannot resolve members
+    // and must NOT leak the global set.
+    const app = await makeApp(deps);
+    try {
+      const res = await app.inject({ method: 'GET', url: '/v1/leaderboard?bracket=client:agave' });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { bracketCount: number; count: number; items: unknown[] };
+      expect(body.items).toEqual([]);
+      expect(body.count).toBe(0);
+      expect(body.bracketCount).toBe(0);
     } finally {
       await app.close();
     }

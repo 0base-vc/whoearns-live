@@ -124,6 +124,10 @@ function buildDeps(
         validatorAvgCuPerBlock: 14_820_000,
         cohortMedianCuPerBlock: 11_200_000,
       }),
+      // Cohort disclosure (migration 0045 / J): the votes the
+      // percentile was ranked against. Just the target here — the
+      // route surfaces this verbatim in the economic evidence.
+      findEconomicCohortVotes: async () => [VOTE_1],
     },
     epochsRepo: {
       // Current epoch 600 → all six seeded history rows (500-505)

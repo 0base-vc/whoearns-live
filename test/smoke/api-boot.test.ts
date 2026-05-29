@@ -24,6 +24,7 @@ import type { ProcessedBlocksRepository } from '../../src/storage/repositories/p
 import type { SimdDiscussionsRepository } from '../../src/storage/repositories/simd-discussions.repo.js';
 import type { SimdProposalsRepository } from '../../src/storage/repositories/simd-proposals.repo.js';
 import type { StatsRepository } from '../../src/storage/repositories/stats.repo.js';
+import type { TierSnapshotsRepository } from '../../src/storage/repositories/tier-snapshots.repo.js';
 import type { ValidatorClaimEventsRepository } from '../../src/storage/repositories/validator-claim-events.repo.js';
 import type { ValidatorGithubRepository } from '../../src/storage/repositories/validator-github.repo.js';
 import type { ValidatorsRepository } from '../../src/storage/repositories/validators.repo.js';
@@ -81,6 +82,7 @@ function makeConfig(): AppConfig {
     ANTHROPIC_MODEL: 'claude-sonnet-4-6',
     SIMD_CURATION_INTERVAL_MS: 12 * 60 * 60 * 1000,
     STAKEWIZ_TENURE_INTERVAL_MS: 24 * 60 * 60 * 1000,
+    TIER_SNAPSHOT_INTERVAL_MS: 30 * 60 * 1000,
     SLOT_FINALITY_BUFFER: 32,
     SHUTDOWN_TIMEOUT_MS: 15_000,
   };
@@ -141,6 +143,13 @@ function makeDeps(): Parameters<typeof buildServer>[0] {
       walletActivity: {} as unknown as WalletActivityRepository,
       simdProposals: {} as unknown as SimdProposalsRepository,
       simdDiscussions: {} as unknown as SimdDiscussionsRepository,
+      // Stub: migration-0045 tier snapshots. The smoke test never hits
+      // the /tier trend or /tier/history surfaces, so a no-op
+      // findByVote/findLatestTwo satisfies DI.
+      tierSnapshots: {
+        findByVote: async () => [],
+        findLatestTwo: async () => [],
+      } as unknown as TierSnapshotsRepository,
     },
     services: {
       validator: new FakeValidatorService() as unknown as ValidatorService,

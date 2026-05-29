@@ -334,6 +334,15 @@ export interface EconomicEvidence {
   rank: { position: number; of: number };
   perEpoch: EconomicEvidencePerEpoch[];
   incomeBreakdown?: EconomicEvidenceIncomeBreakdown;
+  /**
+   * The vote pubkeys the percentile was ranked against (~19-200).
+   * Disclosure surface (J): listing the exact cohort lets a delegator
+   * independently reproduce the percentile — the honesty goal. The
+   * hub renders these as a collapsible "View cohort" list, each
+   * linking to that validator's hub/income page. May be absent on
+   * older API responses; treat `undefined` as "cohort not disclosed".
+   */
+  cohortVotes?: string[];
 }
 
 /**
@@ -371,6 +380,28 @@ export interface NodeTierComponentCu {
   /** `null` when the validator produced no blocks in the window. */
   score: number | null;
   evidence: CuEvidence;
+}
+
+/**
+ * Tier movement since the prior snapshot (H). Surfaced on
+ * `NodeTierBody.trend`. `null` on the body when fewer than one prior
+ * snapshot exists (brand-new validator — the UI shows nothing).
+ *
+ *   - `delta` = current composite − prior-snapshot composite. `null`
+ *     when either composite is null (an unrated edge).
+ *   - `prevComposite` / `prevTier` describe the prior snapshot.
+ *   - `epochsTracked` = how many snapshots the forward-only history
+ *     job has accrued.
+ *
+ * Honesty: the history is forward-only (it starts when the backend
+ * snapshot job first ran), so a thin `epochsTracked` is a cold-start,
+ * not a deficiency.
+ */
+export interface NodeTierTrend {
+  prevComposite: number | null;
+  delta: number | null;
+  prevTier: string | null;
+  epochsTracked: number;
 }
 
 /**
@@ -436,12 +467,48 @@ export interface NodeTierBody {
      */
     cuPercentile: NodeTierComponentCu;
   };
+  /**
+   * Movement since the prior snapshot (H). `null` when fewer than one
+   * prior snapshot exists (brand-new — the UI renders no delta badge).
+   * Optional for backwards compat with pre-trend API responses; treat
+   * `undefined` the same as `null`.
+   */
+  trend?: NodeTierTrend | null;
 }
 
 /** `GET /v1/validators/:idOrVote/tier`. */
 export interface NodeTierResponse extends NodeTierBody {
   vote: string;
   identity: string;
+}
+
+/**
+ * One snapshot row from `GET /v1/validators/:idOrVote/tier/history`.
+ * Newest-first by the endpoint contract. `composite` / `reliability`
+ * / percentiles are `null` for epochs the snapshot couldn't score
+ * (an unrated edge in the historical window) — the sparkline skips
+ * those points rather than plotting a phantom zero.
+ */
+export interface TierHistorySnapshot {
+  epoch: number;
+  composite: number | null;
+  tier: string;
+  reliability: number | null;
+  economicPercentile: number | null;
+  cuPercentile: number | null;
+}
+
+/**
+ * `GET /v1/validators/:idOrVote/tier/history?limit=N` (H). Forward-only
+ * composite history — the series starts when the backend snapshot job
+ * first ran, so an empty / single-element `snapshots` is a cold start
+ * (the UI omits the sparkline rather than fabricating a flat line).
+ * `snapshots` is newest-first.
+ */
+export interface TierHistoryResponse {
+  vote: string;
+  identity: string;
+  snapshots: TierHistorySnapshot[];
 }
 
 /** The `tenure` block surfaced by `/badges` and `/scoring`. */
@@ -597,6 +664,22 @@ export type LeaderboardSort =
   | 'compute_units'
   | 'skip_rate';
 
+/**
+ * Leaderboard bracket filter (I). Mirrors the server-accepted
+ * `?bracket=` values. `all` is the default (no filtering). The
+ * `client:<kind>` form filters to a single canonical client kind —
+ * the 14 kinds the backend recognises (see `CLIENT_BRACKET_KINDS`).
+ * A bracket-relative rank is returned (rank #1 = best IN the
+ * bracket). Consumers should treat an unknown string as a
+ * client/server mismatch and fall back to `all`.
+ */
+export type LeaderboardBracket =
+  | 'all'
+  | 'stake_lt_100k'
+  | 'stake_lt_500k'
+  | 'newcomer'
+  | `client:${string}`;
+
 /** One row of the homepage top-N leaderboard. */
 export interface LeaderboardItem {
   rank: number;
@@ -682,6 +765,19 @@ export interface Leaderboard {
   };
   /** Echoed back so the UI can highlight the matching tab. */
   sort: LeaderboardSort;
+  /**
+   * Echo of the applied bracket filter (I). `'all'` when unfiltered.
+   * Optional for backwards compat with pre-bracket API responses;
+   * treat `undefined` as `'all'`.
+   */
+  bracket?: LeaderboardBracket;
+  /**
+   * Total validators in the selected bracket, independent of `limit`
+   * (I). Lets the UI render "{bracketCount} validators in this
+   * bracket" even when only the top N rows are shown. Optional for
+   * backwards compat; falls back to `count` when absent.
+   */
+  bracketCount?: number;
   count: number;
   limit: number;
   items: LeaderboardItem[];

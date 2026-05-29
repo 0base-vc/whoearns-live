@@ -8,7 +8,9 @@ import type { ClaimsRepository } from '../../../src/storage/repositories/claims.
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
 import type { ProfilesRepository } from '../../../src/storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
+import type { TierSnapshotsRepository } from '../../../src/storage/repositories/tier-snapshots.repo.js';
 import type { ValidatorsRepository } from '../../../src/storage/repositories/validators.repo.js';
+import type { TierSnapshot } from '../../../src/types/domain.js';
 import {
   FakeEpochsRepo,
   FakeStatsRepo,
@@ -25,19 +27,64 @@ import {
 
 const silent = pino({ level: 'silent' });
 
+/**
+ * In-memory tier-snapshots repo for the trend + history tests. Stores
+ * snapshots per vote; `findByVote` / `findLatestTwo` return newest-
+ * first (highest epoch first) like the real repo.
+ */
+class FakeTierSnapshotsRepo {
+  readonly byVote = new Map<string, TierSnapshot[]>();
+
+  seed(vote: string, snapshots: TierSnapshot[]): void {
+    this.byVote.set(
+      vote,
+      [...snapshots].sort((a, b) => b.epoch - a.epoch),
+    );
+  }
+
+  async findByVote(vote: string, limit: number): Promise<TierSnapshot[]> {
+    const safe = Math.max(1, Math.min(limit, 60));
+    return (this.byVote.get(vote) ?? []).slice(0, safe);
+  }
+
+  async findLatestTwo(vote: string): Promise<TierSnapshot[]> {
+    return (this.byVote.get(vote) ?? []).slice(0, 2);
+  }
+}
+
+function snapshot(
+  vote: string,
+  epoch: number,
+  composite: number | null,
+  tier: string,
+): TierSnapshot {
+  return {
+    votePubkey: vote,
+    epoch,
+    composite,
+    tier,
+    reliability: 0.9,
+    economicPercentile: composite === null ? null : 0.5,
+    cuPercentile: null,
+    createdAt: new Date(`2026-04-${String(epoch % 28 || 1).padStart(2, '0')}T00:00:00Z`),
+  };
+}
+
 interface Ctx {
   app: FastifyInstance;
   stats: FakeStatsRepo;
   validators: FakeValidatorsRepo;
   epochs: FakeEpochsRepo;
+  snapshots: FakeTierSnapshotsRepo;
   optedOutVotes: Set<string>;
   claimedVotes: Set<string>;
 }
 
-async function makeCtx(): Promise<Ctx> {
+async function makeCtx(opts: { withSnapshots?: boolean } = {}): Promise<Ctx> {
   const stats = new FakeStatsRepo();
   const validators = new FakeValidatorsRepo();
   const epochs = new FakeEpochsRepo();
+  const snapshots = new FakeTierSnapshotsRepo();
   const optedOutVotes = new Set<string>();
   const claimedVotes = new Set<string>();
 
@@ -54,8 +101,14 @@ async function makeCtx(): Promise<Ctx> {
       findClaimedVotes: async (votes: string[]) =>
         new Set(votes.filter((vote) => claimedVotes.has(vote))),
     } as unknown as ClaimsRepository,
+    // Default-wired so the trend + history surfaces are exercised; a
+    // dedicated test below registers a route WITHOUT it to prove the
+    // optional-dep degradation path.
+    ...(opts.withSnapshots === false
+      ? {}
+      : { tierSnapshotsRepo: snapshots as unknown as TierSnapshotsRepository }),
   });
-  return { app, stats, validators, epochs, optedOutVotes, claimedVotes };
+  return { app, stats, validators, epochs, snapshots, optedOutVotes, claimedVotes };
 }
 
 async function seedValidator(ctx: Ctx, vote: string, identity: string, epoch = 500) {
@@ -825,6 +878,239 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
   it('returns 404 for unknown validators', async () => {
     const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_2}/tier` });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+/**
+ * Seed a strong full-window (10 closed-epoch) history + economic
+ * lookup so the tier resolves to forge with a high composite. Bumps
+ * the current epoch to 600 so all seeded rows count as CLOSED.
+ */
+async function seedForge(ctx: Ctx, vote: string, identity: string): Promise<void> {
+  await seedValidator(ctx, vote, identity, 505);
+  for (let e = 496; e <= 505; e++) {
+    ctx.stats.rows.set(
+      `${e}:${vote}`,
+      makeStats(e, vote, identity, {
+        slotsAssigned: 100,
+        slotsProduced: 100,
+        slotsSkipped: 0,
+        feesUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
+        tipsUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
+      }),
+    );
+  }
+  await ctx.epochs.upsert({ epoch: 600, firstSlot: 0, lastSlot: 100, slotCount: 100 });
+  ctx.stats.setEconomicLookup(vote, {
+    percentile: 1.0,
+    cohortSize: 200,
+    measuredEpochs: 10,
+    medianIncomePerSlotLamports: '50000000',
+    cohortMedianLamportsPerSlot: '12100000',
+    cohortP25LamportsPerSlot: '6200000',
+    cohortP75LamportsPerSlot: '22800000',
+    cuPercentile: 1.0,
+    validatorAvgCuPerBlock: 14_820_000,
+    cohortMedianCuPerBlock: 11_200_000,
+  });
+}
+
+describe('GET /v1/validators/:idOrVote/tier — trend block (migration 0045)', () => {
+  let ctx: Ctx;
+  beforeEach(async () => {
+    resetTierPercentileCache();
+    ctx = await makeCtx();
+  });
+
+  it('trend is null when fewer than one prior snapshot exists', async () => {
+    await seedForge(ctx, VOTE_1, IDENTITY_1);
+    // No snapshots seeded.
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { trend: unknown };
+    expect(body.trend).toBeNull();
+  });
+
+  it('computes delta against the most recent prior snapshot', async () => {
+    await seedForge(ctx, VOTE_1, IDENTITY_1);
+    // Prior snapshot at epoch 504 was anvil/80; the live composite
+    // (forge, ≥95) should produce a positive delta.
+    ctx.snapshots.seed(VOTE_1, [
+      snapshot(VOTE_1, 504, 80, 'anvil'),
+      snapshot(VOTE_1, 503, 78, 'anvil'),
+    ]);
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      composite: number;
+      trend: {
+        prevComposite: number | null;
+        delta: number | null;
+        prevTier: string | null;
+        epochsTracked: number;
+      } | null;
+    };
+    expect(body.trend).not.toBeNull();
+    expect(body.trend?.prevComposite).toBe(80);
+    expect(body.trend?.prevTier).toBe('anvil');
+    expect(body.trend?.delta).toBe(body.composite - 80);
+    expect(body.trend?.delta).toBeGreaterThan(0);
+    // epochsTracked reflects the two snapshots findLatestTwo returned.
+    expect(body.trend?.epochsTracked).toBe(2);
+  });
+
+  it('delta is null when the prior snapshot was unrated (no composite to subtract)', async () => {
+    await seedForge(ctx, VOTE_1, IDENTITY_1);
+    ctx.snapshots.seed(VOTE_1, [snapshot(VOTE_1, 504, null, 'unrated')]);
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    const body = res.json() as {
+      trend: { prevComposite: number | null; delta: number | null; prevTier: string | null } | null;
+    };
+    expect(body.trend?.prevComposite).toBeNull();
+    expect(body.trend?.delta).toBeNull();
+    // The tier-name change is still describable.
+    expect(body.trend?.prevTier).toBe('unrated');
+  });
+
+  it('trend is null when the snapshot repo is not wired (optional dep)', async () => {
+    ctx = await makeCtx({ withSnapshots: false });
+    await seedForge(ctx, VOTE_1, IDENTITY_1);
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { trend: unknown }).trend).toBeNull();
+  });
+});
+
+describe('GET /v1/validators/:idOrVote/tier — cohortVotes disclosure (J)', () => {
+  let ctx: Ctx;
+  beforeEach(async () => {
+    resetTierPercentileCache();
+    ctx = await makeCtx();
+  });
+
+  it('surfaces the cohort vote list the percentile was ranked against', async () => {
+    // Two peers with measured income in the window form the cohort.
+    await seedForge(ctx, VOTE_1, IDENTITY_1);
+    await seedValidator(ctx, VOTE_2, IDENTITY_2, 505);
+    for (let e = 496; e <= 505; e++) {
+      ctx.stats.rows.set(
+        `${e}:${VOTE_2}`,
+        makeStats(e, VOTE_2, IDENTITY_2, {
+          slotsAssigned: 100,
+          slotsProduced: 100,
+          slotsSkipped: 0,
+          feesUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
+          tipsUpdatedAt: new Date(`2026-04-${e - 480}T00:00:00Z`),
+        }),
+      );
+    }
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      components: { economicPercentile: { evidence: { cohortVotes: string[] } } };
+    };
+    const cohort = body.components.economicPercentile.evidence.cohortVotes;
+    expect(cohort).toContain(VOTE_1);
+    expect(cohort).toContain(VOTE_2);
+  });
+
+  it('cohortVotes is empty when the validator has no closed-epoch window', async () => {
+    await seedValidator(ctx, VOTE_1, IDENTITY_1);
+    const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    const body = res.json() as {
+      components: { economicPercentile: { evidence: { cohortVotes: string[] } } };
+    };
+    expect(body.components.economicPercentile.evidence.cohortVotes).toEqual([]);
+  });
+});
+
+describe('GET /v1/validators/:idOrVote/tier/history', () => {
+  let ctx: Ctx;
+  beforeEach(async () => {
+    ctx = await makeCtx();
+  });
+
+  it('returns 404 for unknown validators', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_2}/tier/history`,
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('returns newest-first snapshots with component sub-scores', async () => {
+    await seedValidator(ctx, VOTE_1, IDENTITY_1);
+    ctx.snapshots.seed(VOTE_1, [
+      snapshot(VOTE_1, 503, 78, 'anvil'),
+      snapshot(VOTE_1, 505, 90, 'forge'),
+      snapshot(VOTE_1, 504, 82, 'anvil'),
+    ]);
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/tier/history`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      vote: string;
+      identity: string;
+      snapshots: Array<{
+        epoch: number;
+        composite: number | null;
+        tier: string;
+        reliability: number | null;
+        economicPercentile: number | null;
+        cuPercentile: number | null;
+      }>;
+    };
+    expect(body.vote).toBe(VOTE_1);
+    expect(body.identity).toBe(IDENTITY_1);
+    // Newest-first ordering.
+    expect(body.snapshots.map((s) => s.epoch)).toEqual([505, 504, 503]);
+    expect(body.snapshots[0]).toMatchObject({ epoch: 505, composite: 90, tier: 'forge' });
+    expect(body.snapshots[0]?.reliability).toBe(0.9);
+  });
+
+  it('clamps limit to 60 and floors to 1', async () => {
+    await seedValidator(ctx, VOTE_1, IDENTITY_1);
+    // 70 snapshots seeded; limit=200 must clamp the RESULT to 60.
+    ctx.snapshots.seed(
+      VOTE_1,
+      Array.from({ length: 70 }, (_v, i) => snapshot(VOTE_1, 400 + i, 70, 'hearth')),
+    );
+    const capped = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/tier/history?limit=200`,
+    });
+    expect(capped.statusCode).toBe(200);
+    expect((capped.json() as { snapshots: unknown[] }).snapshots).toHaveLength(60);
+
+    const floored = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/tier/history?limit=0`,
+    });
+    expect(floored.statusCode).toBe(200);
+    expect((floored.json() as { snapshots: unknown[] }).snapshots).toHaveLength(1);
+  });
+
+  it('returns an empty list for a validator with no recorded history', async () => {
+    await seedValidator(ctx, VOTE_1, IDENTITY_1);
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/tier/history`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { snapshots: unknown[] }).snapshots).toEqual([]);
+  });
+
+  it('returns an empty list when the snapshot repo is not wired (optional dep)', async () => {
+    ctx = await makeCtx({ withSnapshots: false });
+    await seedValidator(ctx, VOTE_1, IDENTITY_1);
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/tier/history`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { snapshots: unknown[] }).snapshots).toEqual([]);
   });
 });
 

@@ -124,6 +124,12 @@ async function compileSvelteAsDataUrl(absPath: string): Promise<string> {
         const d = decimals === undefined ? 1 : decimals;
         return (fraction * 100).toFixed(d) + '%';
       }
+      export function shortenPubkey(pk, head, tail) {
+        const h = head === undefined ? 6 : head;
+        const t = tail === undefined ? 4 : tail;
+        if (pk.length <= h + t + 1) return pk;
+        return pk.slice(0, h) + '…' + pk.slice(-t);
+      }
     `;
     const formatDataUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent(
       formatModuleSource,
@@ -322,6 +328,58 @@ describe('EvidenceRow — cu', () => {
     expect(html).toContain('0.7321');
     // The honest "CU never forces kindling" disclaimer.
     expect(html).toContain('CU never forces kindling');
+  });
+});
+
+describe('EvidenceRow — cohort disclosure (J)', () => {
+  const COHORT = [
+    'Vote111111111111111111111111111111111111111A',
+    'Vote222222222222222222222222222222222222222B',
+    'Vote333333333333333333333333333333333333333C',
+  ];
+
+  it('renders a collapsible cohort list with truncated, linked pubkeys when cohortVotes is present', async () => {
+    const html = await renderEvidenceRow({
+      kind: 'economic',
+      evidence: { ...ECONOMIC_EVIDENCE, cohortVotes: COHORT },
+      window: WINDOW_PROP,
+      score: 1.0,
+    });
+
+    // The affordance is a <details> with the count in the summary.
+    expect(html).toContain('<details');
+    expect(html).toContain('View cohort (3)');
+    // Descriptive label only — no editorialising.
+    expect(html).toContain('Ranked against these 3 indexed validators');
+    // Each peer links to its hub (/v/<vote>) with a truncated pubkey.
+    expect(html).toContain(`href="/v/${COHORT[0]}"`);
+    expect(html).toContain(`href="/v/${COHORT[1]}"`);
+    expect(html).toContain(`href="/v/${COHORT[2]}"`);
+    // shortenPubkey(8, 6) → "Vote1111…11111A" style ellipsis.
+    expect(html).toContain('…');
+  });
+
+  it('omits the cohort affordance when cohortVotes is absent (older payload)', async () => {
+    const html = await renderEvidenceRow({
+      kind: 'economic',
+      evidence: ECONOMIC_EVIDENCE,
+      window: WINDOW_PROP,
+      score: 1.0,
+    });
+
+    expect(html).not.toContain('View cohort');
+    expect(html).not.toContain('Ranked against these');
+  });
+
+  it('omits the cohort affordance when cohortVotes is an empty array', async () => {
+    const html = await renderEvidenceRow({
+      kind: 'economic',
+      evidence: { ...ECONOMIC_EVIDENCE, cohortVotes: [] },
+      window: WINDOW_PROP,
+      score: 1.0,
+    });
+
+    expect(html).not.toContain('View cohort');
   });
 });
 

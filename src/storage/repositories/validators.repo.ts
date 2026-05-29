@@ -400,6 +400,51 @@ export class ValidatorsRepository {
     return out;
   }
 
+  /**
+   * Resolve a leaderboard bracket to the set of candidate vote
+   * pubkeys it admits, using ONLY the `validators` table (client kind
+   * + tenure columns). The leaderboard route feeds this set into
+   * `StatsRepository.findTopNByWindow` as an allowlist so ranking and
+   * the row limit happen WITHIN the bracket — keeping rank positions
+   * bracket-relative.
+   *
+   * Two bracket shapes are resolved here (stake brackets are handled
+   * directly in `findTopNByWindow` against the window-representative
+   * stake, so they don't pass through this method):
+   *
+   *   - `{ clientKind }` — exact match on `client_kind`. The caller
+   *     validates the kind against the documented enum before calling;
+   *     an unrecognised kind never reaches here.
+   *   - `{ newcomerFromEpoch }` — `COALESCE(genesis_epoch,
+   *     first_seen_epoch) >= newcomerFromEpoch`. This mirrors
+   *     `summariseTenure`'s genesis-preferred tenure origin (true
+   *     on-chain genesis when known, indexer-relative first-seen
+   *     otherwise); the caller computes the threshold as
+   *     `currentEpoch - NEWCOMER_WINDOW_EPOCHS`.
+   *
+   * Returns ALL matching votes (no limit) — the bracket may legitimately
+   * have hundreds of members and `findTopNByWindow` applies the row
+   * limit after ranking. At ~2000 rows this is a single cheap scan.
+   */
+  async findVotesForBracket(
+    bracket: { clientKind: string } | { newcomerFromEpoch: number },
+  ): Promise<VotePubkey[]> {
+    if ('clientKind' in bracket) {
+      const { rows } = await this.pool.query<{ vote_pubkey: string }>(
+        `SELECT vote_pubkey FROM validators WHERE client_kind = $1`,
+        [bracket.clientKind],
+      );
+      return rows.map((r) => r.vote_pubkey as VotePubkey);
+    }
+    const { rows } = await this.pool.query<{ vote_pubkey: string }>(
+      `SELECT vote_pubkey
+         FROM validators
+        WHERE COALESCE(genesis_epoch, first_seen_epoch) >= $1`,
+      [bracket.newcomerFromEpoch],
+    );
+    return rows.map((r) => r.vote_pubkey as VotePubkey);
+  }
+
   async searchByText(
     query: string,
     limit: number,

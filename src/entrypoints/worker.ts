@@ -18,6 +18,7 @@ import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
 import { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
 import { StatsRepository } from '../storage/repositories/stats.repo.js';
+import { TierSnapshotsRepository } from '../storage/repositories/tier-snapshots.repo.js';
 import { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import { WalletActivityRepository } from '../storage/repositories/wallet-activity.repo.js';
 import { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
@@ -29,6 +30,7 @@ import { createValidatorInfoRefreshJob } from '../jobs/validator-info-refresh.jo
 import { createSlotIngesterJob } from '../jobs/slot-ingester.job.js';
 import { createWalletActivityIngesterJob } from '../jobs/wallet-activity-ingester.job.js';
 import { createStakewizTenureIngesterJob } from '../jobs/stakewiz-tenure-ingester.job.js';
+import { createTierSnapshotIngesterJob } from '../jobs/tier-snapshot-ingester.job.js';
 import { createValidatorsAppClientIngesterJob } from '../jobs/validators-app-client-ingester.job.js';
 import { ValidatorsAppClient } from '../clients/validators-app.js';
 import { StakewizClient } from '../clients/stakewiz.js';
@@ -66,6 +68,7 @@ export async function startWorker(): Promise<void> {
   const validatorsRepo = new ValidatorsRepository(pool);
   const epochsRepo = new EpochsRepository(pool);
   const statsRepo = new StatsRepository(pool);
+  const tierSnapshotsRepo = new TierSnapshotsRepository(pool);
   const processedBlocksRepo = new ProcessedBlocksRepository(pool);
   const aggregatesRepo = new AggregatesRepository(pool);
   // Runtime-added "someone typed an unknown pubkey" watched set. The
@@ -420,6 +423,29 @@ export async function startWorker(): Promise<void> {
     // 6 h cadence so the boot tick doesn't compete with the
     // primary-path jobs for outbound bandwidth.
     initialDelayMs: 90_000,
+  });
+
+  // Migration 0045 — tier-snapshot ingester. Persists each tracked
+  // validator's tier composite for the latest CLOSED epoch so the
+  // profile surface can render movement + history. Forward-only; the
+  // cursor check makes most ticks a cheap no-op (a closed epoch only
+  // appears every ~2 days). Pure SQL — no RPC — but it reads the same
+  // history + cohort the /tier endpoint does, so it stays off the
+  // cold-start path.
+  scheduler.register({
+    ...createTierSnapshotIngesterJob({
+      statsRepo,
+      epochsRepo,
+      validatorsRepo,
+      cursorsRepo,
+      tierSnapshotsRepo,
+      intervalMs: config.TIER_SNAPSHOT_INTERVAL_MS,
+      logger,
+    }),
+    // +105s: behind the validators-app ingester. Cheap cursor check on
+    // most ticks; the once-per-closed-epoch heavy pass is not latency-
+    // sensitive (the tier itself only moves on an epoch boundary).
+    initialDelayMs: 105_000,
   });
 
   shutdown.register('scheduler', async () => {

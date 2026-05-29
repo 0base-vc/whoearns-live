@@ -74,14 +74,26 @@
     isReliabilityFloorTriggered,
     nextTierGap,
     skipRate,
+    tierDeltaBadge,
     trustSummary,
     unratedReason,
   } from '$lib/tier';
   import { formatTimestamp, lamportsStringToSolNumber } from '$lib/format';
   import { SITE_URL } from '$lib/site';
   import { safeOperatorUrl } from '$lib/url-safety';
-  import { fetchClaimAudit, fetchClaimStatus, fetchSimdProposals } from '$lib/api';
-  import type { ClaimAuditEvent, ClaimStatus, NodeTier, SimdProposalListItem } from '$lib/types';
+  import {
+    fetchClaimAudit,
+    fetchClaimStatus,
+    fetchSimdProposals,
+    fetchTierHistory,
+  } from '$lib/api';
+  import type {
+    ClaimAuditEvent,
+    ClaimStatus,
+    NodeTier,
+    SimdProposalListItem,
+    TierHistorySnapshot,
+  } from '$lib/types';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -163,6 +175,15 @@
   // today.
   let simdItems = $state<ReadonlyArray<SimdProposalListItem>>([]);
   let simdLoading = $state(true);
+  // Tier composite history (H) — fed to the sparkline beside the ring.
+  // CSR-deferred like the other panels: the SSR `/scoring` payload
+  // doesn't carry the snapshot series. Forward-only — an empty /
+  // single-element list is a cold start, and the sparkline is omitted
+  // rather than drawing a fabricated flat line. A failed fetch is
+  // SILENT (the sparkline is decorative supplementary context, not a
+  // delegator-critical signal) — `tierHistory` simply stays `[]`.
+  let tierHistory = $state<ReadonlyArray<TierHistorySnapshot>>([]);
+  let tierHistoryLoading = $state(true);
   // Hero sentinel for the sticky mobile header — set on a 1×1 div
   // at the bottom of the hero card via `bind:this`. IntersectionObserver
   // watches it; once it scrolls out of view, the header appears.
@@ -191,6 +212,8 @@
     auditFailed = false;
     simdItems = [];
     simdLoading = true;
+    tierHistory = [];
+    tierHistoryLoading = true;
   }
 
   /**
@@ -226,8 +249,21 @@
       (v) => ({ ok: true as const, value: v }),
       (err: unknown) => ({ ok: false as const, error: err }),
     );
+    // Tier composite history (H) — 16-epoch sparkline window. Fired in
+    // the same fan-out so it shares the AbortController teardown. A
+    // failure (or an empty series on a brand-new validator) hides the
+    // sparkline; it never paints an error tile.
+    const tierHistoryPromise = fetchTierHistory(vote, 16, { signal }).then(
+      (v) => ({ ok: true as const, value: v }),
+      (err: unknown) => ({ ok: false as const, error: err }),
+    );
 
-    const [claim, audit, simd] = await Promise.all([claimPromise, auditPromise, simdPromise]);
+    const [claim, audit, simd, tierHist] = await Promise.all([
+      claimPromise,
+      auditPromise,
+      simdPromise,
+      tierHistoryPromise,
+    ]);
     if (signal.aborted) return;
 
     if (claim.ok) {
@@ -249,6 +285,12 @@
     // delegator's trust signal. No error tile here.
     if (simd.ok) simdItems = simd.value.items;
     simdLoading = false;
+
+    // Tier history failure is silent too — the sparkline is decorative
+    // supplementary context. On success we keep the snapshots; the
+    // sparkline derivation hides itself when <2 plottable points exist.
+    if (tierHist.ok) tierHistory = tierHist.value.snapshots;
+    tierHistoryLoading = false;
   }
 
   /** True when an unknown error is the rejection from a deliberate AbortController.abort(). */
@@ -334,6 +376,65 @@
   const reliabilityScore = $derived(tierComponents.reliability.score);
   const economicPercentileScore = $derived(tierComponents.economicPercentile.score);
   const cuPercentileScore = $derived(tierComponents.cuPercentile.score);
+
+  // ── H4: composite delta badge ──
+  // Derived from the SSR `tier.trend` block — no extra fetch. `null`
+  // when there's no prior snapshot (brand-new) or the delta is
+  // unmeasurable, in which case the badge renders nothing. The helper
+  // states the movement only ("+3 since last epoch"); the voice rule
+  // forbids "improve / climb" imperatives here.
+  const deltaBadge = $derived(tierDeltaBadge(tier.tier, tier.trend));
+
+  // ── H4: composite sparkline ──
+  // The CSR `/tier/history` snapshots are newest-first; reverse to
+  // oldest-left for the polyline. Skip snapshots whose composite is
+  // null (an unrated edge in the historical window) — the line plots
+  // only real measurements, never a phantom zero. Forward-only
+  // history: with <2 plottable points there's nothing honest to draw,
+  // so the sparkline section is omitted entirely.
+  const sparkPoints = $derived.by<Array<{ epoch: number; composite: number }>>(() => {
+    const out: Array<{ epoch: number; composite: number }> = [];
+    // `.slice()` before `.reverse()` — never mutate the reactive source.
+    for (const snap of tierHistory.slice().reverse()) {
+      if (snap.composite === null) continue;
+      out.push({ epoch: snap.epoch, composite: snap.composite });
+    }
+    return out;
+  });
+  const showSparkline = $derived(sparkPoints.length >= 2);
+
+  // Polyline points string in a 100×30 viewBox. Composite is a fixed
+  // 0-100 scale, so the Y axis is anchored to that absolute range
+  // (NOT a per-window min/max) — this keeps the line's height
+  // comparable across validators and over time, rather than
+  // re-normalising every window. Top padding 3, bottom padding 3, so
+  // a 100 composite sits near the top and a 0 near the bottom without
+  // clipping the 2px stroke.
+  const SPARK_TOP = 3;
+  const SPARK_BOTTOM = 27;
+  const sparkPath = $derived.by(() => {
+    if (sparkPoints.length < 2) return '';
+    const stepX = 100 / (sparkPoints.length - 1);
+    return sparkPoints
+      .map((p, i) => {
+        const x = (i * stepX).toFixed(2);
+        // Composite 0-100 → Y in [SPARK_BOTTOM, SPARK_TOP] (inverted:
+        // higher composite = smaller Y = higher on screen).
+        const clamped = Math.max(0, Math.min(100, p.composite));
+        const y = (SPARK_BOTTOM - (clamped / 100) * (SPARK_BOTTOM - SPARK_TOP)).toFixed(2);
+        return `${x},${y}`;
+      })
+      .join(' ');
+  });
+  // Epoch span label for the sparkline ("742–757"). Null with <2
+  // points so the caller doesn't render a half-open range.
+  const sparkRangeLabel = $derived.by<string | null>(() => {
+    if (sparkPoints.length < 2) return null;
+    const first = sparkPoints[0]?.epoch;
+    const last = sparkPoints.at(-1)?.epoch;
+    if (first === undefined || last === undefined) return null;
+    return `${first}–${last}`;
+  });
 
   // Evidence-panel accordion. ONE sub-component expanded at a time —
   // clicking the chevron on a different row swaps the visible panel.
@@ -910,6 +1011,113 @@
           size={144}
           nextCutoff={tierGap?.nextCutoff ?? null}
         />
+
+        <!--
+          ── H4: composite delta badge + sparkline ──
+
+          Both sit directly beneath the ring (which renders the
+          composite number at its centre), so the movement reads
+          "near the composite". The badge STATES the change only —
+          "+3 since last epoch" — never coaching it; a downward move
+          is amber (muted), not red-alarm, because a dip can come from
+          a strengthening cohort rather than a regression.
+
+          The sparkline is forward-only: it appears only once ≥2
+          snapshots have accrued. With 0-1 snapshots we draw NOTHING
+          (no fabricated flat line); a short note explains the series
+          is still accruing. No animation on either element, so
+          `prefers-reduced-motion` has nothing to suppress — the
+          badge's only transition is colour-on-hover-less text, and
+          the polyline is static.
+        -->
+        {#if deltaBadge !== null}
+          <div class="-mt-1 flex flex-wrap items-center gap-2 text-sm">
+            <span
+              class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold tabular-nums"
+              class:bg-[color:var(--color-status-ok-bg)]={deltaBadge.tone === 'up'}
+              class:text-[color:var(--color-status-ok-fg)]={deltaBadge.tone === 'up'}
+              class:bg-[color:var(--color-status-warn-bg)]={deltaBadge.tone === 'down'}
+              class:text-[color:var(--color-status-warn-fg)]={deltaBadge.tone === 'down'}
+              class:bg-[color:var(--color-surface-muted)]={deltaBadge.tone === 'flat'}
+              class:text-[color:var(--color-text-muted)]={deltaBadge.tone === 'flat'}
+              aria-label={`Composite ${
+                deltaBadge.tone === 'up' ? 'up' : deltaBadge.tone === 'down' ? 'down' : 'unchanged'
+              } ${deltaBadge.deltaLabel} since the previous snapshot`}
+            >
+              <span aria-hidden="true">{deltaBadge.arrow}</span>
+              <span>{deltaBadge.deltaLabel}</span>
+            </span>
+            <span class="text-xs text-[color:var(--color-text-muted)]">
+              since last epoch{#if deltaBadge.transition}
+                · {deltaBadge.transition}{/if}
+            </span>
+          </div>
+        {/if}
+
+        {#if !tierHistoryLoading}
+          {#if showSparkline}
+            <!--
+              16-epoch composite sparkline. Y axis is anchored to the
+              absolute 0-100 composite scale (not a per-window min/max),
+              so the line's height is comparable across validators and
+              over time. `aria-hidden` on the SVG because the precise
+              per-epoch numbers live in the `sr-only` `<dl>` below —
+              the polyline is visual chrome for sighted viewers only.
+            -->
+            <div>
+              <div class="flex items-center gap-3">
+                <svg
+                  viewBox="0 0 100 30"
+                  preserveAspectRatio="none"
+                  class="h-9 flex-1 text-[color:var(--color-brand-500)]"
+                  aria-hidden="true"
+                >
+                  <polyline
+                    points={sparkPath}
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linejoin="round"
+                    stroke-linecap="round"
+                    vector-effect="non-scaling-stroke"
+                  />
+                </svg>
+                {#if sparkRangeLabel !== null}
+                  <span class="text-xs tabular-nums text-[color:var(--color-text-subtle)]">
+                    {sparkRangeLabel}
+                  </span>
+                {/if}
+              </div>
+              <p class="mt-1 text-xs text-[color:var(--color-text-muted)]">
+                Composite, last {sparkPoints.length}
+                {sparkPoints.length === 1 ? 'epoch' : 'epochs'}.
+              </p>
+              <!--
+                sr-only data list — AT users get the per-epoch composite
+                numbers the polyline can't surface. Mirrors the
+                IncomeSummaryStrip pattern.
+              -->
+              <div class="sr-only">
+                <p>Composite by epoch, oldest first:</p>
+                <dl>
+                  {#each sparkPoints as p (p.epoch)}
+                    <dt>Epoch {p.epoch}</dt>
+                    <dd>{p.composite}</dd>
+                  {/each}
+                </dl>
+              </div>
+            </div>
+          {:else if sparkPoints.length === 1}
+            <!--
+              Exactly one snapshot — honest cold start. We do NOT draw a
+              flat line; a one-liner notes the history is still
+              accruing. Zero snapshots renders nothing at all.
+            -->
+            <p class="text-xs text-[color:var(--color-text-muted)]">
+              Composite history starts accruing — one snapshot so far.
+            </p>
+          {/if}
+        {/if}
 
         {#if reliabilityFloor}
           <!--

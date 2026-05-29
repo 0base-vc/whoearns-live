@@ -324,6 +324,14 @@ config:
   # half a day. Set to a longer interval (e.g. 24 hr) if your token
   # budget is tight; set to 0 to disable the periodic job entirely.
   simdCurationIntervalMs: '43200000'
+  # Tier-snapshot ingester cadence (migration 0045). Persists each
+  # tracked validator's tier composite for the latest CLOSED epoch so
+  # the profile surface can show movement + history. 30 min: a closed
+  # epoch only appears every ~2 days, so most ticks are a cheap cursor
+  # check that skips before any per-validator work; this just bounds
+  # the latency between an epoch closing and its snapshot landing.
+  # Forward-only — never backfills past epochs.
+  tierSnapshotIntervalMs: '1800000'
   slotFinalityBuffer: 32
   shutdownTimeoutMs: 15000
 
