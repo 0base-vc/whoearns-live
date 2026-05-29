@@ -22,6 +22,12 @@ info:
     Repository migration note:
     `docs/migrations/v0.4-api.md`.
 
+    **AI-agent access (MCP + llms.txt).** Beyond this REST surface, the
+    same read-only data is queryable by AI agents over an in-process
+    Model Context Protocol server at `POST /mcp` — see the `/mcp` path
+    below for the tool list and connection notes — and is summarised for
+    crawlers at `/llms.txt`. Both are read-only and need no API key.
+
 servers:
   - url: http://localhost:8080
     description: Placeholder — runtime route rewrites `servers[0].url` to match `SITE_URL` at request time
@@ -1103,10 +1109,33 @@ paths:
         '405':
           description: Public stateless MCP accepts POST only.
     post:
-      summary: Streamable HTTP MCP endpoint
+      summary: Model Context Protocol (MCP) endpoint — streamable HTTP, stateless JSON-RPC
+      description: |
+        In-process [Model Context Protocol](https://modelcontextprotocol.io)
+        server exposing the same read-only data as this REST API, so AI
+        agents (Claude Desktop, Claude Code, or any MCP client) can call
+        it directly without scraping the UI or parsing this spec.
+
+        Transport: streamable HTTP, **stateless** — each POST is a
+        complete JSON-RPC exchange (no session cookies, no API key).
+
+        Six read-only tools:
+          * `get_current_epoch` — current epoch number + progress.
+          * `get_leaderboard` — ranked validators for a window/sort
+            (includes `windowedCu`).
+          * `get_validator` — income + facts for one vote/identity pubkey.
+          * `get_validator_tier` — Node Tier composite + components
+            (reliability, economicPercentile, cuPercentile).
+          * `get_validator_badges` — tenure + client + tier badge row.
+          * `get_validator_leader_slots` — per-epoch leader-slot detail.
+
+        Connect (e.g. a Claude Desktop `mcpServers` entry):
+        `{ "whoearns": { "url": "https://whoearns.live/mcp" } }`.
+        A crawler-facing summary of these surfaces also lives at
+        `/llms.txt`.
       responses:
         '200':
-          description: MCP transport response.
+          description: MCP transport response (JSON-RPC result).
     delete:
       summary: MCP session cleanup verb disabled
       responses:
