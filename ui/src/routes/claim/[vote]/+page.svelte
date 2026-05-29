@@ -9,7 +9,7 @@
          box.
        - Operator runs the command, pastes the base58 signature into
          the form, submits.
-       - POST /v1/claim/verify → on success, page reloads into
+       - PUT /v1/claims/:vote → on success, page reloads into
          profile-editor mode (effectively: `status` is re-fetched).
 
     2. **Profile edit** (`status.claimed === true`):
@@ -17,7 +17,7 @@
        - Operator tweaks (twitter handle, hide-footer, opt-out),
          re-generates a signable message, pastes a fresh signature,
          submits.
-       - POST /v1/claim/profile → on success, updated profile
+       - PUT /v1/claims/:vote/profile → on success, updated profile
          values are shown.
 
   No wallet connect, no browser-side Ed25519 signing. The operator's
@@ -29,18 +29,50 @@
   to do.
 
   Nonce + timestamp are generated server-side via
-  `/v1/claim/challenge`. UI treats them as opaque — they feed into
+  `/v1/claims/challenge`. UI treats them as opaque — they feed into
   the message template that gets copy-pasted. Client never needs
   to know the crypto rules.
 -->
 <script lang="ts">
+  import { browser } from '$app/environment';
   import type { PageData } from './$types';
-  import { fetchClaimChallenge, updateClaimProfile, verifyClaim, ApiError } from '$lib/api';
+  import {
+    fetchClaimChallenge,
+    fetchClaimStatus,
+    updateClaimProfile,
+    verifyClaim,
+    linkGithub,
+    registerOperatorWallet,
+    unregisterOperatorWallet,
+    ApiError,
+  } from '$lib/api';
   import Card from '$lib/components/Card.svelte';
+  import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
   import AddressDisplay from '$lib/components/AddressDisplay.svelte';
   import EllipsisAddress from '$lib/components/EllipsisAddress.svelte';
+  import OperatorWalletConnectionStatus from '$lib/components/OperatorWalletConnectionStatus.svelte';
   import { shortenPubkey } from '$lib/format';
-  import { SITE_NAME } from '$lib/site';
+  import {
+    connectSelectedOperatorWallet,
+    createOperatorWalletSelectionState,
+    discoverSupportedOperatorWallets,
+    sendMemoTransaction,
+    type ConnectedOperatorWallet,
+    type SupportedOperatorWallet,
+    type WalletStandardRegistry,
+  } from '$lib/operator-wallet-discovery';
+  import {
+    buildMemoTransaction,
+    canAffordMemoFee,
+    CONFIRM_TIMEOUT_SECONDS,
+    FEE_THRESHOLD_LAMPORTS,
+  } from '$lib/operator-wallet-memo-tx';
+  import {
+    awaitMemoTxConfirmation,
+    getBalanceLamports,
+    getLatestBlockhash,
+  } from '$lib/solana-rpc-client';
+  import { SITE_NAME, SITE_URL } from '$lib/site';
 
   let { data }: { data: PageData } = $props();
 
@@ -206,6 +238,12 @@
             narrativeOverride: null,
             updatedAt: '',
           },
+          // The gamification-surface fields (githubLink + wallets)
+          // are populated by their own claim subflows; on first
+          // claim they're both empty. Mirrors the `ClaimStatus`
+          // shape returned by `GET /v1/claims/:vote`.
+          githubLink: null,
+          wallets: { count: 0, capReached: false, oldestExpiresAt: null, entries: [] },
         };
       } else {
         // Mirror the backend's normalisation: empty/whitespace =
@@ -228,7 +266,19 @@
           },
         });
         successMessage = 'Profile updated.';
-        status = { claimed: true, profile: result.profile };
+        status = {
+          claimed: true,
+          profile: result.profile,
+          // Preserve any previously-fetched githubLink / wallets
+          // state across a profile edit (they're owned by separate
+          // subflows; a profile update doesn't touch them). When
+          // the page was loaded into edit-mode they came from the
+          // initial `fetchClaimStatus` call.
+          githubLink: status.claimed ? status.githubLink : null,
+          wallets: status.claimed
+            ? status.wallets
+            : { count: 0, capReached: false, oldestExpiresAt: null, entries: [] },
+        };
       }
       // Invalidate the single-use envelope so the UI makes the
       // operator regenerate before another submit.
@@ -248,6 +298,942 @@
 
   const shortVote = $derived(shortenPubkey(history.vote, 6, 6));
   const pageTitle = $derived(`Claim ${history.name ?? shortVote} — ${SITE_NAME}`);
+
+  /**
+   * Reactive "now" tick.
+   *
+   * Envelope-expiry countdowns ("Nonce expires in ~N minutes") and
+   * wallet/github entry expiry badges derive from `expiresAtMs -
+   * Date.now()`. `Date.now()` is NOT reactive — without an explicit
+   * tick the count is frozen at last-mutation time. An operator
+   * signing offline (the whole point of the flow) could come back
+   * 28 minutes later, see "expires in ~28 minutes", confidently
+   * submit, and discover the envelope is in fact about to die.
+   *
+   * Tick every 30s — half the smallest unit the UI displays
+   * (minutes). `$effect` only registers the interval client-side
+   * (Svelte 5 effects don't run during SSR). Teardown clears the
+   * interval on component destroy.
+   */
+  let nowMs = $state(Date.now());
+  $effect(() => {
+    const id = setInterval(() => {
+      nowMs = Date.now();
+    }, 30_000);
+    return () => clearInterval(id);
+  });
+
+  /**
+   * Format `expiresAt` (ISO string) as one of:
+   *   - "expires in 47 days" (normal)
+   *   - "expires in 4 days ⚠" (≤7 days)
+   *   - "expired 3 days ago" (past)
+   *
+   * The server-side claim status endpoint filters lapsed entries
+   * out, but we still defensively render the past-expiry shape:
+   * the page might be stale (tab open from yesterday), the
+   * operator's clock might be skewed, or the read endpoint might
+   * change its filter behaviour in the future.
+   */
+  function formatExpiry(expiresAtIso: string): { label: string; tone: 'ok' | 'warn' | 'expired' } {
+    const expMs = new Date(expiresAtIso).getTime();
+    // Read from the reactive `nowMs` (ticked every 30s) so the
+    // computed label re-evaluates as time passes; using bare
+    // `Date.now()` here would freeze the value at first render.
+    const dayMs = 24 * 60 * 60 * 1000;
+    const diffDays = Math.floor((expMs - nowMs) / dayMs);
+    if (diffDays < 0) {
+      return {
+        label: `expired ${Math.abs(diffDays)} day${Math.abs(diffDays) === 1 ? '' : 's'} ago`,
+        tone: 'expired',
+      };
+    }
+    if (diffDays <= 7) {
+      return { label: `expires in ${diffDays} day${diffDays === 1 ? '' : 's'}`, tone: 'warn' };
+    }
+    return { label: `expires in ${diffDays} days`, tone: 'ok' };
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // GitHub link ceremony (PUT /v1/claims/:vote/github)
+  //
+  // Differs from the v1 claim/profile ceremony above: the signed
+  // payload is a sorted-keys JSON nonce (matches the server's
+  // `canonicaliseNonce` in `github-gist-verification.service.ts`),
+  // the signature lives in a public Gist body, and the submit only
+  // carries the gist URL + the body fields the server uses to
+  // reconstruct + verify the canonical nonce.
+  //
+  // Three states:
+  //   - read: show current githubLink if any (username + verifiedAt +
+  //     expiresAt)
+  //   - draft: operator types a GitHub username, hits "Generate" to
+  //     mint the canonical nonce + timestampMs (kept together so a
+  //     tweak invalidates the envelope), copies the canonical JSON +
+  //     the CLI command, signs offline, publishes a public Gist
+  //     containing `<json>---<base58sig>`, pastes the Gist URL back.
+  //   - submitted: 30-minute TTL on the nonce — the server enforces
+  //     freshness; we just disable the submit if the envelope expired
+  //     locally to avoid a guaranteed 403 round-trip.
+  // ──────────────────────────────────────────────────────────────────
+
+  // svelte-ignore state_referenced_locally
+  let githubUsernameDraft = $state<string>(
+    status.claimed && status.githubLink ? status.githubLink.githubUsername : '',
+  );
+  // The envelope captures the inputs that produced the canonical
+  // nonce so we can detect drift later (operator edits the username
+  // AFTER generating but BEFORE submitting). `submittedUsername` is
+  // the value the signature actually covers; the live input may have
+  // moved on. See `githubInputsDrifted` below.
+  let githubEnvelope = $state<{
+    nonceJson: string;
+    timestampMs: number;
+    expiresAtMs: number;
+    submittedUsername: string;
+  } | null>(null);
+  let githubGistUrl = $state('');
+  let githubError = $state<string | null>(null);
+  let githubSuccess = $state<string | null>(null);
+  let githubSubmitting = $state(false);
+
+  // svelte-ignore state_referenced_locally
+  const githubLink = $derived(status.claimed ? status.githubLink : null);
+
+  /**
+   * Reconstruct the canonical nonce JSON the server will rebuild on
+   * submit. Key order MUST match `canonicaliseNonce` in
+   * `github-gist-verification.service.ts:122` (alphabetical), and
+   * the surrounding object MUST be a no-whitespace `JSON.stringify`.
+   * A single-byte drift here breaks every signature.
+   */
+  function buildGithubNonceJson(args: {
+    githubUsername: string;
+    identityPubkey: string;
+    votePubkey: string;
+    issuedAtMs: number;
+    expiresAtMs: number;
+  }): string {
+    return JSON.stringify({
+      domain: SITE_URL,
+      expiresAtMs: args.expiresAtMs,
+      githubUsername: args.githubUsername,
+      identityPubkey: args.identityPubkey,
+      issuedAtMs: args.issuedAtMs,
+      purpose: 'github-link',
+      votePubkey: args.votePubkey,
+    });
+  }
+
+  const GITHUB_NONCE_TTL_MS = 30 * 60 * 1000; // mirrors server DEFAULT_NONCE_TTL_MS
+
+  function generateGithubEnvelope() {
+    // Clear ONLY status banners up front. The Gist URL is intentionally
+    // preserved across regenerate clicks — operators commonly tweak
+    // a username typo and want their already-published Gist URL to
+    // stick around so they can edit the Gist body in-place rather
+    // than re-publishing. Input fields (the username) and the signed
+    // envelope itself are the only things that should change here.
+    githubError = null;
+    githubSuccess = null;
+    const trimmed = githubUsernameDraft.trim();
+    if (trimmed.length === 0) {
+      githubError = 'Enter a GitHub username first.';
+      return;
+    }
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/.test(trimmed)) {
+      githubError = 'That does not look like a valid GitHub username (letters, digits, hyphens).';
+      return;
+    }
+    const timestampMs = Date.now();
+    const expiresAtMs = timestampMs + GITHUB_NONCE_TTL_MS;
+    const nonceJson = buildGithubNonceJson({
+      githubUsername: trimmed,
+      identityPubkey: history.identity,
+      votePubkey: history.vote,
+      issuedAtMs: timestampMs,
+      expiresAtMs,
+    });
+    githubEnvelope = { nonceJson, timestampMs, expiresAtMs, submittedUsername: trimmed };
+  }
+
+  /**
+   * True when the operator generated an envelope, then edited the
+   * username input. The signature in `githubEnvelope` covers
+   * `submittedUsername`; submitting with a different live input
+   * would mean the server reconstructs canonical JSON from the new
+   * username, the signature would not verify against it, and the
+   * server returns `bad_signature` with no path forward visible to
+   * the operator. We block submit on drift and surface a clear
+   * "Regenerate" CTA instead.
+   */
+  const githubInputsDrifted = $derived(
+    githubEnvelope !== null && githubEnvelope.submittedUsername !== githubUsernameDraft.trim(),
+  );
+
+  /**
+   * CLI command the operator runs on their validator box. The
+   * canonical nonce JSON is wrapped in single quotes; shell-escape
+   * any embedded single quote so the literal bytes that get signed
+   * exactly match the canonical JSON the server will reconstruct.
+   * Our JSON is all-ASCII (pubkeys + integers + ASCII username),
+   * but the escape stays defensive in case a future field carries
+   * something stranger.
+   */
+  const githubCliCommand = $derived.by<string | null>(() => {
+    if (githubEnvelope === null) return null;
+    const escaped = githubEnvelope.nonceJson.replace(/'/g, "'\\''");
+    return `solana sign-offchain-message --keypair ~/validator-identity.json '${escaped}'`;
+  });
+
+  /**
+   * Reference Gist body — what the operator publishes on GitHub.
+   * Three lines: the boundary `--whoearns-proof--`, the canonical
+   * nonce JSON, the boundary again, then `signature: <base58>`.
+   * Earlier revision used a bare `---` delimiter; that broke when
+   * SITE_URL contained `---` because JSON.stringify doesn't escape
+   * hyphens. The unique-string boundary anchored on a full line
+   * cannot collide with any JSON-encoded value.
+   */
+  const githubGistTemplate = $derived.by<string | null>(() => {
+    if (githubEnvelope === null) return null;
+    return `--whoearns-proof--\n${githubEnvelope.nonceJson}\n--whoearns-proof--\nsignature: <paste base58 signature here>`;
+  });
+
+  async function handleSubmitGithub() {
+    if (githubEnvelope === null) {
+      githubError = 'Generate a signable nonce first.';
+      return;
+    }
+    if (githubInputsDrifted) {
+      githubError =
+        'Username changed after the nonce was generated. Click Regenerate so the signature covers the new value.';
+      return;
+    }
+    const trimmedUrl = githubGistUrl.trim();
+    if (trimmedUrl.length === 0) {
+      githubError = 'Paste your public Gist URL first.';
+      return;
+    }
+    try {
+      // Reject obvious shape errors before the round-trip. The
+      // server (`parseGistUrl`) accepts BOTH the canonical
+      // `gist.github.com/<user>/<id>` and the raw-content
+      // `gist.githubusercontent.com/<user>/<id>/raw` form — operators
+      // who click GitHub's "Raw" button get the latter, so the
+      // client mirrors that acceptance set. `endsWith()` was unsafe
+      // (it would accept `attacker.gist.github.com`); the exact-
+      // hostname `===` check matches the server's regex behaviour.
+      const parsedUrl = new URL(trimmedUrl);
+      if (parsedUrl.protocol !== 'https:') throw new Error('not https');
+      if (
+        parsedUrl.hostname !== 'gist.github.com' &&
+        parsedUrl.hostname !== 'gist.githubusercontent.com'
+      ) {
+        throw new Error('not a gist.github.com URL');
+      }
+    } catch {
+      githubError =
+        'Gist URL must be on https://gist.github.com or https://gist.githubusercontent.com.';
+      return;
+    }
+    githubSubmitting = true;
+    githubError = null;
+    githubSuccess = null;
+    try {
+      const result = await linkGithub({
+        votePubkey: history.vote,
+        identityPubkey: history.identity,
+        // Submit the captured username so the server reconstructs
+        // the canonical nonce from EXACTLY the same bytes the
+        // signature covered. `githubInputsDrifted` check above
+        // already guarantees they agree.
+        githubUsername: githubEnvelope.submittedUsername,
+        gistUrl: trimmedUrl,
+        timestampMs: githubEnvelope.timestampMs,
+      });
+      githubSuccess = `GitHub linked: ${result.link.githubUsername} (expires ${new Date(result.link.expiresAt).toLocaleDateString()})`;
+      // Fold the new link into local status so the read-state shows
+      // the fresh values without a navigation.
+      if (status.claimed) {
+        status = {
+          ...status,
+          githubLink: {
+            githubUsername: result.link.githubUsername,
+            verifiedAt: result.link.verifiedAt,
+            expiresAt: result.link.expiresAt,
+          },
+        };
+      }
+      githubEnvelope = null;
+      githubGistUrl = '';
+    } catch (err) {
+      githubError =
+        err instanceof ApiError
+          ? `${err.code}: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : 'GitHub link failed — try again.';
+    } finally {
+      githubSubmitting = false;
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Operator wallet register ceremony (POST /v1/claims/:vote/wallets)
+  //
+  // Validator identity CLI signature + browser-wallet memo
+  // transaction. The operator signs the canonical nonce ONCE with the
+  // validator identity key via the CLI, then connects a browser
+  // wallet (Wallet Standard) that signs AND sends a memo-only Solana
+  // transaction carrying that exact canonical nonce in its single SPL
+  // Memo instruction. That one transaction replaces the legacy
+  // wallet-key signMessage + separate anchor tx.
+  //
+  // State machine: read (list registered wallets) + draft (connect
+  // wallet, generate nonce, paste identity CLI signature) +
+  // memo-tx (balance gate → build → sign+send → confirm) + submit.
+  // 90-day TTL per wallet; up to 3 per validator.
+  // ──────────────────────────────────────────────────────────────────
+
+  let walletLabelDraft = $state('');
+  // `walletPubkeyDraft` is the CONNECTED wallet's pubkey — set by
+  // `connectOperatorWallet`, never typed by hand. The memo
+  // transaction is signed by the connected wallet, and the backend
+  // verifies that wallet is the signer, so a free-text pubkey field
+  // would only invite a mismatch.
+  let walletPubkeyDraft = $state('');
+  // Captures the inputs that produced the canonical nonce. See the
+  // matching note on `githubEnvelope` above — the body sent at
+  // submit-time is the SAME shape the server reconstructs the
+  // canonical nonce from, so any drift between submit-time inputs
+  // and the captured-at-generate inputs produces a cryptic
+  // `bad_identity_signature` 403. We block on drift.
+  let walletEnvelope = $state<{
+    nonceJson: string;
+    timestampMs: number;
+    expiresAtMs: number;
+    submittedPubkey: string;
+    submittedLabel: string;
+  } | null>(null);
+  let walletIdentitySig = $state('');
+  let walletError = $state<string | null>(null);
+  let walletSuccess = $state<string | null>(null);
+  let walletSubmitting = $state(false);
+  let detectedOperatorWallets = $state<SupportedOperatorWallet[]>([]);
+  let selectedOperatorWalletId = $state<string | null>(null);
+  let walletConnecting = $state(false);
+  let walletConnectError = $state<string | null>(null);
+  // The full connected-wallet handle — carries the Wallet Standard
+  // features needed to sign+send the memo transaction. `null` until
+  // a wallet is connected.
+  let connectedOperatorWallet = $state<ConnectedOperatorWallet | null>(null);
+  const connectedOperatorWalletPubkey = $derived(connectedOperatorWallet?.walletPubkey ?? null);
+  const connectedOperatorWalletName = $derived(connectedOperatorWallet?.wallet.name ?? null);
+  const walletSelection = $derived(
+    createOperatorWalletSelectionState(detectedOperatorWallets, selectedOperatorWalletId),
+  );
+
+  // Memo-transaction lifecycle for the register flow.
+  //   idle         — no memo tx attempted yet
+  //   checking     — fetching the connected wallet's SOL balance
+  //   insufficient — balance below FEE_THRESHOLD_LAMPORTS; blocked
+  //   signing      — memo tx built, waiting on the wallet to sign+send
+  //   confirming   — tx sent, polling for `confirmed` commitment
+  //   timeout      — 30s elapsed without confirmation; recovery offered
+  //   confirmed    — tx reached `confirmed`; ready for API submit
+  //   failed       — balance check / sign / send / RPC error
+  type WalletMemoPhase =
+    | 'idle'
+    | 'checking'
+    | 'insufficient'
+    | 'signing'
+    | 'confirming'
+    | 'timeout'
+    | 'confirmed'
+    | 'failed';
+  let walletMemoPhase = $state<WalletMemoPhase>('idle');
+  let walletMemoSignature = $state<string | null>(null);
+  let walletMemoError = $state<string | null>(null);
+  let walletBalanceLamports = $state<number | null>(null);
+  // Concurrency guard for the memo-tx drivers. The `timeout` phase can
+  // surface a re-check action and a re-send action at the same time;
+  // this flag (held across `runMemoTransaction` / `retryMemoConfirmation`)
+  // makes a racing second invocation a no-op so an in-flight poll can
+  // never be overwritten by a racing re-send.
+  let walletMemoBusy = $state(false);
+
+  // svelte-ignore state_referenced_locally
+  const walletsState = $derived(
+    status.claimed
+      ? status.wallets
+      : { count: 0, capReached: false, oldestExpiresAt: null, entries: [] },
+  );
+
+  const WALLET_NONCE_TTL_MS = 30 * 60 * 1000; // mirrors server DEFAULT_NONCE_TTL_MS
+  const WALLET_LABEL_MAX = 32;
+
+  /**
+   * Enumerate browser wallets via Wallet Standard's `getWallets()`.
+   * Lazily imported — `@wallet-standard/app` reads `window`, so the
+   * chunk is only pulled in client-side. A failure (module missing,
+   * no `window`) degrades to "no wallets detected" rather than
+   * throwing.
+   */
+  async function loadWalletStandardRegistry(): Promise<WalletStandardRegistry | null> {
+    try {
+      const walletStandard = await import('@wallet-standard/app');
+      return walletStandard.getWallets() as unknown as WalletStandardRegistry;
+    } catch {
+      return null;
+    }
+  }
+
+  async function refreshDetectedOperatorWallets() {
+    if (!browser) return;
+    const registry = await loadWalletStandardRegistry();
+    detectedOperatorWallets = registry === null ? [] : discoverSupportedOperatorWallets(registry);
+  }
+
+  $effect(() => {
+    void refreshDetectedOperatorWallets();
+  });
+
+  async function connectOperatorWallet() {
+    walletConnectError = null;
+    walletError = null;
+    walletSuccess = null;
+    const selectedWallet = walletSelection.selectedWallet;
+    if (selectedWallet === null) {
+      walletConnectError =
+        'Install or unlock Phantom, Backpack, or another supported Wallet Standard wallet.';
+      return;
+    }
+
+    walletConnecting = true;
+    connectedOperatorWallet = null;
+    try {
+      const connected = await connectSelectedOperatorWallet(selectedWallet);
+      connectedOperatorWallet = connected;
+      // The connected wallet pubkey IS the operator wallet pubkey —
+      // feed it into the envelope inputs. Any in-flight nonce /
+      // memo-tx state from a previously-connected wallet is stale.
+      walletPubkeyDraft = connected.walletPubkey;
+      walletEnvelope = null;
+      walletIdentitySig = '';
+      resetWalletMemoState();
+      selectedOperatorWalletId = walletSelection.selectedOption?.id ?? selectedOperatorWalletId;
+    } catch (err) {
+      walletConnectError =
+        err instanceof Error
+          ? err.message
+          : 'Wallet connection failed. Unlock the wallet and try again.';
+    } finally {
+      walletConnecting = false;
+    }
+  }
+
+  /**
+   * Canonical wallet nonce JSON. Must match
+   * `canonicaliseOperatorNonce` in
+   * `operator-wallet-verification.service.ts` byte-for-byte — key
+   * order, value shapes, no whitespace. This EXACT string is both
+   * (a) signed by the identity CLI and (b) placed into the memo
+   * instruction the connected wallet sends.
+   */
+  function buildWalletNonceJson(args: {
+    identityPubkey: string;
+    votePubkey: string;
+    walletPubkey: string;
+    label: string;
+    issuedAtMs: number;
+    expiresAtMs: number;
+  }): string {
+    return JSON.stringify({
+      domain: SITE_URL,
+      expiresAtMs: args.expiresAtMs,
+      identityPubkey: args.identityPubkey,
+      issuedAtMs: args.issuedAtMs,
+      label: args.label,
+      purpose: 'wallet-register',
+      votePubkey: args.votePubkey,
+      walletPubkey: args.walletPubkey,
+    });
+  }
+
+  /** Reset every memo-transaction field back to the idle baseline. */
+  function resetWalletMemoState() {
+    walletMemoPhase = 'idle';
+    walletMemoSignature = null;
+    walletMemoError = null;
+    walletBalanceLamports = null;
+  }
+
+  function generateWalletEnvelope() {
+    walletError = null;
+    walletSuccess = null;
+    const wallet = walletPubkeyDraft.trim();
+    const label = walletLabelDraft.trim();
+    // The wallet pubkey is the connected wallet's — `connectedOperatorWallet`
+    // being null means the operator skipped the connect step.
+    if (connectedOperatorWallet === null || wallet.length === 0) {
+      walletError = 'Connect a browser wallet first — its pubkey is the operator wallet.';
+      return;
+    }
+    if (wallet === history.identity || wallet === history.vote) {
+      walletError =
+        'The connected wallet is the validator identity or vote account. Connect a separate operator wallet.';
+      return;
+    }
+    if (label.length === 0) {
+      walletError = 'Enter a short label (max 32 chars) — appears on the activity heatmap.';
+      return;
+    }
+    if (label.length > WALLET_LABEL_MAX) {
+      walletError = `Label must be ${WALLET_LABEL_MAX} characters or fewer.`;
+      return;
+    }
+    // Mirror of the server LabelSchema (`claim-v2.route.ts`) and
+    // migration 0038 — HTML trio + C0/DEL/C1 + invisible/ZW family
+    // + BiDi override + isolate codepoints + BOM.
+    if (
+      // eslint-disable-next-line no-control-regex
+      /[<>`{}\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/.test(label)
+    ) {
+      walletError =
+        'Label cannot contain HTML metacharacters, control characters, or invisible/text-direction codepoints.';
+      return;
+    }
+    if (walletsState.capReached) {
+      walletError = 'This validator has already reached the per-validator wallet cap (3).';
+      return;
+    }
+    const timestampMs = Date.now();
+    const expiresAtMs = timestampMs + WALLET_NONCE_TTL_MS;
+    const nonceJson = buildWalletNonceJson({
+      identityPubkey: history.identity,
+      votePubkey: history.vote,
+      walletPubkey: wallet,
+      label,
+      issuedAtMs: timestampMs,
+      expiresAtMs,
+    });
+    walletEnvelope = {
+      nonceJson,
+      timestampMs,
+      expiresAtMs,
+      submittedPubkey: wallet,
+      submittedLabel: label,
+    };
+    // A new envelope mints a new nonce → the old identity signature
+    // and any prior memo transaction no longer cover it.
+    walletIdentitySig = '';
+    resetWalletMemoState();
+  }
+
+  /**
+   * True when the operator generated an envelope, then changed the
+   * label or reconnected a different wallet. See the matching
+   * `githubInputsDrifted` note.
+   */
+  const walletInputsDrifted = $derived(
+    walletEnvelope !== null &&
+      (walletEnvelope.submittedPubkey !== walletPubkeyDraft.trim() ||
+        walletEnvelope.submittedLabel !== walletLabelDraft.trim()),
+  );
+
+  /**
+   * The single CLI command — the validator identity key signs the
+   * canonical nonce. UNCHANGED from the legacy flow: the identity
+   * key never touches the browser. (The operator-wallet half is now
+   * the browser memo transaction below, not a second CLI command.)
+   */
+  const walletIdentityCli = $derived.by<string | null>(() => {
+    if (walletEnvelope === null) return null;
+    const escaped = walletEnvelope.nonceJson.replace(/'/g, "'\\''");
+    return `solana sign-offchain-message --keypair ~/validator-identity.json '${escaped}'`;
+  });
+
+  /** Lamports rendered as a SOL string for funding guidance. */
+  function lamportsToSol(lamports: number): string {
+    return (lamports / 1_000_000_000).toLocaleString(undefined, { maximumFractionDigits: 9 });
+  }
+
+  /**
+   * Build, sign, send, and confirm the memo transaction. Drives the
+   * `walletMemoPhase` state machine:
+   *   checking → (insufficient | signing) → confirming → (confirmed | timeout)
+   * On timeout the UI offers `retryMemoConfirmation` (re-query the
+   * same signature) and `resignMemoTransaction` (build a fresh one).
+   */
+  async function runMemoTransaction() {
+    // Concurrency guard — a racing call (e.g. the re-send button
+    // clicked while a re-check poll is still in flight) is a no-op.
+    if (walletMemoBusy) return;
+    walletMemoBusy = true;
+    try {
+      await runMemoTransactionInner();
+    } finally {
+      walletMemoBusy = false;
+    }
+  }
+
+  async function runMemoTransactionInner() {
+    walletMemoError = null;
+    walletError = null;
+    walletSuccess = null;
+    if (connectedOperatorWallet === null) {
+      walletMemoError = 'Connect a browser wallet first.';
+      walletMemoPhase = 'failed';
+      return;
+    }
+    if (walletEnvelope === null) {
+      walletMemoError = 'Generate a signable nonce first.';
+      walletMemoPhase = 'failed';
+      return;
+    }
+    if (walletInputsDrifted) {
+      walletMemoError = 'The label or connected wallet changed. Regenerate the nonce first.';
+      walletMemoPhase = 'failed';
+      return;
+    }
+
+    // Fee affordability gate — BEFORE building or sending anything.
+    walletMemoPhase = 'checking';
+    walletMemoSignature = null;
+    let balance: number;
+    try {
+      balance = await getBalanceLamports(connectedOperatorWallet.walletPubkey);
+    } catch (err) {
+      walletMemoError =
+        err instanceof Error ? err.message : 'Could not check the wallet balance. Retry shortly.';
+      walletMemoPhase = 'failed';
+      return;
+    }
+    walletBalanceLamports = balance;
+    if (!canAffordMemoFee(balance)) {
+      // Block: no memo transaction is sent. The operator must fund
+      // the wallet above the fee threshold and retry.
+      walletMemoPhase = 'insufficient';
+      return;
+    }
+
+    await signSendAndConfirmMemo();
+  }
+
+  /**
+   * Build a fresh memo transaction, ask the connected wallet to
+   * sign+send it, then wait up to 30s for `confirmed`. Shared by the
+   * first attempt and the re-sign recovery path.
+   */
+  async function signSendAndConfirmMemo() {
+    if (connectedOperatorWallet === null || walletEnvelope === null) return;
+    walletMemoError = null;
+    walletMemoPhase = 'signing';
+    walletMemoSignature = null;
+    let signature: string;
+    try {
+      const recentBlockhash = await getLatestBlockhash();
+      const transaction = buildMemoTransaction({
+        feePayerPubkey: connectedOperatorWallet.walletPubkey,
+        recentBlockhash,
+        memo: walletEnvelope.nonceJson,
+      });
+      signature = await sendMemoTransaction({ connected: connectedOperatorWallet, transaction });
+    } catch (err) {
+      walletMemoError =
+        err instanceof Error
+          ? err.message
+          : 'The memo transaction could not be signed or sent. Try again.';
+      walletMemoPhase = 'failed';
+      return;
+    }
+    walletMemoSignature = signature;
+    await waitForMemoConfirmation();
+  }
+
+  /**
+   * Poll for `confirmed` commitment on `walletMemoSignature`. Sets
+   * `confirmed` on success and `timeout` after 30s — the timeout
+   * branch keeps the signature so both recovery actions can use it.
+   */
+  async function waitForMemoConfirmation() {
+    if (walletMemoSignature === null) return;
+    walletMemoPhase = 'confirming';
+    walletMemoError = null;
+    try {
+      const confirmed = await awaitMemoTxConfirmation(walletMemoSignature, {
+        timeoutMs: CONFIRM_TIMEOUT_SECONDS * 1000,
+      });
+      walletMemoPhase = confirmed ? 'confirmed' : 'timeout';
+    } catch (err) {
+      // An on-chain failure (the tx landed but errored) — re-signing
+      // is the only recovery, so surface it as a failed phase.
+      walletMemoError =
+        err instanceof Error ? err.message : 'The memo transaction failed on chain.';
+      walletMemoPhase = 'failed';
+    }
+  }
+
+  /**
+   * Timeout recovery #1 — re-query `getSignatureStatuses` for the
+   * SAME memo-tx signature. Handles a merely-slow confirmation.
+   */
+  async function retryMemoConfirmation() {
+    if (walletMemoBusy) return;
+    if (walletMemoSignature === null) {
+      walletMemoError = 'No memo transaction to re-check.';
+      return;
+    }
+    walletMemoBusy = true;
+    try {
+      await waitForMemoConfirmation();
+    } finally {
+      walletMemoBusy = false;
+    }
+  }
+
+  /**
+   * Timeout recovery #2 — build and send a FRESH memo transaction.
+   * Handles a dropped transaction. Re-runs the balance gate too in
+   * case the earlier attempt or another spend changed the balance.
+   */
+  async function resignMemoTransaction() {
+    await runMemoTransaction();
+  }
+
+  async function handleSubmitWallet() {
+    if (walletEnvelope === null) {
+      walletError = 'Generate a signable nonce first.';
+      return;
+    }
+    if (walletInputsDrifted) {
+      walletError =
+        'The label or connected wallet changed after the nonce was generated. Click Regenerate so the proof covers the new values.';
+      return;
+    }
+    const trimmedIdentitySig = walletIdentitySig.trim();
+    if (trimmedIdentitySig.length === 0) {
+      walletError = 'Paste the validator identity-key signature first.';
+      return;
+    }
+    // The memo transaction must have reached `confirmed` — the API
+    // submit is gated on it (a seed constraint).
+    if (walletMemoPhase !== 'confirmed' || walletMemoSignature === null) {
+      walletError = 'Send the memo transaction and wait for it to confirm before registering.';
+      return;
+    }
+    walletSubmitting = true;
+    walletError = null;
+    walletSuccess = null;
+    try {
+      // Submit using the captured-at-generate values, NOT the live
+      // drafts — `walletInputsDrifted` above ensures they agree, but
+      // using the envelope's captured values defensively guarantees
+      // the body bytes match the canonical nonce the server
+      // reconstructs + verifies against.
+      const result = await registerOperatorWallet({
+        votePubkey: history.vote,
+        identityPubkey: history.identity,
+        walletPubkey: walletEnvelope.submittedPubkey,
+        label: walletEnvelope.submittedLabel,
+        timestampMs: walletEnvelope.timestampMs,
+        identitySignatureB58: trimmedIdentitySig,
+        memoTxSignature: walletMemoSignature,
+      });
+      walletSuccess = `Wallet registered: ${result.wallet.walletAddressShort} (${result.wallet.label}). Expires ${new Date(result.wallet.expiresAt).toLocaleDateString()}.`;
+      // Re-fetch the canonical claim status so the new wallet row
+      // picks up its server-issued `walletRef` (the opaque
+      // per-registration token). The write response carries only the
+      // truncated `walletAddressShort` — NOT a ref — so a folded
+      // local entry could not be unregistered until a reload. A fresh
+      // `GET /v1/claims/:vote` gives every entry its `walletRef`,
+      // keeping the just-registered wallet immediately removable.
+      // Resilient: on a re-fetch failure the prior `status` stands
+      // (the register itself still succeeded).
+      if (status.claimed) {
+        try {
+          status = await fetchClaimStatus(history.vote);
+        } catch {
+          // Keep the pre-register status; the operator can reload to
+          // see the new row. The registration is already committed.
+        }
+      }
+      walletEnvelope = null;
+      walletPubkeyDraft = '';
+      walletLabelDraft = '';
+      walletIdentitySig = '';
+      connectedOperatorWallet = null;
+      resetWalletMemoState();
+    } catch (err) {
+      walletError =
+        err instanceof ApiError
+          ? `${err.code}: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : 'Wallet registration failed — try again.';
+    } finally {
+      walletSubmitting = false;
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Operator wallet UNREGISTER ceremony
+  // (DELETE /v1/claims/:vote/wallets/:walletRef)
+  //
+  // Single-signature flow — operator signs an unregister nonce with
+  // their identity key only (the wallet keypair isn't required, see
+  // service docstring for rationale). Removes a previously-registered
+  // wallet so the operator isn't trapped by a typo'd pubkey or a
+  // lost-key wallet sitting in one of the 3 cap slots for 90 days.
+  //
+  // SEC — the wallet is identified by its opaque `walletRef` (the
+  // per-registration token from `wallets.entries[].walletRef`), NOT
+  // its full pubkey. `GET /v1/claims/:vote` no longer surfaces the
+  // full operator-wallet pubkey, so the whole flow — the signed nonce
+  // AND the DELETE URL — keys on the ref. The server resolves it back
+  // to the real pubkey internally.
+  //
+  // The unregister flow is targeted: only one wallet entry is being
+  // unregistered at a time. `unregisterTarget` carries the `walletRef`
+  // the flow is currently scoped to (null = no flow open).
+  // ──────────────────────────────────────────────────────────────────
+
+  let unregisterTarget = $state<string | null>(null);
+  let unregisterEnvelope = $state<{
+    nonceJson: string;
+    timestampMs: number;
+    expiresAtMs: number;
+    walletRef: string;
+  } | null>(null);
+  let unregisterSig = $state('');
+  let unregisterError = $state<string | null>(null);
+  let unregisterSuccess = $state<string | null>(null);
+  let unregisterSubmitting = $state(false);
+
+  function buildUnregisterNonceJson(args: {
+    identityPubkey: string;
+    votePubkey: string;
+    walletRef: string;
+    issuedAtMs: number;
+    expiresAtMs: number;
+  }): string {
+    // Sorted keys — must match `canonicaliseOperatorUnregisterNonce`
+    // in `src/services/operator-wallet-verification.service.ts`
+    // byte-for-byte. `walletRef` sorts last (after `votePubkey`).
+    return JSON.stringify({
+      domain: SITE_URL,
+      expiresAtMs: args.expiresAtMs,
+      identityPubkey: args.identityPubkey,
+      issuedAtMs: args.issuedAtMs,
+      purpose: 'wallet-unregister',
+      votePubkey: args.votePubkey,
+      walletRef: args.walletRef,
+    });
+  }
+
+  function startUnregister(walletRef: string): void {
+    unregisterTarget = walletRef;
+    unregisterEnvelope = null;
+    unregisterSig = '';
+    unregisterError = null;
+    unregisterSuccess = null;
+  }
+
+  function cancelUnregister(): void {
+    unregisterTarget = null;
+    unregisterEnvelope = null;
+    unregisterSig = '';
+    unregisterError = null;
+  }
+
+  function generateUnregisterEnvelope(): void {
+    if (unregisterTarget === null) return;
+    unregisterError = null;
+    unregisterSuccess = null;
+    const timestampMs = Date.now();
+    const expiresAtMs = timestampMs + WALLET_NONCE_TTL_MS;
+    const nonceJson = buildUnregisterNonceJson({
+      identityPubkey: history.identity,
+      votePubkey: history.vote,
+      walletRef: unregisterTarget,
+      issuedAtMs: timestampMs,
+      expiresAtMs,
+    });
+    unregisterEnvelope = {
+      nonceJson,
+      timestampMs,
+      expiresAtMs,
+      walletRef: unregisterTarget,
+    };
+    unregisterSig = '';
+  }
+
+  const unregisterCliCommand = $derived.by<string | null>(() => {
+    if (unregisterEnvelope === null) return null;
+    const escaped = unregisterEnvelope.nonceJson.replace(/'/g, "'\\''");
+    return `solana sign-offchain-message --keypair ~/validator-identity.json '${escaped}'`;
+  });
+
+  async function handleSubmitUnregister(): Promise<void> {
+    if (unregisterTarget === null || unregisterEnvelope === null) {
+      unregisterError = 'Generate a signable nonce first.';
+      return;
+    }
+    const trimmedSig = unregisterSig.trim();
+    if (trimmedSig.length === 0) {
+      unregisterError = 'Paste the identity-key signature first.';
+      return;
+    }
+    unregisterSubmitting = true;
+    unregisterError = null;
+    unregisterSuccess = null;
+    const removedRef = unregisterEnvelope.walletRef;
+    try {
+      const result = await unregisterOperatorWallet(removedRef, {
+        votePubkey: history.vote,
+        identityPubkey: history.identity,
+        timestampMs: unregisterEnvelope.timestampMs,
+        identitySignatureB58: trimmedSig,
+      });
+      // The response carries only the truncated `walletAddressShort`
+      // (`FXfD…PsJ5`) — the full operator-wallet pubkey is never
+      // surfaced by any `/v1/*` response. Surface it in the success
+      // copy; the list entries are dropped by `walletRef` (the stable
+      // opaque key) below.
+      const removedShort = result.unregistered.walletAddressShort;
+      unregisterSuccess = `Wallet ${removedShort} removed.`;
+      // Fold the deletion into local state so the list re-renders
+      // without re-fetching `/v1/claims/:vote`.
+      if (status.claimed) {
+        const entries = status.wallets.entries.filter((e) => e.walletRef !== removedRef);
+        status = {
+          ...status,
+          wallets: {
+            count: entries.length,
+            capReached: entries.length >= 3,
+            oldestExpiresAt: entries.reduce(
+              (acc: string | null, e) => (acc === null || e.expiresAt < acc ? e.expiresAt : acc),
+              null,
+            ),
+            entries,
+          },
+        };
+      }
+      unregisterTarget = null;
+      unregisterEnvelope = null;
+      unregisterSig = '';
+    } catch (err) {
+      unregisterError =
+        err instanceof ApiError
+          ? `${err.code}: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : 'Wallet removal failed — try again.';
+    } finally {
+      unregisterSubmitting = false;
+    }
+  }
 </script>
 
 <svelte:head>
@@ -287,6 +1273,71 @@
   </dl>
 </Card>
 
+<!--
+  Benefit-led card ABOVE the signing ritual. The signing steps below
+  are all crypto mechanics; on their own they read as cost with no
+  visible reward. This card names what an operator actually gains by
+  claiming, each item verified against the hub (`/v/[id]`):
+    - verified badge          → `VerifiedBadge` renders once `claimed`
+    - operator-wallet heatmap → `ActivityHeatmap` per registered wallet
+    - GitHub identity chip     → `githubLink` chip in the hub hero
+    - profile customization    → moniker note / Twitter / narrative
+    - opt-out control          → `optedOut` removes the validator from
+                                 the public dashboard
+  Descriptive voice — what you get, not a sales pitch. Shown in both
+  modes (pre-claim and edit) so the payoff stays visible.
+-->
+<Card class="mt-6">
+  <h2 class="text-base font-semibold">What claiming unlocks</h2>
+  <p class="mt-2 text-sm text-[color:var(--color-text-muted)]">
+    A verified claim turns this read-only profile into one you control:
+  </p>
+  <ul class="mt-3 space-y-2.5 text-sm text-[color:var(--color-text-muted)]">
+    <li class="flex gap-2.5">
+      <VerifiedBadge size={18} />
+      <span>
+        <strong class="font-medium text-[color:var(--color-text-default)]">Verified badge</strong>
+        — your profile and leaderboard rows show the verified mark, signalling the operator stands behind
+        this validator.
+      </span>
+    </li>
+    <li class="flex gap-2.5">
+      <span aria-hidden="true" class="mt-0.5 shrink-0 text-[color:var(--color-brand-500)]">▦</span>
+      <span>
+        <strong class="font-medium text-[color:var(--color-text-default)]"
+          >Operator-wallet activity heatmap</strong
+        >
+        — register up to three operator wallets and surface a year of their on-chain activity on the hub.
+      </span>
+    </li>
+    <li class="flex gap-2.5">
+      <span aria-hidden="true" class="mt-0.5 shrink-0 text-[color:var(--color-brand-500)]">◐</span>
+      <span>
+        <strong class="font-medium text-[color:var(--color-text-default)]"
+          >GitHub-linked identity</strong
+        >
+        — prove a GitHub account via a signed Gist; the hub shows a linked GitHub chip on your identity.
+      </span>
+    </li>
+    <li class="flex gap-2.5">
+      <span aria-hidden="true" class="mt-0.5 shrink-0 text-[color:var(--color-brand-500)]">✎</span>
+      <span>
+        <strong class="font-medium text-[color:var(--color-text-default)]"
+          >Profile customization</strong
+        >
+        — set a Twitter / X handle and a short operator note, and hide the 0base.vc footer on your page.
+      </span>
+    </li>
+    <li class="flex gap-2.5">
+      <span aria-hidden="true" class="mt-0.5 shrink-0 text-[color:var(--color-brand-500)]">⊘</span>
+      <span>
+        <strong class="font-medium text-[color:var(--color-text-default)]">Opt-out control</strong>
+        — remove this validator from the public dashboard if you would rather not be listed.
+      </span>
+    </li>
+  </ul>
+</Card>
+
 {#if !status.claimed}
   <!-- ─────────── First-time claim ─────────── -->
   <Card tone="accent" class="mt-6">
@@ -306,7 +1357,7 @@
       message, sign with your validator identity keypair, and submit.
     </p>
 
-    <div class="mt-5 grid gap-5">
+    <div class="mt-5 grid grid-cols-1 gap-5">
       <label class="block">
         <span
           class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
@@ -412,7 +1463,7 @@
         </p>
         <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
           <pre
-            class="flex-1 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed"><code
+            class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-all"><code
               >{cliCommand}</code
             ></pre>
           <button
@@ -488,16 +1539,676 @@
   {/if}
 </Card>
 
+{#if status.claimed}
+  <!--
+    ─────────── GitHub link (`PUT /v1/claims/:vote/github`) ───────────
+
+    Operator publishes a public Gist on github.com containing the
+    canonical nonce + a base58 Ed25519 signature of it, then submits
+    the Gist URL here. The server fetches the Gist, parses, and
+    verifies — the signature path is identical to the v1 claim, just
+    routed through a public proof artifact (the Gist) so the link
+    survives a domain owner change without server-side credential
+    storage.
+  -->
+  <Card class="mt-6">
+    <div class="flex flex-wrap items-baseline justify-between gap-3">
+      <h2 class="text-base font-semibold">GitHub link</h2>
+      {#if githubLink !== null}
+        {@const exp = formatExpiry(githubLink.expiresAt)}
+        <!--
+          Tone-aware rendering: green check when the link is healthy
+          (>7 days remaining), amber warn when ≤7 days, red strikethrough
+          when expired. The server filters lapsed entries out of the
+          read endpoint, but a stale tab or clock skew can still surface
+          a past-expiry entry — fail visibly rather than silently green.
+        -->
+        <span
+          class="text-xs"
+          class:text-[color:var(--color-status-ok-fg)]={exp.tone === 'ok'}
+          class:text-[color:var(--color-status-warn-fg)]={exp.tone === 'warn'}
+          class:text-red-600={exp.tone === 'expired'}
+          class:dark:text-red-400={exp.tone === 'expired'}
+        >
+          {exp.tone === 'expired' ? '⚠' : '✓'}
+          {githubLink.githubUsername} · {exp.label}
+        </span>
+      {/if}
+    </div>
+    <p class="mt-2 text-sm text-[color:var(--color-text-muted)]">
+      Link your operator's GitHub username via a public Gist signed with your validator identity
+      keypair. Surfaces on this validator's hub as a verified-account chip and powers the governance
+      half of the Operator Activity Index.
+    </p>
+
+    <div class="mt-5 grid grid-cols-1 gap-4">
+      <label class="block">
+        <span
+          class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+        >
+          GitHub username
+        </span>
+        <input
+          type="text"
+          bind:value={githubUsernameDraft}
+          placeholder="alice"
+          maxlength={39}
+          autocomplete="off"
+          spellcheck="false"
+          class="mt-1 w-full max-w-sm rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 font-mono text-base sm:text-sm"
+        />
+        <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
+          Letters, digits, hyphens. Same casing as your GitHub profile URL.
+        </p>
+      </label>
+
+      <button
+        type="button"
+        onclick={generateGithubEnvelope}
+        class="inline-flex min-h-11 w-fit items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1.5 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-500)] hover:text-white"
+      >
+        {githubEnvelope === null ? 'Generate signable nonce' : 'Regenerate'}
+      </button>
+
+      {#if githubEnvelope !== null && githubCliCommand !== null && githubGistTemplate !== null}
+        <div class="grid grid-cols-1 gap-4">
+          <div>
+            <p
+              class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+            >
+              Step 1 · Sign on your validator box
+            </p>
+            <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
+              <pre
+                class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-all"><code
+                  >{githubCliCommand}</code
+                ></pre>
+              <button
+                type="button"
+                onclick={() => copyToClipboard(githubCliCommand)}
+                class="inline-flex min-h-11 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <p
+              class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+            >
+              Step 2 · Publish a public Gist on github.com with this exact body
+            </p>
+            <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
+              <pre
+                class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-all"><code
+                  >{githubGistTemplate}</code
+                ></pre>
+              <button
+                type="button"
+                onclick={() => copyToClipboard(githubGistTemplate)}
+                class="inline-flex min-h-11 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+              >
+                Copy
+              </button>
+            </div>
+            <p class="mt-1.5 text-xs text-[color:var(--color-text-subtle)]">
+              Replace the signature placeholder with the base58 string the CLI printed in Step 1.
+              The Gist file extension does not matter; the body must contain the canonical nonce
+              JSON between two literal
+              <code class="font-mono">--whoearns-proof--</code> lines, followed by
+              <code class="font-mono">signature:</code> and the base58 signature.
+            </p>
+          </div>
+
+          <label class="block">
+            <span
+              class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+            >
+              Step 3 · Paste the Gist URL
+            </span>
+            <input
+              type="url"
+              bind:value={githubGistUrl}
+              placeholder="https://gist.github.com/alice/abc123…"
+              class="mt-1 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 font-mono text-base sm:text-sm"
+            />
+            <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
+              Nonce expires in ~{Math.max(
+                0,
+                Math.floor((githubEnvelope.expiresAtMs - nowMs) / 60_000),
+              )} minutes.
+            </p>
+          </label>
+
+          {#if githubInputsDrifted}
+            <p
+              role="alert"
+              class="rounded-md border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-xs text-[color:var(--color-status-warn-fg)]"
+            >
+              Username changed. The current signature covers
+              <code class="font-mono">{githubEnvelope.submittedUsername}</code> — click Regenerate above
+              to mint a fresh nonce for the new value.
+            </p>
+          {/if}
+          <button
+            type="button"
+            onclick={handleSubmitGithub}
+            disabled={githubSubmitting || githubGistUrl.trim().length === 0 || githubInputsDrifted}
+            class="min-h-11 w-full rounded-lg bg-[color:var(--color-brand-500)] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[color:var(--color-brand-600)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {githubSubmitting ? 'Verifying Gist…' : 'Link GitHub'}
+          </button>
+        </div>
+      {/if}
+
+      {#if githubError}
+        <div
+          role="alert"
+          class="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-300"
+        >
+          {githubError}
+        </div>
+      {/if}
+      {#if githubSuccess}
+        <div
+          role="status"
+          class="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300"
+        >
+          {githubSuccess}
+        </div>
+      {/if}
+    </div>
+  </Card>
+
+  <!--
+    ─────────── Operator wallet register (`POST /v1/claims/:vote/wallets`) ───────────
+
+    Dual-signature ceremony — the SAME canonical nonce is signed by
+    both the validator identity key and the wallet key, plus an
+    "anchor tx signature" the wallet has previously emitted (proves
+    the wallet keypair holder controls a working on-chain wallet).
+    Up to 3 wallets per validator; 90-day TTL per registration.
+  -->
+  <Card class="mt-6">
+    <div class="flex flex-wrap items-baseline justify-between gap-3">
+      <h2 class="text-base font-semibold">Operator wallets</h2>
+      <span class="text-xs text-[color:var(--color-text-muted)]">
+        {walletsState.count} / 3 registered
+      </span>
+    </div>
+    <p class="mt-2 text-sm text-[color:var(--color-text-muted)]">
+      Link wallets your operator controls so their on-chain activity powers the wallet half of the
+      Operator Activity Index. Each registration is good for 90 days; up to 3 wallets per validator.
+      Wallets MUST differ from the validator's identity and vote pubkeys.
+    </p>
+
+    {#if walletsState.entries.length > 0}
+      <!--
+        Sorted ascending by expiry so the wallet that ages out FIRST
+        is at the top of the list — when the operator is cap-reached,
+        the soonest-to-expire is the one they're waiting on. Tone-
+        coded same as the GitHub link badge: ok / warn (≤7d) /
+        expired (past).
+      -->
+      {@const sortedWallets = [...walletsState.entries].sort((a, b) =>
+        a.expiresAt < b.expiresAt ? -1 : a.expiresAt > b.expiresAt ? 1 : 0,
+      )}
+      <ul
+        class="mt-4 divide-y divide-[color:var(--color-border-default)] rounded-lg border border-[color:var(--color-border-default)]"
+      >
+        {#each sortedWallets as entry (entry.walletRef)}
+          {@const exp = formatExpiry(entry.expiresAt)}
+          <li class="flex flex-col gap-2 px-3 py-2">
+            <div class="flex flex-wrap items-baseline justify-between gap-2">
+              <div class="min-w-0">
+                <div class="text-sm font-semibold">{entry.label}</div>
+                <!--
+                  Display-only truncated address. `GET /v1/claims/:vote`
+                  no longer surfaces the full operator-wallet pubkey;
+                  `walletAddressShort` is the `FXfD…PsJ5` form.
+                -->
+                <div class="font-mono text-[11px] text-[color:var(--color-text-subtle)]">
+                  {entry.walletAddressShort}
+                </div>
+              </div>
+              <div class="flex items-center gap-3">
+                <div
+                  class="text-xs"
+                  class:text-[color:var(--color-text-muted)]={exp.tone === 'ok'}
+                  class:text-[color:var(--color-status-warn-fg)]={exp.tone === 'warn'}
+                  class:text-red-600={exp.tone === 'expired'}
+                  class:dark:text-red-400={exp.tone === 'expired'}
+                >
+                  {exp.label}
+                </div>
+                <!--
+                  Remove button — opens an inline single-signature
+                  removal flow scoped to THIS wallet entry. Closes
+                  any in-progress removal for a different wallet
+                  (only one removal can be in flight at a time).
+                -->
+                {#if unregisterTarget === entry.walletRef}
+                  <button
+                    type="button"
+                    onclick={cancelUnregister}
+                    class="text-xs text-[color:var(--color-text-muted)] hover:text-[color:var(--color-text-default)]"
+                  >
+                    Cancel
+                  </button>
+                {:else}
+                  <button
+                    type="button"
+                    onclick={() => startUnregister(entry.walletRef)}
+                    class="text-xs text-red-600 hover:underline dark:text-red-400"
+                  >
+                    Remove
+                  </button>
+                {/if}
+              </div>
+            </div>
+
+            {#if unregisterTarget === entry.walletRef}
+              <!--
+                Inline single-signature removal flow.
+
+                Step 1: Generate signable nonce + render CLI command.
+                Step 2: Operator pastes the base58 signature.
+                Step 3: Submit; on success the entry disappears from
+                the list (folded into local status).
+
+                Scoped inside the targeted `<li>` so the operator
+                can see exactly which wallet they're removing.
+              -->
+              <div
+                class="mt-1 rounded-md border border-red-500/30 bg-red-500/5 p-3 dark:bg-red-500/10"
+              >
+                <p class="text-xs text-[color:var(--color-text-muted)]">
+                  Removing this wallet sends a single
+                  <code class="font-mono">DELETE</code> with your identity-key signature — the wallet
+                  keypair is NOT required. The wallet's row + its slot in the 3-wallet cap are released
+                  immediately on success.
+                </p>
+                <button
+                  type="button"
+                  onclick={generateUnregisterEnvelope}
+                  class="mt-2 inline-flex min-h-9 items-center rounded-lg border border-red-500/60 px-3 py-1 text-xs font-semibold text-red-600 transition-colors hover:bg-red-500 hover:text-white dark:text-red-400"
+                >
+                  {unregisterEnvelope === null ? 'Generate signable nonce' : 'Regenerate'}
+                </button>
+                {#if unregisterCliCommand !== null}
+                  <div class="mt-3 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
+                    <pre
+                      class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-all"><code
+                        >{unregisterCliCommand}</code
+                      ></pre>
+                    <button
+                      type="button"
+                      onclick={() => copyToClipboard(unregisterCliCommand)}
+                      class="inline-flex min-h-9 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <textarea
+                    bind:value={unregisterSig}
+                    rows={2}
+                    placeholder="Paste identity-key base58 signature"
+                    class="mt-2 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-3 font-mono text-base sm:text-xs"
+                  ></textarea>
+                  <button
+                    type="button"
+                    onclick={handleSubmitUnregister}
+                    disabled={unregisterSubmitting || unregisterSig.trim().length === 0}
+                    class="mt-2 min-h-9 w-full rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {unregisterSubmitting ? 'Removing…' : 'Remove wallet'}
+                  </button>
+                {/if}
+                {#if unregisterError}
+                  <div
+                    role="alert"
+                    class="mt-2 rounded-lg border border-red-500/40 bg-red-500/10 p-2 text-xs text-red-700 dark:text-red-300"
+                  >
+                    {unregisterError}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+      {#if unregisterSuccess}
+        <div
+          role="status"
+          class="mt-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300"
+        >
+          {unregisterSuccess}
+        </div>
+      {/if}
+    {/if}
+
+    {#if !walletsState.capReached}
+      <div class="mt-5 grid grid-cols-1 gap-4">
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+          <label class="block">
+            <span
+              class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+            >
+              Browser wallet
+            </span>
+            <select
+              value={walletSelection.selectedOption?.id ?? ''}
+              onchange={(event) => {
+                selectedOperatorWalletId = event.currentTarget.value;
+              }}
+              disabled={detectedOperatorWallets.length === 0 || walletConnecting}
+              class="mt-1 min-h-11 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-base sm:text-sm disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {#if detectedOperatorWallets.length === 0}
+                <option value="">No supported wallet detected</option>
+              {:else}
+                {#each walletSelection.options as option (option.id)}
+                  <option value={option.id}>{option.label} ({option.detail})</option>
+                {/each}
+              {/if}
+            </select>
+          </label>
+          <button
+            type="button"
+            onclick={connectOperatorWallet}
+            disabled={walletConnecting || walletSelection.selectedWallet === null}
+            class="inline-flex min-h-11 items-center justify-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1.5 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-500)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {walletConnecting ? 'Connecting…' : 'Connect wallet'}
+          </button>
+        </div>
+        {#if walletConnectError}
+          <p
+            role="alert"
+            class="rounded-md border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-xs text-[color:var(--color-status-warn-fg)]"
+          >
+            {walletConnectError}
+          </p>
+        {/if}
+        <OperatorWalletConnectionStatus
+          connecting={walletConnecting}
+          walletName={connectedOperatorWalletName ?? walletSelection.selectedOption?.label ?? null}
+          walletPubkey={connectedOperatorWalletPubkey}
+        />
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div class="block">
+            <span
+              class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+            >
+              Operator wallet pubkey
+            </span>
+            <p
+              class="mt-1 min-h-11 break-all rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] px-3 py-2 font-mono text-base sm:text-xs"
+              data-testid="operator-wallet-pubkey"
+            >
+              {connectedOperatorWalletPubkey ?? 'Connect a browser wallet above'}
+            </p>
+          </div>
+          <label class="block">
+            <span
+              class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+            >
+              Label
+            </span>
+            <input
+              type="text"
+              bind:value={walletLabelDraft}
+              placeholder="e.g. fee payer"
+              maxlength={WALLET_LABEL_MAX}
+              class="mt-1 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-base sm:text-sm"
+            />
+          </label>
+        </div>
+
+        <button
+          type="button"
+          onclick={generateWalletEnvelope}
+          disabled={connectedOperatorWalletPubkey === null}
+          class="inline-flex min-h-11 w-fit items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1.5 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-500)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {walletEnvelope === null ? 'Generate signable nonce' : 'Regenerate'}
+        </button>
+
+        {#if walletEnvelope !== null && walletIdentityCli !== null}
+          <div class="grid grid-cols-1 gap-4">
+            <div>
+              <p
+                class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+              >
+                Step 1 · Sign with the validator identity key
+              </p>
+              <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
+                Run this in your shell — the identity key never touches the browser.
+              </p>
+              <div class="mt-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
+                <pre
+                  class="flex-1 min-w-0 overflow-x-auto rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-all"><code
+                    >{walletIdentityCli}</code
+                  ></pre>
+                <button
+                  type="button"
+                  onclick={() => copyToClipboard(walletIdentityCli)}
+                  class="inline-flex min-h-11 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+                >
+                  Copy
+                </button>
+              </div>
+              <textarea
+                bind:value={walletIdentitySig}
+                rows={2}
+                placeholder="Paste identity-key base58 signature"
+                class="mt-2 w-full rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-3 font-mono text-base sm:text-xs"
+              ></textarea>
+            </div>
+
+            <div data-testid="operator-wallet-memo-step">
+              <p
+                class="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-text-muted)]"
+              >
+                Step 2 · Send the memo transaction from your connected wallet
+              </p>
+              <p class="mt-1 text-xs text-[color:var(--color-text-subtle)]">
+                Your connected wallet signs and sends a memo-only Solana transaction carrying this
+                exact nonce. Network fee is ~0.000005 SOL (one signature). Nonce expires in ~{Math.max(
+                  0,
+                  Math.floor((walletEnvelope.expiresAtMs - nowMs) / 60_000),
+                )} minutes.
+              </p>
+
+              {#if walletInputsDrifted}
+                <p
+                  role="alert"
+                  class="mt-2 rounded-md border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-xs text-[color:var(--color-status-warn-fg)]"
+                >
+                  The label or connected wallet changed. The current nonce covers
+                  <code class="font-mono"
+                    >{shortenPubkey(walletEnvelope.submittedPubkey, 4, 4)}</code
+                  >
+                  / <code class="font-mono">{walletEnvelope.submittedLabel}</code> — click Regenerate
+                  above to mint a fresh nonce for the new values.
+                </p>
+              {/if}
+
+              {#if walletMemoPhase === 'insufficient'}
+                <div
+                  role="alert"
+                  data-testid="operator-wallet-insufficient-funds"
+                  class="mt-2 rounded-md border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-xs text-[color:var(--color-status-warn-fg)]"
+                >
+                  <p class="font-semibold">Not enough SOL to send the memo transaction.</p>
+                  <p class="mt-1">
+                    The connected wallet holds
+                    {walletBalanceLamports === null
+                      ? 'too little SOL'
+                      : `${lamportsToSol(walletBalanceLamports)} SOL`}, below the
+                    {lamportsToSol(FEE_THRESHOLD_LAMPORTS)} SOL needed (5000-lamport base fee + a 5000-lamport
+                    buffer). Fund this wallet, then check the balance again.
+                  </p>
+                </div>
+              {:else if walletMemoPhase === 'signing'}
+                <p
+                  role="status"
+                  class="mt-2 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] px-3 py-2 text-xs text-[color:var(--color-text-subtle)]"
+                >
+                  Approve the memo transaction in your wallet…
+                </p>
+              {:else if walletMemoPhase === 'confirming'}
+                <p
+                  role="status"
+                  data-testid="operator-wallet-confirming"
+                  class="mt-2 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] px-3 py-2 text-xs text-[color:var(--color-text-subtle)]"
+                >
+                  Confirming the memo transaction on chain (up to {CONFIRM_TIMEOUT_SECONDS}s)…
+                </p>
+              {:else if walletMemoPhase === 'timeout'}
+                <div
+                  role="alert"
+                  data-testid="operator-wallet-confirm-timeout"
+                  class="mt-2 rounded-md border border-[color:var(--color-status-warn-fg)]/40 bg-[color:var(--color-status-warn-bg)] px-3 py-2 text-xs text-[color:var(--color-status-warn-fg)]"
+                >
+                  <p class="font-semibold">
+                    The memo transaction has not confirmed within {CONFIRM_TIMEOUT_SECONDS}s.
+                  </p>
+                  <p class="mt-1">
+                    It may just be slow — check again — or it may have been dropped — re-sign a
+                    fresh one.
+                  </p>
+                  <div class="mt-2 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      data-testid="operator-wallet-confirm-retry"
+                      onclick={retryMemoConfirmation}
+                      class="inline-flex min-h-9 items-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-semibold hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+                    >
+                      Check confirmation again
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="operator-wallet-resign"
+                      onclick={resignMemoTransaction}
+                      class="inline-flex min-h-9 items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1 text-xs font-semibold text-[color:var(--color-brand-500)] hover:bg-[color:var(--color-brand-500)] hover:text-white"
+                    >
+                      Re-sign a new memo transaction
+                    </button>
+                  </div>
+                </div>
+              {:else if walletMemoPhase === 'confirmed'}
+                <p
+                  role="status"
+                  data-testid="operator-wallet-confirmed"
+                  class="mt-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300"
+                >
+                  Memo transaction confirmed.
+                  {#if walletMemoSignature}
+                    <span class="font-mono">{shortenPubkey(walletMemoSignature, 6, 6)}</span>
+                  {/if}
+                </p>
+              {:else if walletMemoPhase === 'failed' && walletMemoError}
+                <p
+                  role="alert"
+                  class="mt-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300"
+                >
+                  {walletMemoError}
+                </p>
+              {/if}
+
+              {#if walletMemoPhase !== 'confirmed'}
+                <button
+                  type="button"
+                  data-testid="operator-wallet-send-memo"
+                  onclick={runMemoTransaction}
+                  disabled={walletConnecting ||
+                    walletInputsDrifted ||
+                    walletMemoBusy ||
+                    walletMemoPhase === 'checking' ||
+                    walletMemoPhase === 'signing' ||
+                    walletMemoPhase === 'confirming'}
+                  class="mt-2 inline-flex min-h-11 w-fit items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1.5 text-sm font-semibold text-[color:var(--color-brand-500)] transition-colors hover:bg-[color:var(--color-brand-500)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {#if walletMemoPhase === 'checking'}
+                    Checking wallet balance…
+                  {:else if walletMemoPhase === 'signing' || walletMemoPhase === 'confirming'}
+                    Working…
+                  {:else if walletMemoPhase === 'insufficient'}
+                    Check balance again
+                  {:else if walletMemoPhase === 'timeout' || walletMemoPhase === 'failed'}
+                    Re-send memo transaction
+                  {:else}
+                    Send memo transaction
+                  {/if}
+                </button>
+              {/if}
+            </div>
+
+            <button
+              type="button"
+              onclick={handleSubmitWallet}
+              disabled={walletSubmitting ||
+                walletIdentitySig.trim().length === 0 ||
+                walletMemoPhase !== 'confirmed' ||
+                walletInputsDrifted}
+              class="min-h-11 w-full rounded-lg bg-[color:var(--color-brand-500)] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[color:var(--color-brand-600)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {walletSubmitting ? 'Registering…' : 'Register wallet'}
+            </button>
+          </div>
+        {/if}
+      </div>
+    {:else}
+      <p class="mt-4 text-sm text-[color:var(--color-text-muted)]">
+        This validator has reached the 3-wallet cap. Existing entries expire on a 90-day rolling
+        window — once the oldest entry expires you can register another. If you registered an
+        incorrect wallet by mistake, click <strong>Remove</strong> on the offending entry above to free
+        the slot immediately.
+      </p>
+    {/if}
+
+    <!--
+      Error / success banners live OUTSIDE the `!capReached` branch.
+      The pattern mirrors the v1 claim Card's comment at line ~877:
+      on a successful 3rd wallet register, `status.wallets.capReached`
+      flips true, the draft form tears down, and a banner placed
+      inside the form would be torn down with it — the operator
+      never sees confirmation of the very registration they just
+      completed. Banners outside the branch always render regardless
+      of mode.
+    -->
+    {#if walletError}
+      <div
+        role="alert"
+        class="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-300"
+      >
+        {walletError}
+      </div>
+    {/if}
+    {#if walletSuccess}
+      <div
+        role="status"
+        class="mt-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300"
+      >
+        {walletSuccess}
+      </div>
+    {/if}
+  </Card>
+{/if}
+
+<!--
+  Mechanics + security framing. The "what you gain" framing now lives
+  in the benefit card above the form; this card is intentionally the
+  how-and-why-it's-safe explanation that complements it.
+-->
 <Card class="mt-6">
-  <h2 class="text-base font-semibold">What does claiming do?</h2>
+  <h2 class="text-base font-semibold">How claiming works</h2>
   <ul class="mt-2 list-disc space-y-1 pl-6 text-sm text-[color:var(--color-text-muted)]">
     <li>
       Proves you control the validator's identity keypair (the one Solana's
       <code class="font-mono">getVoteAccounts</code> reports for this vote).
-    </li>
-    <li>
-      Unlocks profile editing: Twitter handle, hiding the 0base.vc footer on your page, opting out
-      of the public dashboard.
     </li>
     <li>
       Doesn't change anything on-chain. No transactions, no gas, no token approvals. Just a

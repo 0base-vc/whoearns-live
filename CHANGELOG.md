@@ -18,6 +18,39 @@ and this project follows [Semantic Versioning](https://semver.org/).
   Solana block data, not AI-written summaries.
 - Block-level slot facts for watched validator leader slots and
   `GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots` for AI/X analysis.
+- Validator profile gamification (Phases 0-6, see `docs/scoring.md`):
+  - **Node Tier** composite — `forge` / `anvil` / `hearth` / `kindling` /
+    `unrated` — from pessimistic block-production reliability (Wilson
+    upper bound on skip rate) blended with an economic-percentile rank
+    against the indexed cohort (`PERCENT_RANK()` of median per-leader-
+    slot income across a 5-closed-epoch window), served at
+    `GET /v1/validators/:idOrVote/tier` and bundled with the tenure /
+    client badges at `GET /v1/validators/:idOrVote/badges`. Capped at
+    `kindling` when `skip_rate > 0.20` regardless of economic percentile.
+  - **Tenure landmarks** (Mainnet-beta launch, Cycle 1 OG, Cross-chain era,
+    DeFi 2, Pre-FTX, Jito v2, Firedancer launch) and **client kind**
+    classification (Agave / Jito-Solana / Firedancer / Frankendancer /
+    Paladin / Sig / Unknown) on the badges payload.
+  - **Operator claim flow** (Ed25519 sign-over-nonce + Keybase-style
+    GitHub Gist verification + operator-wallet registration), exposed
+    as `GET /v1/claims/:vote`, `PUT /v1/claims/:vote/verify`,
+    `PUT /v1/claims/:vote/profile`, `PUT /v1/claims/:vote/github`,
+    `POST /v1/claims/:vote/wallets`, plus an append-only forensic audit
+    log at `GET /v1/claims/:vote/audit`.
+  - **Wallet daily activity** for registered operator wallets — a
+    heatmap and 365-day series at
+    `GET /v1/operator-wallets/:wallet/activity`, with the parent
+    resource at `GET /v1/operator-wallets/:wallet`.
+  - **AI-curated SIMD proposals feed** with reviewer attestation at
+    `GET /v1/simd-proposals`.
+  - **Operator Activity Index** (governance + wallet half blended 50/50)
+    at `GET /v1/validators/:idOrVote/operator-activity-index`.
+  - **Aggregate scoring bundle** at `GET /v1/validators/:idOrVote/scoring`
+    — the profile-page one round-trip returning tier, tenure, client,
+    and OAI together. Additive; the granular routes above remain
+    available.
+- MCP tools `get_validator_tier` and `get_validator_badges` mirroring
+  the public HTTP surface.
 
 ### Changed
 
@@ -34,6 +67,69 @@ and this project follows [Semantic Versioning](https://semver.org/).
   `docs/migrations/`, removed the Korean deployment-era API note, and
   aligned architecture/roadmap/OpenAPI wording with the current ingestion
   model.
+- **BREAKING** — `/v1/claim/*` (Phase 3) restructured to RESTful
+  `/v1/claims/*`: paths AND methods changed (`PUT` for the idempotent
+  verify / profile / GitHub-link mutations, `POST /v1/claims/:vote/wallets`
+  for the wallet append). No back-compat aliases. The first-party
+  SvelteKit UI is the only consumer and ships in the same deployment
+  image, so the rename is atomic.
+- Node Tier math corrected (`docs/scoring.md`): the SIMD-0033 max-credit
+  constant is now `16` (was `8`); the TVC denominator is cluster-relative
+  (`slotsAssigned × SOLANA_SLOTS_PER_EPOCH × 16`), not own-leader-slot
+  count, so the ratio no longer saturates to 1.0 cluster-wide; the
+  Wilson interval is consumed at its _upper_ skip-rate bound so
+  reliability is the _pessimistic_ lower bound (small samples no longer
+  inflate to 1.0).
+- Operator Activity Index partial-release honesty: while the GitHub
+  Discussions ingest is inactive `governance.score` and `composite`
+  return `null` ("unknown"), not `0`, with sub-component counts and
+  `walletScore` still populated. A top-level
+  `ingestStatus.{governanceIngestActive, walletFeesIngestActive}` block
+  self-documents the partial state.
+- Closed a seven-expert adversarial review of the gamification surface:
+  6 BLOCKER-class items, 22 HIGH, ~52 MED, and the LOW backlog are all
+  resolved across the hardening commits on this branch.
+- **BREAKING** — Node Tier (`/v1/validators/:idOrVote/tier` and the
+  `tier` block of `/v1/validators/:idOrVote/scoring`) drops the
+  vote-credits half of the composite entirely. Vote-credit accrual
+  is operator-controlled (client mods, vote-tx send-side patches,
+  networking proximity) and therefore reflects capital + engineering
+  investment more than service quality to delegators, so it is no
+  longer a public delegation signal. The new composite is
+  `0.3 × reliability + 0.7 × economicPercentile`, where
+  `economicPercentile` is the cohort rank of this validator's median
+  per-leader-slot income across the 5-epoch window — both halves are
+  on-chain-signed facts the validator cannot inflate. Response shape
+  changes: `window.voteCredits` / `window.maxCredits` /
+  `window.voteCreditsUpdatedAt` are gone, replaced by
+  `window.economicCohortSize` / `window.economicMeasuredEpochs` /
+  `window.economicMedianLamportsPerSlot` / `window.incomeFreshness`.
+  `components.tvcRatio` / `components.wilsonSkipRate` are replaced
+  by `components.reliability` / `components.economicPercentile`.
+  Tier cutoffs (95 / 80 / 40) are unchanged. Full rationale in
+  `docs/scoring.md` Phase 1, "Why no vote credits".
+- **BREAKING** — MCP tools `get_validator_tier` and
+  `get_validator_badges` shape changed in lockstep with the HTTP
+  tier; the MCP `tier` payload now carries the same
+  `window.economicCohortSize` / `economicMeasuredEpochs` /
+  `economicMedianLamportsPerSlot` / `incomeFreshness` /
+  `cohortAsOfEpoch` fields and the same
+  `components.reliability` / `components.economicPercentile` shape
+  as the HTTP route.
+- **BREAKING** — New cohort floors: validators with fewer than 4
+  measured closed epochs (was 3), or in a cohort of fewer than 10
+  peers, drop to `unrated` until the cohort matures. Production
+  validators that were previously classified may temporarily appear
+  unrated after the deploy until the income ingester has run for at
+  least 4 closed epochs across ≥10 indexed peers. A new hard
+  reliability floor caps the tier at `kindling` when
+  `skip_rate > 0.20` regardless of economic percentile.
+- **BREAKING** — New `window.cohortAsOfEpoch` field on the `/tier`
+  response (and the embedded `tier` block of `/scoring`) surfaces
+  the `{fromEpoch, toEpoch}` closed-epoch range the cohort was
+  sampled over (`null` when the window had no closed-epoch data),
+  so a consumer can detect when a cached tier may be out of step
+  with a freshly-fetched leaderboard.
 
 ## [0.3.0] - 2026-04-29
 

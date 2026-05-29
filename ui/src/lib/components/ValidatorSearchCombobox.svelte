@@ -2,6 +2,7 @@
   import { searchValidators } from '$lib/api';
   import { shortenPubkey } from '$lib/format';
   import type { ValidatorSearchItem } from '$lib/types';
+  import { safeOperatorUrl } from '$lib/url-safety';
   import VerifiedBadge from './VerifiedBadge.svelte';
 
   interface Props {
@@ -178,6 +179,15 @@
         </div>
       {:else}
         {#each items as item, i (item.vote)}
+          <!--
+            Operator-supplied `iconUrl` passes through the same
+            `safeOperatorUrl` gate as the hub + income page:
+            HTTPS-only, no userinfo, no IP / bare-hostname. The
+            dropdown was the last consumer rendering this URL
+            without the gate, breaking the "canonical gate"
+            claim in `$lib/url-safety.ts`'s docstring.
+          -->
+          {@const safeIcon = safeOperatorUrl(item.iconUrl)}
           <button
             id={`${id}-option-${i}`}
             type="button"
@@ -189,9 +199,9 @@
             onmousedown={(event) => event.preventDefault()}
             onclick={() => choose(item)}
           >
-            {#if item.iconUrl}
+            {#if safeIcon}
               <img
-                src={item.iconUrl}
+                src={safeIcon}
                 alt=""
                 class="h-7 w-7 shrink-0 rounded-md border border-[color:var(--color-border-default)] object-cover"
                 loading="lazy"

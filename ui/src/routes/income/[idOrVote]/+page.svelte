@@ -29,7 +29,7 @@
 -->
 <script lang="ts">
   import type { PageData } from './$types';
-  import type { ValidatorEpochRecord } from '$lib/types';
+  import type { NodeTier, ValidatorEpochRecord } from '$lib/types';
   import {
     formatNumberOrDash,
     formatSkipRate,
@@ -39,13 +39,16 @@
   } from '$lib/format';
 
   import IncomeChartLoader from '$lib/components/IncomeChartLoader.svelte';
+  import ComputeUnitsChartLoader from '$lib/components/ComputeUnitsChartLoader.svelte';
   import Card from '$lib/components/Card.svelte';
   import AddressDisplay from '$lib/components/AddressDisplay.svelte';
-  import EllipsisAddress from '$lib/components/EllipsisAddress.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
+  import TierBadge from '$lib/components/TierBadge.svelte';
+  import ShareWidget from '$lib/components/ShareWidget.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { serializeJsonLd } from '$lib/json-ld';
   import { SITE_NAME, SITE_URL } from '$lib/site';
+  import { safeOperatorUrl } from '$lib/url-safety';
 
   // Per-row decimal counts in the epoch-history table. Fixed-
   // precision SOL renders so decimal points line up across rows —
@@ -54,21 +57,92 @@
   // rationale behind the specific counts.
   const HISTORY_PER_EPOCH_DECIMALS = 3;
 
-  const LAST_MONTH_EPOCHS = 16;
-
-  function safeHttpUrl(raw: string | null | undefined): string | null {
-    if (raw === null || raw === undefined) return null;
-    try {
-      const url = new URL(raw);
-      return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
-    } catch {
-      return null;
-    }
+  /**
+   * Average compute units per produced block for one epoch row. CU
+   * runs to tens of millions, so render a one-decimal "M" suffix to
+   * keep the table cell scannable (matching the leaderboard's CU
+   * column). "—" when the epoch produced no blocks (null CU).
+   */
+  function epochCuText(cu: string | null): string {
+    if (cu === null) return '—';
+    const n = Number(cu);
+    if (!Number.isFinite(n)) return '—';
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    return new Intl.NumberFormat('en').format(n);
   }
+
+  const LAST_MONTH_EPOCHS = 16;
 
   let { data }: { data: PageData } = $props();
 
   const history = $derived(data.history);
+  /**
+   * Best-effort tier surface for the cross-link strip below the
+   * breadcrumb. `null` when:
+   *   - the validator has no scoring yet (unrated / sample too thin),
+   *   - the operator opted out of the gamification surface, or
+   *   - the `/scoring` endpoint 404s for any other reason.
+   * Income page renders fine without it; the strip just collapses.
+   */
+  const scoring = $derived(data.scoring);
+
+  /**
+   * Tier-name in plain English for the cross-link strip. Mirrors the
+   * `tierLabel` map inside `TierBadge`'s aria-label, capitalised so
+   * it reads as a proper noun in the strip ("Forge tier · …").
+   */
+  const tierName = $derived.by<string | null>(() => {
+    if (scoring === null) return null;
+    const map: Record<NodeTier, string> = {
+      forge: 'Forge',
+      anvil: 'Anvil',
+      hearth: 'Hearth',
+      kindling: 'Kindling',
+      unrated: 'Unrated',
+    };
+    return map[scoring.tier.tier];
+  });
+
+  /**
+   * On-chain vote-account commission (integer 0–100) for the income
+   * hero. Sourced from the already-loaded `/scoring` payload's tier
+   * window — no extra fetch. `null` when scoring is unavailable
+   * (unrated / opted-out / 404) OR when the backend refresh tick
+   * hasn't covered this validator's row yet (legacy rows).
+   *
+   * IMPORTANT — honesty contract (see `docs/scoring.md` design-
+   * principle #1): WhoEarns income is OPERATOR income (block fees +
+   * tips → operator identity), framed commission-NEUTRAL. Commission
+   * is surfaced as STANDALONE context for the delegator's own
+   * inflation-reward math; it is deliberately NOT multiplied against
+   * the displayed income number. `(1 − commission) × operatorIncome`
+   * is the wrong formula — commission applies to inflation rewards we
+   * do not track, not to the fee/tip income shown here.
+   */
+  const commissionPct = $derived<number | null>(scoring?.tier.window.commission ?? null);
+
+  /**
+   * Jito MEV commission — the validator's cut of MEV tips before the
+   * rest is shared with delegators. Shown beside `commissionPct`
+   * because inflation commission alone is a half-truth for any
+   * validator whose income leans on Jito tips: `commission` governs
+   * staking yield, this governs the tip split. Sourced on-chain
+   * (stakewiz reads Jito's tip-distribution accounts) via `/scoring`
+   * — same honesty contract as `commissionPct`: a displayed FACT,
+   * never multiplied into the income number.
+   *
+   * `runsJito` separates "0% MEV commission" (runs Jito, shares
+   * everything) from "doesn't run Jito at all"; both `null` when
+   * scoring is unavailable or the row predates migration 0046.
+   * `mevCommissionPct` is a pre-formatted percent string (bps / 100,
+   * trailing zeros stripped) or `null` when there's nothing to show.
+   */
+  const mevCommissionBps = $derived<number | null>(scoring?.tier.window.mevCommissionBps ?? null);
+  const runsJito = $derived<boolean | null>(scoring?.tier.window.runsJito ?? null);
+  const mevCommissionPct = $derived<string | null>(
+    mevCommissionBps === null ? null : String(Number((mevCommissionBps / 100).toFixed(2))),
+  );
 
   /**
    * True when the user hit an unknown pubkey and the indexer just
@@ -79,8 +153,12 @@
    */
   const isTracking = $derived<boolean>(history.tracking === true);
   const trackingMessage = $derived<string | null>(history.trackingMessage ?? null);
-  const safeWebsiteUrl = $derived(safeHttpUrl(history.website));
-  const safeIconUrl = $derived(safeHttpUrl(history.iconUrl));
+  // Shared HTTPS-only gate with userinfo / IP / bare-host rejection,
+  // matching the hub's surface. Earlier this page used a looser
+  // `safeHttpUrl` (allowed `http:` + no shape checks) which created
+  // an asymmetric defense — same data, two postures.
+  const safeWebsiteUrl = $derived(safeOperatorUrl(history.website));
+  const safeIconUrl = $derived(safeOperatorUrl(history.iconUrl));
 
   const lastMonthRows = $derived<ValidatorEpochRecord[]>(history.items.slice(0, LAST_MONTH_EPOCHS));
   const lastMonthFeesSol = $derived<number>(
@@ -125,9 +203,14 @@
   // recents, and shared-link previews actually readable. Falls back
   // to the short pubkey for unregistered validators.
   const titleLabel = $derived(history.name ?? shortVote);
-  const pageTitle = $derived(`${titleLabel} — Solana validator income | ${SITE_NAME}`);
+  // Typography matches the hub page (`${heroTitle} • ${tierLabel} tier
+  // • WhoEarns Live`) so a delegator navigating hub ↔ income sees one
+  // page-name shape, not two. The bullet `•` is deliberate — Korean
+  // treats the middle-dot `·` as a division mark, so the site
+  // standardises on the slightly wider bullet across both pages.
+  const pageTitle = $derived(`${titleLabel} • Epoch income • ${SITE_NAME}`);
   const pageDescription = $derived(
-    `Per-epoch income for Solana validator ${history.vote}: block fees, on-chain Jito tips, slot production, and indexed-validator median income per leader slot over the most recent month-sized window.`,
+    `Per-epoch income for ${titleLabel}: block fees, on-chain Jito tips, slot production, and indexed-validator median income per leader slot over the most recent month-sized window.`,
   );
 
   /**
@@ -145,6 +228,12 @@
     '@graph': [
       {
         '@type': 'BreadcrumbList',
+        // Two-item trail matches the visible breadcrumb on the page:
+        // Leaderboard → this validator's income. With income as the
+        // canonical surface (the page user landed on), the hub no
+        // longer sits between them in the hierarchy — the tier-glance
+        // strip handles that cross-link as garnish rather than a
+        // breadcrumb step.
         itemListElement: [
           { '@type': 'ListItem', position: 1, name: 'Leaderboard', item: `${SITE_URL}/` },
           {
@@ -157,9 +246,12 @@
       },
       {
         '@type': 'Dataset',
-        name: `${history.name ?? shortenPubkey(history.vote, 6, 6)} — Solana validator income | ${SITE_NAME}`,
+        name: `${history.name ?? shortenPubkey(history.vote, 6, 6)} — Epoch income | ${SITE_NAME}`,
         inLanguage: 'en',
         description: operatorNarrative ?? pageDescription,
+        // Dataset URL points at the income page itself (canonical
+        // alignment): structured-data crawlers should attribute
+        // earnings data to this surface, not the hub.
         url: `${SITE_URL}/income/${history.vote}`,
         creator: { '@type': 'Organization', name: '0base.vc' },
         license: 'https://creativecommons.org/publicdomain/zero/1.0/',
@@ -250,6 +342,16 @@
 <svelte:head>
   <title>{pageTitle}</title>
   <meta name="description" content={pageDescription} />
+  <!--
+    Canonical points at this income page itself. Site naming
+    (`whoearns.live`) + the leaderboard's income-sorted default make
+    "per-validator earnings" the primary surface; the validator hub
+    `/v/<vote>` is the secondary "operator profile" surface and links
+    here back via its own breadcrumb + share widget. Keeping the
+    canonical here matches user intent on inbound traffic — most
+    sources (search results, social shares, leaderboard rows) are
+    looking up income, not gamification.
+  -->
   <link rel="canonical" href={`${SITE_URL}/income/${history.vote}`} />
   <meta property="og:title" content={pageTitle} />
   <meta property="og:description" content={pageDescription} />
@@ -283,6 +385,86 @@
     <meta http-equiv="refresh" content="45" />
   {/if}
 </svelte:head>
+
+<!--
+  Breadcrumb trail (WAI-ARIA Breadcrumb pattern): Leaderboard →
+  current validator. Two items match the JSON-LD `BreadcrumbList`
+  below so structured-data crawlers + screen readers + sighted users
+  all see the same hierarchy. With income as the canonical surface
+  the hub is reached via the tier-glance strip below, not as a
+  breadcrumb step — that keeps the breadcrumb a true ancestor chain.
+
+  Every `<li>` is `min-h-11` for matching vertical rhythm + meeting
+  WCAG 2.5.5 (44×44 target size on mobile).
+-->
+<nav aria-label="Breadcrumb" class="mb-3">
+  <ol class="flex list-none flex-wrap items-center gap-1 p-0">
+    <li class="inline-flex min-h-11 items-center">
+      <a
+        href="/"
+        class="inline-flex items-center text-xs text-[color:var(--color-text-muted)] hover:text-[color:var(--color-brand-500)] hover:underline"
+      >
+        Leaderboard
+      </a>
+    </li>
+    <li
+      class="inline-flex min-h-11 items-center text-xs text-[color:var(--color-text-subtle)]"
+      aria-current="page"
+    >
+      <span aria-hidden="true" class="px-1.5">›</span>
+      <span>{history.name ?? shortenPubkey(history.vote, 6, 6)}</span>
+    </li>
+  </ol>
+</nav>
+
+<!--
+  Tier-glance strip. Sits between the breadcrumb and the income hero
+  as a soft hand-off to the validator hub (`/v/<vote>`), where the
+  full gamification surface lives (tier ring, tenure, client, OAI,
+  wallet activity heatmap, audit log). The income page stays the
+  primary "performance" view — site name is whoearns.live, leaderboard
+  sort key is income, the entire user expectation when clicking a row
+  is "show me this validator's numbers." The strip lets a reader who
+  IS curious about the operator-craft side of things hop over in one
+  click without making that the default destination.
+
+  Collapses silently when scoring is unavailable (unrated, opted-out,
+  /scoring 404) — the income page is the contract; the strip is
+  cross-link garnish.
+
+  Whole strip is a single `<a>` so the hover affordance covers the
+  entire row and the click target is large (WCAG 2.5.5 — 44×44 on
+  mobile, the strip's `py-2.5` gives ~44px vertical even for a one-
+  line text + 18px badge).
+-->
+{#if scoring !== null && tierName !== null}
+  <a
+    href={`/v/${history.vote}`}
+    class="mb-4 flex items-center justify-between gap-3 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)]/40 px-3 py-2.5 transition-colors hover:border-[color:var(--color-brand-500)] hover:bg-[color:var(--color-surface-muted)]"
+    aria-label={`See ${tierName} tier details, badges, and activity on the validator hub`}
+  >
+    <span class="flex min-w-0 items-center gap-2 text-xs text-[color:var(--color-text-muted)]">
+      <TierBadge tier={scoring.tier.tier} size={18} />
+      <span class="truncate">
+        <span class="font-semibold text-[color:var(--color-text-default)]">{tierName}</span>
+        {#if scoring.tier.composite !== null}
+          <span class="text-[color:var(--color-text-subtle)]">
+            · {scoring.tier.composite} of 100
+          </span>
+        {/if}
+        <span class="text-[color:var(--color-text-subtle)]">
+          — tier, tenure, client, activity
+        </span>
+      </span>
+    </span>
+    <span
+      class="shrink-0 text-xs font-semibold text-[color:var(--color-brand-500)]"
+      aria-hidden="true"
+    >
+      Operator profile →
+    </span>
+  </a>
+{/if}
 
 <!-- ─────────── 1. Validator hero (identity + recent income) ─────────── -->
 <Card tone="raised">
@@ -344,26 +526,12 @@
                 (read name → see verification cue), and `shrink-0`
                 keeps it intact when the moniker truncates.
               -->
-              <VerifiedBadge size={18} />
+              <VerifiedBadge
+                size={18}
+                label="Verified — claim signed with the validator identity key (Ed25519)"
+              />
             {/if}
           </h1>
-          <!--
-            Vote pubkey under the moniker. `EllipsisAddress` is
-            elastic: on iPhone Pro and narrower viewports it
-            middle-truncates ("5BAi9Y…C6uBPZ") so the address sits
-            on a single line and the hero stays vertically tight;
-            on tablet+ where 318 px fits comfortably, the full
-            44-char pubkey renders. Copy-on-select still yields
-            the full pubkey via the component's clipboard hijack.
-            Earlier this used `break-all` which wrapped to two
-            lines on iPhone Pro — visually noisy.
-          -->
-          <p class="mt-0.5">
-            <EllipsisAddress
-              pubkey={history.vote}
-              class="font-mono text-xs text-[color:var(--color-text-subtle)]"
-            />
-          </p>
         {:else}
           <h1
             class="mt-1 flex min-w-0 items-center gap-2 text-2xl font-semibold tracking-tight sm:text-3xl"
@@ -371,10 +539,46 @@
           >
             <span class="truncate">{shortVote}</span>
             {#if history.claimed}
-              <VerifiedBadge size={18} />
+              <VerifiedBadge
+                size={18}
+                label="Verified — claim signed with the validator identity key (Ed25519)"
+              />
             {/if}
           </h1>
         {/if}
+
+        <!--
+          Compact vote + identity row. `head…tail`-truncated, each with
+          a copy button and an `(i)` tooltip. This replaces BOTH the
+          old full-width vote pubkey under the moniker AND the separate
+          bordered `<dl>` block lower in the hero — the vote pubkey
+          used to render twice (once full under the moniker, once in
+          the dl). Identity, which previously only lived in the dl,
+          is now surfaced here too. One compact line instead of a
+          line + a whole bordered block + its divider.
+        -->
+        <div class="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+          <span class="inline-flex items-center gap-1">
+            <span class="font-medium uppercase tracking-wide text-[color:var(--color-text-subtle)]">
+              Vote
+            </span>
+            <Tooltip
+              label="About the vote account"
+              content="The on-chain vote account. Stakers delegate to this address. Each validator has exactly one fixed vote account that lives forever — even across re-keys."
+            />
+            <AddressDisplay pubkey={history.vote} variant="inline" head={6} tail={6} />
+          </span>
+          <span class="inline-flex items-center gap-1">
+            <span class="font-medium uppercase tracking-wide text-[color:var(--color-text-subtle)]">
+              Identity
+            </span>
+            <Tooltip
+              label="About the identity key"
+              content="The validator's identity keypair — the hot key that signs blocks and votes. Operators can rotate this key periodically while keeping the same vote account."
+            />
+            <AddressDisplay pubkey={history.identity} variant="inline" head={6} tail={6} />
+          </span>
+        </div>
         {#if safeWebsiteUrl}
           <!--
             Website is user-supplied on-chain; treat as untrusted link.
@@ -431,63 +635,100 @@
     </div>
 
     <!--
-      The "money number". Promoted from a side-dl (where it was
-      essentially the same visual weight as the `Last epoch` label)
-      to a dedicated hero block with an accent-coloured 4xl digit.
-      It's the primary reason this page exists — a delegator
-      sanity-checking their validator's earnings, an operator
-      comparing epochs, a bidder evaluating a candidate.
+      Right-hand hero column. Holds (1) the share/embed widget — the
+      same component the hub uses, mounted here so the CANONICAL,
+      SEO-indexed surface every delegator lands on has the growth-loop
+      share affordance the hidden hub already had; and (2) the "money
+      number" income block below it.
 
-      Hidden entirely in the `isTracking && !hasAnyHistory` state
-      below, because "◎0" reads as a fact ("this validator earned
-      zero") rather than "still ingesting" — the tracking banner
-      carries the correct message for that case.
+      The widget is always rendered (even in the tracking / no-history
+      state) — a delegator who lands on a freshly-tracked validator can
+      still share the page. The income block keeps its own
+      `hasAnyHistory` gate so "◎0" never reads as a stated fact during
+      ingestion.
     -->
-    {#if hasAnyHistory}
-      <div class="shrink-0 text-left lg:min-w-64 lg:text-right">
-        <p
-          class="inline-flex items-center text-xs font-semibold uppercase tracking-wider text-[color:var(--color-text-subtle)]"
-        >
-          Total income · last month
-          <Tooltip
-            label="About last-month income"
-            content="Block fees + on-chain Jito tips summed across the most recent month-sized window we have indexed. Pre-commission — this is what the operator earned, not what delegators received."
-          />
-        </p>
-        <p
-          class="mt-1 text-4xl font-semibold tracking-tight text-[color:var(--color-brand-500)] sm:text-5xl"
-        >
-          ◎{formatSol(lastMonthTotalSol.toString())}
-        </p>
-      </div>
-    {/if}
-  </div>
+    <div class="flex shrink-0 flex-col gap-4 lg:min-w-64 lg:items-end">
+      <!-- Share widget — top-right of hero, mirroring the hub placement. -->
+      <ShareWidget
+        vote={history.vote}
+        siteUrl={SITE_URL}
+        tierLabel={tierName ? `${tierName} tier` : undefined}
+        display={history.name ?? undefined}
+      />
 
-  <!--
-    Addresses moved below the hero row so the money-shot gets a clean
-    horizontal band to dominate. On mobile they stack naturally under
-    the identity block; on desktop they form a two-column strip.
-  -->
-  <dl
-    class="mt-5 grid grid-cols-1 gap-3 border-t border-[color:var(--color-border-default)] pt-4 sm:grid-cols-2"
-  >
-    <AddressDisplay
-      pubkey={history.vote}
-      variant="block"
-      label="Vote"
-      head={8}
-      tail={8}
-      tooltip="The on-chain vote account. Stakers delegate to this address. Each validator has exactly one fixed vote account that lives forever — even across re-keys."
-    />
-    <AddressDisplay
-      pubkey={history.identity}
-      variant="block"
-      label="Identity"
-      head={8}
-      tail={8}
-      tooltip="The validator's identity keypair — the hot key that signs blocks and votes. Operators can rotate this key periodically while keeping the same vote account."
-    />
-  </dl>
+      <!--
+        The "money number". Promoted from a side-dl (where it was
+        essentially the same visual weight as the `Last epoch` label)
+        to a dedicated hero block with an accent-coloured 4xl digit.
+        It's the primary reason this page exists — a delegator
+        sanity-checking their validator's earnings, an operator
+        comparing epochs, a bidder evaluating a candidate.
+
+        Hidden entirely in the `isTracking && !hasAnyHistory` state
+        below, because "◎0" reads as a fact ("this validator earned
+        zero") rather than "still ingesting" — the tracking banner
+        carries the correct message for that case.
+      -->
+      {#if hasAnyHistory}
+        <div class="text-left lg:text-right">
+          <p
+            class="inline-flex items-center text-xs font-semibold uppercase tracking-wider text-[color:var(--color-text-subtle)]"
+          >
+            Total income · last month
+            <Tooltip
+              label="About last-month income"
+              content="Block fees + on-chain Jito tips over the most recent month-sized indexed window. This is OPERATOR income — it accrues to the validator identity, not to delegators. A delegator's staking yield is inflation rewards (not tracked here) minus the validator's commission; block fees go to the operator and only MEV tips are partly shared."
+            />
+          </p>
+          <p
+            class="mt-1 text-4xl font-semibold tracking-tight text-[color:var(--color-brand-500)] sm:text-5xl"
+          >
+            ◎{formatSol(lastMonthTotalSol.toString())}
+          </p>
+          {#if commissionPct !== null || runsJito !== null}
+            <p
+              class="mt-1 inline-flex flex-wrap items-center gap-x-1.5 text-xs text-[color:var(--color-text-muted)]"
+            >
+              {#if commissionPct !== null}
+                <span
+                  >Commission <span class="font-semibold text-[color:var(--color-text-default)]"
+                    >{commissionPct}%</span
+                  ></span
+                >
+              {/if}
+              {#if commissionPct !== null && runsJito !== null}
+                <span aria-hidden="true" class="text-[color:var(--color-text-subtle)]">·</span>
+              {/if}
+              {#if runsJito === true}
+                <span
+                  >MEV <span class="font-semibold text-[color:var(--color-text-default)]"
+                    >{mevCommissionPct ?? '—'}%</span
+                  ></span
+                >
+              {:else if runsJito === false}
+                <span>No Jito MEV</span>
+              {/if}
+              <Tooltip
+                label="About commission"
+                content="Two separate take-rates. Commission is the validator's cut of inflation / staking rewards — what 'commission' usually means. MEV commission is its cut of Jito tips before the rest is shared with delegators: 0% means all MEV tips pass through, 'No Jito MEV' means the validator doesn't run Jito. Both describe the operator and neither feeds WhoEarns's tier. MEV commission is sourced from Jito's on-chain tip-distribution accounts via Stakewiz."
+              />
+            </p>
+          {/if}
+          <!--
+            The "operator income, not delegator yield" honesty note now
+            lives in the income-label tooltip above (it was a long
+            always-visible caption here, but that read as a defensive
+            disclaimer on what is primarily an operator-facing surface;
+            the tooltip carries the same content on demand). We still
+            deliberately do NOT compute a fabricated "delegator yield":
+            `(1 − commission) × operatorIncome` is the wrong formula —
+            commission applies to inflation rewards, not to the fee/tip
+            income shown here (see `docs/scoring.md` principle #1).
+          -->
+        </div>
+      {/if}
+    </div>
+  </div>
 </Card>
 
 <!-- ─────────── 1b. On-demand tracking banner ───────────
@@ -532,22 +773,31 @@
   </section>
 {/if}
 
-<!-- ─────────── 2. Income trend chart ─────────── -->
+<!-- ─────────── 2. Trend charts (income + compute units) ─────────── -->
 <!--
   Hidden during the initial tracking window: an empty chart card is a
   "nothing here" signal that stacks redundantly with the tracking
   banner + Validator card. Shows as soon as `items.length > 0`.
+
+  Responsive 2-column grid: at the `md` breakpoint (>= 768px) the
+  income chart and the compute-units chart sit side by side, each
+  roughly half width; below 768px the grid collapses to a single
+  column so each chart gets the full content width on phones. Both
+  charts read the same `history.items` array — one source of truth.
+  Each chart's inner LineChart is `w-full`, so it reflows to whatever
+  width its grid cell resolves to at any viewport size.
 -->
 {#if hasAnyHistory}
-  <div class="mt-6">
+  <div class="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
     <IncomeChartLoader history={history.items} />
+    <ComputeUnitsChartLoader history={history.items} />
   </div>
 {/if}
 
 <!-- ─────────── 3. Epoch income ─────────── -->
 <section aria-labelledby="history-title" class="mt-10">
   <div class="mb-4">
-    <h2 id="history-title" class="text-lg font-semibold">Epoch income</h2>
+    <h2 id="history-title" class="text-lg font-semibold">Epoch breakdown</h2>
   </div>
 
   {#if !hasAnyHistory}
@@ -674,7 +924,7 @@
                   {/if}
                 </dd>
               </div>
-              <div class="col-span-2">
+              <div>
                 <dt class="inline-flex items-center text-[color:var(--color-text-muted)]">
                   MEV tips
                   <Tooltip
@@ -690,6 +940,18 @@
                   {/if}
                 </dd>
               </div>
+              <div>
+                <dt class="inline-flex items-center text-[color:var(--color-text-muted)]">
+                  CU
+                  <Tooltip
+                    label="About compute units"
+                    content="Average compute units consumed per block this validator produced this epoch."
+                  />
+                </dt>
+                <dd class="font-mono tabular-nums">
+                  {epochCuText(row.avgComputeUnitsPerProducedBlock)}
+                </dd>
+              </div>
             </dl>
           </Card>
         </li>
@@ -702,10 +964,10 @@
     >
       <table class="min-w-full divide-y divide-[color:var(--color-border-default)] text-sm">
         <caption class="sr-only">
-          Epoch income for validator {history.vote}, newest epoch first. The live running epoch
+          Epoch breakdown for validator {history.vote}, newest epoch first. The live running epoch
           appears first when available. Income is decomposed into three revenue streams: base fees,
           priority fees, and Jito MEV tips. The MEV column shows on-chain Jito tips derived from
-          produced blocks.
+          produced blocks. The CU column is the average compute units consumed per produced block.
         </caption>
         <thead
           class="bg-[color:var(--color-surface-muted)] text-xs uppercase tracking-wide text-[color:var(--color-text-muted)]"
@@ -768,8 +1030,18 @@
                 <Tooltip
                   label="About total"
                   placement="bottom"
-                  align="right"
                   content="Base fees + Priority fees + MEV — every revenue stream the indexer can see, summed."
+                />
+              </span>
+            </th>
+            <th scope="col" class="px-4 py-3 text-right">
+              <span class="inline-flex items-center justify-end">
+                CU
+                <Tooltip
+                  label="About compute units"
+                  placement="bottom"
+                  align="right"
+                  content="Average compute units consumed per block this validator produced this epoch."
                 />
               </span>
             </th>
@@ -835,6 +1107,13 @@
                       HISTORY_PER_EPOCH_DECIMALS,
                     )}
                   </span>
+                {:else}
+                  <span class="text-[color:var(--color-text-subtle)]" aria-label="no data">—</span>
+                {/if}
+              </td>
+              <td class="px-4 py-3 text-right tabular-nums">
+                {#if row.avgComputeUnitsPerProducedBlock !== null}
+                  {epochCuText(row.avgComputeUnitsPerProducedBlock)}
                 {:else}
                   <span class="text-[color:var(--color-text-subtle)]" aria-label="no data">—</span>
                 {/if}

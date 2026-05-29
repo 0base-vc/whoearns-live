@@ -135,8 +135,13 @@ const seoRoutes: FastifyPluginAsync<SeoRoutesDeps> = async (
       );
     }
     for (const vote of votes) {
+      // The public per-validator surface is `/income/<vote>`. The
+      // `/v/<vote>` hub is intentionally an internal-only deep view
+      // reached from inside the income page via the "Operator
+      // profile →" hand-off — sitemap advertises only the public
+      // entry, so crawlers never index hub URLs directly.
       urls.push(
-        `  <url><loc>${SITE_URL}/income/${vote}</loc><changefreq>daily</changefreq><priority>0.6</priority></url>`,
+        `  <url><loc>${SITE_URL}/income/${vote}</loc><changefreq>daily</changefreq><priority>0.7</priority></url>`,
       );
     }
 
@@ -152,9 +157,14 @@ ${urls.join('\n')}
   });
 
   app.get('/robots.txt', async (_request, reply) => {
-    // Whitelist the major AI crawlers to modest public endpoints that
-    // satisfy citation needs without inviting a 2000-validator history
-    // scrape. `*` keeps the existing disallow on /v1/* for unknown agents.
+    // Whitelist the major AI crawlers to the public GET read surface
+    // that satisfies citation needs. `Allow:` directives are prefix
+    // matches, so `/v1/validators/` covers search, history, current-
+    // epoch, leader-slots, tier, badges, and operator-activity-index
+    // in one line — every path under it is a public crawlable GET.
+    // `/badge/` is the embeddable SVG. The /v1/claims/* mutations
+    // are intentionally NOT listed — they're not crawlable. `*` keeps
+    // the existing disallow on /v1/* for unknown agents.
     const body = `User-agent: *
 Allow: /
 Allow: /llms.txt
@@ -167,23 +177,31 @@ Disallow: /v1/
 Disallow: /healthz
 
 User-agent: GPTBot
+Allow: /badge/
 Allow: /v1/leaderboard
 Allow: /v1/epoch/current
-Allow: /v1/validators/search
+Allow: /v1/validators/
+Allow: /v1/simd-proposals
 
 User-agent: ClaudeBot
+Allow: /badge/
 Allow: /v1/leaderboard
 Allow: /v1/epoch/current
-Allow: /v1/validators/search
+Allow: /v1/validators/
+Allow: /v1/simd-proposals
 
 User-agent: PerplexityBot
+Allow: /badge/
 Allow: /v1/leaderboard
 Allow: /v1/epoch/current
-Allow: /v1/validators/search
+Allow: /v1/validators/
+Allow: /v1/simd-proposals
 
 User-agent: Googlebot
+Allow: /badge/
 Allow: /v1/leaderboard
-Allow: /v1/validators/search
+Allow: /v1/validators/
+Allow: /v1/simd-proposals
 
 Sitemap: ${SITE_URL}/sitemap.xml
 `;
@@ -207,7 +225,7 @@ Sitemap: ${SITE_URL}/sitemap.xml
 ## Core pages
 
 - ${SITE_URL}/: Leaderboard — top validators by live-trend income per slot
-- ${SITE_URL}/income/{vote}: Per-validator history (vote OR identity pubkey)
+- ${SITE_URL}/income/{vote}: Per-validator surface — tier strip, per-epoch income table, slot stats, freshness. Primary public entry for a single validator; accepts both vote and identity pubkeys.
 - ${SITE_URL}/compare: Side-by-side comparison of two validators
 - ${SITE_URL}/glossary: Plain-language definitions of Solana validator terms
 - ${SITE_URL}/faq: Frequently asked questions
@@ -220,6 +238,28 @@ Sitemap: ${SITE_URL}/sitemap.xml
 - ${SITE_URL}/llms-full.txt: Full reference for AI agents (extended doc)
 - ${SITE_URL}/.well-known/ai-plugin.json: Agent plugin manifest
 - ${SITE_URL}/mcp: Model Context Protocol server (Streamable HTTP)
+
+## API endpoints
+
+GET unless noted. Full descriptions + query params in /llms-full.txt.
+
+- ${SITE_URL}/v1/epoch/current: Running epoch metadata
+- ${SITE_URL}/v1/leaderboard: Validators ranked by income window
+- ${SITE_URL}/v1/validators/search: DB-only validator name/pubkey search
+- ${SITE_URL}/v1/validators/{idOrVote}/history: Per-epoch income history
+- ${SITE_URL}/v1/validators/{idOrVote}/current-epoch: Single running-epoch record
+- ${SITE_URL}/v1/validators/{idOrVote}/epochs/{epoch}/leader-slots: Leader-slot facts for one epoch
+- ${SITE_URL}/v1/validators/{idOrVote}/tier: Node Tier composite (10-epoch window)
+- ${SITE_URL}/v1/validators/{idOrVote}/badges: Tenure + client + tier badge bundle
+- ${SITE_URL}/v1/validators/{idOrVote}/operator-activity-index: Operator Activity Index (governance + wallet)
+- ${SITE_URL}/v1/validators/{idOrVote}/scoring: Aggregate scoring bundle — tier + badges + OAI in one round-trip
+- ${SITE_URL}/v1/claims/{vote}?includeActivity=1: Claim status — folds in each registered operator wallet's 365-day daily activity
+- ${SITE_URL}/v1/simd-proposals: Human-reviewed AI-curated SIMD proposal feed
+- ${SITE_URL}/badge/{vote}.svg: Embeddable SVG performance badge
+- ${SITE_URL}/v1/validators/current-epoch/batch: POST — bulk current-epoch lookup
+- ${SITE_URL}/v1/claims/{vote}/github: PUT — link a GitHub identity via a signed Gist
+- ${SITE_URL}/v1/claims/{vote}/wallets: POST — register an operator wallet via dual-signature proof
+- ${SITE_URL}/v1/claims/{vote}/wallets/{walletRef}: DELETE — unregister an operator wallet by its opaque ref
 
 ## AI-assisted operations
 
@@ -339,16 +379,147 @@ unit totals, provider cost-unit totals, ComputeBudget request aggregates,
 per-block/per-transaction CU averages, income per 1M CU, and best block.
 Use closed epochs before deriving public claims from these facts.
 
+### GET /v1/validators/{idOrVote}/tier
+Node Tier composite — pessimistic block-production reliability
+(Wilson upper bound on skip rate) + economic-productivity percentile
+(cohort rank of median per-leader-slot income across 10 closed epochs).
+Formula: 0.3 × reliability + 0.7 × economicPercentile. The cohort is
+the INDEXED-VALIDATOR set (the deployment's WatchMode), not the full
+Solana cluster. Accepts a vote OR identity pubkey; no query params.
+Returns { vote, identity, window, tier, composite, components }. tier
+is forge | anvil | hearth | kindling | unrated; composite is null
+when tier is unrated (thin samples — slotsAssigned < 10, cohort < 10,
+or measuredEpochs < 4). Tier is hard-capped at kindling when skip
+rate exceeds 20%, regardless of economic percentile. See
+docs/scoring.md Phase 1 for the rationale on excluding vote credits.
+Closed-epoch data only — no live RPC.
+
+### GET /v1/validators/{idOrVote}/badges
+Composite profile badges in one round-trip: { vote, identity,
+tenure, client, tier }. tenure carries firstSeenEpoch, activeEpochs,
+and the oldest landmark the validator predates (MAINNET_BETA_LAUNCH,
+CYCLE_1_OG, etc.). client carries the node-software kind (agave,
+jito_solana, firedancer, frankendancer, paladin, sig, solana_labs,
+agave_bam, rakurai, harmonic_firedancer, harmonic_agave,
+harmonic_frankendancer, firebam, raiku, unknown) and version. The
+original 7 kinds come from gossip version-string classification
+(cluster-nodes ingester); the fork variants come from validators.app's
+gossip-CRDS decode (epoch-triggered ingester). tier mirrors GET
+/tier. Accepts a vote OR identity pubkey; no query params.
+
+### GET /v1/validators/{idOrVote}/operator-activity-index
+Operator Activity Index (OAI) — a 0-100 composite blending
+governance participation (50%) with operator-wallet liveness (50%).
+Accepts a vote OR identity pubkey; no query params. Gated: the
+validator must be known, CLAIMED, and not opted out of public
+scoring — all three failures return 404 (the cases are collapsed so
+the endpoint does not leak claim/opt-out state). Returns { vote,
+identity, composite, components }. composite is null in the
+cold-start case where neither half has signal. Only ACTIVE (non-
+expired) Phase 3 GitHub links / operator wallets contribute. HEAD is
+supported and short-circuits before the scoring queries.
+
+### GET /v1/validators/{idOrVote}/scoring
+Aggregate scoring bundle — the profile-page one round-trip. Does the
+validator lookup once and returns tier + badges + OAI together:
+{ vote, identity, tier, tenure, client, oai }. tier is the full
+GET /tier body (window + tier + composite + components); tenure and
+client are the GET /badges blocks; oai is the GET
+/operator-activity-index body, OR null. ADDITIVE — /tier, /badges,
+and /operator-activity-index all stay live and unchanged for
+consumers wanting one component with its own CDN cache. 404s ONLY
+when the validator pubkey is unknown; a known-but-unclaimed /
+opted-out / identity-drifted validator returns 200 with oai: null
+(tier + tenure + client still populated). Accepts a vote OR identity
+pubkey; no query params. HEAD is supported and short-circuits after
+the existence check.
+
 ### POST /v1/validators/current-epoch/batch
 Body: { "votes": ["Vote111...", ...] }. Bulk lookup; returns
 { results: [...], missing: [...] }.
 
+### GET /v1/claims/{vote}?includeActivity=1
+Claim + profile status for a validator. Returns { claimed, profile,
+githubLink, wallets }. wallets.entries[] carries, per registered
+operator wallet, a DISPLAY-ONLY truncated address
+(walletAddressShort, e.g. "FXfD…PsJ5"), the operator-chosen label,
+and registration/expiry timestamps — the full operator-wallet
+pubkey is never surfaced. With ?includeActivity=1 each entry also
+folds in activity: { days: 365, entries: [{ date, txCount,
+txFeesLamports }] } — the wallet's daily on-chain tx counts. Days
+with zero activity are omitted (clients zero-fill at render time);
+txFeesLamports is null today (counts-only release, fee backfill
+lands in a later indexer pass). Without ?includeActivity, activity
+is null.
+
+### GET /v1/simd-proposals
+Human-reviewed, AI-curated feed of SIMD (Solana Improvement
+Document) proposals for the Pending SIMD widget. Query param: limit
+(1-25, default 20). Returns { proposals }; each proposal is
+{ simdNumber, title, status, sourceUrl, aiSummary, aiQuestions,
+reviewedAt }. Only proposals a human reviewer has signed off on
+surface — unreviewed AI curation stays hidden. Newest-reviewed
+first. The internal reviewer_note audit field is not exposed.
+
+### GET /badge/{vote}.svg
+Embeddable 440×76 SVG performance badge for operator websites and
+GitHub READMEs. Accepts a vote OR identity pubkey. Renders the
+LATEST CLOSED epoch only — never running-epoch numbers — so a
+CDN-cached badge cannot be caught lying mid-epoch. Ships <title> +
+<desc> accessibility metadata with the validator name + closed-epoch
+summary. Cache-Control: public, max-age=3600, s-maxage=86400.
+
+### PUT /v1/claims/{vote}/github
+Links a GitHub identity to a CLAIMED validator via a Keybase-style
+public Gist; no OAuth token is retained. The vote pubkey is in the
+path AND the body — they must match (400 vote_pubkey_mismatch
+otherwise). Body: { votePubkey, identityPubkey, githubUsername,
+gistUrl, timestampMs }. The Gist must contain the canonical WhoEarns
+nonce plus the operator's Ed25519 signature over it. 200 on success,
+403 for nonce/sig/policy failures, 502 for upstream Gist fetch
+errors, 503 when the feature deps are not wired in. Replayed nonces
+return 403 nonce_replay.
+
+### POST /v1/claims/{vote}/wallets
+Registers (appends) an operator day-to-day wallet. The validator
+identity key signs the canonical nonce via the CLI; the operator's
+browser wallet signs AND sends a memo-only Solana transaction whose
+single SPL Memo instruction carries that exact canonical nonce. The
+vote pubkey is in the path AND the body — they must match (400
+vote_pubkey_mismatch otherwise). Body: { votePubkey, identityPubkey,
+walletPubkey, label, timestampMs, identitySignatureB58,
+memoTxSignature }. Cap of 3 wallets per validator (409
+wallet_cap_reached). The validator must already be CLAIMED. The
+backend fetches the memo transaction via getTransaction at confirmed
+commitment and verifies the wallet pubkey is in the signer set and
+the memo content equals the canonical nonce. Replayed nonces return
+403 nonce_replay; future-dated timestamps return 403 stale_timestamp.
+
+### DELETE /v1/claims/{vote}/wallets/{walletRef}
+Unregisters (removes) a previously-registered operator wallet. The
+wallet is identified by its opaque {walletRef} — the per-registration
+token surfaced as wallets.entries[].walletRef on GET /v1/claims/{vote}
+— NOT its full pubkey, so no operator-wallet pubkey appears in the
+URL. Single-signature ceremony: the validator identity key signs a
+canonical wallet-unregister nonce (which binds the walletRef); the
+wallet keypair is not required. The vote pubkey is in the path AND
+the body — they must match (400 vote_pubkey_mismatch otherwise).
+Body: { votePubkey, identityPubkey, timestampMs,
+identitySignatureB58 }. A walletRef that resolves to no active
+registration returns 404 wallet_not_registered. The validator must
+already be CLAIMED. The success response carries only the truncated
+walletAddressShort — the full pubkey is never returned.
+
 ## Rate limit
 
 Default 60 requests / minute / IP. AI crawlers (GPTBot, ClaudeBot,
-PerplexityBot) are whitelisted to /v1/leaderboard, /v1/epoch/current,
-and /v1/validators/search via robots.txt. MCP calls use the same public
-per-IP budget. Higher-volume queries should run a self-hosted indexer.
+PerplexityBot) are whitelisted via robots.txt to the public GET read
+surface: /v1/leaderboard, /v1/epoch/current, everything under
+/v1/validators/ (search, history, current-epoch, leader-slots, tier,
+badges, operator-activity-index), /v1/simd-proposals, and /badge/.
+The /v1/claims/* mutations are not crawlable. MCP calls
+use the same public per-IP budget. Higher-volume queries should run a
+self-hosted indexer.
 
 ## Error envelope
 

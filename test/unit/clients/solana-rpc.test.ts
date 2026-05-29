@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { HttpResponse, http, delay } from 'msw';
 import { setupServer } from 'msw/node';
+import bs58 from 'bs58';
 import { pino } from 'pino';
 import { SolanaRpcClient, parseRetryAfterMs } from '../../../src/clients/solana-rpc.js';
 import { RateLimitedError, UpstreamError } from '../../../src/core/errors.js';
@@ -508,6 +509,143 @@ describe('SolanaRpcClient — error paths & retries', () => {
     );
     const client = makeClient({ maxRetries: 0 });
     await expect(client.getSlot()).rejects.toBeInstanceOf(UpstreamError);
+  });
+});
+
+describe('SolanaRpcClient.getTransaction', () => {
+  // SPL Memo program id — the operator-wallet verification keys on it.
+  const SPL_MEMO_PROGRAM_ID = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr';
+  const SIGNATURE = '5'.repeat(88);
+
+  /** Base58 of a memo string's raw UTF-8 bytes, as the RPC returns it. */
+  function memoData(memo: string): string {
+    return bs58.encode(new TextEncoder().encode(memo));
+  }
+
+  /**
+   * A realistic `getTransaction` `encoding:'json'` JSON-RPC `result`:
+   * a memo-only tx whose sole compiled instruction is the SPL Memo.
+   */
+  function memoTxResult(memo: string): unknown {
+    return {
+      slot: 216_120_000,
+      meta: { err: null, fee: 5000 },
+      transaction: {
+        signatures: [SIGNATURE],
+        message: {
+          accountKeys: ['Wa11et1111111111111111111111111111111111111', SPL_MEMO_PROGRAM_ID],
+          header: {
+            numRequiredSignatures: 1,
+            numReadonlySignedAccounts: 0,
+            numReadonlyUnsignedAccounts: 1,
+          },
+          instructions: [{ programIdIndex: 1, accounts: [], data: memoData(memo) }],
+          recentBlockhash: 'EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N',
+        },
+      },
+    };
+  }
+
+  it('parses a memo-only getTransaction response into the minimal projection', async () => {
+    server.use(
+      http.post(RPC_URL, async ({ request }) => {
+        const body = await readBody(request);
+        expect(body.method).toBe('getTransaction');
+        // encoding:'json' + versioned-tx support are part of the contract.
+        expect(body.params?.[0]).toBe(SIGNATURE);
+        expect(body.params?.[1]).toMatchObject({
+          encoding: 'json',
+          maxSupportedTransactionVersion: 0,
+          commitment: 'confirmed',
+        });
+        return HttpResponse.json(rpcResponse(memoTxResult('canonical-nonce'), body.id));
+      }),
+    );
+    const result = await makeClient().getTransaction(SIGNATURE, { commitment: 'confirmed' });
+    expect(result).not.toBeNull();
+    expect(result?.accountKeys).toEqual([
+      'Wa11et1111111111111111111111111111111111111',
+      SPL_MEMO_PROGRAM_ID,
+    ]);
+    expect(result?.numRequiredSignatures).toBe(1);
+    // The single instruction's programIdIndex (1) resolved against
+    // accountKeys → the SPL Memo program id; data passed through verbatim.
+    expect(result?.instructions).toEqual([
+      { programId: SPL_MEMO_PROGRAM_ID, dataBase58: memoData('canonical-nonce') },
+    ]);
+  });
+
+  it('returns null when the RPC reports the signature as unknown (result: null)', async () => {
+    server.use(
+      http.post(RPC_URL, async ({ request }) => {
+        const body = await readBody(request);
+        return HttpResponse.json(rpcResponse(null, body.id));
+      }),
+    );
+    expect(await makeClient().getTransaction(SIGNATURE)).toBeNull();
+  });
+
+  it('returns null for a malformed response missing the message accountKeys', async () => {
+    server.use(
+      http.post(RPC_URL, async ({ request }) => {
+        const body = await readBody(request);
+        // `transaction.message` present but `accountKeys` absent.
+        return HttpResponse.json(
+          rpcResponse(
+            { transaction: { message: { header: { numRequiredSignatures: 1 } } } },
+            body.id,
+          ),
+        );
+      }),
+    );
+    expect(await makeClient().getTransaction(SIGNATURE)).toBeNull();
+  });
+
+  it('returns null when numRequiredSignatures exceeds the accountKeys length', async () => {
+    server.use(
+      http.post(RPC_URL, async ({ request }) => {
+        const body = await readBody(request);
+        return HttpResponse.json(
+          rpcResponse(
+            {
+              transaction: {
+                message: {
+                  accountKeys: ['OnlyOneKey1111111111111111111111111111111111'],
+                  header: { numRequiredSignatures: 2 },
+                  instructions: [],
+                },
+              },
+            },
+            body.id,
+          ),
+        );
+      }),
+    );
+    expect(await makeClient().getTransaction(SIGNATURE)).toBeNull();
+  });
+
+  it('returns null when an instruction programIdIndex is out of range', async () => {
+    server.use(
+      http.post(RPC_URL, async ({ request }) => {
+        const body = await readBody(request);
+        return HttpResponse.json(
+          rpcResponse(
+            {
+              transaction: {
+                message: {
+                  accountKeys: ['Wa11et1111111111111111111111111111111111111', SPL_MEMO_PROGRAM_ID],
+                  header: { numRequiredSignatures: 1 },
+                  // index 5 has no matching accountKeys entry.
+                  instructions: [{ programIdIndex: 5, accounts: [], data: memoData('x') }],
+                },
+              },
+            },
+            body.id,
+          ),
+        );
+      }),
+    );
+    expect(await makeClient().getTransaction(SIGNATURE)).toBeNull();
   });
 });
 

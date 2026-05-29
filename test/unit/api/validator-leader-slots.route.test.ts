@@ -14,6 +14,7 @@ import {
   FakeStatsRepo,
   FakeValidatorsRepo,
   IDENTITY_1,
+  IDENTITY_2,
   VOTE_1,
   VOTE_2,
   makeEpochInfo,
@@ -239,6 +240,38 @@ describe('GET /v1/validators/:idOrVote/epochs/:epoch/leader-slots', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ isFinal: false });
+    await ctx.app.close();
+  });
+
+  it('resolves CU under the epoch identity after an identity rotation', async () => {
+    // VOTE_1 has since rotated its identity key: the `validators` row
+    // now carries IDENTITY_2, but epoch 500 ran under IDENTITY_1.
+    // `beforeEach` already seeded the `500:${VOTE_1}` stats row with
+    // IDENTITY_1 — re-upsert only the validator's current identity.
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_2,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 501,
+    });
+    // The produced block is stored under the OLD (epoch-500) identity.
+    const block = makeProcessedBlock(100, 500, IDENTITY_1, 100_000_000n, 'produced');
+    block.computeUnitsConsumed = 9_000_000n;
+    ctx.blocks.rows.set(100, block);
+
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/epochs/500/leader-slots`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      summary: { producedBlocks: number; avgComputeUnitsPerProducedBlock: string | null };
+    };
+    // The block resolves under the epoch-500 identity (IDENTITY_1), not
+    // the validator's current identity — a naive current-identity
+    // lookup would report zero produced blocks / null CU.
+    expect(body.summary.producedBlocks).toBe(1);
+    expect(body.summary.avgComputeUnitsPerProducedBlock).toBe('9000000');
     await ctx.app.close();
   });
 });

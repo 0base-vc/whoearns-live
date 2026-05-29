@@ -11,15 +11,24 @@ import {
 } from '../../src/api/cache-headers.js';
 import { buildServer } from '../../src/api/server.js';
 import type { AppConfig } from '../../src/core/config.js';
+import type { GithubGistVerificationService } from '../../src/services/github-gist-verification.service.js';
+import type { OperatorWalletVerificationService } from '../../src/services/operator-wallet-verification.service.js';
 import type { ValidatorService } from '../../src/services/validator.service.js';
 import type { AggregatesRepository } from '../../src/storage/repositories/aggregates.repo.js';
 import type { ClaimService } from '../../src/services/claim.service.js';
 import type { ClaimsRepository } from '../../src/storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../src/storage/repositories/epochs.repo.js';
+import type { OperatorWalletsRepository } from '../../src/storage/repositories/operator-wallets.repo.js';
 import type { ProfilesRepository } from '../../src/storage/repositories/profiles.repo.js';
 import type { ProcessedBlocksRepository } from '../../src/storage/repositories/processed-blocks.repo.js';
+import type { SimdDiscussionsRepository } from '../../src/storage/repositories/simd-discussions.repo.js';
+import type { SimdProposalsRepository } from '../../src/storage/repositories/simd-proposals.repo.js';
 import type { StatsRepository } from '../../src/storage/repositories/stats.repo.js';
+import type { TierSnapshotsRepository } from '../../src/storage/repositories/tier-snapshots.repo.js';
+import type { ValidatorClaimEventsRepository } from '../../src/storage/repositories/validator-claim-events.repo.js';
+import type { ValidatorGithubRepository } from '../../src/storage/repositories/validator-github.repo.js';
 import type { ValidatorsRepository } from '../../src/storage/repositories/validators.repo.js';
+import type { WalletActivityRepository } from '../../src/storage/repositories/wallet-activity.repo.js';
 import type { WatchedDynamicRepository } from '../../src/storage/repositories/watched-dynamic.repo.js';
 import {
   FakeAggregatesRepo,
@@ -63,8 +72,17 @@ function makeConfig(): AppConfig {
     FEE_INGEST_INTERVAL_MS: 30_000,
     FEE_INGEST_BATCH_SIZE: 50,
     AGGREGATES_INTERVAL_MS: 300_000,
-    CLOSED_EPOCH_RECONCILE_INTERVAL_MS: 300_000,
+    CLOSED_EPOCH_RECONCILE_INTERVAL_MS: 4 * 60 * 60 * 1000,
     VALIDATOR_INFO_INTERVAL_MS: 6 * 60 * 60 * 1000,
+    CLUSTER_NODES_INTERVAL_MS: 30 * 60 * 1000,
+    WALLET_ACTIVITY_INTERVAL_MS: 6 * 60 * 60 * 1000,
+    WALLET_FEE_BACKFILL_INTERVAL_MS: 60 * 60 * 1000,
+    WALLET_FEE_BACKFILL_PER_TICK_LIMIT: 500,
+    VALIDATORS_APP_INTERVAL_MS: 2 * 60 * 60 * 1000,
+    ANTHROPIC_MODEL: 'claude-sonnet-4-6',
+    SIMD_CURATION_INTERVAL_MS: 12 * 60 * 60 * 1000,
+    STAKEWIZ_TENURE_INTERVAL_MS: 24 * 60 * 60 * 1000,
+    TIER_SNAPSHOT_INTERVAL_MS: 30 * 60 * 1000,
     SLOT_FINALITY_BUFFER: 32,
     SHUTDOWN_TIMEOUT_MS: 15_000,
   };
@@ -106,14 +124,45 @@ function makeDeps(): Parameters<typeof buildServer>[0] {
         upsert: async () => {},
         bumpNonce: async () => {},
       } as unknown as ClaimsRepository,
+      // Stub: SEC-M4 audit log. The smoke test never hits a
+      // claim-surface mutation or the `/v1/claims/:vote/audit` read,
+      // so a no-op `append` + empty `listByVote` satisfy DI.
+      validatorClaimEvents: {
+        append: async () => {},
+        listByVote: async () => [],
+      } as unknown as ValidatorClaimEventsRepository,
+      // Stubs: the Phase 3-6 repos (Claim v2, wallet-activity,
+      // SIMD proposals/discussions) are wired into `buildServer`
+      // unconditionally. The smoke test never hits the routes that
+      // read them — it boots the server and probes /healthz, the SEO
+      // surfaces, and /mcp — so empty objects satisfy the DI
+      // signature without modelling any behaviour, same as the
+      // `profiles` / `claims` / `claim` stubs above.
+      validatorGithub: {} as unknown as ValidatorGithubRepository,
+      operatorWallets: {} as unknown as OperatorWalletsRepository,
+      walletActivity: {} as unknown as WalletActivityRepository,
+      simdProposals: {} as unknown as SimdProposalsRepository,
+      simdDiscussions: {} as unknown as SimdDiscussionsRepository,
+      // Stub: migration-0045 tier snapshots. The smoke test never hits
+      // the /tier trend or /tier/history surfaces, so a no-op
+      // findByVote/findLatestTwo satisfies DI.
+      tierSnapshots: {
+        findByVote: async () => [],
+        findLatestTwo: async () => [],
+      } as unknown as TierSnapshotsRepository,
     },
     services: {
       validator: new FakeValidatorService() as unknown as ValidatorService,
-      // Stub: claim service is only invoked by the POST /v1/claim/*
-      // endpoints; the smoke test boots the server and hits /healthz,
-      // so nothing reaches claimService in practice. The empty object
-      // satisfies the TypeScript constructor signature.
+      // Stub: claim service is only invoked by the /v1/claims/:vote
+      // mutating endpoints; the smoke test boots the server and hits
+      // /healthz, so nothing reaches claimService in practice. The
+      // empty object satisfies the TypeScript constructor signature.
       claim: {} as unknown as ClaimService,
+      // Stubs: Claim v2 verification services — only invoked by the
+      // PUT /v1/claims/:vote/github + POST /v1/claims/:vote/wallets
+      // endpoints, which the smoke test never reaches.
+      githubGist: {} as unknown as GithubGistVerificationService,
+      operatorWallet: {} as unknown as OperatorWalletVerificationService,
     },
   };
 }
@@ -141,6 +190,52 @@ describe('smoke: api server boots and routes 200/degraded', () => {
       expect(res.statusCode).toBe(404);
     } finally {
       await app.close();
+    }
+  });
+
+  it('an unknown /v1/* path returns a JSON 404 envelope, not the SPA HTML shell (REST-M9)', async () => {
+    // Regression guard: the `setNotFoundHandler` SPA fallback only
+    // fires WITH a UI build dir, and it must NOT serve `spa-fallback.html`
+    // for `/v1/*` — an unknown API path has to 404 with the JSON
+    // error envelope so a typed client never parses an HTML body as
+    // a 200. The conditional route registration that originally
+    // motivated this finding is gone (deps are required, all routes
+    // always register), but the `/v1/` guard inside the handler
+    // still has to hold — this asserts it positively.
+    const uiDir = await mkdtemp(join(tmpdir(), 'whoearns-ui-build-'));
+    await writeFile(join(uiDir, 'index.html'), '<!doctype html><title>WhoEarns</title>');
+    await writeFile(join(uiDir, 'spa-fallback.html'), '<!doctype html><title>WhoEarns SPA</title>');
+    const deps = makeDeps();
+    deps.uiBuildDir = uiDir;
+    const app = await buildServer(deps);
+
+    try {
+      // Browser-style Accept header — the exact case where the SPA
+      // fallback is tempted to fire. It must still 404-as-JSON for /v1/*.
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/this-route-does-not-exist',
+        headers: { accept: 'text/html,application/xhtml+xml' },
+      });
+      expect(res.statusCode).toBe(404);
+      expect(res.headers['content-type']).toMatch(/^application\/json/);
+      const body = res.json() as { error?: { code?: string } };
+      expect(body.error?.code).toBe('not_found');
+      // Belt-and-braces: the body is the JSON envelope, not the shell.
+      expect(res.body).not.toContain('<!doctype html');
+
+      // A non-/v1/ unknown path with the same Accept SHOULD get the
+      // SPA shell — confirms the guard is path-scoped, not blanket-off.
+      const spa = await app.inject({
+        method: 'GET',
+        url: '/some-client-route',
+        headers: { accept: 'text/html' },
+      });
+      expect(spa.statusCode).toBe(200);
+      expect(spa.headers['content-type']).toMatch(/^text\/html/);
+    } finally {
+      await app.close();
+      await rm(uiDir, { recursive: true, force: true });
     }
   });
 
@@ -321,7 +416,7 @@ describe('smoke: api server boots and routes 200/degraded', () => {
       // JSON-RPC `tools/list` is the cheapest probe: doesn't hit any
       // repo, just enumerates the registered tools. If MCP plumbing
       // is wired wrong this 500s; if the SDK is happy we get back
-      // four tool names. The MCP Inspector and Claude Desktop both
+      // six tool names. The MCP Inspector and Claude Desktop both
       // start with this exact request.
       const res = await app.inject({
         method: 'POST',
@@ -345,7 +440,9 @@ describe('smoke: api server boots and routes 200/degraded', () => {
         'get_current_epoch',
         'get_leaderboard',
         'get_validator',
+        'get_validator_badges',
         'get_validator_leader_slots',
+        'get_validator_tier',
       ]);
     } finally {
       await app.close();

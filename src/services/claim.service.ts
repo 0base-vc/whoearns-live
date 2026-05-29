@@ -114,11 +114,16 @@ export const MESSAGE_FRESHNESS_WINDOW_SEC = 5 * 60;
  * CLI flag) — re-run the probe in `scripts/probe-envelope.ts` to
  * detect.
  *
- * **Why message_format = 1 (UTF-8) and not 0 (ASCII)**: format 0
- * restricts content to printable ASCII range 0x20-0x7e. Our
- * canonical message uses `\n` (0x0a) as a line separator, which is
- * outside that range. The CLI auto-selects format 1 for our
- * payload; matching its choice keeps our envelope byte-identical.
+ * **The message_format byte is content-dependent.** The Agave CLI
+ * picks format 0 (`RestrictedAscii`) when the message is ENTIRELY
+ * printable ASCII (every byte 0x20-0x7e), and format 1
+ * (`LimitedUtf8`) otherwise. The verifier MUST reproduce that exact
+ * choice — see `selectOffchainFormat`. An earlier revision hardcoded
+ * format 1: correct for the newline-joined v1 claim payload, but
+ * WRONG for the single-line `JSON.stringify` nonces the github-link
+ * and operator-wallet ceremonies sign (pure printable ASCII → the
+ * CLI picks format 0). The one-byte mismatch made every one of those
+ * proofs fail Ed25519 verification as `bad_signature`.
  */
 const OFFCHAIN_PREFIX = new Uint8Array([
   0xff,
@@ -127,14 +132,34 @@ const OFFCHAIN_PREFIX = new Uint8Array([
 ]);
 const OFFCHAIN_VERSION = 0;
 /**
- * UTF-8 (format 1). `\n` in our canonical message rules out format
- * 0 (printable ASCII only). Don't change to 0 without first
- * canonicalising the payload to a non-newline-separated form — and
- * note the Solana CLI also auto-picks format 1 when newlines are
- * present, so changing the server side without changing the CLI
- * invocation would break verification immediately.
+ * Offchain-message `message_format` bytes (Agave `MessageFormat`):
+ *   0 = RestrictedAscii — every byte in the printable range 0x20-0x7e
+ *   1 = LimitedUtf8     — valid UTF-8, anything else
+ * (Format 2, ExtendedUtf8, is only for messages above the Ledger
+ * display limit — far longer than any canonical payload signed here.)
  */
-const OFFCHAIN_FORMAT_UTF8 = 1;
+const OFFCHAIN_FORMAT_RESTRICTED_ASCII = 0;
+const OFFCHAIN_FORMAT_LIMITED_UTF8 = 1;
+
+/**
+ * Select the `message_format` byte the way Agave's
+ * `solana sign-offchain-message` does: format 0 when every byte is
+ * printable ASCII (0x20-0x7e), format 1 otherwise. The verifier MUST
+ * make the same choice the signer's CLI made — a different format
+ * byte changes the envelope and Ed25519 verification fails.
+ *
+ * Why this is per-message, not a constant:
+ *   - v1 claim payload — newline-joined `key=value` lines; `\n`
+ *     (0x0a) is below 0x20 → format 1.
+ *   - github-link / operator-wallet nonce — single-line
+ *     `JSON.stringify` output, pure printable ASCII → format 0.
+ */
+function selectOffchainFormat(msgBytes: Uint8Array): number {
+  for (const b of msgBytes) {
+    if (b < 0x20 || b > 0x7e) return OFFCHAIN_FORMAT_LIMITED_UTF8;
+  }
+  return OFFCHAIN_FORMAT_RESTRICTED_ASCII;
+}
 
 export function buildOffchainMessage(message: string): Uint8Array {
   const msgBytes = new TextEncoder().encode(message);
@@ -146,7 +171,7 @@ export function buildOffchainMessage(message: string): Uint8Array {
   out.set(OFFCHAIN_PREFIX, offset);
   offset += OFFCHAIN_PREFIX.length;
   out[offset++] = OFFCHAIN_VERSION;
-  out[offset++] = OFFCHAIN_FORMAT_UTF8;
+  out[offset++] = selectOffchainFormat(msgBytes);
   out[offset++] = lenLo;
   out[offset++] = lenHi;
   out.set(msgBytes, offset);

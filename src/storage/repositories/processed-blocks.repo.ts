@@ -950,4 +950,159 @@ export class ProcessedBlocksRepository {
       updatedAt,
     };
   }
+
+  /**
+   * Average compute units per produced block, per epoch, for ONE
+   * validator VOTE account. Keyed by epoch. The value is `null` for an
+   * epoch where the validator produced no blocks (no denominator) —
+   * computed exactly like `getValidatorEpochSlotStats`'
+   * `avgComputeUnitsPerProducedBlock`: `SUM(compute_units_consumed) /
+   * COUNT(*)` over `block_status = 'produced'` rows. Powers the
+   * per-epoch validator CU series on the income-page chart.
+   *
+   * Resolves the SET of identity keys the vote ran across `epochs`
+   * from `epoch_validator_stats`, then folds every produced block
+   * under any of them. `epoch_validator_stats` records only ONE
+   * identity per (epoch, vote), so an operator that rotates its
+   * identity key *mid-epoch* runs that epoch under two identities;
+   * keying CU on the windowed identity set — rather than a single
+   * per-epoch identity — folds both halves instead of dropping the
+   * unrecorded one. Correct as long as the rotated-to/-from identity
+   * appears in `epochs` somewhere, which holds whenever the window
+   * spans the rotation.
+   */
+  async getEpochComputeUnitsByVote(
+    vote: VotePubkey,
+    epochs: Epoch[],
+  ): Promise<Map<Epoch, bigint | null>> {
+    const out = new Map<Epoch, bigint | null>();
+    if (epochs.length === 0) return out;
+    const { rows } = await this.pool.query<{
+      epoch: string;
+      compute_units_consumed: string;
+      produced_blocks: string;
+    }>(
+      `WITH vote_identities AS (
+         SELECT ARRAY_AGG(DISTINCT identity_pubkey) AS identities
+           FROM epoch_validator_stats
+          WHERE epoch = ANY($1::bigint[])
+            AND vote_pubkey = $2
+       )
+       SELECT pb.epoch::text AS epoch,
+              COALESCE(SUM(pb.compute_units_consumed)
+                FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS compute_units_consumed,
+              COUNT(*) FILTER (WHERE pb.block_status = 'produced')::bigint AS produced_blocks
+         FROM processed_blocks pb
+         CROSS JOIN vote_identities vi
+        WHERE pb.epoch = ANY($1::bigint[])
+          AND pb.leader_identity = ANY(vi.identities)
+        GROUP BY pb.epoch`,
+      [epochs, vote],
+    );
+    for (const row of rows) {
+      const cu = toIntegerBigInt(row.compute_units_consumed ?? '0', 'compute units');
+      const blocks = Number(row.produced_blocks ?? '0');
+      out.set(Number(row.epoch), bigintAverage(cu, blocks));
+    }
+    return out;
+  }
+
+  /**
+   * Service-wide average compute units per produced block, per epoch
+   * — every tracked validator's produced blocks pooled (`processed_blocks`
+   * holds tracked validators' leader slots, not the whole cluster).
+   * Keyed by epoch; `null` for an epoch with no produced blocks anywhere.
+   *
+   * This is the produced-block-count-weighted mean of each
+   * validator's per-epoch average CU: weighting each validator's mean
+   * by its block count and summing is algebraically identical to
+   * `SUM(all CU) / COUNT(all produced blocks)`, so a validator with 0
+   * produced blocks contributes nothing and is excluded for free.
+   * Powers the "service average" series on the CU chart.
+   */
+  async getEpochComputeUnitsServiceWide(epochs: Epoch[]): Promise<Map<Epoch, bigint | null>> {
+    const out = new Map<Epoch, bigint | null>();
+    if (epochs.length === 0) return out;
+    const { rows } = await this.pool.query<{
+      epoch: string;
+      compute_units_consumed: string;
+      produced_blocks: string;
+    }>(
+      `SELECT epoch::text AS epoch,
+              COALESCE(SUM(compute_units_consumed)
+                FILTER (WHERE block_status = 'produced'), 0)::numeric AS compute_units_consumed,
+              COUNT(*) FILTER (WHERE block_status = 'produced')::bigint AS produced_blocks
+         FROM processed_blocks
+        WHERE epoch = ANY($1::bigint[])
+        GROUP BY epoch`,
+      [epochs],
+    );
+    for (const row of rows) {
+      const cu = toIntegerBigInt(row.compute_units_consumed ?? '0', 'compute units');
+      const blocks = Number(row.produced_blocks ?? '0');
+      out.set(Number(row.epoch), bigintAverage(cu, blocks));
+    }
+    return out;
+  }
+
+  /**
+   * Windowed average compute units per produced block, per validator
+   * VOTE, pooled across the given window epochs. Keyed by vote pubkey;
+   * `null` for a vote that produced no blocks across the window.
+   *
+   * Resolves, per vote, the SET of identity keys it ran across the
+   * window from `epoch_validator_stats`, then pools every produced
+   * block under any of them. `epoch_validator_stats` records one
+   * identity per (epoch, vote), so a bare per-epoch-identity join
+   * would drop blocks an operator produced under a second identity
+   * after a *mid-epoch* rotation; the windowed identity set folds
+   * both. Ordinary cross-epoch rotation is covered for free — the
+   * pre- and post-rotation identities are simply both in the set.
+   * `SUM(CU) / COUNT(produced)` over the window is the
+   * produced-block-count-weighted CU the leaderboard needs: a
+   * single-epoch window yields that epoch's average, a multi-epoch
+   * window weights each epoch by how many blocks the validator
+   * produced. Restricted to `votes` so the query only aggregates the
+   * leaderboard's visible rows.
+   */
+  async getWindowedComputeUnitsByVote(
+    epochs: Epoch[],
+    votes: VotePubkey[],
+  ): Promise<Map<VotePubkey, bigint | null>> {
+    const out = new Map<VotePubkey, bigint | null>();
+    if (epochs.length === 0 || votes.length === 0) return out;
+    const { rows } = await this.pool.query<{
+      vote_pubkey: string;
+      compute_units_consumed: string;
+      produced_blocks: string;
+    }>(
+      `WITH vote_identities AS (
+         SELECT vote_pubkey,
+                ARRAY_AGG(DISTINCT identity_pubkey) AS identities
+           FROM epoch_validator_stats
+          WHERE epoch = ANY($1::bigint[])
+            AND vote_pubkey = ANY($2::text[])
+          GROUP BY vote_pubkey
+       )
+       SELECT vi.vote_pubkey,
+              COALESCE(SUM(pb.compute_units_consumed)
+                FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS compute_units_consumed,
+              COUNT(pb.slot) FILTER (WHERE pb.block_status = 'produced')::bigint AS produced_blocks
+         FROM vote_identities vi
+         LEFT JOIN processed_blocks pb
+           -- Constant epoch list so the planner prunes
+           -- processed_blocks partitions; a bare join-column
+           -- equality does not.
+           ON pb.epoch = ANY($1::bigint[])
+          AND pb.leader_identity = ANY(vi.identities)
+        GROUP BY vi.vote_pubkey`,
+      [epochs, votes],
+    );
+    for (const row of rows) {
+      const cu = toIntegerBigInt(row.compute_units_consumed ?? '0', 'compute units');
+      const blocks = Number(row.produced_blocks ?? '0');
+      out.set(row.vote_pubkey, bigintAverage(cu, blocks));
+    }
+    return out;
+  }
 }

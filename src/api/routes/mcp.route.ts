@@ -31,6 +31,11 @@ import {
   type ValidatorEpochSlotStatsResponse,
 } from '../serializers/leader-slots-response.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
+import { oldestIncomeFreshness } from '../../services/node-tier.js';
+import type { NodeTier } from '../../services/node-tier.js';
+import { resolveTierForValidator, type CohortAsOfEpoch } from './validators.route.js';
+import { narrowToDocumentedKind } from '../../services/client-kind.js';
+import { summariseTenure } from '../../services/tenure.js';
 
 const MCP_LEADERBOARD_CACHE_TTL_MS = 10_000;
 const MCP_LEADERBOARD_CACHE_MAX_ENTRIES = 128;
@@ -46,8 +51,18 @@ export interface McpRoutesDeps {
     EpochsRepository,
     'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs' | 'findLatestCompleteClosedEpochBlock'
   >;
-  statsRepo: Pick<StatsRepository, 'findHistoryByVote' | 'findTopNByWindow' | 'findByVoteEpoch'>;
-  processedBlocksRepo: Pick<ProcessedBlocksRepository, 'getValidatorEpochSlotStats'>;
+  statsRepo: Pick<
+    StatsRepository,
+    | 'findHistoryByVote'
+    | 'findTopNByWindow'
+    | 'findByVoteEpoch'
+    | 'findEconomicPercentile'
+    | 'findEconomicCohortVotes'
+  >;
+  processedBlocksRepo: Pick<
+    ProcessedBlocksRepository,
+    'getValidatorEpochSlotStats' | 'getWindowedComputeUnitsByVote'
+  >;
   aggregatesRepo: Pick<AggregatesRepository, 'findByEpochTopN'>;
   profilesRepo: Pick<ProfilesRepository, 'findOptedOutVotes' | 'findByVote'>;
   claimsRepo: Pick<ClaimsRepository, 'findClaimedVotes'>;
@@ -57,11 +72,12 @@ type LeaderboardPayload = Awaited<ReturnType<typeof buildLeaderboardPayload>>;
 type LeaderboardPayloadCache = TtlCache<string, Promise<LeaderboardPayload>>;
 
 /**
- * Streamable-HTTP MCP server in-process at `/mcp`. Exposes four
+ * Streamable-HTTP MCP server in-process at `/mcp`. Exposes six
  * read-only tools (`get_current_epoch`, `get_leaderboard`,
- * `get_validator`, `get_validator_leader_slots`) that AI agents —
- * Claude Desktop, Claude Code, custom MCP clients — can call directly
- * without scraping the UI or parsing OpenAPI.
+ * `get_validator`, `get_validator_leader_slots`, `get_validator_tier`,
+ * `get_validator_badges`) that AI agents — Claude Desktop, Claude
+ * Code, custom MCP clients — can call directly without scraping the
+ * UI or parsing OpenAPI.
  *
  * Why in-process Fastify routes instead of a sidecar:
  *   * No new Docker image, no Helm changes, no extra port.
@@ -161,11 +177,13 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
           'block fees (base + priority), and on-chain Jito tips — indexed by',
           `${opts.config.SITE_NAME} at`,
           `${opts.config.SITE_URL}.`,
-          'Four tools:',
+          'Six tools:',
           '  • get_current_epoch — returns the current epoch state (call first).',
           '  • get_leaderboard — top-N validators ranked by live-trend income / fees / reliability.',
           '  • get_validator — per-epoch history for one validator (vote OR identity).',
           '  • get_validator_leader_slots — block-level facts for one validator epoch.',
+          '  • get_validator_tier — Node Tier (forge/anvil/hearth/kindling/unrated) over closed epochs.',
+          '  • get_validator_badges — tenure + client + tier badge row for one validator.',
           'Data is read-only. Live-trend windows include running-epoch lower bounds;',
           'closed-epoch numbers are final. All lamport amounts are decimal',
           'strings — parse as BigInt to avoid precision loss.',
@@ -354,6 +372,65 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
       },
     );
 
+    server.registerTool(
+      'get_validator_tier',
+      {
+        title: 'Get validator Node Tier',
+        description:
+          'Returns the Node Tier (forge / anvil / hearth / kindling / unrated) for ONE validator. Pass either a vote pubkey OR an identity pubkey. ' +
+          "Node Tier composite — `0.3 × reliability + 0.7 × economicScore`, where `economicScore = 0.9 × economicPercentile + 0.1 × cuSubscore`. Reliability is the pessimistic Wilson upper bound on skip rate (so small samples cannot inflate to 1.0). Economic percentile is the cohort rank of this validator's median per-leader-slot income across 10 CLOSED epochs, computed against the INDEXED-VALIDATOR cohort (not the full Solana cluster); cuSubscore is the cohort percentile rank of producedBlock-weighted compute units per block among block-producing validators, or the validator's own economic percentile when it produced no blocks (so a non-producer is judged on income alone). The running epoch is excluded so the tier never rides mid-epoch counters. " +
+          'Tier is "unrated" when the sample is too thin (slotsAssigned < 10, cohort < 10, or measuredEpochs < 10) and capped at "kindling" when skip_rate > 20% regardless of economic percentile. The response carries the window aggregates and per-component sub-scores so the classification is auditable. Vote credits are deliberately excluded — see docs/scoring.md Phase 1 for the rationale. Same data as GET /v1/validators/{idOrVote}/tier. ' +
+          SHARED_TOOL_PROVENANCE_NOTE,
+        inputSchema: {
+          voteOrIdentity: z
+            .string()
+            .pipe(PubkeySchema)
+            .describe('Vote pubkey OR identity pubkey (base58, 32-44 chars).'),
+        },
+      },
+      async (args) => {
+        const result = await buildValidatorTierPayload(opts, args.voteOrIdentity);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+          isError: result.found === false,
+        };
+      },
+    );
+
+    server.registerTool(
+      'get_validator_badges',
+      {
+        title: 'Get validator badge row',
+        description:
+          'Returns the profile-level badge row for ONE validator: tenure (first-seen epoch, active-epoch count, landmark badge), client kind + version (from gossip ingestion), and Node Tier. Pass either a vote pubkey OR an identity pubkey. ' +
+          'This is the single-call equivalent of the badge strip on a validator profile page — use it when you need the "who is this operator" summary rather than per-epoch income. The tier sub-object mirrors get_validator_tier: composite is `0.3 × reliability + 0.7 × economicScore` (economicScore = `0.9 × economicPercentile + 0.1 × cuSubscore`, cuSubscore = cuPercentile, or the economic percentile when no blocks were produced) over 10 closed epochs, "unrated" for thin samples (slotsAssigned < 10, cohort < 10, or measuredEpochs < 10), and capped at "kindling" when skip_rate > 20%. Vote credits are deliberately excluded — see docs/scoring.md Phase 1. Same data as GET /v1/validators/{idOrVote}/badges. ' +
+          SHARED_TOOL_PROVENANCE_NOTE,
+        inputSchema: {
+          voteOrIdentity: z
+            .string()
+            .pipe(PubkeySchema)
+            .describe('Vote pubkey OR identity pubkey (base58, 32-44 chars).'),
+        },
+      },
+      async (args) => {
+        const result = await buildValidatorBadgesPayload(opts, args.voteOrIdentity);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+          isError: result.found === false,
+        };
+      },
+    );
+
     // SDK option types declare `sessionIdGenerator: () => string` as
     // required, but the stateless-mode contract documented in the
     // README explicitly accepts `undefined`. Cast at the boundary
@@ -449,6 +526,12 @@ interface LeaderboardPayloadRow {
   decadeEpochStart: number | null;
   decadeEpochEnd: number | null;
   decadeRank: DecadeRank | null;
+  /**
+   * Produced-block-count-weighted average CU per produced block for
+   * the active window, stringified; `null` when the validator
+   * produced no blocks in the window. Mirrors REST /v1/leaderboard.
+   */
+  windowedCu: string | null;
 }
 
 type DecadeRank = 1 | 2 | 3;
@@ -604,9 +687,15 @@ async function buildLeaderboardPayload(
 
   const identities = trimmed.map((r) => r.identityPubkey);
   const votes = trimmed.map((r) => r.votePubkey);
-  const [infoMap, claimedSet] = await Promise.all([
+  const [infoMap, claimedSet, windowedCuByVote] = await Promise.all([
     opts.validatorsRepo.getInfosByIdentities(identities),
     opts.claimsRepo.findClaimedVotes(votes),
+    // Per-row windowed CU — mirrors REST /v1/leaderboard. Keyed by
+    // vote (rotation-correct via the epoch_validator_stats join).
+    opts.processedBlocksRepo.getWindowedComputeUnitsByVote(
+      epochs.map((e) => e.epoch),
+      votes,
+    ),
   ]);
 
   const items: LeaderboardPayloadRow[] = trimmed.map((row, i) =>
@@ -616,6 +705,7 @@ async function buildLeaderboardPayload(
       infoMap.get(row.identityPubkey),
       claimedSet.has(row.votePubkey),
       decadeRanks.get(row.votePubkey),
+      windowedCuByVote.get(row.votePubkey) ?? null,
     ),
   );
 
@@ -644,6 +734,7 @@ function serializeLeaderboardRow(
   info: { name: string | null } | undefined,
   claimed: boolean,
   decadeBadge: DecadeBadge | undefined,
+  windowedCu: bigint | null,
 ): LeaderboardPayloadRow {
   const blockFees = stats.blockFeesTotalLamports;
   const blockTips = stats.blockTipsTotalLamports;
@@ -676,6 +767,7 @@ function serializeLeaderboardRow(
     decadeEpochStart: decadeBadge?.epochStart ?? null,
     decadeEpochEnd: decadeBadge?.epochEnd ?? null,
     decadeRank: decadeBadge?.rank ?? null,
+    windowedCu: windowedCu === null ? null : windowedCu.toString(),
   };
 }
 
@@ -826,7 +918,12 @@ async function buildValidatorLeaderSlotsPayload(
   const slotStats = await opts.processedBlocksRepo.getValidatorEpochSlotStats({
     epoch,
     votePubkey: validator.votePubkey,
-    identityPubkey: validator.identityPubkey,
+    // `processed_blocks` is keyed by the `leader_identity` as of that
+    // epoch — use the per-epoch identity from `epoch_validator_stats`
+    // so a validator that rotated its identity key still resolves its
+    // historical leader slots (falls back to the current identity when
+    // there is no row — no activity → all-zero either way).
+    identityPubkey: stats?.identityPubkey ?? validator.identityPubkey,
     slotsAssigned: stats?.slotsAssigned ?? 0,
     slotsProduced: stats?.slotsProduced ?? 0,
     slotsSkipped: stats?.slotsSkipped ?? 0,
@@ -835,6 +932,161 @@ async function buildValidatorLeaderSlotsPayload(
   return {
     found: true,
     ...serializeValidatorEpochSlotStats(slotStats, epochRow?.isClosed ?? false),
+  };
+}
+
+/**
+ * `get_validator_tier` payload. Same shape + computation as the
+ * `/v1/validators/:idOrVote/tier` route — delegates to the SHARED
+ * `resolveTierForValidator` helper so the MCP tool and the REST
+ * route cannot drift. Opt-out is respected, mirroring
+ * `buildValidatorPayload`.
+ */
+async function buildValidatorTierPayload(
+  opts: McpRoutesDeps,
+  voteOrIdentity: string,
+): Promise<
+  | { found: false; reason: string }
+  | {
+      found: true;
+      vote: string;
+      identity: string;
+      window: {
+        epochs: number;
+        slotsAssigned: number;
+        slotsSkipped: number;
+        economicCohortSize: number;
+        economicMeasuredEpochs: number;
+        economicMedianLamportsPerSlot: string | null;
+        incomeFreshness: string | null;
+        cohortAsOfEpoch: CohortAsOfEpoch | null;
+      };
+      tier: NodeTier;
+      composite: number | null;
+      components: {
+        reliability: number;
+        economicPercentile: number | null;
+        cuPercentile: number | null;
+      };
+    }
+> {
+  const validator = await resolveValidator(opts, voteOrIdentity);
+  if (validator === null) {
+    return { found: false, reason: `validator not found: ${voteOrIdentity}` };
+  }
+  const profile = await opts.profilesRepo.findByVote(validator.votePubkey);
+  if (profile?.optedOut === true) {
+    return { found: false, reason: `validator not found or opted out: ${voteOrIdentity}` };
+  }
+
+  // SHARED resolver — same code path as /v1/validators/:idOrVote/tier.
+  // Window logic + cohort lookup + composite all live in one place; we
+  // map the result into the MCP-specific shape below. No duplication.
+  const resolved = await resolveTierForValidator(
+    opts.statsRepo,
+    opts.epochsRepo,
+    validator.votePubkey,
+  );
+  const { result, input, closedRows, economicLookup, cohortAsOfEpoch } = resolved;
+  const incomeFreshness = oldestIncomeFreshness(closedRows);
+
+  return {
+    found: true,
+    vote: validator.votePubkey,
+    identity: validator.identityPubkey,
+    window: {
+      epochs: closedRows.length,
+      slotsAssigned: input.slotsAssigned,
+      slotsSkipped: input.slotsSkipped,
+      economicCohortSize: input.economicCohortSize,
+      economicMeasuredEpochs: input.economicMeasuredEpochs,
+      economicMedianLamportsPerSlot: economicLookup.medianIncomePerSlotLamports,
+      incomeFreshness: incomeFreshness?.toISOString() ?? null,
+      cohortAsOfEpoch,
+    },
+    tier: result.tier,
+    composite: result.composite,
+    components: {
+      reliability: result.components.reliability,
+      economicPercentile: result.components.economicPercentile,
+      cuPercentile: result.components.cuPercentile,
+    },
+  };
+}
+
+/**
+ * `get_validator_badges` payload. Same shape + computation as the
+ * `/v1/validators/:idOrVote/badges` route — delegates to the SHARED
+ * `resolveTierForValidator` helper for the tier sub-object so the MCP
+ * tool can't drift from the REST route. Small fixed-size response;
+ * opt-out respected.
+ */
+async function buildValidatorBadgesPayload(
+  opts: McpRoutesDeps,
+  voteOrIdentity: string,
+): Promise<
+  | { found: false; reason: string }
+  | {
+      found: true;
+      vote: string;
+      identity: string;
+      tenure: { firstSeenEpoch: number; activeEpochs: number; landmark: string; badge: string };
+      client: { kind: string; version: string | null; updatedAt: string | null };
+      tier: {
+        tier: NodeTier;
+        composite: number | null;
+        windowEpochs: number;
+      };
+    }
+> {
+  const validator = await resolveValidator(opts, voteOrIdentity);
+  if (validator === null) {
+    return { found: false, reason: `validator not found: ${voteOrIdentity}` };
+  }
+  const profile = await opts.profilesRepo.findByVote(validator.votePubkey);
+  if (profile?.optedOut === true) {
+    return { found: false, reason: `validator not found or opted out: ${voteOrIdentity}` };
+  }
+
+  // SHARED resolver + a parallel `findCurrent` for the tenure cap.
+  // `resolveTierForValidator` internally fetches `findCurrent` too;
+  // accepting the one extra read keeps the helper boundary clean (the
+  // resolver does not leak its internal epoch fetch up to callers).
+  const [resolved, currentEpoch] = await Promise.all([
+    resolveTierForValidator(opts.statsRepo, opts.epochsRepo, validator.votePubkey),
+    opts.epochsRepo.findCurrent(),
+  ]);
+  const { result: tierResult, closedRows } = resolved;
+
+  const tenure = summariseTenure(
+    validator.firstSeenEpoch,
+    currentEpoch !== null ? currentEpoch.epoch : validator.lastSeenEpoch,
+    validator.genesisEpoch,
+  );
+  // Re-narrow the stored client kind to the documented enum at the
+  // public boundary — same as the /badges route.
+  const clientKind = narrowToDocumentedKind(validator.clientKind);
+
+  return {
+    found: true,
+    vote: validator.votePubkey,
+    identity: validator.identityPubkey,
+    tenure: {
+      firstSeenEpoch: tenure.firstSeenEpoch,
+      activeEpochs: tenure.activeEpochs,
+      landmark: tenure.landmark,
+      badge: tenure.badge,
+    },
+    client: {
+      kind: clientKind,
+      version: validator.clientVersion,
+      updatedAt: validator.clientUpdatedAt?.toISOString() ?? null,
+    },
+    tier: {
+      tier: tierResult.tier,
+      composite: tierResult.composite,
+      windowEpochs: closedRows.length,
+    },
   };
 }
 

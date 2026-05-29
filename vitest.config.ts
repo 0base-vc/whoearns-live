@@ -1,6 +1,18 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  // `$env/static/public` is a SvelteKit/Vite virtual module that does
+  // not exist in the plain node-vitest harness. Alias it to a stub so
+  // UI library modules that read a `PUBLIC_*` env var (e.g.
+  // `solana-rpc-client.ts`) can be unit-tested directly.
+  resolve: {
+    alias: {
+      '$env/static/public': fileURLToPath(
+        new URL('./test/unit/ui/_env-static-public-stub.ts', import.meta.url),
+      ),
+    },
+  },
   test: {
     globals: false,
     environment: 'node',

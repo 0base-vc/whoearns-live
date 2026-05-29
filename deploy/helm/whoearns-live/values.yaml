@@ -90,6 +90,42 @@ podDisruptionBudget:
   enabled: false
   minAvailable: 1
 
+# Prometheus Operator ServiceMonitor (OPS-2). The StatefulSet already
+# emits `prometheus.io/scrape` annotations for annotation-based
+# discovery (kube-prometheus-stack default); this block adds a
+# first-class ServiceMonitor CRD for clusters whose Prometheus is
+# configured to discover targets via ServiceMonitor selectors
+# instead — the two mechanisms are independent and you typically
+# pick one.
+#
+# Rendered ONLY when `serviceMonitor.enabled: true` AND
+# `config.metricsPort > 0` (no metrics listener → nothing to scrape).
+# Requires the monitoring.coreos.com CRDs to be installed in the
+# cluster; `helm template`/`helm install` will emit the manifest
+# regardless, but `kubectl apply` fails if the CRD is absent — leave
+# disabled unless you run Prometheus Operator.
+serviceMonitor:
+  enabled: false
+  # Scrape cadence + per-scrape timeout. Defaults match the app's
+  # cheap `/metrics` endpoint; tighten only if you need finer
+  # resolution and have the Prometheus storage budget for it.
+  interval: 30s
+  scrapeTimeout: 10s
+  # Extra labels on the ServiceMonitor object. Many Prometheus
+  # Operator installs use a `release: <name>` label selector to
+  # decide which ServiceMonitors to honour — set that here, e.g.
+  #   labels:
+  #     release: kube-prometheus-stack
+  labels: {}
+  # Optional: pin the ServiceMonitor into a specific namespace (e.g.
+  # the namespace your Prometheus Operator watches). Empty → the
+  # release namespace.
+  namespace: ''
+  # Relabeling applied to scraped metrics before ingestion. Empty
+  # default; add entries if you need to drop or rewrite labels.
+  metricRelabelings: []
+  relabelings: []
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
@@ -181,12 +217,15 @@ config:
   # provider. A fallback `getBlock` null is treated as ambiguous and
   # does not permanently mark a leader slot skipped.
   solanaFallbackRpcUrl: ''
-  # Optional secondary RPC endpoint retained for one-shot/offline refill
-  # scripts. The live worker no longer uses this for `getBlockProduction`
-  # or `getBlock`: slot counters come from local `processed_blocks`, and
-  # block fetches only cover watched validators' leader slots on
-  # `solanaRpcUrl`. Normal deployments should leave this empty.
-  solanaArchiveRpcUrl: ''
+  # Secondary RPC used by the wallet-fee backfill's INCREMENTAL
+  # walks (routine newest-first polling once a wallet has been
+  # backfilled once). publicnode retains ~60h of signature history
+  # — too short for the initial 365-day backfill (that runs on the
+  # primary RPC) but more than enough for incremental polling.
+  # Tiered routing keeps the paid primary endpoint idle on the
+  # common-case tick. Setting this to '' falls back to "primary
+  # for everything" — functional but more expensive.
+  solanaArchiveRpcUrl: 'https://solana-rpc.publicnode.com'
 
   # Optional Yellowstone gRPC endpoint for LIVE block streaming.
   # When set, the worker subscribes to block updates and processes
@@ -245,8 +284,96 @@ config:
   # fills missing processed block rows, then rebuilds aggregate totals
   # from `processed_blocks`.
   closedEpochReconcileIntervalMs: 300000
+  # Phase 2 — gossip ContactInfo refresh. Drives client-kind +
+  # client-version indexing on the full cluster (~2000 entries).
+  # 30 min balances "fresh during a Firedancer-Pioneer release" against
+  # ~500 KB payload per tick.
+  #
+  # NOTE: the interval values below are deliberately QUOTED. Helm
+  # loads YAML through a JSON pass that widens bare integers to
+  # float64 — a bare `1800000` would then render as `"1.8e+06"` via
+  # `quote`. Quoting at the source keeps them exact decimal strings.
+  clusterNodesIntervalMs: '1800000'
+  # Phase 2 — on-chain validator-info refresh for the WATCHED set
+  # (operator renames / icon changes). 6 hr × 4 watched validators
+  # = 16 RPC calls/day; very light.
+  validatorInfoIntervalMs: '21600000'
+  # Phase 4 — wallet-activity indexer cadence. 6 hr is the right
+  # resolution for a daily-bucketed heatmap; cuts RPC pressure by
+  # ~4× vs hourly. Idempotent so partial runs are safe.
+  walletActivityIntervalMs: '21600000'
+  # Phase 4-extension — wallet fee backfill cadence + per-tick
+  # `getTransactionFee` budget. Tiered RPC routing: the initial
+  # 365-day backfill per fresh wallet hits the primary
+  # (`solanaRpcUrl`, full history); routine incremental polling
+  # hits `solanaArchiveRpcUrl` (publicnode, ~60h retention).
+  # 1 hr cadence lets a freshly-registered wallet catch up its
+  # 365-day fee history within ~a day at the default per-tick
+  # ceiling, then settles into cheap incremental polling.
+  walletFeeBackfillIntervalMs: '3600000'
+  walletFeeBackfillPerTickLimit: '500'
+  # Phase 2-extension — validators.app canonical client-kind
+  # ingester cadence. 2 hr refresh. Sole source of client_kind
+  # data since `cluster-nodes-ingester` was disabled (regex
+  # classifier was overwriting validators.app's specific variants
+  # like AgaveBam with the base 'agave' kind 12× per 6 h).
+  # One bulk HTTP call per tick; off the RPC path entirely.
+  validatorsAppIntervalMs: '7200000'
+  # Phase 5 — SIMD curation cadence. 12 hr keeps Anthropic token
+  # spend modest while still catching newly-listed SIMDs within
+  # half a day. Set to a longer interval (e.g. 24 hr) if your token
+  # budget is tight; set to 0 to disable the periodic job entirely.
+  simdCurationIntervalMs: '43200000'
+  # Tier-snapshot ingester cadence (migration 0045). Persists each
+  # tracked validator's tier composite for the latest CLOSED epoch so
+  # the profile surface can show movement + history. 30 min: a closed
+  # epoch only appears every ~2 days, so most ticks are a cheap cursor
+  # check that skips before any per-validator work; this just bounds
+  # the latency between an epoch closing and its snapshot landing.
+  # Forward-only — never backfills past epochs.
+  tierSnapshotIntervalMs: '1800000'
   slotFinalityBuffer: 32
   shutdownTimeoutMs: 15000
+
+# Phase 5 — Anthropic Claude API config. Optional: when unset,
+# the SIMD curation pipeline is disabled (the public read endpoint
+# still serves already-curated rows; new SIMDs just stay pre-review
+# until populated manually).
+#
+# The chart NEVER lets the key live in the ConfigMap — it is wired
+# exclusively via `valueFrom.secretKeyRef`. Two patterns:
+#
+#   1. Inline (dev / fork demo). Set `anthropic.apiKey` and the
+#      chart creates a Secret with that value.
+#         anthropic:
+#           apiKey: sk-ant-...
+#   2. External Secret (production). Pre-create a Secret in the
+#      release namespace with key `ANTHROPIC_API_KEY`, then set
+#      `anthropic.existingSecret` to its name. The chart does NOT
+#      create / manage that Secret — it only references it. This is
+#      the pattern to use with external-secrets / sealed-secrets /
+#      cloud KMS injection so the key never lives in values files
+#      or chart history.
+#         anthropic:
+#           existingSecret: anthropic-credentials
+#
+# `anthropic.apiKey` and `anthropic.existingSecret` are mutually
+# exclusive; setting both is a configuration error (the chart
+# template renders the existingSecret reference and ignores the
+# inline value, but you should not rely on that — pick one).
+anthropic:
+  # Inline API key (development / forks only). Leave empty in
+  # production. When non-empty AND `existingSecret` is empty, the
+  # chart provisions a Secret named `<fullname>-anthropic` holding
+  # this value.
+  apiKey: ''
+  # Name of a pre-existing Secret in the release namespace, with
+  # key `ANTHROPIC_API_KEY`. Takes precedence over `apiKey`.
+  existingSecret: ''
+  # Model identifier passed to the Anthropic Messages API. Pinning a
+  # specific minor version protects against silent behaviour shifts
+  # — the curation prompt was tuned against the default below.
+  model: claude-sonnet-4-6
 
 # Embedded Postgres auth. Picked up by the entrypoint at first boot. Once
 # the PVC is initialised these values are locked in — changing them on a

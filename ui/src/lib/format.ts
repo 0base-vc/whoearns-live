@@ -79,6 +79,13 @@ export function formatTimestamp(iso: string | null, now: Date = new Date()): str
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d ago`;
+  // Keep the relative form up to ~30 days — a delegator skimming
+  // "Last refreshed 3w ago" reads age at a glance; an absolute UTC
+  // stamp at 8 days old forces them into mental subtraction. Past
+  // ~30 days the relative form starts losing precision, so fall
+  // through to the absolute date format below.
+  const weeks = Math.floor(days / 7);
+  if (weeks < 4) return `${weeks}w ago`;
   const months = [
     'Jan',
     'Feb',
@@ -115,6 +122,62 @@ export function lamportsStringToSolNumber(lamports: string | null): number | nul
   const asNum = Number(lamports);
   if (!Number.isFinite(asNum)) return null;
   return asNum / 1_000_000_000;
+}
+
+/**
+ * Compact lamports → human-readable. Used by the EvidenceRow panel
+ * where raw per-slot lamports figures are surfaced inline with the
+ * percentile rank: tiny values (e.g. dust per slot) read as raw
+ * "{n} lam" with thousands separators; values that scale into
+ * meaningful fractions of SOL switch to "{x} SOL" with 4 decimals,
+ * which is precise enough to compare per-slot performance across
+ * validators without padding the column with leading zeros.
+ *
+ * Threshold: 1,000,000 lamports (0.001 SOL). Below this the SOL
+ * representation collapses to a flood of "0.000" prefixes; above it
+ * the raw lamports number bloats past 10 digits and stops being
+ * scannable.
+ *
+ * Returns "—" for null inputs and falls back to the raw string for
+ * non-finite parses so a bad payload is visible rather than silently
+ * coerced to 0.
+ */
+export function formatLamports(lamports: string | null): string {
+  if (lamports === null) return '—';
+  const n = Number(lamports);
+  if (!Number.isFinite(n)) return lamports;
+  if (n === 0) return '0 lam';
+  if (Math.abs(n) >= 1_000_000) {
+    const sol = n / 1_000_000_000;
+    return `${sol.toFixed(4)} SOL`;
+  }
+  return `${Math.round(n).toLocaleString()} lam`;
+}
+
+/**
+ * Locale-formatted compute units value with thousands separators and
+ * no unit suffix. Compute units are dimensionless in display contexts
+ * (the column header carries the unit), so the function returns just
+ * the rounded integer with separators. "—" for null inputs so the
+ * EvidenceRow can render a placeholder cell symmetrically with the
+ * SOL helpers above.
+ */
+export function formatComputeUnits(value: number | null): string {
+  if (value === null) return '—';
+  if (!Number.isFinite(value)) return String(value);
+  return Math.round(value).toLocaleString();
+}
+
+/**
+ * Format a 0–1 fraction as a percentage with one decimal place. Used
+ * by the EvidenceRow's Wilson-bound display + the percentile-rank
+ * recap line. Returns "—" for null so callers don't have to branch
+ * before interpolating the result.
+ */
+export function formatFractionAsPercent(fraction: number | null, decimals = 1): string {
+  if (fraction === null) return '—';
+  if (!Number.isFinite(fraction)) return '—';
+  return `${(fraction * 100).toFixed(decimals)}%`;
 }
 
 /**

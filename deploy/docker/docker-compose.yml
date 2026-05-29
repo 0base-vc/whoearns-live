@@ -24,6 +24,13 @@ services:
       SOLANA_FALLBACK_RPC_URL: ${SOLANA_FALLBACK_RPC_URL:-}
       YELLOWSTONE_GRPC_URL: ${YELLOWSTONE_GRPC_URL:-}
       YELLOWSTONE_GRPC_X_TOKEN: ${YELLOWSTONE_GRPC_X_TOKEN:-}
+      # Phase 5 — SIMD curation. Leave ANTHROPIC_API_KEY empty to keep
+      # the curation pipeline disabled (the SIMD route still serves
+      # already-curated rows). SIMD_CURATION_INTERVAL_MS is not set
+      # here — like the other job intervals it falls back to the
+      # in-app default (12h); set it via a local .env if you need to.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
       # Leave empty to track no validators by default; override in a local
       # .env or `-e VALIDATORS_WATCH_LIST=...` at run time.
       VALIDATORS_WATCH_LIST: ${VALIDATORS_WATCH_LIST:-}

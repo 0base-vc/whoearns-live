@@ -57,23 +57,42 @@
   const popoverId = `tt-${Math.random().toString(36).slice(2, 10)}`;
 
   /**
-   * Position classes assembled at runtime. We build the class string
-   * here rather than using Svelte's `class:NAME={cond}` directive
-   * because Tailwind's positioning utilities include slashes
-   * (`left-1/2`, `-translate-x-1/2`) which the directive parser
-   * rejects as invalid identifiers.
+   * Transform classes assembled at runtime. The popover is
+   * `position: fixed` so it escapes any `overflow: hidden` / scroll
+   * ancestor (e.g. the rounded comparison table) that would otherwise
+   * clip it. Its viewport `left`/`top` are set inline from the
+   * trigger's rect; these translate utilities then anchor the popover
+   * box relative to that point — `-translate-y-full` lifts it above
+   * the anchor, `-translate-x-1/2` centres it. Built as a string
+   * rather than `class:NAME` because Tailwind's slash utilities
+   * (`-translate-x-1/2`) are invalid `class:` identifiers.
    */
   const popoverClasses = $derived.by(() => {
-    const vert = placement === 'top' ? 'bottom-full mb-2' : 'top-full mt-2';
+    const vert = placement === 'top' ? '-translate-y-full -mt-2' : 'mt-2';
     const horiz =
-      align === 'center' ? 'left-1/2 -translate-x-1/2' : align === 'left' ? 'left-0' : 'right-0';
+      align === 'center' ? '-translate-x-1/2' : align === 'left' ? '' : '-translate-x-full';
     return `${vert} ${horiz}`;
   });
 
   let trigger: HTMLButtonElement | undefined = $state();
   let open = $state(false);
+  /**
+   * Viewport coordinates for the `position: fixed` popover, recomputed
+   * on open and — while open — on scroll/resize so it tracks the
+   * trigger.
+   */
+  let popoverPos = $state<{ x: number; y: number } | null>(null);
+
+  function reposition() {
+    if (trigger === undefined) return;
+    const r = trigger.getBoundingClientRect();
+    const x = align === 'center' ? r.left + r.width / 2 : align === 'left' ? r.left : r.right;
+    const y = placement === 'top' ? r.top : r.bottom;
+    popoverPos = { x, y };
+  }
 
   function show() {
+    reposition();
     open = true;
   }
   function hide() {
@@ -84,6 +103,7 @@
     // we attach below; otherwise the toggle that opens the tooltip
     // would also be the click that closes it.
     e.stopPropagation();
+    if (!open) reposition();
     open = !open;
   }
 
@@ -103,14 +123,23 @@
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') open = false;
     };
+    // The popover is `position: fixed`, so it must follow the trigger
+    // whenever anything scrolls — `capture: true` catches scrolls
+    // inside nested overflow containers (e.g. a scrollable table) —
+    // or the viewport resizes.
+    const onReflow = () => reposition();
     const handle = setTimeout(() => {
       document.addEventListener('click', onDocClick);
       document.addEventListener('keydown', onKey);
+      window.addEventListener('scroll', onReflow, { capture: true, passive: true });
+      window.addEventListener('resize', onReflow);
     }, 0);
     return () => {
       clearTimeout(handle);
       document.removeEventListener('click', onDocClick);
       document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onReflow, { capture: true });
+      window.removeEventListener('resize', onReflow);
     };
   });
 </script>
@@ -142,11 +171,13 @@
     <span aria-hidden="true">i</span>
   </button>
 
-  {#if open}
+  {#if open && popoverPos !== null}
     <span
       id={popoverId}
       role="tooltip"
-      class="pointer-events-none absolute z-50 w-max max-w-xs whitespace-normal rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-left text-xs font-normal normal-case leading-relaxed tracking-normal text-[color:var(--color-text-default)] shadow-lg {popoverClasses}"
+      style:left={`${popoverPos.x}px`}
+      style:top={`${popoverPos.y}px`}
+      class="pointer-events-none fixed z-50 w-max max-w-xs whitespace-normal rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-left text-xs font-normal normal-case leading-relaxed tracking-normal text-[color:var(--color-text-default)] shadow-lg {popoverClasses}"
     >
       {content}
     </span>

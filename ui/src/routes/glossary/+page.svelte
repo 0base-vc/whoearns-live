@@ -107,15 +107,50 @@
     },
     {
       term: 'Commission',
-      en: 'The percentage cut the validator takes from inflation rewards before passing the rest to delegators. NOTE: this site shows the OPERATOR side income — what the validator earns. Delegator yield = (1 - commission) × operator yield.',
-      ko: 'validator가 인플레이션 보상에서 자신의 몫으로 떼는 비율입니다. 참고: 이 사이트는 운영자(OPERATOR) 측 수입을 보여줍니다. Delegator의 수익률은 = (1 - commission) × operator 수익률입니다.',
+      en: "The percentage a validator takes from its delegators' INFLATION staking rewards before passing the rest on. Important: this site shows operator-side fee + tip income, which goes to the operator directly and is separate from the inflation rewards commission applies to. Commission is a delegator-facing cost; check it before delegating, but don't read this site's operator income as your yield.",
+      ko: 'validator가 delegator의 인플레이션(INFLATION) 스테이킹 보상에서 자신의 몫으로 떼고 나머지를 넘겨주는 비율입니다. 중요: 이 사이트가 보여주는 것은 운영자(operator) 측의 fee + tip 수입으로, 이는 운영자에게 직접 들어가며 commission이 적용되는 inflation 보상과는 별개입니다. Commission은 delegator가 부담하는 비용입니다. 위임 전에 반드시 확인하시되, 이 사이트의 operator 수입을 본인의 수익률로 읽지는 마세요.',
     },
     {
       term: 'APR / APY (operator)',
-      en: 'Annualised return on activated stake from the operator side. Calculated as (block fees + on-chain Jito tips) / activated stake × ~182 epochs/year. Distinct from the delegator-facing APR which subtracts the validator commission.',
-      ko: '활성 스테이크 대비 연환산 수익률(운영자 측)입니다. 계산식: (블록 수수료 + 온체인 Jito tips) / 활성 스테이크 × 약 182 에폭/년. Validator commission이 차감된 delegator APR과 구분됩니다.',
+      en: "Annualised return on activated stake from the operator side — what the validator's identity earns, NOT what a delegator receives. Calculated as (block fees + on-chain Jito tips) / activated stake × ~182 epochs/year. A delegator's own APR is a separate figure: it comes from inflation rewards minus the validator's commission, which this site does not track.",
+      ko: '활성 스테이크 대비 연환산 수익률(운영자 측)입니다 — validator의 identity가 버는 수치이며, delegator가 받는 수치가 아닙니다. 계산식: (블록 수수료 + 온체인 Jito tips) / 활성 스테이크 × 약 182 에폭/년. Delegator 본인의 APR은 별개의 수치로, inflation 보상에서 validator commission을 뺀 값이며 이 사이트는 이를 추적하지 않습니다.',
+    },
+    {
+      term: 'Reliability',
+      en: "A Node Tier sub-component: how dependably a validator produces the blocks it was scheduled to lead. Computed as 1 − the 95% Wilson UPPER bound on skip rate, so a small sample with zero observed skips can't claim a perfect score. A Wilson-upper skip rate above 20% hard-caps the tier at Kindling no matter how high the economic half is.",
+      ko: 'Node Tier의 하위 구성요소로, validator가 리더로 스케줄된 블록을 얼마나 안정적으로 생산하는지를 나타냅니다. 계산식은 1 − skip rate의 95% Wilson 상한(UPPER)이라, 표본이 작고 관측된 skip이 0이어도 만점을 주장할 수 없습니다. Wilson 상한 skip rate가 20%를 넘으면 economic 절반이 아무리 높아도 tier가 Kindling으로 hard-cap 됩니다.',
+    },
+    {
+      term: 'Economic percentile',
+      en: "A Node Tier sub-component: where a validator's median fee + tip income per leader slot ranks within the cohort of validators WhoEarns indexes — NOT against all of Solana. A percentile of 100% means top of the indexed cohort (which may be only a few dozen validators), not top of the whole cluster. Read the cohort size shown next to it.",
+      ko: 'Node Tier의 하위 구성요소로, validator의 리더 슬롯당 fee + tip 수입의 중앙값이 WhoEarns가 인덱싱하는 validator cohort 안에서 어디에 위치하는지를 나타냅니다 — Solana 전체가 아닙니다. percentile 100%는 인덱싱된 cohort(수십 개 validator에 불과할 수 있음)의 최상위라는 뜻이지, 클러스터 전체의 최상위가 아닙니다. 옆에 표시된 cohort 크기를 함께 확인하세요.',
+    },
+    {
+      term: 'CU subscore',
+      en: "A small (10%) part of the Node Tier economic half: the cohort percentile of a validator's average compute units packed into each produced block. It's a block-density lens — how much work per block — NOT a quality measure, and it never on its own forces an unrated tier. A validator that produced no blocks falls back to its economic percentile here.",
+      ko: 'Node Tier economic 절반의 작은(10%) 부분으로, validator가 생산한 블록 하나당 평균 compute units의 cohort percentile입니다. 블록당 작업량을 보는 밀도 관점이지 품질 척도가 아니며, 단독으로 unrated tier를 강제하지 않습니다. 블록을 하나도 생산하지 않은 validator는 여기서 자신의 economic percentile로 대체됩니다.',
     },
   ];
+
+  /**
+   * Deterministic slug for a term — lowercases, drops anything that
+   * isn't a letter / number / space / hyphen (so "MEV (Maximal …)"
+   * loses its parens and "APR / APY" loses the slash), then collapses
+   * runs of spaces / hyphens into a single hyphen and trims the ends.
+   *
+   * Used for two things that MUST agree: the `id` anchor on each
+   * rendered term, and the `/glossary#<slug>` deep-links the hub's
+   * Node Tier card points at. Keeping the function here (one source)
+   * is what guarantees "Economic percentile" → `economic-percentile`
+   * resolves identically on both sides.
+   */
+  function slugify(term: string): string {
+    return term
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .trim()
+      .replace(/[\s-]+/g, '-');
+  }
 
   const locale = $derived(currentLocale());
   const titleText = $derived(locale === 'ko' ? '용어집' : 'Glossary');
@@ -190,7 +225,17 @@
 <h2 id="terms-title" class="sr-only">{locale === 'ko' ? '용어 목록' : 'Terms'}</h2>
 <dl class="mt-12 space-y-8" aria-labelledby="terms-title">
   {#each TERMS as term (term.term)}
-    <div class="border-l-4 border-[color:var(--color-brand-500)] pl-5">
+    <!--
+      `id={slugify(term.term)}` makes every entry deep-linkable
+      (`/glossary#economic-percentile`) — the hub's Node Tier card
+      links sub-component labels straight here. `scroll-mt-24` keeps
+      the jumped-to term clear of the sticky site header instead of
+      landing flush against the viewport top.
+    -->
+    <div
+      id={slugify(term.term)}
+      class="scroll-mt-24 border-l-4 border-[color:var(--color-brand-500)] pl-5"
+    >
       <dt class="text-lg font-semibold tracking-tight">{term.term}</dt>
       <dd class="mt-1 max-w-3xl text-sm leading-relaxed text-[color:var(--color-text-muted)]">
         {locale === 'ko' ? term.ko : term.en}

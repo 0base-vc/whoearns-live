@@ -12,6 +12,19 @@ import type {
 
 export type SerializerContext = Record<string, never>;
 
+/**
+ * Per-epoch compute-unit block threaded onto the history response.
+ * `validator` is this validator's average CU per produced block for
+ * the epoch; `serviceAverage` is the service-wide producedBlock-
+ * weighted average. Both `null` when the epoch has no produced-block
+ * denominator. Defaults to all-null for callers that do not surface
+ * CU (the current-epoch / batch / per-epoch routes).
+ */
+export interface ComputeUnitsBlock {
+  validator: bigint | null;
+  serviceAverage: bigint | null;
+}
+
 function maxDate(...dates: (Date | null)[]): Date | null {
   let max: Date | null = null;
   for (const d of dates) {
@@ -68,6 +81,7 @@ export function serializeValidator(
   _ctx?: SerializerContext,
   cluster: EpochAggregate | null = null,
   peerBenchmark: EpochPeerBenchmark | null = null,
+  computeUnits: ComputeUnitsBlock = { validator: null, serviceAverage: null },
 ): ValidatorCurrentEpochResponse {
   const hasSlots = stats.slotsUpdatedAt !== null;
   const hasIncome = stats.feesUpdatedAt !== null;
@@ -179,6 +193,10 @@ export function serializeValidator(
     },
     cluster: serializeCluster(cluster),
     peerBenchmark: serializePeerBenchmark(peerBenchmark),
+    avgComputeUnitsPerProducedBlock:
+      computeUnits.validator === null ? null : computeUnits.validator.toString(),
+    serviceAverageCu:
+      computeUnits.serviceAverage === null ? null : computeUnits.serviceAverage.toString(),
   };
 }
 
@@ -249,5 +267,7 @@ export function serializeValidatorPlaceholder(args: {
     },
     cluster: serializeCluster(args.cluster ?? null),
     peerBenchmark: serializePeerBenchmark(args.peerBenchmark ?? null),
+    avgComputeUnitsPerProducedBlock: null,
+    serviceAverageCu: null,
   };
 }

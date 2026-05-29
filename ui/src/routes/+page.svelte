@@ -53,10 +53,10 @@
 </script>
 
 <svelte:head>
-  <title>{SITE_NAME} — AI-assisted Solana validator income intelligence</title>
+  <title>{SITE_NAME} — Solana validator income, decomposed per leader slot</title>
   <meta
     name="description"
-    content="AI-assisted open data project by 0base.vc for Solana validator income. Compare live-trend fees, Jito tips, slots, skip rate, and income per slot."
+    content="Open, reproducible data by 0base.vc decomposing Solana validator income per leader slot — base fee, priority fee, and Jito tip kept separate and normalized per slot. Queryable by AI agents via MCP."
   />
   <link rel="canonical" href={`${SITE_URL}/`} />
   <link
@@ -96,15 +96,24 @@
   ></div>
 
   <p class="text-xs font-semibold uppercase tracking-wider text-[color:var(--color-brand-500)]">
-    Solana · Mainnet · AI-assisted open data
+    Solana · Mainnet · Open, reproducible data
   </p>
   <h1 id="hero-title" class="mt-2 text-4xl font-semibold tracking-tight sm:text-5xl">
     Who's earning on
     <span class="text-[color:var(--color-brand-500)]">Solana right now?</span>
   </h1>
+  <!--
+    Hero subhead states the actual wedge, not "AI". WhoEarns
+    decomposes each operator's per-leader-slot income into its three
+    real components — base fee, priority fee, Jito tip — kept separate,
+    normalized per slot so stake size doesn't flatter anyone, and
+    sourced from public on-chain records anyone can reproduce. The
+    AI-assist is demoted to the eyebrow/strip, no longer the lede.
+  -->
   <p class="mt-4 max-w-2xl text-base text-[color:var(--color-text-muted)]">
-    AI-assisted validator income intelligence from on-chain data: per-epoch block fees, Jito tips,
-    slots, skip rate, and income per slot for tracked Solana validators.
+    WhoEarns breaks down what each Solana validator actually earns per leader slot — base fee,
+    priority fee, and Jito tip kept separate, normalized per slot so stake size doesn't flatter
+    anyone, from open on-chain records you can reproduce.
   </p>
 
   <form onsubmit={submit} class="mt-6 flex max-w-xl gap-2">
@@ -144,6 +153,38 @@
       </svg>
     </button>
   </form>
+
+  <!--
+    AI-agent strip. Real differentiator: the same data is queryable by
+    AI agents over an in-process MCP server (`/mcp`) and described for
+    crawlers via `llms.txt`. Slim, single-line, links to the API docs
+    (the canonical, crawler-friendly catalog already in the nav/footer)
+    — present without crowding the leaderboard below.
+  -->
+  <p class="mt-4 flex items-center gap-2 text-xs text-[color:var(--color-text-subtle)]">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+      class="shrink-0 text-[color:var(--color-brand-500)]"
+    >
+      <rect x="4" y="8" width="16" height="12" rx="2"></rect>
+      <path d="M12 8V4M9 4h6M9 14h.01M15 14h.01"></path>
+    </svg>
+    <span>
+      Built to be queryable by AI agents — MCP server and
+      <code class="font-mono">llms.txt</code> for programmatic access.
+      <a href="/api/docs" class="font-medium text-[color:var(--color-brand-500)] hover:underline">
+        See the API
+      </a>
+    </span>
+  </p>
 </section>
 
 <div class="mt-10">

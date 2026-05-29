@@ -25,10 +25,23 @@
     tone?: Tone;
     padded?: boolean;
     class?: string;
+    /**
+     * Optional `aria-labelledby` — the `id` of the heading element
+     * INSIDE the card. Lets a section that routes its shell through
+     * `Card` keep the same region-labelling it had when it hand-rolled
+     * its own `<section aria-labelledby=…>`.
+     */
+    ariaLabelledby?: string;
     children: Snippet;
   }
 
-  let { tone = 'panel', padded = true, class: extra = '', children }: Props = $props();
+  let {
+    tone = 'panel',
+    padded = true,
+    class: extra = '',
+    ariaLabelledby,
+    children,
+  }: Props = $props();
 
   const toneClasses: Record<Tone, string> = {
     panel: 'border-[color:var(--color-border-default)] bg-[color:var(--color-surface)]',
@@ -39,6 +52,9 @@
   };
 </script>
 
-<section class="rounded-xl border {toneClasses[tone]} {padded ? 'p-5' : ''} {extra}">
+<section
+  class="rounded-xl border {toneClasses[tone]} {padded ? 'p-5' : ''} {extra}"
+  aria-labelledby={ariaLabelledby}
+>
   {@render children()}
 </section>

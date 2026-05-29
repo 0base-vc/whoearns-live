@@ -40,5 +40,28 @@ data:
   FEE_INGEST_BATCH_SIZE: {{ .Values.config.feeIngestBatchSize | quote }}
   AGGREGATES_INTERVAL_MS: {{ .Values.config.aggregatesIntervalMs | quote }}
   CLOSED_EPOCH_RECONCILE_INTERVAL_MS: {{ .Values.config.closedEpochReconcileIntervalMs | quote }}
+  # Phase 2 — gossip + validator-info refresh cadences.
+  CLUSTER_NODES_INTERVAL_MS: {{ .Values.config.clusterNodesIntervalMs | default 1800000 | quote }}
+  VALIDATOR_INFO_INTERVAL_MS: {{ .Values.config.validatorInfoIntervalMs | default 21600000 | quote }}
+  # Phase 4 — wallet daily-activity indexer cadence.
+  WALLET_ACTIVITY_INTERVAL_MS: {{ .Values.config.walletActivityIntervalMs | default 21600000 | quote }}
+  # Phase 4-extension — wallet fee backfill cadence + per-tick
+  # `getTransactionFee` budget. Job is only registered when
+  # `SOLANA_ARCHIVE_RPC_URL` is set; otherwise these are inert.
+  WALLET_FEE_BACKFILL_INTERVAL_MS: {{ .Values.config.walletFeeBackfillIntervalMs | default 3600000 | quote }}
+  WALLET_FEE_BACKFILL_PER_TICK_LIMIT: {{ .Values.config.walletFeeBackfillPerTickLimit | default 500 | quote }}
+  # Phase 2-extension — validators.app canonical client-kind ingester cadence.
+  VALIDATORS_APP_INTERVAL_MS: {{ .Values.config.validatorsAppIntervalMs | default 21600000 | quote }}
+  # Phase 5 — SIMD curation cadence. Anthropic API key itself is
+  # injected via Secret reference in the StatefulSet (never via
+  # ConfigMap). The interval drives the worker scheduler; the
+  # public read endpoint is unaffected by this value.
+  SIMD_CURATION_INTERVAL_MS: {{ .Values.config.simdCurationIntervalMs | default 43200000 | quote }}
+  # Tier-snapshot ingester cadence (migration 0045). Forward-only
+  # per-closed-epoch tier composite snapshots for the profile
+  # movement + history surfaces. Cheap cursor check on most ticks.
+  TIER_SNAPSHOT_INTERVAL_MS: {{ .Values.config.tierSnapshotIntervalMs | default 1800000 | quote }}
+  # Phase 5 — Anthropic model identifier. Non-secret; goes in ConfigMap.
+  ANTHROPIC_MODEL: {{ .Values.anthropic.model | default "claude-sonnet-4-6" | quote }}
   SLOT_FINALITY_BUFFER: {{ .Values.config.slotFinalityBuffer | quote }}
   SHUTDOWN_TIMEOUT_MS: {{ .Values.config.shutdownTimeoutMs | quote }}

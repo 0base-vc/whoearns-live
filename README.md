@@ -121,8 +121,9 @@ curl http://localhost:8080/v1/epoch/current
 ```
 
 The same port also serves the SvelteKit UI — open
-<http://localhost:8080/> in a browser, or jump straight to an income page
-like <http://localhost:8080/income/5BAi9YGCipHq4ZcXuen5vagRQqRTVTRszXNqBZC6uBPZ>.
+<http://localhost:8080/> in a browser, or jump straight to a validator
+overview like <http://localhost:8080/v/5BAi9YGCipHq4ZcXuen5vagRQqRTVTRszXNqBZC6uBPZ>
+(the per-epoch drill-down is at `/income/<vote>`).
 
 ### UI development (hot reload)
 

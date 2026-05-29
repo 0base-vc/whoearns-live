@@ -9,17 +9,20 @@
  * via the service's constructor dependency shape is enough.
  */
 
-import type {
-  UpsertSlotStatsArgs,
-  AddFeeAndTipDeltaArgs,
-  AddFeeDeltaArgs,
-  AddIncomeDeltaArgs,
-  EnsureSlotStatsRowArgs,
-  IndexedIncomePerSlotBenchmarkRequest,
-  LeaderboardWindowEpoch,
-  LeaderboardWindowSort,
-  WindowedLeaderboardStats,
+import {
+  EMPTY_ECONOMIC_LOOKUP,
+  type UpsertSlotStatsArgs,
+  type AddFeeAndTipDeltaArgs,
+  type AddFeeDeltaArgs,
+  type AddIncomeDeltaArgs,
+  type EconomicPercentileLookup,
+  type EnsureSlotStatsRowArgs,
+  type IndexedIncomePerSlotBenchmarkRequest,
+  type LeaderboardWindowEpoch,
+  type LeaderboardWindowSort,
+  type WindowedLeaderboardStats,
 } from '../../../src/storage/repositories/stats.repo.js';
+import type { DailyActivityUpsert } from '../../../src/storage/repositories/wallet-activity.repo.js';
 import type {
   Epoch,
   EpochAggregate,
@@ -27,23 +30,22 @@ import type {
   EpochPeerBenchmark,
   EpochValidatorStats,
   IdentityPubkey,
+  IngestionCursor,
   ProcessedBlock,
+  SimdProposal,
   Slot,
   Validator,
+  ValidatorUpsertInput,
   ValidatorEpochSlotStats,
   VotePubkey,
+  WalletDailyActivity,
 } from '../../../src/types/domain.js';
 
 /** Fake ValidatorsRepository. */
 export class FakeValidatorsRepo {
   readonly rows = new Map<VotePubkey, Validator>();
 
-  async upsert(
-    v: Omit<
-      Validator,
-      'updatedAt' | 'name' | 'details' | 'website' | 'keybaseUsername' | 'iconUrl' | 'infoUpdatedAt'
-    >,
-  ): Promise<void> {
+  async upsert(v: ValidatorUpsertInput): Promise<void> {
     const existing = this.rows.get(v.votePubkey);
     const firstSeen = existing ? existing.firstSeenEpoch : v.firstSeenEpoch;
     const lastSeen = existing ? Math.max(existing.lastSeenEpoch, v.lastSeenEpoch) : v.lastSeenEpoch;
@@ -52,6 +54,8 @@ export class FakeValidatorsRepo {
       identityPubkey: v.identityPubkey,
       firstSeenEpoch: firstSeen,
       lastSeenEpoch: lastSeen,
+      // `genesis_epoch` is owned by `setGenesisEpochs`, not `upsert`.
+      genesisEpoch: existing ? existing.genesisEpoch : null,
       updatedAt: new Date(),
       // Info columns are owned by `upsertInfo`, not `upsert` — the
       // hot-path validator sync must not clobber monikers. Preserve
@@ -62,6 +66,18 @@ export class FakeValidatorsRepo {
       keybaseUsername: existing?.keybaseUsername ?? null,
       iconUrl: existing?.iconUrl ?? null,
       infoUpdatedAt: existing?.infoUpdatedAt ?? null,
+      clientKind: existing?.clientKind ?? 'unknown',
+      clientVersion: existing?.clientVersion ?? null,
+      clientUpdatedAt: existing?.clientUpdatedAt ?? null,
+      // Mirror the real repo's `COALESCE(EXCLUDED, existing)`
+      // semantic: the caller's `v.commission` wins when supplied,
+      // the previous row's value is preserved otherwise.
+      commission: v.commission ?? existing?.commission ?? null,
+      // MEV commission + Jito participation are owned by
+      // `setMevCommissions`, not `upsert` — preserve the prior row,
+      // default null on first insert (same posture as genesisEpoch).
+      mevCommissionBps: existing?.mevCommissionBps ?? null,
+      runsJito: existing?.runsJito ?? null,
     });
   }
 
@@ -157,6 +173,26 @@ export class FakeValidatorsRepo {
     for (const v of votes) {
       const row = this.rows.get(v);
       if (row) out.push(row);
+    }
+    return out;
+  }
+
+  /**
+   * Mirror of `ValidatorsRepository.findVotesForBracket`. Client
+   * bracket → exact `clientKind` match; newcomer bracket → genesis-
+   * preferred tenure origin at/after the supplied epoch.
+   */
+  async findVotesForBracket(
+    bracket: { clientKind: string } | { newcomerFromEpoch: number },
+  ): Promise<VotePubkey[]> {
+    const out: VotePubkey[] = [];
+    for (const row of this.rows.values()) {
+      if ('clientKind' in bracket) {
+        if (row.clientKind === bracket.clientKind) out.push(row.votePubkey);
+      } else {
+        const effectiveFirst = row.genesisEpoch ?? row.firstSeenEpoch;
+        if (effectiveFirst >= bracket.newcomerFromEpoch) out.push(row.votePubkey);
+      }
     }
     return out;
   }
@@ -368,7 +404,11 @@ export class FakeStatsRepo {
       blockTipsTotalLamports: prev?.blockTipsTotalLamports ?? 0n,
       medianTipLamports: prev?.medianTipLamports ?? null,
       medianTotalLamports: prev?.medianTotalLamports ?? null,
+      computeUnitsTotal: prev?.computeUnitsTotal ?? 0n,
       activatedStakeLamports: nextStake,
+      voteCredits: prev?.voteCredits ?? 0n,
+      prevEpochVoteCredits: prev?.prevEpochVoteCredits ?? 0n,
+      voteCreditsUpdatedAt: prev?.voteCreditsUpdatedAt ?? null,
       slotsUpdatedAt: new Date(),
       slotWindowLastSlot: args.slotWindowLastSlot ?? prev?.slotWindowLastSlot ?? null,
       slotWindowUpdatedAt:
@@ -426,7 +466,11 @@ export class FakeStatsRepo {
         blockTipsTotalLamports: 0n,
         medianTipLamports: null,
         medianTotalLamports: null,
+        computeUnitsTotal: 0n,
         activatedStakeLamports: row.activatedStakeLamports ?? null,
+        voteCredits: 0n,
+        prevEpochVoteCredits: 0n,
+        voteCreditsUpdatedAt: null,
         slotsUpdatedAt: new Date(),
         slotWindowLastSlot: row.slotWindowLastSlot ?? null,
         slotWindowUpdatedAt: row.slotWindowLastSlot === undefined ? null : new Date(),
@@ -472,6 +516,7 @@ export class FakeStatsRepo {
       baseFeeDeltaLamports: 0n,
       priorityFeeDeltaLamports: 0n,
       tipDeltaLamports: args.tipDeltaLamports,
+      computeUnitsDelta: 0n,
     });
   }
 
@@ -495,6 +540,7 @@ export class FakeStatsRepo {
           blockPriorityFeesTotalLamports:
             row.blockPriorityFeesTotalLamports + args.priorityFeeDeltaLamports,
           blockTipsTotalLamports: row.blockTipsTotalLamports + args.tipDeltaLamports,
+          computeUnitsTotal: row.computeUnitsTotal + args.computeUnitsDelta,
           feesUpdatedAt: now,
           tipsUpdatedAt: now,
         });
@@ -512,6 +558,7 @@ export class FakeStatsRepo {
           blockBaseFeesTotalLamports: 0n,
           blockPriorityFeesTotalLamports: 0n,
           blockTipsTotalLamports: 0n,
+          computeUnitsTotal: 0n,
         });
       }
     }
@@ -534,13 +581,18 @@ export class FakeStatsRepo {
         0n,
       );
       const tips = (this.processedTipsByEpochIdentity.get(key) ?? []).reduce((a, b) => a + b, 0n);
+      const computeUnits = (this.processedComputeUnitsByEpochIdentity.get(key) ?? []).reduce(
+        (a, b) => a + b,
+        0n,
+      );
       for (const [rowKey, row] of this.rows.entries()) {
         if (row.epoch !== epoch || row.identityPubkey !== identity) continue;
         if (
           row.blockFeesTotalLamports === fees &&
           row.blockBaseFeesTotalLamports === base &&
           row.blockPriorityFeesTotalLamports === priority &&
-          row.blockTipsTotalLamports === tips
+          row.blockTipsTotalLamports === tips &&
+          row.computeUnitsTotal === computeUnits
         ) {
           continue;
         }
@@ -551,6 +603,7 @@ export class FakeStatsRepo {
           blockBaseFeesTotalLamports: base,
           blockPriorityFeesTotalLamports: priority,
           blockTipsTotalLamports: tips,
+          computeUnitsTotal: computeUnits,
           feesUpdatedAt: now,
           tipsUpdatedAt: now,
         });
@@ -599,6 +652,9 @@ export class FakeStatsRepo {
   processedTotalsByEpochIdentity: Map<string, bigint[]> = new Map();
   processedBaseByEpochIdentity: Map<string, bigint[]> = new Map();
   processedPriorityByEpochIdentity: Map<string, bigint[]> = new Map();
+  // Per-block compute units, keyed `${epoch}:${identity}` — feeds the
+  // `compute_units_total` rebuild in `rebuildIncomeTotalsFromProcessedBlocks`.
+  processedComputeUnitsByEpochIdentity: Map<string, bigint[]> = new Map();
 
   private async recomputeMedianFrom(
     epoch: Epoch,
@@ -750,11 +806,28 @@ export class FakeStatsRepo {
     minWindowSlots?: number;
     requiredClosedEpochs?: number;
     excludedVotes?: string[];
+    maxActivatedStakeLamports?: bigint;
+    candidateVotes?: readonly string[] | null;
   }): Promise<WindowedLeaderboardStats[]> {
+    // Mirror the real repo's empty-allowlist short-circuit: an
+    // explicit empty `candidateVotes` is "a bracket with no members".
+    if (
+      args.candidateVotes !== undefined &&
+      args.candidateVotes !== null &&
+      args.candidateVotes.length === 0
+    ) {
+      return [];
+    }
     const safeLimit = Math.max(1, Math.min(args.limit, 500));
     const minWindowSlots = Math.max(1, args.minWindowSlots ?? 4);
     const requiredClosedEpochs = Math.max(0, args.requiredClosedEpochs ?? 0);
     const excludedVotes = new Set(args.excludedVotes ?? []);
+    // Bracket allowlist (newcomer / client:<kind>); undefined/null
+    // means no allowlist. Applied before aggregation, like the SQL.
+    const candidateVotes =
+      args.candidateVotes === undefined || args.candidateVotes === null
+        ? null
+        : new Set(args.candidateVotes);
     const epochs = new Map(args.epochs.map((e) => [e.epoch, e.isCurrent]));
     const byVote = new Map<VotePubkey, WindowedLeaderboardStats>();
 
@@ -762,6 +835,7 @@ export class FakeStatsRepo {
       const isCurrent = epochs.get(row.epoch);
       if (isCurrent === undefined) continue;
       if (excludedVotes.has(row.votePubkey)) continue;
+      if (candidateVotes !== null && !candidateVotes.has(row.votePubkey)) continue;
       if (row.slotsUpdatedAt === null) continue;
       const denominator = isCurrent ? row.slotsElapsedAssigned : row.slotsAssigned;
       const currentIncome = isCurrent
@@ -814,9 +888,18 @@ export class FakeStatsRepo {
       byVote.set(row.votePubkey, next);
     }
 
-    const rows = [...byVote.values()].filter(
-      (r) => r.windowSlots >= minWindowSlots && r.closedEpochsIncluded >= requiredClosedEpochs,
-    );
+    const rows = [...byVote.values()].filter((r) => {
+      if (r.windowSlots < minWindowSlots) return false;
+      if (r.closedEpochsIncluded < requiredClosedEpochs) return false;
+      // Stake bracket: window-representative stake STRICTLY below the
+      // ceiling; NULL stake excluded — matches the real repo's outer
+      // WHERE.
+      if (args.maxActivatedStakeLamports !== undefined) {
+        if (r.activatedStakeLamports === null) return false;
+        if (r.activatedStakeLamports >= args.maxActivatedStakeLamports) return false;
+      }
+      return true;
+    });
     const total = (r: WindowedLeaderboardStats) =>
       r.blockFeesTotalLamports + r.blockTipsTotalLamports;
     const compareBigIntDesc = (a: bigint, b: bigint): number => (a === b ? 0 : a > b ? -1 : 1);
@@ -920,6 +1003,86 @@ export class FakeStatsRepo {
       .map((item) => this.peerBenchmarks.get(item.epoch) ?? null)
       .filter((item): item is EpochPeerBenchmark => item !== null);
   }
+
+  /**
+   * Stubbed economic-percentile lookup. Tests that exercise the Node
+   * Tier route call `setEconomicLookup(vote, lookup)` to inject the
+   * cohort context they want — the production query is a cross-
+   * validator window aggregate that we don't reimplement in-memory.
+   *
+   * When no override is set, this mirrors the production fallback
+   * shape: the target validator is absent from the cohort, so
+   * `percentile` and `medianIncomePerSlotLamports` are `null`, but the
+   * cohort size is computed from the in-memory rows (counting
+   * other-validator rows in the window with a positive
+   * `block_fees_total_lamports`). That matches the real repo's
+   * second-pass cohort-size query — without it, every fake test
+   * silently saw `cohortSize: 0` regardless of seeded peers, which
+   * masked the real-world case where a fresh validator's NULL
+   * percentile sits inside a healthy cohort.
+   */
+  private economicLookups = new Map<VotePubkey, EconomicPercentileLookup>();
+
+  setEconomicLookup(vote: VotePubkey, lookup: EconomicPercentileLookup): void {
+    this.economicLookups.set(vote, lookup);
+  }
+
+  async findEconomicPercentile(
+    vote: VotePubkey,
+    fromEpoch: Epoch,
+    toEpoch: Epoch,
+  ): Promise<EconomicPercentileLookup> {
+    const override = this.economicLookups.get(vote);
+    if (override !== undefined) return override;
+
+    // Production fallback semantic: when the target vote is absent
+    // from the cohort, return `null` percentile / null median, but
+    // report the SIZE of the cohort the validator was compared
+    // against (i.e. how many OTHER validators in the same window had
+    // measurable income). This is the same second-query shape the
+    // real repo uses on the empty-target-row branch.
+    const peerVotes = new Set<VotePubkey>();
+    for (const row of this.rows.values()) {
+      if (row.votePubkey === vote) continue;
+      if (row.epoch < fromEpoch || row.epoch > toEpoch) continue;
+      if (row.blockFeesTotalLamports > 0n || row.blockTipsTotalLamports > 0n) {
+        peerVotes.add(row.votePubkey);
+      }
+    }
+    if (peerVotes.size === 0) return EMPTY_ECONOMIC_LOOKUP;
+    return {
+      percentile: null,
+      cohortSize: peerVotes.size,
+      measuredEpochs: 0,
+      medianIncomePerSlotLamports: null,
+      cohortMedianLamportsPerSlot: null,
+      cohortP25LamportsPerSlot: null,
+      cohortP75LamportsPerSlot: null,
+      cuPercentile: null,
+      validatorAvgCuPerBlock: null,
+      cohortMedianCuPerBlock: null,
+    };
+  }
+
+  /**
+   * Mirror of `StatsRepository.findEconomicCohortVotes` (cohort
+   * disclosure). Returns the DISTINCT votes with a measured row in the
+   * window — `slotsAssigned > 0` AND both fees + tips timestamps
+   * present — matching the production cohort filter. Includes the
+   * target vote itself (the production cohort does too). Sorted for
+   * determinism. Opt-out is not modelled here (the fake's
+   * `findEconomicPercentile` doesn't model it either).
+   */
+  async findEconomicCohortVotes(fromEpoch: Epoch, toEpoch: Epoch): Promise<VotePubkey[]> {
+    const votes = new Set<VotePubkey>();
+    for (const row of this.rows.values()) {
+      if (row.epoch < fromEpoch || row.epoch > toEpoch) continue;
+      if (row.slotsAssigned > 0 && row.feesUpdatedAt !== null && row.tipsUpdatedAt !== null) {
+        votes.add(row.votePubkey);
+      }
+    }
+    return [...votes].sort();
+  }
 }
 
 /**
@@ -959,6 +1122,14 @@ export class FakeProcessedBlocksRepo {
   readonly fetchErrors = new Map<Slot, { epoch: Epoch; leaderIdentity: IdentityPubkey }>();
   /** Number of insert calls for race testing. */
   insertCalls = 0;
+  /**
+   * Optional link to a `FakeStatsRepo`'s `rows` map (the
+   * epoch_validator_stats fake). `getWindowedComputeUnitsByVote`
+   * iterates it to resolve each (epoch, vote)'s identity, mirroring
+   * the real query's `epoch_validator_stats` join — tests wire it so
+   * the windowed-CU lookup survives identity rotation.
+   */
+  epochValidatorStatsRows: Map<string, EpochValidatorStats> | undefined;
 
   async insertBatch(blocks: ProcessedBlock[]): Promise<Set<Slot>> {
     this.insertCalls += 1;
@@ -1204,6 +1375,114 @@ export class FakeProcessedBlocksRepo {
       ),
     };
   }
+
+  /** Mirror of `ProcessedBlocksRepository.getEpochComputeUnitsByVote`. */
+  async getEpochComputeUnitsByVote(
+    vote: VotePubkey,
+    epochs: Epoch[],
+  ): Promise<Map<Epoch, bigint | null>> {
+    if (this.epochValidatorStatsRows === undefined) {
+      // Fail loud: the real query resolves the vote's identity set
+      // from epoch_validator_stats — a test exercising this path
+      // without the link would otherwise get a silent all-null
+      // result for the wrong reason.
+      throw new Error(
+        'FakeProcessedBlocksRepo.getEpochComputeUnitsByVote: epochValidatorStatsRows ' +
+          'is not wired — assign a FakeStatsRepo `rows` map to it before use.',
+      );
+    }
+    const epochSet = new Set(epochs);
+    // Resolve the set of identity keys the vote ran across the window
+    // — mirrors the real `vote_identities` CTE, so a mid-epoch
+    // rotation (one epoch produced under two identities) folds both.
+    const identities = new Set<IdentityPubkey>();
+    for (const stat of this.epochValidatorStatsRows.values()) {
+      if (epochSet.has(stat.epoch) && stat.votePubkey === vote) {
+        identities.add(stat.identityPubkey);
+      }
+    }
+    const acc = new Map<Epoch, { cu: bigint; blocks: number }>();
+    for (const row of this.rows.values()) {
+      if (!epochSet.has(row.epoch)) continue;
+      if (!identities.has(row.leaderIdentity)) continue;
+      if (row.blockStatus !== 'produced') continue;
+      const e = acc.get(row.epoch) ?? { cu: 0n, blocks: 0 };
+      e.cu += row.computeUnitsConsumed;
+      e.blocks += 1;
+      acc.set(row.epoch, e);
+    }
+    const out = new Map<Epoch, bigint | null>();
+    for (const [epoch, { cu, blocks }] of acc) {
+      out.set(epoch, blocks > 0 ? cu / BigInt(blocks) : null);
+    }
+    return out;
+  }
+
+  /** Mirror of `ProcessedBlocksRepository.getEpochComputeUnitsServiceWide`. */
+  async getEpochComputeUnitsServiceWide(epochs: Epoch[]): Promise<Map<Epoch, bigint | null>> {
+    const epochSet = new Set(epochs);
+    const acc = new Map<Epoch, { cu: bigint; blocks: number }>();
+    for (const row of this.rows.values()) {
+      if (!epochSet.has(row.epoch)) continue;
+      if (row.blockStatus !== 'produced') continue;
+      const e = acc.get(row.epoch) ?? { cu: 0n, blocks: 0 };
+      e.cu += row.computeUnitsConsumed;
+      e.blocks += 1;
+      acc.set(row.epoch, e);
+    }
+    const out = new Map<Epoch, bigint | null>();
+    for (const [epoch, { cu, blocks }] of acc) {
+      out.set(epoch, blocks > 0 ? cu / BigInt(blocks) : null);
+    }
+    return out;
+  }
+
+  /** Mirror of `ProcessedBlocksRepository.getWindowedComputeUnitsByVote`. */
+  async getWindowedComputeUnitsByVote(
+    epochs: Epoch[],
+    votes: VotePubkey[],
+  ): Promise<Map<VotePubkey, bigint | null>> {
+    const out = new Map<VotePubkey, bigint | null>();
+    if (epochs.length === 0 || votes.length === 0) return out;
+    if (this.epochValidatorStatsRows === undefined) {
+      // Fail loud: the real query joins epoch_validator_stats, so a
+      // test that exercises this path without wiring the link would
+      // otherwise get a silent all-null result for the wrong reason.
+      throw new Error(
+        'FakeProcessedBlocksRepo.getWindowedComputeUnitsByVote: epochValidatorStatsRows ' +
+          'is not wired — assign a FakeStatsRepo `rows` map to it before use.',
+      );
+    }
+    const epochSet = new Set(epochs);
+    const voteSet = new Set(votes);
+    // Resolve, per vote, the SET of identity keys it ran across the
+    // window — mirrors the real `vote_identities` CTE, so a mid-epoch
+    // rotation (one epoch produced under two identities) folds both
+    // halves, not just the one identity epoch_validator_stats records.
+    const identitiesByVote = new Map<VotePubkey, Set<IdentityPubkey>>();
+    for (const stat of this.epochValidatorStatsRows.values()) {
+      if (!epochSet.has(stat.epoch) || !voteSet.has(stat.votePubkey)) continue;
+      const set = identitiesByVote.get(stat.votePubkey) ?? new Set<IdentityPubkey>();
+      set.add(stat.identityPubkey);
+      identitiesByVote.set(stat.votePubkey, set);
+    }
+    const acc = new Map<VotePubkey, { cu: bigint; blocks: number }>();
+    for (const [vote, identities] of identitiesByVote) {
+      for (const block of this.rows.values()) {
+        if (!epochSet.has(block.epoch)) continue;
+        if (!identities.has(block.leaderIdentity)) continue;
+        if (block.blockStatus !== 'produced') continue;
+        const e = acc.get(vote) ?? { cu: 0n, blocks: 0 };
+        e.cu += block.computeUnitsConsumed;
+        e.blocks += 1;
+        acc.set(vote, e);
+      }
+    }
+    for (const [vote, { cu, blocks }] of acc) {
+      out.set(vote, blocks > 0 ? cu / BigInt(blocks) : null);
+    }
+    return out;
+  }
 }
 
 /**
@@ -1403,6 +1682,9 @@ export function makeStats(
     medianTipLamports: null,
     medianTotalLamports: null,
     activatedStakeLamports: null,
+    voteCredits: 0n,
+    prevEpochVoteCredits: 0n,
+    voteCreditsUpdatedAt: null,
     slotsUpdatedAt: null,
     slotWindowLastSlot: null,
     slotWindowUpdatedAt: null,
@@ -1413,6 +1695,129 @@ export function makeStats(
     tipsUpdatedAt: null,
     medianTipUpdatedAt: null,
     medianTotalUpdatedAt: null,
+    computeUnitsTotal: 0n,
     ...overrides,
   };
+}
+
+/**
+ * Fake WalletActivityRepository — in-memory mirror of the Phase 4
+ * wallet daily-activity table. `upsertBatch` records each call's row
+ * batch so the indexer-service tests can assert on what was written;
+ * keyed reads (`listRecentForWallets`) materialise from the same
+ * store so a single fake serves both the indexer (write) and the OAI
+ * route (read) test surfaces.
+ */
+export class FakeWalletActivityRepo {
+  /** One entry per `upsertBatch` call, in call order. */
+  readonly writes: DailyActivityUpsert[][] = [];
+  // Materialised rows keyed by `${wallet}:${activityDate}`.
+  readonly rows = new Map<string, WalletDailyActivity>();
+
+  private key(wallet: string, activityDate: string): string {
+    return `${wallet}:${activityDate}`;
+  }
+
+  async upsertBatch(rows: ReadonlyArray<DailyActivityUpsert>): Promise<{ written: number }> {
+    this.writes.push([...rows]);
+    for (const r of rows) {
+      // Mirror the real repo: last-writer-wins for BOTH columns.
+      // The unified `WalletActivityIngesterService` writes count +
+      // fee in the same call, computed from the same fee-payer-
+      // filtered sig set, so they can't drift from each other.
+      const k = this.key(r.walletPubkey, r.activityDate);
+      this.rows.set(k, {
+        walletPubkey: r.walletPubkey,
+        activityDate: new Date(`${r.activityDate}T00:00:00.000Z`),
+        txCount: r.txCount,
+        txFeesLamports: r.txFeesLamports,
+        indexedAt: new Date(),
+      });
+    }
+    return { written: rows.length };
+  }
+
+  async hasAnyFeeData(): Promise<boolean> {
+    for (const r of this.rows.values()) {
+      if (r.txFeesLamports > 0n) return true;
+    }
+    return false;
+  }
+
+  async listRecentForWallets(
+    wallets: ReadonlyArray<string>,
+    _days: number,
+  ): Promise<WalletDailyActivity[]> {
+    if (wallets.length === 0) return [];
+    const set = new Set(wallets);
+    return [...this.rows.values()]
+      .filter((r) => set.has(r.walletPubkey))
+      .sort(
+        (a, b) =>
+          a.walletPubkey.localeCompare(b.walletPubkey) ||
+          b.activityDate.getTime() - a.activityDate.getTime(),
+      );
+  }
+
+  async listRecent(wallet: string, _days: number): Promise<WalletDailyActivity[]> {
+    return [...this.rows.values()]
+      .filter((r) => r.walletPubkey === wallet)
+      .sort((a, b) => b.activityDate.getTime() - a.activityDate.getTime());
+  }
+}
+
+/**
+ * Fake CursorsRepository — in-memory mirror of `ingestion_cursors`.
+ * Used by the wallet-activity indexer tests to exercise the SOL-M1
+ * per-wallet checkpoint read/write without a live Postgres. Only the
+ * `get` / `upsert` surface the indexer touches is modelled.
+ */
+export class FakeCursorsRepo {
+  readonly rows = new Map<string, IngestionCursor>();
+
+  async get(jobName: string): Promise<IngestionCursor | null> {
+    return this.rows.get(jobName) ?? null;
+  }
+
+  async upsert(c: Omit<IngestionCursor, 'updatedAt'>): Promise<void> {
+    this.rows.set(c.jobName, { ...c, updatedAt: new Date() });
+  }
+
+  async clear(jobName: string): Promise<void> {
+    this.rows.delete(jobName);
+  }
+}
+
+/**
+ * Fake SimdProposalsRepository — in-memory mirror of the Phase 5 SIMD
+ * proposal table. `pending` is the queue `listNeedingCuration`
+ * returns; `curationsApplied` records every `setAiCuration` write so
+ * the curation-service tests can assert on the AI summary/questions
+ * that landed.
+ */
+export class FakeSimdProposalsRepo {
+  /** Rows the curation pass should pick up. Set per-test. */
+  pending: SimdProposal[] = [];
+  /** One entry per `setAiCuration` call, in call order. */
+  readonly curationsApplied: Array<{
+    simdNumber: number;
+    aiSummary: string;
+    aiQuestions: string[];
+  }> = [];
+
+  async listNeedingCuration(_limit = 10): Promise<SimdProposal[]> {
+    return this.pending;
+  }
+
+  async setAiCuration(args: {
+    simdNumber: number;
+    aiSummary: string;
+    aiQuestions: readonly string[];
+  }): Promise<void> {
+    this.curationsApplied.push({
+      simdNumber: args.simdNumber,
+      aiSummary: args.aiSummary,
+      aiQuestions: [...args.aiQuestions],
+    });
+  }
 }

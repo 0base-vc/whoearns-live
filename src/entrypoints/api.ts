@@ -5,15 +5,24 @@ import { loadConfig } from '../core/config.js';
 import { createLogger } from '../core/logger.js';
 import { ShutdownManager } from '../core/shutdown.js';
 import { ClaimService } from '../services/claim.service.js';
+import { GithubGistVerificationService } from '../services/github-gist-verification.service.js';
+import { OperatorWalletVerificationService } from '../services/operator-wallet-verification.service.js';
 import { ValidatorService } from '../services/validator.service.js';
 import { closePool, createPool } from '../storage/db.js';
 import { AggregatesRepository } from '../storage/repositories/aggregates.repo.js';
 import { ClaimsRepository } from '../storage/repositories/claims.repo.js';
+import { ValidatorClaimEventsRepository } from '../storage/repositories/validator-claim-events.repo.js';
 import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
+import { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
 import { ProfilesRepository } from '../storage/repositories/profiles.repo.js';
 import { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
 import { StatsRepository } from '../storage/repositories/stats.repo.js';
+import { TierSnapshotsRepository } from '../storage/repositories/tier-snapshots.repo.js';
+import { ValidatorGithubRepository } from '../storage/repositories/validator-github.repo.js';
 import { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
+import { SimdDiscussionsRepository } from '../storage/repositories/simd-discussions.repo.js';
+import { SimdProposalsRepository } from '../storage/repositories/simd-proposals.repo.js';
+import { WalletActivityRepository } from '../storage/repositories/wallet-activity.repo.js';
 import { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
 
 export async function startApi(): Promise<void> {
@@ -40,6 +49,13 @@ export async function startApi(): Promise<void> {
     watchedDynamic: new WatchedDynamicRepository(pool),
     profiles: profilesRepo,
     claims: claimsRepo,
+    validatorClaimEvents: new ValidatorClaimEventsRepository(pool),
+    validatorGithub: new ValidatorGithubRepository(pool),
+    operatorWallets: new OperatorWalletsRepository(pool),
+    walletActivity: new WalletActivityRepository(pool),
+    simdProposals: new SimdProposalsRepository(pool),
+    simdDiscussions: new SimdDiscussionsRepository(pool),
+    tierSnapshots: new TierSnapshotsRepository(pool),
   };
 
   // The API process needs its own `ValidatorService` so the history
@@ -76,7 +92,23 @@ export async function startApi(): Promise<void> {
     validatorService,
     logger,
   });
-  const services = { validator: validatorService, claim: claimService };
+  const githubGistService = new GithubGistVerificationService({ logger });
+  // `solanaRpc` wires the shared `SolanaRpcClient` into the wallet
+  // verifier so the anchor-tx chain check (`getTransaction` →
+  // accountKeys signer-set) can run inline. The client carries its
+  // own retry / rate-limit / abort wiring; the service treats RPC
+  // failures as `anchor_tx_rpc_unavailable` (transient) rather
+  // than `bad_signature`.
+  const operatorWalletService = new OperatorWalletVerificationService({
+    logger,
+    solanaRpc: rpc,
+  });
+  const services = {
+    validator: validatorService,
+    claim: claimService,
+    githubGist: githubGistService,
+    operatorWallet: operatorWalletService,
+  };
 
   const app = await buildServer({ config, logger, pool, repos, services });
   shutdown.register('http-server', async () => {

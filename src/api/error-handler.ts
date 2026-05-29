@@ -26,6 +26,35 @@ function makePayload(
 }
 
 /**
+ * Send an error response using the SAME envelope shape the central
+ * `setErrorHandler` produces — `{ error: { code, message, requestId,
+ * details? } }`. Route handlers that build error replies inline (a
+ * `reply.code(...).send(...)` for a domain-specific failure that isn't
+ * a thrown `AppError`) should use this instead of hand-rolling the
+ * envelope, so a client parsing typed errors never has to branch on
+ * "handler-built" vs "route-built" shapes.
+ *
+ * `requestId` is passed explicitly (callers source it from
+ * `request.id`) rather than read off `reply.request` so the helper has
+ * no hidden coupling to Fastify's request decoration. `details` is
+ * omitted from the payload when absent, matching `makePayload`.
+ */
+export function sendError(
+  reply: FastifyReply,
+  opts: {
+    code: string;
+    statusCode: number;
+    message: string;
+    requestId: string;
+    details?: Record<string, unknown>;
+  },
+): FastifyReply {
+  return reply
+    .code(opts.statusCode)
+    .send(makePayload(opts.code, opts.message, opts.requestId, opts.details));
+}
+
+/**
  * Install the project-wide Fastify error handler.
  *
  * - `AppError` subclasses (ours) are surfaced with their `code`, `statusCode`,

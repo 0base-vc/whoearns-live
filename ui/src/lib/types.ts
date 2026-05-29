@@ -51,6 +51,18 @@ export interface ValidatorEpochRecord {
   totalIncomeLamports: string | null;
   totalIncomeSol: string | null;
 
+  /**
+   * Compute-units surface (additive). `avgComputeUnitsPerProducedBlock`
+   * is this validator's average CU per produced block for the epoch;
+   * `serviceAverageCu` is the service-wide average CU per produced
+   * block across all validators for the same epoch. Both are
+   * stringified integers (tens of millions, safe to `Number()`-parse)
+   * and may be `null` — the validator field when it produced 0 blocks
+   * that epoch, the service field when no data exists.
+   */
+  avgComputeUnitsPerProducedBlock: string | null;
+  serviceAverageCu: string | null;
+
   lastUpdatedAt: string | null;
   freshness: {
     slotsUpdatedAt: string | null;
@@ -151,9 +163,11 @@ export interface ValidatorProfile {
 }
 
 /**
- * Claim-status payload from `GET /v1/claim/:vote/status`. Light
- * wrapper used by the /claim/:vote page to decide what to render
- * (claim form vs. profile editor).
+ * Claim-status payload from `GET /v1/claims/:vote`. Includes GitHub
+ * link + wallet-registration snapshot so the /v/:id hub can render
+ * the full claim picture in a single fetch (the route was widened in
+ * the cross-cutting MED sweep to surface these alongside the claim
+ * boolean — see `docs/openapi.yaml` ClaimResponse).
  */
 export interface ClaimStatus {
   claimed: boolean;
@@ -162,10 +176,482 @@ export interface ClaimStatus {
         updatedAt: string;
       })
     | null;
+  githubLink: {
+    githubUsername: string;
+    verifiedAt: string;
+    expiresAt: string;
+  } | null;
+  wallets: {
+    count: number;
+    capReached: boolean;
+    oldestExpiresAt: string | null;
+    /**
+     * Per-wallet entries — a DISPLAY-ONLY truncated wallet address
+     * (`walletAddressShort`, e.g. `FXfD…PsJ5`) + operator-chosen
+     * label + registration/expiry windows. The full operator-wallet
+     * pubkey is never surfaced; the hub renders `walletAddressShort`
+     * verbatim. `activity` is the wallet's 365-day daily activity,
+     * populated only when the claim-status fetch is made with
+     * `includeActivity: true` (the hub does this so it renders the
+     * heatmaps from one fetch); `null` otherwise.
+     *
+     * `walletRef` is the opaque per-registration token. The claim
+     * page's unregister flow keys on it — it binds the signed
+     * unregister nonce and rides in the `DELETE
+     * /v1/claims/:vote/wallets/:walletRef` URL — so the full
+     * operator-wallet pubkey never leaves the server.
+     */
+    entries: ReadonlyArray<{
+      walletRef: string;
+      walletAddressShort: string;
+      label: string;
+      registeredAt: string;
+      expiresAt: string;
+      activity: {
+        days: number;
+        entries: OperatorWalletActivityEntry[];
+      } | null;
+    }>;
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Gamification surface — Node Tier, badges, OAI, /scoring aggregate
+// ────────────────────────────────────────────────────────────────────
+
+/** Closed-set tier names from the Node Tier composite. */
+export type NodeTier = 'forge' | 'anvil' | 'hearth' | 'kindling' | 'unrated';
+
+/**
+ * Documented client-kind classifier output. Mirrors the backend
+ * `ClientKind` enum in `src/services/client-kind.ts`. Two source
+ * tiers produce these values:
+ *   - Gossip-version-string regex (cluster-nodes ingester) — can
+ *     only emit the original 7: agave / jito_solana / firedancer /
+ *     frankendancer / paladin / sig / unknown.
+ *   - validators.app canonical IDs (epoch-triggered ingester) — can
+ *     also emit the forks below, decoded from the 16-bit
+ *     `ContactInfo.version.client` gossip-CRDS field that JSON-RPC
+ *     `getClusterNodes` drops.
+ */
+export type ClientKind =
+  | 'agave'
+  | 'jito_solana'
+  | 'firedancer'
+  | 'frankendancer'
+  | 'paladin'
+  | 'sig'
+  | 'solana_labs'
+  | 'agave_bam'
+  | 'rakurai'
+  | 'harmonic_firedancer'
+  | 'harmonic_agave'
+  | 'harmonic_frankendancer'
+  | 'firebam'
+  | 'raiku'
+  | 'unknown';
+
+/** Documented tenure-landmark enum (matches `docs/openapi.yaml`). */
+export type TenureLandmark =
+  | 'MAINNET_BETA_LAUNCH'
+  | 'CYCLE_1_OG'
+  | 'CROSS_CHAIN_ERA'
+  | 'DEFI_2'
+  | 'PRE_FTX'
+  | 'JITO_V2'
+  | 'FIREDANCER_LAUNCH'
+  | 'RECENT'
+  | 'recent_operator';
+
+/**
+ * Per-epoch reliability sample — one row per closed epoch in the
+ * scoring window. Surfaced inside `ReliabilityEvidence.perEpoch` so
+ * the hub can show the raw counts the Wilson-upper bound was computed
+ * from instead of just the final reliability score.
+ */
+export interface ReliabilityEvidencePerEpoch {
+  epoch: number;
+  slotsAssigned: number;
+  slotsSkipped: number;
 }
 
 /**
- * `GET /v1/claim/challenge` response. The UI renders the returned
+ * Evidence block for the reliability sub-component. The hub renders
+ * this inside an expandable row under the Node Tier card so a
+ * delegator can see EXACTLY which leader slots fed the reliability
+ * estimate, plus the Wilson 95% interval the score is derived from.
+ *
+ * `floorEngaged` mirrors the backend's `wilsonSkipRateUpper >
+ * skipRateFloor` gate — when `true`, the tier is hard-capped at
+ * Kindling regardless of the economic half of the composite.
+ */
+export interface ReliabilityEvidence {
+  wilsonSkipRateUpper: number;
+  wilsonSkipRateLower: number;
+  /** 0.20 in the current scoring policy. */
+  skipRateFloor: number;
+  floorEngaged: boolean;
+  perEpoch: ReliabilityEvidencePerEpoch[];
+}
+
+/**
+ * One per-epoch sample for the economic sub-component evidence —
+ * lamports per leader slot for THIS validator in the given closed
+ * epoch. Stringified bigint for u64 precision; the UI parses these
+ * with `Number(…)` only for display.
+ */
+export interface EconomicEvidencePerEpoch {
+  epoch: number;
+  lamportsPerSlot: string;
+}
+
+/**
+ * Optional decomposition of the economic-window income into base
+ * fees, priority fees, and Jito tips. May be absent when the backend
+ * skipped the breakdown (e.g. a validator with no produced blocks in
+ * the window, or an older response shape).
+ */
+export interface EconomicEvidenceIncomeBreakdown {
+  baseFeesLamports: string;
+  priorityFeesLamports: string;
+  jitoTipsLamports: string;
+}
+
+/**
+ * Evidence block for the economic percentile sub-component. Carries
+ * the per-slot income figure the percentile ranks, the cohort
+ * anchors (P25 / median / P75) the rank is computed against, and
+ * the per-epoch sample series so a delegator can see whether the
+ * window aggregate is dominated by one outlier epoch or steady
+ * across the run.
+ */
+export interface EconomicEvidence {
+  validatorMedianLamportsPerSlot: string;
+  cohortMedianLamportsPerSlot: string;
+  cohortP25LamportsPerSlot: string;
+  cohortP75LamportsPerSlot: string;
+  /** Where this validator sits in the sorted cohort — `position of of`. */
+  rank: { position: number; of: number };
+  perEpoch: EconomicEvidencePerEpoch[];
+  incomeBreakdown?: EconomicEvidenceIncomeBreakdown;
+  /**
+   * The vote pubkeys the percentile was ranked against (~19-200).
+   * Disclosure surface (J): listing the exact cohort lets a delegator
+   * independently reproduce the percentile — the honesty goal. The
+   * hub renders these as a collapsible "View cohort" list, each
+   * linking to that validator's hub/income page. May be absent on
+   * older API responses; treat `undefined` as "cohort not disclosed".
+   */
+  cohortVotes?: string[];
+}
+
+/**
+ * Evidence block for the CU percentile sub-component. Two raw
+ * inputs — the validator's average compute units per produced block
+ * across the window, plus the cohort median — so a delegator can
+ * see WHICH side of the cohort median this validator sits on
+ * without having to derive it from the percentile alone.
+ */
+export interface CuEvidence {
+  validatorAvgCuPerBlock: number;
+  cohortMedianCuPerBlock: number;
+}
+
+/**
+ * One sub-component slot on `NodeTierBody.components`. Either the
+ * legacy bare-number form (kept here only for the type union since
+ * the gamification PR migrates EVERY sub-component to the
+ * `{ score, evidence }` form) or the nested form the hub now
+ * renders. Use the generic to pin the evidence type per sub-
+ * component.
+ */
+export interface NodeTierComponentReliability {
+  score: number;
+  evidence: ReliabilityEvidence;
+}
+
+export interface NodeTierComponentEconomic {
+  /** `null` when the cohort isn't large enough to score against. */
+  score: number | null;
+  evidence: EconomicEvidence;
+}
+
+export interface NodeTierComponentCu {
+  /** `null` when the validator produced no blocks in the window. */
+  score: number | null;
+  evidence: CuEvidence;
+}
+
+/**
+ * Tier movement since the prior snapshot (H). Surfaced on
+ * `NodeTierBody.trend`. `null` on the body when fewer than one prior
+ * snapshot exists (brand-new validator — the UI shows nothing).
+ *
+ *   - `delta` = current composite − prior-snapshot composite. `null`
+ *     when either composite is null (an unrated edge).
+ *   - `prevComposite` / `prevTier` describe the prior snapshot.
+ *   - `epochsTracked` = how many snapshots the forward-only history
+ *     job has accrued.
+ *
+ * Honesty: the history is forward-only (it starts when the backend
+ * snapshot job first ran), so a thin `epochsTracked` is a cold-start,
+ * not a deficiency.
+ */
+export interface NodeTierTrend {
+  prevComposite: number | null;
+  delta: number | null;
+  prevTier: string | null;
+  epochsTracked: number;
+}
+
+/**
+ * The window + components block of `/v1/validators/:id/tier`. Matches
+ * `NodeTierBody` in `docs/openapi.yaml`. The breaking refactor in
+ * `6835ae8` + `b726daa` dropped `tvcRatio` / `wilsonSkipRate` /
+ * `voteCredits*` from this shape — vote credits are deliberately
+ * excluded from the public tier (see `docs/scoring.md` Phase 1).
+ *
+ * The gamification follow-up (this branch) nested each sub-component
+ * under a `{ score, evidence }` shape so the hub can render an
+ * expandable evidence panel per row — see the per-component
+ * interfaces above. Consumers that previously read
+ * `components.reliability` as a bare number must now read
+ * `components.reliability.score` (and `.evidence` for the panel).
+ */
+export interface NodeTierBody {
+  window: {
+    epochs: number;
+    slotsAssigned: number;
+    slotsSkipped: number;
+    economicCohortSize: number;
+    economicMeasuredEpochs: number;
+    economicMedianLamportsPerSlot: string | null;
+    incomeFreshness: string | null;
+    /**
+     * Validator's activated stake (lamports, decimal-precision string)
+     * as of the most recent closed epoch in the window. `null` for
+     * windows that span only pre-stake-snapshot epochs.
+     */
+    activatedStakeLamports: string | null;
+    /**
+     * Total vote credits across the closed-epoch window (decimal-
+     * precision string). Sum of per-epoch credits; window-aggregate.
+     */
+    voteCreditsTotal: string;
+    /**
+     * On-chain vote-account commission as an integer 0-100. Sourced
+     * from `getVoteAccounts.commission`. **NOTE**: WhoEarns frames
+     * operator-side income as commission-NEUTRAL — delegator-yield
+     * math that uses commission is the consumer's responsibility,
+     * not WhoEarns's. `null` for legacy rows the backend refresh
+     * tick hasn't yet covered.
+     */
+    commission: number | null;
+    /**
+     * Jito MEV commission in basis points (0-10000; 500 = 5%) — the
+     * validator's cut of MEV tips before the rest is shared with
+     * delegators. Complements `commission` (inflation/staking yield):
+     * showing one without the other tells only half the take-rate
+     * story. Sourced on-chain (Jito tip-distribution accounts) via
+     * Stakewiz. `null` when the validator isn't a Jito participant or
+     * the row predates the column — gate on `runsJito`, never render
+     * `null` as 0%. A displayed FACT, never an input to the tier.
+     */
+    mevCommissionBps: number | null;
+    /**
+     * Whether the validator participates in Jito MEV tip
+     * distribution. Distinguishes "0% MEV commission" (`true`, shares
+     * all tips) from "no MEV commission" (`false`, doesn't run Jito).
+     * `null` when scoring is unavailable / row predates the column.
+     */
+    runsJito: boolean | null;
+    cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
+  };
+  tier: NodeTier;
+  composite: number | null;
+  components: {
+    reliability: NodeTierComponentReliability;
+    economicPercentile: NodeTierComponentEconomic;
+    /**
+     * Cohort percentile rank of this validator's producedBlock-weighted
+     * compute-units-per-block. `score` is `null` when the validator
+     * produced no blocks in the window — see `docs/scoring.md` Phase
+     * 1's non-producer fallback (the composite folds
+     * `economicPercentile.score` back in as the CU subscore so a non-
+     * producer is judged on income alone, never penalised with a zero
+     * on a metric it had no chance to register). Mirrors the same key
+     * on `NodeTierBody.components` in the backend
+     * `/v1/validators/:idOrVote/tier` response.
+     */
+    cuPercentile: NodeTierComponentCu;
+  };
+  /**
+   * Movement since the prior snapshot (H). `null` when fewer than one
+   * prior snapshot exists (brand-new — the UI renders no delta badge).
+   * Optional for backwards compat with pre-trend API responses; treat
+   * `undefined` the same as `null`.
+   */
+  trend?: NodeTierTrend | null;
+}
+
+/** `GET /v1/validators/:idOrVote/tier`. */
+export interface NodeTierResponse extends NodeTierBody {
+  vote: string;
+  identity: string;
+}
+
+/**
+ * One snapshot row from `GET /v1/validators/:idOrVote/tier/history`.
+ * Newest-first by the endpoint contract. `composite` / `reliability`
+ * / percentiles are `null` for epochs the snapshot couldn't score
+ * (an unrated edge in the historical window) — the sparkline skips
+ * those points rather than plotting a phantom zero.
+ */
+export interface TierHistorySnapshot {
+  epoch: number;
+  composite: number | null;
+  tier: string;
+  reliability: number | null;
+  economicPercentile: number | null;
+  cuPercentile: number | null;
+}
+
+/**
+ * `GET /v1/validators/:idOrVote/tier/history?limit=N` (H). Forward-only
+ * composite history — the series starts when the backend snapshot job
+ * first ran, so an empty / single-element `snapshots` is a cold start
+ * (the UI omits the sparkline rather than fabricating a flat line).
+ * `snapshots` is newest-first.
+ */
+export interface TierHistoryResponse {
+  vote: string;
+  identity: string;
+  snapshots: TierHistorySnapshot[];
+}
+
+/** The `tenure` block surfaced by `/badges` and `/scoring`. */
+export interface TenureBlock {
+  firstSeenEpoch: number;
+  activeEpochs: number;
+  landmark: TenureLandmark;
+  badge: string;
+}
+
+/** The `client` block surfaced by `/badges` and `/scoring`. */
+export interface ClientBlock {
+  kind: ClientKind;
+  version: string | null;
+  updatedAt: string | null;
+}
+
+/** `GET /v1/validators/:idOrVote/badges`. */
+export interface BadgesResponse {
+  vote: string;
+  identity: string;
+  tenure: TenureBlock;
+  client: ClientBlock;
+  tier: {
+    tier: NodeTier;
+    composite: number | null;
+    windowEpochs: number;
+  };
+}
+
+/** The OAI body, minus `vote` / `identity`. Matches `OaiBody` in OpenAPI. */
+export interface OaiComponents {
+  composite: number | null;
+  components: {
+    walletScore: number;
+    governance: {
+      score: number | null;
+      commentCount: number;
+      reactionsReceived: number;
+      activeWindowCount: number;
+    };
+  };
+  ingestStatus: {
+    governanceIngestActive: boolean;
+    walletFeesIngestActive: boolean;
+  };
+}
+
+/** `GET /v1/validators/:idOrVote/operator-activity-index`. */
+export interface OaiResponse extends OaiComponents {
+  vote: string;
+  identity: string;
+}
+
+/**
+ * `GET /v1/validators/:idOrVote/scoring` — the REST-M8 aggregate.
+ * One round-trip for tier + tenure + client + OAI. `oai` is `null`
+ * when the validator is known but gated out of the OAI surface
+ * (unclaimed / opted-out / identity-drift); tier/tenure/client are
+ * still fully populated.
+ */
+export interface ScoringResponse {
+  vote: string;
+  identity: string;
+  tier: NodeTierBody;
+  tenure: TenureBlock;
+  client: ClientBlock;
+  oai: OaiComponents | null;
+}
+
+/**
+ * One sparse-day operator-wallet activity entry. Surfaced inline on
+ * `ClaimStatus.wallets.entries[].activity.entries` (the claim-status
+ * response folds wallet activity in when fetched with
+ * `includeActivity: true`). Days with zero activity are omitted —
+ * clients zero-fill at draw time. `txFeesLamports` is `null` in the
+ * current release (counts-only; fee backfill lands later).
+ */
+export interface OperatorWalletActivityEntry {
+  date: string;
+  txCount: number;
+  txFeesLamports: string | null;
+}
+
+/** One curated SIMD proposal from `/v1/simd-proposals`. */
+export interface SimdProposalListItem {
+  simdNumber: number;
+  title: string;
+  status: string;
+  sourceUrl: string;
+  aiSummary: string;
+  aiQuestions: string[];
+  reviewedAt: string;
+}
+
+/** `GET /v1/simd-proposals`. */
+export interface SimdProposalListResponse {
+  count: number;
+  aiModel: string;
+  items: SimdProposalListItem[];
+}
+
+/** One forensic event from `/v1/claims/:vote/audit`. */
+export interface ClaimAuditEvent {
+  eventType:
+    | 'claim'
+    | 'reclaim'
+    | 'profile_update'
+    | 'github_link'
+    | 'wallet_register'
+    | 'wallet_unregister';
+  identityPubkey: string;
+  priorIdentityPubkey: string | null;
+  detail: string | null;
+  createdAt: string;
+}
+
+/** `GET /v1/claims/:vote/audit`. */
+export interface ClaimAuditResponse {
+  votePubkey: string;
+  events: ClaimAuditEvent[];
+}
+
+/**
+ * `GET /v1/claims/challenge` response. The UI renders the returned
  * nonce + timestamp into the message the operator will sign with
  * `solana sign-offchain-message`.
  */
@@ -193,7 +679,24 @@ export type LeaderboardSort =
   | 'total_income'
   | 'mev_tips'
   | 'fees'
+  | 'compute_units'
   | 'skip_rate';
+
+/**
+ * Leaderboard bracket filter (I). Mirrors the server-accepted
+ * `?bracket=` values. `all` is the default (no filtering). The
+ * `client:<kind>` form filters to a single canonical client kind —
+ * the 14 kinds the backend recognises (see `CLIENT_BRACKET_KINDS`).
+ * A bracket-relative rank is returned (rank #1 = best IN the
+ * bracket). Consumers should treat an unknown string as a
+ * client/server mismatch and fall back to `all`.
+ */
+export type LeaderboardBracket =
+  | 'all'
+  | 'stake_lt_100k'
+  | 'stake_lt_500k'
+  | 'newcomer'
+  | `client:${string}`;
 
 /** One row of the homepage top-N leaderboard. */
 export interface LeaderboardItem {
@@ -241,6 +744,13 @@ export interface LeaderboardItem {
    * (pre-stake-snapshot-migration epoch). */
   incomePerStake: number | null;
   /**
+   * Compute units for the currently-active leaderboard window
+   * (additive). Stringified integer (tens of millions, safe to
+   * `Number()`-parse); `null` when no CU data is available for the
+   * window. Present for every window filter.
+   */
+  windowedCu: string | null;
+  /**
    * Phase 3: `true` when this validator's operator has gone through
    * the Ed25519 claim flow at least once. The UI renders a small
    * "verified" badge inline next to the moniker when true.
@@ -273,6 +783,19 @@ export interface Leaderboard {
   };
   /** Echoed back so the UI can highlight the matching tab. */
   sort: LeaderboardSort;
+  /**
+   * Echo of the applied bracket filter (I). `'all'` when unfiltered.
+   * Optional for backwards compat with pre-bracket API responses;
+   * treat `undefined` as `'all'`.
+   */
+  bracket?: LeaderboardBracket;
+  /**
+   * Total validators in the selected bracket, independent of `limit`
+   * (I). Lets the UI render "{bracketCount} validators in this
+   * bracket" even when only the top N rows are shown. Optional for
+   * backwards compat; falls back to `count` when absent.
+   */
+  bracketCount?: number;
   count: number;
   limit: number;
   items: LeaderboardItem[];

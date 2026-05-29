@@ -584,6 +584,7 @@ export class FeeService {
         baseFees: bigint;
         priorityFees: bigint;
         tips: bigint;
+        computeUnits: bigint;
       };
       const deltaBySlot = new Map<Slot, SlotDelta>();
       const now = new Date();
@@ -628,6 +629,7 @@ export class FeeService {
             baseFees: 0n,
             priorityFees: 0n,
             tips: 0n,
+            computeUnits: 0n,
           });
           skipped += 1;
           continue;
@@ -666,6 +668,7 @@ export class FeeService {
           baseFees: r.baseFees,
           priorityFees: r.priorityFees,
           tips: r.tips,
+          computeUnits: r.slotFacts.computeUnitsConsumed,
         });
         processed += 1;
       }
@@ -698,16 +701,27 @@ export class FeeService {
         }
         const deltaByIdentity = new Map<
           IdentityPubkey,
-          { leaderFees: bigint; baseFees: bigint; priorityFees: bigint; tips: bigint }
+          {
+            leaderFees: bigint;
+            baseFees: bigint;
+            priorityFees: bigint;
+            tips: bigint;
+            computeUnits: bigint;
+          }
         >();
         for (const slot of insertedSlots) {
           const entry = deltaBySlot.get(slot);
           if (!entry) continue;
+          // Skip a slot only when it moves NOTHING. Compute units are
+          // part of the test: a produced block can in principle carry
+          // consumed CU while the four fee deltas round to zero, and
+          // dropping it here would leave `compute_units_total` short.
           if (
             entry.leaderFees === 0n &&
             entry.baseFees === 0n &&
             entry.priorityFees === 0n &&
-            entry.tips === 0n
+            entry.tips === 0n &&
+            entry.computeUnits === 0n
           ) {
             continue;
           }
@@ -716,12 +730,14 @@ export class FeeService {
             baseFees: 0n,
             priorityFees: 0n,
             tips: 0n,
+            computeUnits: 0n,
           };
           deltaByIdentity.set(entry.identity, {
             leaderFees: prev.leaderFees + entry.leaderFees,
             baseFees: prev.baseFees + entry.baseFees,
             priorityFees: prev.priorityFees + entry.priorityFees,
             tips: prev.tips + entry.tips,
+            computeUnits: prev.computeUnits + entry.computeUnits,
           });
         }
         for (const [identity, delta] of deltaByIdentity.entries()) {
@@ -732,6 +748,7 @@ export class FeeService {
             baseFeeDeltaLamports: delta.baseFees,
             priorityFeeDeltaLamports: delta.priorityFees,
             tipDeltaLamports: delta.tips,
+            computeUnitsDelta: delta.computeUnits,
           });
         }
       }
@@ -841,7 +858,10 @@ export class FeeService {
       leaderFees !== 0n ||
       leaderBase !== 0n ||
       income.priorityFees !== 0n ||
-      income.mevTips !== 0n
+      income.mevTips !== 0n ||
+      // A produced block carrying consumed CU but no measurable fee
+      // delta still has to advance `compute_units_total`.
+      slotFacts.computeUnitsConsumed !== 0n
     ) {
       await this.statsRepo.addIncomeDelta({
         epoch: args.epoch,
@@ -850,6 +870,7 @@ export class FeeService {
         baseFeeDeltaLamports: leaderBase,
         priorityFeeDeltaLamports: income.priorityFees,
         tipDeltaLamports: income.mevTips,
+        computeUnitsDelta: slotFacts.computeUnitsConsumed,
       });
     }
     return true;

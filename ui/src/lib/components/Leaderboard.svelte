@@ -14,6 +14,7 @@
   import type {
     CurrentEpoch,
     Leaderboard,
+    LeaderboardBracket,
     LeaderboardItem,
     LeaderboardSort,
     LeaderboardWindow,
@@ -58,6 +59,29 @@
     },
   ];
 
+  // The 14 canonical client kinds the backend accepts as
+  // `?bracket=client:<kind>`, rendered as the "By client" <optgroup>
+  // in the bracket dropdown. Sentence-case labels; the lowercased
+  // enum rides on the wire. Mirrors the `ClientKind` union in
+  // `$lib/types` (minus `unknown` / `solana_labs`, which aren't
+  // bracketable cohorts). The non-client brackets (all / stake /
+  // newcomer) are inline <option>s in the template.
+  const CLIENT_BRACKET_KINDS: Array<{ kind: string; label: string }> = [
+    { kind: 'agave', label: 'Agave' },
+    { kind: 'jito_solana', label: 'Jito-Solana' },
+    { kind: 'firedancer', label: 'Firedancer' },
+    { kind: 'frankendancer', label: 'Frankendancer' },
+    { kind: 'paladin', label: 'Paladin' },
+    { kind: 'sig', label: 'Sig' },
+    { kind: 'agave_bam', label: 'Agave (BAM)' },
+    { kind: 'rakurai', label: 'Rakurai' },
+    { kind: 'harmonic_firedancer', label: 'Harmonic Firedancer' },
+    { kind: 'harmonic_agave', label: 'Harmonic Agave' },
+    { kind: 'harmonic_frankendancer', label: 'Harmonic Frankendancer' },
+    { kind: 'firebam', label: 'FireBAM' },
+    { kind: 'raiku', label: 'Raiku' },
+  ];
+
   const COLUMNS: Array<{
     key: LeaderboardSort;
     label: string;
@@ -91,6 +115,13 @@
       alignRight: true,
     },
     {
+      key: 'compute_units',
+      label: 'CU',
+      tooltip:
+        'Average compute units consumed per produced block across the selected window — a block-density signal distinct from income.',
+      alignRight: true,
+    },
+    {
       key: 'skip_rate',
       label: 'Skip rate',
       tooltip: 'Share of scheduled leader slots that were skipped. Lower is better.',
@@ -104,17 +135,44 @@
   let error = $state<string | null>(null);
   let sort = $state<LeaderboardSort>('income_per_slot');
   let window = $state<LeaderboardWindow>('live_trend');
+  // Bracket filter (I) — a single right-aligned dropdown. Holds the
+  // effective value directly, including `client:<kind>` selections
+  // (the client kinds render as an <optgroup> in the same <select>).
+  // `all` on first load so behavior is byte-identical to the
+  // pre-bracket leaderboard.
+  let bracket = $state<LeaderboardBracket>('all');
 
   const activeCol = $derived(COLUMNS.find((c) => c.key === sort) ?? COLUMNS[0]!);
   const activeWindow = $derived(
     WINDOW_OPTIONS.find((option) => option.key === window) ?? WINDOW_OPTIONS[0]!,
   );
 
-  async function load(nextSort: LeaderboardSort = sort, nextWindow: LeaderboardWindow = window) {
+  // Validators in the selected bracket, independent of `limit`. Falls
+  // back to `count` (rows returned) for pre-bracket API responses that
+  // don't carry `bracketCount`.
+  const bracketCount = $derived<number | null>(
+    data === null ? null : (data.bracketCount ?? data.count),
+  );
+
+  // Whether the current view is filtered to a non-`all` bracket — gates
+  // the "{n} validators in this bracket" line so the default view
+  // (every validator) doesn't show a redundant count.
+  const isFiltered = $derived(bracket !== 'all');
+
+  async function load(
+    nextSort: LeaderboardSort = sort,
+    nextWindow: LeaderboardWindow = window,
+    nextBracket: LeaderboardBracket = bracket,
+  ) {
     loading = true;
     error = null;
     try {
-      data = await fetchLeaderboard({ limit, sort: nextSort, window: nextWindow });
+      data = await fetchLeaderboard({
+        limit,
+        sort: nextSort,
+        window: nextWindow,
+        bracket: nextBracket,
+      });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -154,6 +212,13 @@
     void load(sort, next);
   }
 
+  // Bracket dropdown changed — `bracket` is already updated by
+  // `bind:value` on the <select> (its option values are the literal
+  // bracket strings, including `client:<kind>`), so just refetch.
+  function handleBracketChange(): void {
+    void load(sort, window, bracket);
+  }
+
   function skipRateText(item: LeaderboardItem): string {
     if (item.skipRate == null) return '-';
     return `${(item.skipRate * 100).toFixed(2)}%`;
@@ -179,6 +244,27 @@
     return `◎${formatSolFixed(item.blockFeesTotalSol, DECIMALS_TOTAL)}`;
   }
 
+  /**
+   * Human-readable compute units for the active window. CU values are
+   * stringified integers in the tens of millions, so the default
+   * rendering is a one-decimal "M" suffix (e.g. `31.2M`); smaller
+   * magnitudes fall back to a "K" suffix or a thousands-separated
+   * integer. Returns "—" when the row has no CU data for the window
+   * (matches the table's existing null placeholder).
+   */
+  function windowedCuText(item: LeaderboardItem): string {
+    if (item.windowedCu == null) return '—';
+    const n = Number(item.windowedCu);
+    if (!Number.isFinite(n)) return '—';
+    if (Math.abs(n) >= 1_000_000) {
+      return `${new Intl.NumberFormat('en', { maximumFractionDigits: 1 }).format(n / 1_000_000)}M`;
+    }
+    if (Math.abs(n) >= 1_000) {
+      return `${new Intl.NumberFormat('en', { maximumFractionDigits: 1 }).format(n / 1_000)}K`;
+    }
+    return new Intl.NumberFormat('en').format(n);
+  }
+
   function cellText(item: LeaderboardItem, key: LeaderboardSort): string {
     switch (key) {
       case 'income_per_slot':
@@ -189,6 +275,8 @@
         return mevTipsText(item);
       case 'fees':
         return blockFeesText(item);
+      case 'compute_units':
+        return windowedCuText(item);
       case 'skip_rate':
         return skipRateText(item);
       default:
@@ -247,6 +335,22 @@
           Ranked by <span class="font-semibold">{activeCol.label.toLowerCase()}</span> across
           <span class="font-semibold">{activeWindow.label.toLowerCase()}</span>.
         </p>
+        <!--
+          Bracket population (I). Renders only for a non-`all` bracket
+          so the unfiltered default doesn't show a redundant "N
+          validators" line. `bracketCount` is the size of the WHOLE
+          bracket (not the `limit`-capped rows shown), so a delegator
+          knows whether they're seeing the top slice of 12 or of 1,200.
+          `aria-live` announces the new count when the bracket changes.
+        -->
+        {#if isFiltered && bracketCount !== null}
+          <p class="mt-0.5 text-xs text-[color:var(--color-text-subtle)]" aria-live="polite">
+            <span class="font-semibold tabular-nums text-[color:var(--color-text-default)]">
+              {bracketCount.toLocaleString()}
+            </span>
+            {bracketCount === 1 ? 'validator' : 'validators'} in this bracket.
+          </p>
+        {/if}
       </div>
 
       {#if data}
@@ -290,6 +394,8 @@
     </div>
 
     <div class="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+      <!-- Left: window (which sample period to view) — a segmented
+           control because it's a view-mode switch, not a filter. -->
       <div
         class="inline-flex w-fit flex-wrap gap-1 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-1"
       >
@@ -309,19 +415,51 @@
         {/each}
       </div>
 
-      <label class="flex items-center gap-2 text-sm md:hidden">
-        <span class="text-[color:var(--color-text-subtle)]">Sort by</span>
-        <select
-          bind:value={sort}
-          onchange={() => void load(sort, window)}
-          class="min-h-11 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-base"
-          aria-label="Sort validators by"
-        >
-          {#each COLUMNS as col (col.key)}
-            <option value={col.key}>{col.label}</option>
-          {/each}
-        </select>
-      </label>
+      <!--
+        Right: the controls that narrow / reorder the list. The bracket
+        FILTER is a single dropdown (stake + client kinds grouped via
+        <optgroup>) so it reads as a filter, not a second row of view
+        tabs. The sort dropdown is mobile-only — desktop sorts via the
+        column headers. `min-h-11` keeps the WCAG 2.5.5 touch target on
+        mobile.
+      -->
+      <div class="flex flex-wrap items-center gap-3">
+        <label class="flex items-center gap-2 text-xs">
+          <span class="text-[color:var(--color-text-subtle)]">Bracket</span>
+          <select
+            bind:value={bracket}
+            onchange={handleBracketChange}
+            class="min-h-11 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-1.5 text-sm sm:min-h-0"
+            aria-label="Filter validators by bracket"
+          >
+            <option value="all">All validators</option>
+            <optgroup label="By stake">
+              <option value="stake_lt_100k">Small (&lt;100k SOL)</option>
+              <option value="stake_lt_500k">Small (&lt;500k SOL)</option>
+            </optgroup>
+            <option value="newcomer">Newcomers</option>
+            <optgroup label="By client">
+              {#each CLIENT_BRACKET_KINDS as ck (ck.kind)}
+                <option value={`client:${ck.kind}`}>{ck.label}</option>
+              {/each}
+            </optgroup>
+          </select>
+        </label>
+
+        <label class="flex items-center gap-2 text-sm md:hidden">
+          <span class="text-[color:var(--color-text-subtle)]">Sort by</span>
+          <select
+            bind:value={sort}
+            onchange={() => void load(sort, window)}
+            class="min-h-11 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-base"
+            aria-label="Sort validators by"
+          >
+            {#each COLUMNS as col (col.key)}
+              <option value={col.key}>{col.label}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
     </div>
   </header>
 
@@ -534,7 +672,9 @@
                 <div
                   class="mt-0.5 inline-flex items-center text-[11px] text-[color:var(--color-text-subtle)]"
                 >
-                  {item.windowSlots} window slots · skip {skipRateText(item)}
+                  {item.windowSlots} window slots · skip {skipRateText(item)} · CU {windowedCuText(
+                    item,
+                  )}
                 </div>
               </div>
               <div class="shrink-0 text-right">
@@ -556,7 +696,11 @@
         class="border-t border-[color:var(--color-border-default)] px-5 py-3 text-xs text-[color:var(--color-text-subtle)]"
       >
         Showing top {data.items.length}. The public API returns up to 500 rows at
-        <code>/v1/leaderboard?window={window}&amp;limit=500&amp;sort={sort}</code>.
+        <code
+          >/v1/leaderboard?window={window}&amp;limit=500&amp;sort={sort}{isFiltered
+            ? `&bracket=${bracket}`
+            : ''}</code
+        >.
       </footer>
     {/if}
   {/if}

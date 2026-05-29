@@ -1,11 +1,12 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
-import { NotFoundError, ValidationError } from '../../core/errors.js';
+import { NotFoundError } from '../../core/errors.js';
 import { LAMPORTS_PER_SOL } from '../../core/lamports.js';
 import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import type { ValidatorService } from '../../services/validator.service.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
 import type { ClaimsRepository } from '../../storage/repositories/claims.repo.js';
 import type { EpochsRepository } from '../../storage/repositories/epochs.repo.js';
+import type { ProcessedBlocksRepository } from '../../storage/repositories/processed-blocks.repo.js';
 import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
@@ -16,9 +17,11 @@ import type {
   EpochPeerBenchmark,
   ValidatorCurrentEpochResponse,
 } from '../../types/domain.js';
+import { cacheControl } from '../cache-control.js';
 import { setNoStoreCache } from '../cache-headers.js';
 import { HistoryQuerySchema, VoteOrIdentityParamSchema } from '../schemas/requests.js';
 import { serializeValidator } from '../serializers/validator-response.js';
+import { unwrap } from '../zod-helpers.js';
 
 /**
  * Sample size used when joining the cluster benchmark onto history rows.
@@ -34,6 +37,16 @@ export interface ValidatorsHistoryRoutesDeps {
   validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>;
   epochsRepo: Pick<EpochsRepository, 'findByEpoch' | 'findCurrent'>;
   aggregatesRepo: Pick<AggregatesRepository, 'findManyByEpochsTopN'>;
+  /**
+   * Compute-unit aggregator. Powers the per-epoch `avgComputeUnitsPerProducedBlock`
+   * (this validator) and `serviceAverageCu` (cluster-wide) fields on the
+   * history response — the income-page CU chart's two series. Both are
+   * derived from `processed_blocks`; no new ingestion path.
+   */
+  processedBlocksRepo: Pick<
+    ProcessedBlocksRepository,
+    'getEpochComputeUnitsByVote' | 'getEpochComputeUnitsServiceWide'
+  >;
   watchedDynamicRepo: Pick<WatchedDynamicRepository, 'touchLookup' | 'add'>;
   validatorService: Pick<ValidatorService, 'trackOnDemand' | 'getActivatedStakeLamports'>;
   /**
@@ -105,16 +118,6 @@ interface HistoryResponse {
   claimed: boolean;
 }
 
-function unwrap<T>(
-  result: { success: true; data: T } | { success: false; error: unknown },
-  context: string,
-): T {
-  if (result.success) return result.data;
-  throw new ValidationError(`${context} failed validation`, {
-    issues: (result.error as { issues?: unknown[] }).issues ?? [result.error],
-  });
-}
-
 function synthEpochInfo(epoch: number): EpochInfo {
   return {
     epoch,
@@ -145,6 +148,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     validatorsRepo,
     epochsRepo,
     aggregatesRepo,
+    processedBlocksRepo,
     watchedDynamicRepo,
     validatorService,
     profilesRepo,
@@ -279,9 +283,19 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // benchmark blocks. Both are bulk-fetched by distinct epoch to keep
     // the round-trip count at O(1) per response regardless of `limit`.
     const distinctEpochs = Array.from(new Set(rows.map((r) => r.epoch)));
-    const [epochInfos, aggregates] = await Promise.all([
+    const [epochInfos, aggregates, validatorCuByEpoch, serviceCuByEpoch] = await Promise.all([
       Promise.all(distinctEpochs.map((e) => epochsRepo.findByEpoch(e))),
       aggregatesRepo.findManyByEpochsTopN(distinctEpochs, DEFAULT_CLUSTER_TOP_N),
+      // Per-epoch validator CU, keyed by VOTE. The repo resolves the
+      // set of identity keys the vote ran across `distinctEpochs`, so
+      // an epoch produced under two identities (a mid-epoch identity
+      // rotation) — or a window spanning an ordinary cross-epoch
+      // rotation — folds every block, not just the one identity a
+      // given history row happens to carry.
+      processedBlocksRepo.getEpochComputeUnitsByVote(validator.votePubkey, distinctEpochs),
+      // Service-wide average it is plotted against — keyed by epoch;
+      // absent / zero-produced-block epochs collapse to `null`.
+      processedBlocksRepo.getEpochComputeUnitsServiceWide(distinctEpochs),
     ]);
     const epochByNumber = new Map<number, EpochInfo>();
     distinctEpochs.forEach((e, i) => {
@@ -303,7 +317,11 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
       const info = epochByNumber.get(row.epoch) ?? synthEpochInfo(row.epoch);
       const aggregate = aggregateByEpoch.get(row.epoch) ?? null;
       const peerBenchmark = peerBenchmarkByEpoch.get(row.epoch) ?? null;
-      return serializeValidator(row, info, serialCtx, aggregate, peerBenchmark);
+      const computeUnits = {
+        validator: validatorCuByEpoch.get(row.epoch) ?? null,
+        serviceAverage: serviceCuByEpoch.get(row.epoch) ?? null,
+      };
+      return serializeValidator(row, info, serialCtx, aggregate, peerBenchmark, computeUnits);
     });
 
     // Moniker comes straight off the `validators` row the lookup
@@ -313,7 +331,16 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // can show the operator's Twitter link and honour the footer
     // mute. Absent = never-claimed OR claimed-but-never-edited —
     // UI treats both identically (no overrides).
-    setNoStoreCache(reply);
+    //
+    // Cache: SCORING tier (5min client / 30min CDN). The running-
+    // epoch row inside `items` does flux, but at minute-grain the
+    // delta is dominated by fee-ingester ticks every ~30s; SCORING
+    // tolerates that without staling the CDN-cached value beyond
+    // freshness budget. The hub `/v/[vote]` SSR (PR3) and income
+    // page both fetch this; without a cache header every leaderboard
+    // click-through was hitting Postgres with a 30-row scan + peer-
+    // benchmark fan-out.
+    void reply.header('cache-control', cacheControl('SCORING'));
     return {
       vote: validator.votePubkey,
       identity: validator.identityPubkey,

@@ -30,7 +30,13 @@ interface StatsRow {
   block_tips_total_lamports: string;
   median_tip_lamports: string | null;
   median_total_lamports: string | null;
+  /** Epoch-total produced-block compute units. NOT NULL DEFAULT 0 since 0043. */
+  compute_units_total: string;
   activated_stake_lamports: string | null;
+  /** Cumulative vote credits this epoch. NOT NULL DEFAULT 0 since 0021. */
+  vote_credits: string;
+  prev_epoch_vote_credits: string;
+  vote_credits_updated_at: Date | null;
   slots_updated_at: Date | null;
   slot_window_last_slot: string | null;
   slot_window_updated_at: Date | null;
@@ -76,8 +82,17 @@ function rowToStats(row: StatsRow): EpochValidatorStats {
       row.median_tip_lamports === null ? null : toLamports(row.median_tip_lamports),
     medianTotalLamports:
       row.median_total_lamports === null ? null : toLamports(row.median_total_lamports),
+    // `compute_units_total` is NOT NULL DEFAULT 0 (migration 0043) and
+    // COALESCEd in STATS_COLS; the `?? '0'` guard is belt-and-braces
+    // for a caller that hand-rolls a query without the COALESCE. Not
+    // lamports — `toLamports` is the repo's NUMERIC(30,0)->bigint
+    // parser, used here as for `voteCredits`.
+    computeUnitsTotal: toLamports(row.compute_units_total ?? '0'),
     activatedStakeLamports:
       row.activated_stake_lamports === null ? null : toLamports(row.activated_stake_lamports),
+    voteCredits: toLamports(row.vote_credits ?? '0'),
+    prevEpochVoteCredits: toLamports(row.prev_epoch_vote_credits ?? '0'),
+    voteCreditsUpdatedAt: row.vote_credits_updated_at,
     slotsUpdatedAt: row.slots_updated_at,
     slotWindowLastSlot:
       row.slot_window_last_slot === null ? null : Number(row.slot_window_last_slot),
@@ -158,6 +173,14 @@ export interface AddIncomeDeltaArgs {
   priorityFeeDeltaLamports: bigint;
   /** Positive-delta sum on the 8 Jito tip accounts. */
   tipDeltaLamports: bigint;
+  /**
+   * Compute units consumed across the produced blocks in this delta.
+   * Summed into the denormalised `compute_units_total` (migration
+   * 0043) in the same atomic UPDATE as the four fee deltas. NOT
+   * lamports — a separate accounting axis. `0n` for a skipped-only
+   * batch.
+   */
+  computeUnitsDelta: bigint;
 }
 
 /**
@@ -178,7 +201,11 @@ const STATS_COLS = `epoch, vote_pubkey, identity_pubkey,
   median_priority_fee_lamports,
   COALESCE(block_tips_total_lamports, 0) AS block_tips_total_lamports,
   median_tip_lamports, median_total_lamports,
+  COALESCE(compute_units_total, 0) AS compute_units_total,
   activated_stake_lamports,
+  COALESCE(vote_credits, 0) AS vote_credits,
+  COALESCE(prev_epoch_vote_credits, 0) AS prev_epoch_vote_credits,
+  vote_credits_updated_at,
   slots_updated_at, slot_window_last_slot, slot_window_updated_at,
   fees_updated_at, median_fee_updated_at,
   median_base_fee_updated_at, median_priority_fee_updated_at,
@@ -236,7 +263,8 @@ export type LeaderboardWindowSort =
   | 'total_income'
   | 'mev_tips'
   | 'fees'
-  | 'skip_rate';
+  | 'skip_rate'
+  | 'compute_units';
 
 export interface LeaderboardWindowEpoch {
   epoch: Epoch;
@@ -273,6 +301,147 @@ interface IndexedIncomePerSlotBenchmarkRow {
   sample_validators: number;
   sample_slots: string;
   median_income_lamports_per_slot: string;
+}
+
+/**
+ * Result of `findEconomicPercentile` — the per-validator economic
+ * percentile lookup the Node Tier composite consumes. The repo
+ * returns RAW values (percentile + cohort context); the caller
+ * (`computeTier`) decides whether the cohort is large enough or this
+ * validator has enough measured epochs to be classifiable.
+ */
+export interface EconomicPercentileLookup {
+  /**
+   * Percentile rank in [0, 1] of this validator's median income per
+   * leader slot vs the indexed cohort. `null` when:
+   *   - the vote pubkey has no measurable income in the window; or
+   *   - the cohort returned zero peers (no validator has measurable
+   *     income in the window, which is implausible in production but
+   *     possible in a fresh dev DB).
+   *
+   * 0 = lowest in cohort. 1 = highest in cohort. Computed by
+   * PostgreSQL's `PERCENT_RANK()` over the median per-slot income
+   * distribution, which is well-defined for cohort size ≥ 2.
+   */
+  percentile: number | null;
+  /**
+   * Size of the comparison cohort: how many indexed, non-opted-out
+   * validators had measurable income in the window. Surfaced so the
+   * caller can reject ranks computed against a tiny cohort. Zero
+   * when no peer in the window has measurable income.
+   */
+  cohortSize: number;
+  /**
+   * How many epochs in the window had measurable income for THIS
+   * validator. Zero when the target validator is absent from the
+   * cohort. Surfaced so the caller can reject percentiles drawn from
+   * too few epochs.
+   */
+  measuredEpochs: number;
+  /**
+   * The target validator's own median income per slot (lamports), as
+   * a decimal-precision string. `null` when the validator is absent
+   * from the cohort. Surfaced for transparency — a UI can show
+   * "your median: X SOL/slot, cluster median: Y SOL/slot."
+   */
+  medianIncomePerSlotLamports: string | null;
+  /**
+   * Cohort median of per-validator median income per leader slot
+   * (lamports), as a decimal-precision string. `null` when the
+   * cohort is empty. Computed by `percentile_cont(0.5)` over the
+   * same `median_per_validator` distribution that drives `percentile`.
+   */
+  cohortMedianLamportsPerSlot: string | null;
+  /**
+   * Cohort 25th percentile of per-validator median income per leader
+   * slot (lamports), as a decimal-precision string. `null` when the
+   * cohort is empty.
+   */
+  cohortP25LamportsPerSlot: string | null;
+  /**
+   * Cohort 75th percentile of per-validator median income per leader
+   * slot (lamports), as a decimal-precision string. `null` when the
+   * cohort is empty.
+   */
+  cohortP75LamportsPerSlot: string | null;
+  /**
+   * Percentile rank in [0, 1] of this validator's produced-block-
+   * count-weighted compute units per produced block, over the same
+   * window and cohort as `percentile` but ranked only among the
+   * cohort validators that produced blocks. Computed in the same
+   * query (a `processed_blocks` join + a second `PERCENT_RANK()`).
+   *
+   * `null` when the validator produced no blocks in the window — the
+   * Node Tier composite treats that as a CU subscore of 0. A validator
+   * outside the cohort entirely also gets `null` here.
+   */
+  cuPercentile: number | null;
+  /**
+   * The target validator's own produced-block-count-weighted average
+   * compute units per produced block across the window. `null` when
+   * the validator produced no blocks in the window OR is absent from
+   * the cohort. Numeric (not bigint string) — CU per block sits in
+   * the tens of millions and well within `Number.MAX_SAFE_INTEGER`.
+   */
+  validatorAvgCuPerBlock: number | null;
+  /**
+   * Cohort median of per-validator avg CU per produced block.
+   * `null` when no cohort validator produced any blocks in the
+   * window. Same numeric scale as `validatorAvgCuPerBlock`.
+   */
+  cohortMedianCuPerBlock: number | null;
+}
+
+/**
+ * Canonical "no measurable cohort" lookup result. Used by the route
+ * layer (validators.route.ts + mcp.route.ts) when the closed-epoch
+ * window for a validator is empty so we skip the cohort query entirely
+ * — `computeTier` receives a well-formed input that correctly drops to
+ * `unrated` without a second DB round-trip. Exported here (rather than
+ * synthesised at each call site) so the shape stays a single source of
+ * truth: if `EconomicPercentileLookup` ever gains a field, the empty
+ * literal updates with it, not three.
+ */
+export const EMPTY_ECONOMIC_LOOKUP: EconomicPercentileLookup = {
+  percentile: null,
+  cohortSize: 0,
+  measuredEpochs: 0,
+  medianIncomePerSlotLamports: null,
+  cohortMedianLamportsPerSlot: null,
+  cohortP25LamportsPerSlot: null,
+  cohortP75LamportsPerSlot: null,
+  cuPercentile: null,
+  validatorAvgCuPerBlock: null,
+  cohortMedianCuPerBlock: null,
+};
+
+interface EconomicPercentileRow {
+  // `pct` and `median_income_per_slot` are NULL when the target vote
+  // is absent from the cohort (LEFT JOIN target_row ON TRUE in the
+  // consolidated query). `cohort_size` is a `::bigint`-cast count
+  // that pg emits as a decimal string, parsed via `Number(...)` on
+  // the TS side. Cohort size is always populated.
+  pct: string | null;
+  cohort_size: string;
+  measured_epochs: number;
+  median_income_per_slot: string | null;
+  // Cohort aggregate quantiles over the same `median_per_validator`
+  // distribution `pct` is computed against — NULL when the cohort is
+  // empty (no validator has measurable income in the window).
+  cohort_median_income_per_slot: string | null;
+  cohort_p25_income_per_slot: string | null;
+  cohort_p75_income_per_slot: string | null;
+  // `PERCENT_RANK()` of windowed CU across the cohort. NULL when the
+  // target produced no blocks in the window (absent from `cu_ranked`)
+  // OR is absent from the cohort altogether.
+  cu_pct: string | null;
+  // Target validator's own windowed avg CU per produced block; NULL
+  // when the validator produced no blocks in the window OR is absent
+  // from the cohort.
+  target_windowed_cu: string | null;
+  // Cohort median of avg CU per produced block. NULL when no cohort
+  // validator produced any blocks in the window.
+  cohort_median_cu: string | null;
 }
 
 export interface WindowedLeaderboardStats {
@@ -485,14 +654,19 @@ export class StatsRepository {
       baseFeeDeltaLamports: 0n,
       priorityFeeDeltaLamports: 0n,
       tipDeltaLamports: args.tipDeltaLamports,
+      // This forwarder predates the per-block fact pipeline; a caller
+      // with only fee+tip deltas has no CU figure, so leave the
+      // compute-unit total untouched (adding 0 is a no-op).
+      computeUnitsDelta: 0n,
     });
   }
 
   /**
-   * Four-way income delta — applies leader-receipt fees (post-burn),
-   * gross base fees, gross priority fees, and tips atomically in a
-   * single UPDATE. Preferred entry point for any ingest path that
-   * has access to the per-tx fee decomposition (i.e. anything using
+   * Four-way income delta plus the compute-unit total — applies
+   * leader-receipt fees (post-burn), gross base fees, gross priority
+   * fees, tips, and consumed compute units atomically in a single
+   * UPDATE. Preferred entry point for any ingest path that has access
+   * to the per-tx fee decomposition (i.e. anything using
    * `transactionDetails: 'full'`).
    *
    * Zero-valued deltas are safe (adding 0 is a no-op). Timestamps
@@ -507,6 +681,7 @@ export class StatsRepository {
               block_base_fees_total_lamports     = block_base_fees_total_lamports     + $4::numeric,
               block_priority_fees_total_lamports = block_priority_fees_total_lamports + $5::numeric,
               block_tips_total_lamports          = block_tips_total_lamports          + $6::numeric,
+              compute_units_total                = compute_units_total                + $7::numeric,
               fees_updated_at = NOW(),
               tips_updated_at = NOW()
         WHERE epoch = $1 AND identity_pubkey = $2`,
@@ -517,8 +692,75 @@ export class StatsRepository {
         args.baseFeeDeltaLamports.toString(),
         args.priorityFeeDeltaLamports.toString(),
         args.tipDeltaLamports.toString(),
+        args.computeUnitsDelta.toString(),
       ],
     );
+  }
+
+  /**
+   * Batch-write vote credits + previous-epoch credits into the
+   * `(epoch, vote)` rows. Source is `getVoteAccounts.epochCredits`
+   * which returns up to 5 epochs of cumulative credits per validator.
+   *
+   * Uses `INSERT … ON CONFLICT` so a vote without a slot row yet
+   * (validator has stake but no leader slots in the epoch) still
+   * gets credits recorded — the rest of the columns stay at their
+   * NOT NULL DEFAULT 0 / NULL values until the slot or fee ingesters
+   * fill them. `last_seen_epoch` on the parent validator row is
+   * touched separately by `validatorsRepo.upsert`.
+   *
+   * Single-statement batch via `unnest()` so a 2000-validator batch
+   * is one round-trip.
+   */
+  async upsertVoteCreditsBatch(
+    epoch: Epoch,
+    entries: ReadonlyArray<{
+      votePubkey: VotePubkey;
+      identityPubkey: IdentityPubkey;
+      voteCredits: bigint;
+      prevEpochVoteCredits: bigint;
+    }>,
+  ): Promise<number> {
+    if (entries.length === 0) return 0;
+    const votes = entries.map((e) => e.votePubkey);
+    const identities = entries.map((e) => e.identityPubkey);
+    const credits = entries.map((e) => e.voteCredits.toString());
+    const prevCredits = entries.map((e) => e.prevEpochVoteCredits.toString());
+    // DB-M7: UNNEST silently truncates to the SHORTEST array, so a
+    // length mismatch would write a partial, corrupt batch with no
+    // error. All four arrays are `.map()`-derived from the same
+    // `entries` list — a mismatch is a programming error, so fail
+    // fast with a clear message instead of issuing the query.
+    if (
+      votes.length !== identities.length ||
+      votes.length !== credits.length ||
+      votes.length !== prevCredits.length
+    ) {
+      throw new Error(
+        `upsertVoteCreditsBatch: array length mismatch ` +
+          `(votes=${votes.length}, identities=${identities.length}, ` +
+          `credits=${credits.length}, prevCredits=${prevCredits.length})`,
+      );
+    }
+
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO epoch_validator_stats
+         (epoch, vote_pubkey, identity_pubkey,
+          slots_assigned, slots_produced, slots_skipped,
+          vote_credits, prev_epoch_vote_credits, vote_credits_updated_at)
+       SELECT $1::bigint,
+              v.vote_pubkey, v.identity_pubkey,
+              0, 0, 0,
+              v.vote_credits::numeric, v.prev_epoch_vote_credits::numeric, NOW()
+         FROM UNNEST($2::text[], $3::text[], $4::text[], $5::text[])
+              AS v(vote_pubkey, identity_pubkey, vote_credits, prev_epoch_vote_credits)
+       ON CONFLICT (epoch, vote_pubkey) DO UPDATE
+            SET vote_credits = EXCLUDED.vote_credits,
+                prev_epoch_vote_credits = EXCLUDED.prev_epoch_vote_credits,
+                vote_credits_updated_at = NOW()`,
+      [epoch, votes, identities, credits, prevCredits],
+    );
+    return rowCount ?? 0;
   }
 
   /**
@@ -528,8 +770,13 @@ export class StatsRepository {
    * reset to 0 so the re-scan's `addIncomeDelta` calls end at the
    * correct total.
    *
+   * `compute_units_total` is reset alongside the four lamport counters
+   * for the same reason: a re-scan re-applies it through
+   * `addIncomeDelta`, so leaving a stale value here would double-count.
+   *
    * Keeps `slots_*`, stake, and all `*_updated_at` columns
-   * untouched — only the four epoch-total lamport counters move.
+   * untouched — only the four lamport counters and the compute-unit
+   * total move.
    */
   async resetEpochTotals(epoch: Epoch, identity: IdentityPubkey): Promise<void> {
     await this.pool.query(
@@ -537,7 +784,8 @@ export class StatsRepository {
           SET block_fees_total_lamports          = 0,
               block_base_fees_total_lamports     = 0,
               block_priority_fees_total_lamports = 0,
-              block_tips_total_lamports          = 0
+              block_tips_total_lamports          = 0,
+              compute_units_total                = 0
         WHERE epoch = $1 AND identity_pubkey = $2`,
       [epoch, identity],
     );
@@ -548,6 +796,11 @@ export class StatsRepository {
    * the accounting fact table. This repairs the exact drift we can get
    * if a process writes processed block rows but dies before, or races
    * during, the aggregate delta update.
+   *
+   * Rebuilds the four income totals AND `compute_units_total` — the
+   * latter is a denormalised income-family peer (migration 0043)
+   * maintained on the same delta path, so it drifts and self-heals
+   * identically and is recomputed here in the same pass.
    *
    * Only the requested identities are touched. Missing fact rows are
    * treated as zero, which is correct for validators that produced no
@@ -568,7 +821,8 @@ export class StatsRepository {
            COALESCE(SUM(pb.fees_lamports) FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS fees,
            COALESCE(SUM(pb.base_fees_lamports) FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS base_fees,
            COALESCE(SUM(pb.priority_fees_lamports) FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS priority_fees,
-           COALESCE(SUM(pb.tips_lamports) FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS tips
+           COALESCE(SUM(pb.tips_lamports) FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS tips,
+           COALESCE(SUM(pb.compute_units_consumed) FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS compute_units
          FROM input i
          LEFT JOIN processed_blocks pb
            ON pb.epoch = $1
@@ -580,6 +834,7 @@ export class StatsRepository {
               block_base_fees_total_lamports     = fact.base_fees,
               block_priority_fees_total_lamports = fact.priority_fees,
               block_tips_total_lamports          = fact.tips,
+              compute_units_total                = fact.compute_units,
               fees_updated_at = NOW(),
               tips_updated_at = NOW()
          FROM fact
@@ -589,7 +844,17 @@ export class StatsRepository {
             evs.block_fees_total_lamports          <> fact.fees OR
             evs.block_base_fees_total_lamports     <> fact.base_fees OR
             evs.block_priority_fees_total_lamports <> fact.priority_fees OR
-            evs.block_tips_total_lamports          <> fact.tips
+            evs.block_tips_total_lamports          <> fact.tips OR
+            evs.compute_units_total                <> fact.compute_units OR
+            -- A row whose income timestamps are still NULL has never
+            -- been marked measured. Update it even when the totals
+            -- already equal fact — e.g. a genuine zero-income epoch,
+            -- where the freshly-inserted 0 equals the recomputed 0 —
+            -- so fees_updated_at / tips_updated_at get stamped and
+            -- findEconomicPercentile counts the epoch as measured.
+            -- Without this a zero-income validator stays unrated.
+            evs.fees_updated_at IS NULL OR
+            evs.tips_updated_at IS NULL
           )`,
       [epoch, identities],
     );
@@ -818,6 +1083,59 @@ export class StatsRepository {
   }
 
   /**
+   * Returns the subset of `epochs` that have at least one of `votes`
+   * with leader slots assigned but income only partially recorded —
+   * `slots_assigned > 0 AND (fees_updated_at IS NULL OR
+   * tips_updated_at IS NULL)`. This is the income-ingest gap the
+   * income-reconciler repairs: a validator whose leader-block fetches
+   * failed for an epoch never gets a full income delta, so the epoch
+   * is unmeasured for the Node Tier. BOTH timestamps are checked so
+   * this matches `findEconomicPercentile`'s "fees AND tips required"
+   * cohort filter exactly. Cheap — a single indexed scan, no block
+   * fetches.
+   */
+  async findEpochsWithIncomeGaps(epochs: Epoch[], votes: VotePubkey[]): Promise<Epoch[]> {
+    if (epochs.length === 0 || votes.length === 0) return [];
+    const { rows } = await this.pool.query<{ epoch: string }>(
+      `SELECT DISTINCT epoch::text AS epoch
+         FROM epoch_validator_stats
+        WHERE epoch = ANY($1::bigint[])
+          AND vote_pubkey = ANY($2::text[])
+          AND slots_assigned > 0
+          AND (fees_updated_at IS NULL OR tips_updated_at IS NULL)`,
+      [epochs, votes],
+    );
+    return rows.map((r) => Number(r.epoch));
+  }
+
+  /**
+   * Returns the subset of `epochs` for which at least one of `votes`
+   * has NO `epoch_validator_stats` row at all. `findEpochsWithIncomeGaps`
+   * only sees rows that exist; this catches the complementary hole — a
+   * watched validator the slot-ingester never materialised a row for
+   * (a multi-epoch ingest outage, or a validator only recently added
+   * to the watched set). Under the full-window tier requirement such
+   * an epoch holds the validator at `unrated`, so the income-reconciler
+   * rebuilds the row from the leader schedule. Cheap — one indexed
+   * count per epoch, no block fetches.
+   */
+  async findEpochsWithMissingWatchedRows(epochs: Epoch[], votes: VotePubkey[]): Promise<Epoch[]> {
+    if (epochs.length === 0 || votes.length === 0) return [];
+    const { rows } = await this.pool.query<{ epoch: string }>(
+      `SELECT w.epoch::text AS epoch
+         FROM unnest($1::bigint[]) AS w(epoch)
+        WHERE (
+          SELECT COUNT(*)
+            FROM epoch_validator_stats evs
+           WHERE evs.epoch = w.epoch
+             AND evs.vote_pubkey = ANY($2::text[])
+        ) < (SELECT COUNT(DISTINCT v) FROM unnest($2::text[]) AS v)`,
+      [epochs, votes],
+    );
+    return rows.map((r) => Number(r.epoch));
+  }
+
+  /**
    * Return all historical stats rows for a single vote, newest first.
    * Used by the UI income page to render the epoch history table.
    */
@@ -832,6 +1150,314 @@ export class StatsRepository {
       [vote, safe],
     );
     return rows.map(rowToStats);
+  }
+
+  /**
+   * Economic-productivity percentile lookup for the Node Tier
+   * composite. Replaces the previous TVC-based denominator —
+   * vote credits are operator-controlled (client mods, networking
+   * proximity) so the public tier no longer uses them; this query
+   * provides the unfakeable on-chain replacement.
+   *
+   * Returns the target validator's percentile rank against the
+   * indexed-validator cohort, where the per-validator score is the
+   * median across the window of:
+   *
+   *   incomePerSlot = (blockFeesTotalLamports + blockTipsTotalLamports)
+   *                   / slotsAssigned
+   *
+   * `blockFeesTotalLamports` already aggregates the leader's post-
+   * burn share of base + priority fees (see `EpochValidatorStats`
+   * docstring), so adding tips gives total leader income.
+   *
+   * Median rather than mean defends against a single lucky-MEV epoch
+   * dominating the score; `PERCENT_RANK()` gives 0 to the lowest peer
+   * and 1 to the highest.
+   *
+   * Cohort filters mirror `findIndexedIncomePerSlotBenchmarks`:
+   * non-zero `slotsAssigned`, slot data ingested, at least one of
+   * fees/tips ingested, opt-out respected. Per-validator inclusion
+   * also requires at least one epoch with measured income — the
+   * caller checks `measuredEpochs >= MIN_MEASURED_EPOCHS_FOR_ECONOMIC`
+   * (the full window by default) before trusting the percentile.
+   *
+   * @param vote          Target validator's vote pubkey.
+   * @param fromEpoch     Inclusive lower bound of the epoch window.
+   * @param toEpoch       Inclusive upper bound (typically the most
+   *                      recent CLOSED epoch).
+   */
+  async findEconomicPercentile(
+    vote: VotePubkey,
+    fromEpoch: Epoch,
+    toEpoch: Epoch,
+  ): Promise<EconomicPercentileLookup> {
+    // Single query: window the relevant rows, compute per-validator
+    // median, `PERCENT_RANK()` across the cohort, then LEFT JOIN the
+    // target so we always emit exactly one row — cohort metadata
+    // plus optional target columns (NULL when the target is absent).
+    // `block_fees_total_lamports` and `block_tips_total_lamports` are
+    // NOT NULL DEFAULT 0 (migrations 0001 / 0009), so the bare
+    // addition below is safe — no COALESCE needed.
+    //
+    // We require BOTH `fees_updated_at` AND `tips_updated_at` to be
+    // present: a row with only one timestamp means partial ingest,
+    // which would undercount `(fees + tips)` by exactly the missing
+    // half and bias the percentile.
+    const sql = `
+      WITH per_validator_per_epoch AS (
+        SELECT
+          evs.vote_pubkey,
+          evs.identity_pubkey,
+          evs.epoch,
+          (
+            evs.block_fees_total_lamports
+            + evs.block_tips_total_lamports
+          )::numeric / evs.slots_assigned::numeric AS income_per_slot
+        FROM epoch_validator_stats evs
+        WHERE evs.epoch BETWEEN $1::bigint AND $2::bigint
+          AND evs.slots_assigned > 0
+          AND evs.slots_updated_at IS NOT NULL
+          AND evs.fees_updated_at IS NOT NULL
+          AND evs.tips_updated_at IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+              FROM validator_profiles vp
+             WHERE vp.vote_pubkey = evs.vote_pubkey
+               AND vp.opted_out = TRUE
+          )
+      ),
+      median_per_validator AS (
+        SELECT
+          vote_pubkey,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY income_per_slot) AS median_income_per_slot,
+          COUNT(*)::int AS measured_epochs
+        FROM per_validator_per_epoch
+        GROUP BY vote_pubkey
+      ),
+      -- Compute units for the SAME cohort + window. Each cohort
+      -- validator's produced blocks across the window are pooled;
+      -- windowed_cu is the producedBlock-count-weighted average CU
+      -- per produced block, i.e. SUM(CU) / COUNT(produced). NULL when
+      -- the validator produced no blocks in the window.
+      --
+      -- cu_vote_identities resolves the SET of identity keys each
+      -- vote ran across the window. epoch_validator_stats (and so
+      -- per_validator_per_epoch) records one identity per
+      -- (epoch, vote), so an operator that rotates its identity key
+      -- mid-epoch runs that epoch under two identities; pooling
+      -- blocks by the windowed identity set folds both halves rather
+      -- than dropping the unrecorded one.
+      cu_vote_identities AS (
+        SELECT
+          vote_pubkey,
+          ARRAY_AGG(DISTINCT identity_pubkey) AS identities
+        FROM per_validator_per_epoch
+        GROUP BY vote_pubkey
+      ),
+      cu_per_validator AS (
+        SELECT
+          cvi.vote_pubkey,
+          SUM(pb.compute_units_consumed)
+            FILTER (WHERE pb.block_status = 'produced') AS cu_consumed,
+          COUNT(pb.slot) FILTER (WHERE pb.block_status = 'produced') AS produced_blocks
+        FROM cu_vote_identities cvi
+        LEFT JOIN processed_blocks pb
+          -- Explicit constant range so the planner prunes
+          -- processed_blocks partitions — a bare join-column
+          -- equality does NOT prune a RANGE-partitioned table, and
+          -- without it the hash side scans every partition of the
+          -- largest table on the DB.
+          ON pb.epoch BETWEEN $1::bigint AND $2::bigint
+         AND pb.leader_identity = ANY(cvi.identities)
+        GROUP BY cvi.vote_pubkey
+      ),
+      windowed_cu AS (
+        SELECT
+          vote_pubkey,
+          CASE
+            WHEN COALESCE(produced_blocks, 0) > 0
+            THEN cu_consumed::numeric / produced_blocks::numeric
+            ELSE NULL
+          END AS windowed_cu
+        FROM cu_per_validator
+      ),
+      -- CU percentile reuses the PERCENT_RANK method; validators with
+      -- no produced blocks (NULL windowed_cu) are excluded from the CU
+      -- ranking, so they receive no cu_pct — the tier folds their CU
+      -- subscore back to their income percentile.
+      cu_ranked AS (
+        SELECT
+          vote_pubkey,
+          windowed_cu,
+          PERCENT_RANK() OVER (ORDER BY windowed_cu) AS cu_pct
+        FROM windowed_cu
+        WHERE windowed_cu IS NOT NULL
+      ),
+      ranked AS (
+        SELECT
+          vote_pubkey,
+          median_income_per_slot,
+          measured_epochs,
+          PERCENT_RANK() OVER (ORDER BY median_income_per_slot) AS pct,
+          COUNT(*) OVER ()::bigint AS cohort_size
+        FROM median_per_validator
+      ),
+      target_row AS (
+        SELECT
+          ranked.pct,
+          ranked.median_income_per_slot,
+          ranked.measured_epochs,
+          cu_ranked.cu_pct,
+          cu_ranked.windowed_cu AS target_windowed_cu
+        FROM ranked
+        LEFT JOIN cu_ranked ON cu_ranked.vote_pubkey = ranked.vote_pubkey
+        WHERE ranked.vote_pubkey = $3
+      ),
+      cohort AS (
+        -- One-row cohort summary: size of the income cohort plus
+        -- median / p25 / p75 of the per-validator income distribution
+        -- AND the cohort median of windowed-CU among block-producing
+        -- peers. All four percentile aggregates share the same
+        -- distribution as the pct rank, so a UI showing rank also
+        -- knows the absolute value at that rank.
+        SELECT
+          (SELECT COUNT(*)::bigint FROM median_per_validator) AS cohort_size,
+          (
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY median_income_per_slot)
+              FROM median_per_validator
+          ) AS cohort_median_income_per_slot,
+          (
+            SELECT percentile_cont(0.25) WITHIN GROUP (ORDER BY median_income_per_slot)
+              FROM median_per_validator
+          ) AS cohort_p25_income_per_slot,
+          (
+            SELECT percentile_cont(0.75) WITHIN GROUP (ORDER BY median_income_per_slot)
+              FROM median_per_validator
+          ) AS cohort_p75_income_per_slot,
+          (
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY windowed_cu)
+              FROM windowed_cu
+             WHERE windowed_cu IS NOT NULL
+          ) AS cohort_median_cu
+      )
+      -- LEFT JOIN ON TRUE: emit cohort metadata once, attach the
+      -- optional target columns (NULL when the target vote is not in
+      -- the cohort). Always returns exactly one row.
+      SELECT
+        cohort.cohort_size::text                                AS cohort_size,
+        COALESCE(target_row.measured_epochs, 0)::int            AS measured_epochs,
+        target_row.pct::text                                    AS pct,
+        target_row.median_income_per_slot::text                 AS median_income_per_slot,
+        cohort.cohort_median_income_per_slot::text              AS cohort_median_income_per_slot,
+        cohort.cohort_p25_income_per_slot::text                 AS cohort_p25_income_per_slot,
+        cohort.cohort_p75_income_per_slot::text                 AS cohort_p75_income_per_slot,
+        target_row.cu_pct::text                                 AS cu_pct,
+        target_row.target_windowed_cu::text                     AS target_windowed_cu,
+        cohort.cohort_median_cu::text                           AS cohort_median_cu
+      FROM cohort
+      LEFT JOIN target_row ON TRUE
+    `;
+
+    const { rows } = await this.pool.query<EconomicPercentileRow>(sql, [fromEpoch, toEpoch, vote]);
+
+    // `cohort_size` arrives as a decimal string from the `::bigint`
+    // cast. Cohort size is bounded by the indexed validator set
+    // (~thousands), well within safe-int range.
+    const row = rows[0] as EconomicPercentileRow;
+    const cohortSize = Number(row.cohort_size);
+
+    // Cohort aggregate quantiles share the same `median_per_validator`
+    // distribution that drives `pct` — populated whenever the cohort
+    // itself is non-empty, regardless of whether the target validator
+    // appears in it. The target-absent branch below still surfaces
+    // these so a UI can render cohort distribution context even when
+    // the validator has no own median to compare against.
+    const cohortMedianIncomePerSlot = row.cohort_median_income_per_slot;
+    const cohortP25IncomePerSlot = row.cohort_p25_income_per_slot;
+    const cohortP75IncomePerSlot = row.cohort_p75_income_per_slot;
+    const cohortMedianCuRaw = row.cohort_median_cu;
+    const cohortMedianCuParsed =
+      cohortMedianCuRaw === null ? Number.NaN : Number(cohortMedianCuRaw);
+
+    // Target absent from the cohort: pct and median are both NULL.
+    if (row.pct === null && row.median_income_per_slot === null) {
+      return {
+        percentile: null,
+        cohortSize,
+        measuredEpochs: 0,
+        medianIncomePerSlotLamports: null,
+        cohortMedianLamportsPerSlot: cohortMedianIncomePerSlot,
+        cohortP25LamportsPerSlot: cohortP25IncomePerSlot,
+        cohortP75LamportsPerSlot: cohortP75IncomePerSlot,
+        cuPercentile: null,
+        validatorAvgCuPerBlock: null,
+        cohortMedianCuPerBlock: Number.isFinite(cohortMedianCuParsed) ? cohortMedianCuParsed : null,
+      };
+    }
+
+    const pct = row.pct === null ? Number.NaN : Number(row.pct);
+    // CU percentile is independently nullable: the target can be in
+    // the income cohort yet have produced no blocks in the window
+    // (absent from `cu_ranked`, so `cu_pct` is NULL).
+    const cuPct = row.cu_pct === null ? Number.NaN : Number(row.cu_pct);
+    const targetCu = row.target_windowed_cu === null ? Number.NaN : Number(row.target_windowed_cu);
+    return {
+      // `PERCENT_RANK` returns 0 for a cohort of size 1 (no other
+      // peers to rank against). We still pass that through — the
+      // caller's `MIN_COHORT_FOR_PERCENTILE` guard catches it.
+      percentile: Number.isFinite(pct) ? pct : null,
+      cohortSize,
+      measuredEpochs: row.measured_epochs,
+      medianIncomePerSlotLamports: row.median_income_per_slot,
+      cohortMedianLamportsPerSlot: cohortMedianIncomePerSlot,
+      cohortP25LamportsPerSlot: cohortP25IncomePerSlot,
+      cohortP75LamportsPerSlot: cohortP75IncomePerSlot,
+      cuPercentile: Number.isFinite(cuPct) ? cuPct : null,
+      validatorAvgCuPerBlock: Number.isFinite(targetCu) ? targetCu : null,
+      cohortMedianCuPerBlock: Number.isFinite(cohortMedianCuParsed) ? cohortMedianCuParsed : null,
+    };
+  }
+
+  /**
+   * The VOTE PUBKEYS of the economic-percentile cohort for a closed-
+   * epoch window — i.e. exactly which validators the percentile in
+   * `findEconomicPercentile` was ranked against. Surfaced so the
+   * percentile is independently reproducible (cohort disclosure): a
+   * consumer can re-derive the rank by pulling each member's income.
+   *
+   * Cohort membership MIRRORS `findEconomicPercentile`'s
+   * `per_validator_per_epoch` filter EXACTLY (non-zero `slots_assigned`,
+   * slot data ingested, BOTH fees + tips timestamps present, opt-out
+   * respected) so the returned set is the same population the
+   * `PERCENT_RANK()` was computed over. A validator is in the cohort if
+   * it has at least one measured epoch in the window.
+   *
+   * Bounded by the indexed validator set (~19-200 in production), so a
+   * single `array`-free row-per-vote scan is cheap and returned whole;
+   * sorted for deterministic output.
+   *
+   * @param fromEpoch Inclusive lower bound of the closed-epoch window.
+   * @param toEpoch   Inclusive upper bound (most recent closed epoch).
+   */
+  async findEconomicCohortVotes(fromEpoch: Epoch, toEpoch: Epoch): Promise<VotePubkey[]> {
+    const { rows } = await this.pool.query<{ vote_pubkey: string }>(
+      `SELECT DISTINCT evs.vote_pubkey
+         FROM epoch_validator_stats evs
+        WHERE evs.epoch BETWEEN $1::bigint AND $2::bigint
+          AND evs.slots_assigned > 0
+          AND evs.slots_updated_at IS NOT NULL
+          AND evs.fees_updated_at IS NOT NULL
+          AND evs.tips_updated_at IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+              FROM validator_profiles vp
+             WHERE vp.vote_pubkey = evs.vote_pubkey
+               AND vp.opted_out = TRUE
+          )
+        ORDER BY evs.vote_pubkey`,
+      [fromEpoch, toEpoch],
+    );
+    return rows.map((r) => r.vote_pubkey as VotePubkey);
   }
 
   async findIndexedIncomePerSlotBenchmarks(
@@ -1032,8 +1658,36 @@ export class StatsRepository {
     minWindowSlots?: number;
     requiredClosedEpochs?: number;
     excludedVotes?: string[];
+    /**
+     * Bracket filter (operator-primary leaderboard): when set, only
+     * votes whose window-representative `activated_stake_lamports` is
+     * STRICTLY LESS than this ceiling are ranked. Applied AFTER the
+     * per-vote window aggregation but BEFORE `ORDER BY … LIMIT`, so
+     * rank positions stay bracket-relative ("1st of N in bracket")
+     * rather than slicing a globally-ranked top-N. Rows with NULL
+     * stake (pre-stake-snapshot epochs) are excluded from a stake
+     * bracket — they can't be proven to be under the ceiling.
+     */
+    maxActivatedStakeLamports?: bigint;
+    /**
+     * Bracket filter: when a non-null array is supplied, only these
+     * votes are eligible (an allowlist). Used by the `newcomer` and
+     * `client:<kind>` brackets, which the route resolves to a vote
+     * set from the `validators` table first, then ranks within. An
+     * empty array yields an empty result (a bracket with no members).
+     * Applied in the windowed CTE WHERE — i.e. before aggregation,
+     * ordering, and LIMIT. `undefined`/omitted means no allowlist
+     * (the `all` and stake brackets).
+     */
+    candidateVotes?: readonly string[] | null;
   }): Promise<WindowedLeaderboardStats[]> {
     if (args.epochs.length === 0) return [];
+    // An explicit empty allowlist means "a bracket with no members" —
+    // short-circuit before issuing a query whose `ANY('{}')` would
+    // match nothing anyway.
+    if (args.candidateVotes !== undefined && args.candidateVotes !== null) {
+      if (args.candidateVotes.length === 0) return [];
+    }
 
     const safeLimit = Math.max(1, Math.min(args.limit, 500));
     const minWindowSlots = Math.max(1, args.minWindowSlots ?? 4);
@@ -1049,6 +1703,13 @@ export class StatsRepository {
           return `block_fees_total_lamports DESC, window_income_lamports DESC`;
         case 'skip_rate':
           return `(slots_skipped::float / NULLIF(window_slots, 0)) ASC NULLS LAST,
+                  window_income_lamports DESC`;
+        case 'compute_units':
+          // ProducedBlock-weighted average compute units per produced
+          // block: SUM(compute_units_total) / SUM(slots_produced) over
+          // the window. NULLIF guards a validator that produced no
+          // blocks in the window (NULLs sort last). Income breaks ties.
+          return `(compute_units_total / NULLIF(slots_produced, 0)) DESC NULLS LAST,
                   window_income_lamports DESC`;
         case 'income_per_slot':
         default:
@@ -1070,6 +1731,30 @@ export class StatsRepository {
     const excludedVotesParam = params.length + 3;
     const limitParam = params.length + 4;
     params.push(minWindowSlots, requiredClosedEpochs, args.excludedVotes ?? [], safeLimit);
+
+    // Optional bracket params, appended after the fixed four so the
+    // base placeholder numbering above is untouched. Each contributes
+    // a SQL clause fragment only when the corresponding arg is set.
+    const hasCandidateAllowlist = args.candidateVotes !== undefined && args.candidateVotes !== null;
+    let candidateVotesClause = '';
+    if (hasCandidateAllowlist) {
+      const candidateVotesParam = params.length + 1;
+      // Restrict the candidate set to the bracket's allowlist BEFORE
+      // aggregation, so ranks are bracket-relative.
+      candidateVotesClause = `AND evs.vote_pubkey = ANY($${candidateVotesParam}::text[])`;
+      params.push(args.candidateVotes as string[]);
+    }
+    let maxStakeClause = '';
+    if (args.maxActivatedStakeLamports !== undefined) {
+      const maxStakeParam = params.length + 1;
+      // Stake is aggregated per window row (priority-ordered, same
+      // value the API displays). Filter in the OUTER query so it
+      // applies to the window-representative stake, NULL excluded,
+      // STRICTLY less than the ceiling (`stake_lt_*` is exclusive).
+      maxStakeClause = `AND activated_stake_lamports IS NOT NULL
+         AND activated_stake_lamports < $${maxStakeParam}::numeric`;
+      params.push(args.maxActivatedStakeLamports.toString());
+    }
 
     const { rows } = await this.pool.query<WindowedLeaderboardStatsRow>(
       `WITH included(epoch, is_current, priority) AS (
@@ -1093,6 +1778,15 @@ export class StatsRepository {
            SUM(evs.slots_skipped)::bigint AS slots_skipped,
            SUM(evs.block_fees_total_lamports)::numeric AS block_fees_total_lamports,
            SUM(COALESCE(evs.block_tips_total_lamports, 0))::numeric AS block_tips_total_lamports,
+           -- Window-summed compute units, paired with slots_produced
+           -- above so the outer ORDER BY can rank by average CU per
+           -- produced block. Exposed by the CTE purely so that the
+           -- ORDER BY can reach it (an ORDER BY may reference any CTE
+           -- column); deliberately NOT in the outer SELECT list — the
+           -- leaderboard's DISPLAYED per-row CU still comes from the
+           -- rotation-aware getWindowedComputeUnitsByVote aggregation,
+           -- this column drives the compute-unit sort only.
+           SUM(COALESCE(evs.compute_units_total, 0))::numeric AS compute_units_total,
            SUM(evs.block_fees_total_lamports + COALESCE(evs.block_tips_total_lamports, 0))::numeric
              AS window_income_lamports,
            SUM(CASE
@@ -1121,6 +1815,7 @@ export class StatsRepository {
          JOIN epoch_validator_stats evs ON evs.epoch = included.epoch
          WHERE evs.slots_updated_at IS NOT NULL
            AND NOT (evs.vote_pubkey = ANY($${excludedVotesParam}::text[]))
+           ${candidateVotesClause}
            AND (
              evs.fees_updated_at IS NOT NULL
              OR evs.tips_updated_at IS NOT NULL
@@ -1154,6 +1849,7 @@ export class StatsRepository {
          activated_stake_lamports
         FROM windowed
        WHERE window_slots >= $${minParam}
+         ${maxStakeClause}
        ORDER BY ${order}
        LIMIT $${limitParam}`,
       params,

@@ -99,6 +99,7 @@ function buildBlockFixture(): {
       meta: {
         err: null,
         fee: PRIORITY_FEE_LAMPORTS + BASE_FEE_LAMPORTS,
+        computeUnitsConsumed: 200_000n,
         // Balances irrelevant for this tx (no tip account present).
         preBalances: [1_000_000_000n],
         postBalances: [1_000_000_000n],
@@ -117,6 +118,7 @@ function buildBlockFixture(): {
       meta: {
         err: null,
         fee: 5_000n,
+        computeUnitsConsumed: 50_000n,
         preBalances: [10_000_000_000n, 0n],
         postBalances: [10_000_000_000n - 5_000n - TIP_DEPOSIT_LAMPORTS, TIP_DEPOSIT_LAMPORTS],
       },
@@ -223,6 +225,9 @@ describe('FeeService contract: polling vs gRPC paths produce identical rows', ()
     expect(pollingStats.incomeDeltaCalls).toHaveLength(1);
     expect(grpcStats.incomeDeltaCalls).toHaveLength(1);
     expect(pollingStats.incomeDeltaCalls[0]).toEqual(grpcStats.incomeDeltaCalls[0]);
+    // 4. The compute-unit delta is plumbed through both paths: the two
+    //    fixture txs consume 200_000 + 50_000 CU.
+    expect(pollingStats.incomeDeltaCalls[0]?.computeUnitsDelta).toBe(250_000n);
   });
 
   it('agrees on the leader-base derivation when priority > 0', async () => {
