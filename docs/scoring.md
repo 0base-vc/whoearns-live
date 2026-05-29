@@ -427,7 +427,17 @@ top of all 2,000+ active validators.
   separately — surfaced on the validator profile but never
   composed into the tier (commission has its own gameability
   problems: see "Anti-patterns" below for why "lowest
-  commission" is not a leaderboard).
+  commission" is not a leaderboard). **This holds for BOTH
+  commissions.** As of migration 0046 the profile also surfaces the
+  Jito **MEV commission** (`window.mevCommissionBps` +
+  `window.runsJito`) beside the inflation commission, because
+  inflation commission alone is a half-truth for any validator whose
+  income leans on tips: inflation commission governs staking yield,
+  MEV commission governs the tip split. The MEV commission is sourced
+  from Jito's on-chain tip-distribution accounts (via Stakewiz, on the
+  same `stakewiz-tenure-ingester` feed as tenure) and is held to the
+  identical contract — a displayed delegator FACT, never an input to
+  any composite or tier.
 - **Cohort scope depends on `WatchMode`.** A validator's
   percentile against `top:500` and against `*` are different
   numbers. The cohort size is reported in every response;

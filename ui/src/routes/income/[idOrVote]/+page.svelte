@@ -123,6 +123,28 @@
   const commissionPct = $derived<number | null>(scoring?.tier.window.commission ?? null);
 
   /**
+   * Jito MEV commission — the validator's cut of MEV tips before the
+   * rest is shared with delegators. Shown beside `commissionPct`
+   * because inflation commission alone is a half-truth for any
+   * validator whose income leans on Jito tips: `commission` governs
+   * staking yield, this governs the tip split. Sourced on-chain
+   * (stakewiz reads Jito's tip-distribution accounts) via `/scoring`
+   * — same honesty contract as `commissionPct`: a displayed FACT,
+   * never multiplied into the income number.
+   *
+   * `runsJito` separates "0% MEV commission" (runs Jito, shares
+   * everything) from "doesn't run Jito at all"; both `null` when
+   * scoring is unavailable or the row predates migration 0046.
+   * `mevCommissionPct` is a pre-formatted percent string (bps / 100,
+   * trailing zeros stripped) or `null` when there's nothing to show.
+   */
+  const mevCommissionBps = $derived<number | null>(scoring?.tier.window.mevCommissionBps ?? null);
+  const runsJito = $derived<boolean | null>(scoring?.tier.window.runsJito ?? null);
+  const mevCommissionPct = $derived<string | null>(
+    mevCommissionBps === null ? null : String(Number((mevCommissionBps / 100).toFixed(2))),
+  );
+
+  /**
    * True when the user hit an unknown pubkey and the indexer just
    * auto-tracked it. The first rendered response is always empty
    * (`items.length === 0`) — subsequent reloads progressively fill
@@ -663,11 +685,33 @@
           >
             ◎{formatSol(lastMonthTotalSol.toString())}
           </p>
-          {#if commissionPct !== null}
-            <p class="mt-1 text-xs text-[color:var(--color-text-muted)]">
-              Commission <span class="font-semibold text-[color:var(--color-text-default)]"
-                >{commissionPct}%</span
-              >
+          {#if commissionPct !== null || runsJito !== null}
+            <p
+              class="mt-1 inline-flex flex-wrap items-center gap-x-1.5 text-xs text-[color:var(--color-text-muted)]"
+            >
+              {#if commissionPct !== null}
+                <span
+                  >Commission <span class="font-semibold text-[color:var(--color-text-default)]"
+                    >{commissionPct}%</span
+                  ></span
+                >
+              {/if}
+              {#if commissionPct !== null && runsJito !== null}
+                <span aria-hidden="true" class="text-[color:var(--color-text-subtle)]">·</span>
+              {/if}
+              {#if runsJito === true}
+                <span
+                  >MEV <span class="font-semibold text-[color:var(--color-text-default)]"
+                    >{mevCommissionPct ?? '—'}%</span
+                  ></span
+                >
+              {:else if runsJito === false}
+                <span>No Jito MEV</span>
+              {/if}
+              <Tooltip
+                label="About commission"
+                content="Two separate take-rates. Commission is the validator's cut of inflation / staking rewards — what 'commission' usually means. MEV commission is its cut of Jito tips before the rest is shared with delegators: 0% means all MEV tips pass through, 'No Jito MEV' means the validator doesn't run Jito. Both describe the operator and neither feeds WhoEarns's tier. MEV commission is sourced from Jito's on-chain tip-distribution accounts via Stakewiz."
+              />
             </p>
           {/if}
           <!--

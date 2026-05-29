@@ -25,12 +25,15 @@ interface ValidatorRow {
   client_version: string | null;
   client_updated_at: Date | null;
   commission: number | null;
+  mev_commission_bps: number | null;
+  runs_jito: boolean | null;
 }
 
 /** Column list shared by every SELECT so new info columns stay in sync. */
 const VALIDATOR_COLS = `vote_pubkey, identity_pubkey, first_seen_epoch, last_seen_epoch,
   genesis_epoch, updated_at, name, details, website, keybase_username, icon_url, info_updated_at,
-  COALESCE(client_kind, 'unknown') AS client_kind, client_version, client_updated_at, commission`;
+  COALESCE(client_kind, 'unknown') AS client_kind, client_version, client_updated_at, commission,
+  mev_commission_bps, runs_jito`;
 
 function rowToValidator(row: ValidatorRow): Validator {
   return {
@@ -60,6 +63,11 @@ function rowToValidator(row: ValidatorRow): Validator {
     // migration 0044 yields a missing field; either way the domain
     // value is "we don't know commission yet."
     commission: row.commission ?? null,
+    // MEV commission + Jito participation — same defensive collapse:
+    // a partial-projection SELECT or a pre-0046 row yields a missing
+    // field, which maps to "unknown" (`null`), never a fake 0%.
+    mevCommissionBps: row.mev_commission_bps ?? null,
+    runsJito: row.runs_jito ?? null,
   };
 }
 
@@ -130,6 +138,54 @@ export class ValidatorsRepository {
         WHERE v.vote_pubkey = data.vote
           AND v.genesis_epoch IS DISTINCT FROM data.epoch`,
       [votes, epochs],
+    );
+    return { updated: rowCount ?? 0 };
+  }
+
+  /**
+   * Bulk-set `mev_commission_bps` + `runs_jito` for the supplied
+   * entries. Driven by the `stakewiz-tenure-ingester` job alongside
+   * `setGenesisEpochs` — same bulk feed, same 24 h cadence, so it
+   * costs no extra HTTP round-trip.
+   *
+   * Only rows ALREADY in `validators` are touched (the `UPDATE … FROM
+   * (VALUES …)` naturally no-ops non-matching votes). The `IS
+   * DISTINCT FROM` guard across BOTH columns skips a write when
+   * nothing changed — MEV commission moves rarely, so most ticks are
+   * pure no-ops.
+   *
+   * The (bps, runsJito) pair is written verbatim: a non-Jito row
+   * carries `(null, false)`, and a validator that LEAVES Jito flips
+   * `runs_jito` back to false AND clears the bps in the same write.
+   * Returns the number of rows actually changed. Empty input is a
+   * no-op. One statement so a ~1-2k-pair refresh is a single
+   * round-trip.
+   */
+  async setMevCommissions(
+    entries: ReadonlyArray<{
+      votePubkey: string;
+      mevCommissionBps: number | null;
+      runsJito: boolean;
+    }>,
+  ): Promise<{ updated: number }> {
+    if (entries.length === 0) return { updated: 0 };
+    const votes = entries.map((e) => e.votePubkey);
+    const bps = entries.map((e) => e.mevCommissionBps);
+    const runsJito = entries.map((e) => e.runsJito);
+    const { rowCount } = await this.pool.query(
+      `UPDATE validators v
+          SET mev_commission_bps = data.bps,
+              runs_jito          = data.runs_jito,
+              updated_at         = NOW()
+         FROM (
+           SELECT UNNEST($1::text[])    AS vote,
+                  UNNEST($2::integer[]) AS bps,
+                  UNNEST($3::boolean[]) AS runs_jito
+         ) AS data
+        WHERE v.vote_pubkey = data.vote
+          AND (v.mev_commission_bps IS DISTINCT FROM data.bps
+               OR v.runs_jito IS DISTINCT FROM data.runs_jito)`,
+      [votes, bps, runsJito],
     );
     return { updated: rowCount ?? 0 };
   }

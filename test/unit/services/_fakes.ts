@@ -73,6 +73,11 @@ export class FakeValidatorsRepo {
       // semantic: the caller's `v.commission` wins when supplied,
       // the previous row's value is preserved otherwise.
       commission: v.commission ?? existing?.commission ?? null,
+      // MEV commission + Jito participation are owned by
+      // `setMevCommissions`, not `upsert` — preserve the prior row,
+      // default null on first insert (same posture as genesisEpoch).
+      mevCommissionBps: existing?.mevCommissionBps ?? null,
+      runsJito: existing?.runsJito ?? null,
     });
   }
 

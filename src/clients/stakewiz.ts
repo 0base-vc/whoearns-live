@@ -11,9 +11,12 @@ import type { Logger } from '../core/logger.js';
  * validator first held active stake, i.e. the true tenure start.
  *
  * The bulk endpoint `GET /validators` returns the whole mainnet set
- * (~1500 entries) in one call. We project each entry to just
- * `{ voteIdentity, firstEpochWithStake }` — nothing else is
- * load-bearing for tenure.
+ * (~1500 entries) in one call. We project each entry to the tenure
+ * field (`firstEpochWithStake`) plus the Jito MEV-commission facts
+ * (`runsJito` + `jitoCommissionBps`). Stakewiz reads the latter off
+ * Jito's on-chain tip-distribution accounts, so the MEV commission
+ * is the same kind of delegator FACT we already surface for tenure,
+ * from the same source on the same 24 h cadence.
  *
  * No API key required. `fetcher` is injectable so unit tests can
  * stub the HTTP layer.
@@ -40,12 +43,24 @@ export interface StakewizClientDeps {
 }
 
 /**
- * One projected stakewiz validator row. Only the two fields tenure
- * cares about — see class docstring.
+ * One projected stakewiz validator row — the tenure field plus the
+ * Jito MEV-commission facts. See class docstring.
  */
-interface StakewizValidatorProjection {
+export interface StakewizValidatorProjection {
+  /** Maps to our `validators.vote_pubkey` (stakewiz calls it
+   *  `vote_identity`). */
   voteIdentity: string;
-  firstEpochWithStake: number;
+  /** True on-chain tenure start (`first_epoch_with_stake`). `null`
+   *  when stakewiz omits / malforms it — the row is still kept for
+   *  its MEV facts. */
+  firstEpochWithStake: number | null;
+  /** Validator's Jito MEV commission in basis points (0-10000), or
+   *  `null` when the validator isn't running Jito or the field is
+   *  absent. 500 bps = 5%. */
+  jitoCommissionBps: number | null;
+  /** Whether the validator participates in Jito MEV tip
+   *  distribution (`is_jito`). */
+  runsJito: boolean;
 }
 
 export class StakewizClient {
@@ -58,17 +73,22 @@ export class StakewizClient {
   }
 
   /**
-   * Fetch every mainnet validator's first-epoch-with-stake.
+   * Fetch every mainnet validator's tenure + Jito MEV-commission
+   * facts in one bulk call.
    *
-   * Returns a `Map<voteIdentity, firstEpochWithStake>`. Entries with
-   * a missing / non-finite / negative `first_epoch_with_stake` or a
-   * missing `vote_identity` are skipped (not fatal — a single bad
-   * row shouldn't sink the whole refresh).
+   * Returns a `Map<voteIdentity, StakewizValidatorProjection>`.
+   * Entries missing `vote_identity` are skipped (not fatal — a single
+   * bad row shouldn't sink the whole refresh). A row missing a valid
+   * `first_epoch_with_stake` is still kept (with `firstEpochWithStake:
+   * null`) so its MEV facts aren't lost; the tenure consumer filters
+   * those out itself.
    *
    * Throws on network failure / non-2xx / oversize / unparseable
    * body — the caller (the ingester job) logs + retries next tick.
    */
-  async fetchValidatorGenesisEpochs(signal?: AbortSignal): Promise<Map<string, number>> {
+  async fetchValidatorFacts(
+    signal?: AbortSignal,
+  ): Promise<Map<string, StakewizValidatorProjection>> {
     const timeoutSignal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
     const combinedSignal =
       signal === undefined ? timeoutSignal : AbortSignal.any([timeoutSignal, signal]);
@@ -108,7 +128,7 @@ export class StakewizClient {
       throw new Error(`stakewiz: ${parsed.length} entries exceeds the ${MAX_ENTRIES} cap`);
     }
 
-    const out = new Map<string, number>();
+    const out = new Map<string, StakewizValidatorProjection>();
     let skipped = 0;
     for (const entry of parsed) {
       const projection = projectEntry(entry);
@@ -116,7 +136,7 @@ export class StakewizClient {
         skipped += 1;
         continue;
       }
-      out.set(projection.voteIdentity, projection.firstEpochWithStake);
+      out.set(projection.voteIdentity, projection);
     }
     if (skipped > 0) {
       this.logger.debug({ skipped, kept: out.size }, 'stakewiz: skipped malformed rows');
@@ -163,17 +183,39 @@ export class StakewizClient {
 
 /**
  * Project + validate one raw stakewiz array element. Returns `null`
- * when the row is missing either field or carries an out-of-range
- * `first_epoch_with_stake`.
+ * only when `vote_identity` is missing — that's the join key, so a
+ * row without it is unusable. A missing / out-of-range
+ * `first_epoch_with_stake` degrades to `firstEpochWithStake: null`
+ * (the row survives for its MEV facts). MEV commission is read only
+ * when `is_jito` is true; a non-Jito row reports `runsJito: false`
+ * with `jitoCommissionBps: null`, which is itself a correct fact to
+ * persist.
  */
 function projectEntry(entry: unknown): StakewizValidatorProjection | null {
   if (entry === null || typeof entry !== 'object') return null;
   const obj = entry as Record<string, unknown>;
   const voteIdentity = obj['vote_identity'];
-  const firstEpoch = obj['first_epoch_with_stake'];
   if (typeof voteIdentity !== 'string' || voteIdentity.length === 0) return null;
-  if (typeof firstEpoch !== 'number' || !Number.isFinite(firstEpoch) || firstEpoch < 0) {
-    return null;
-  }
-  return { voteIdentity, firstEpochWithStake: Math.floor(firstEpoch) };
+
+  const rawFirstEpoch = obj['first_epoch_with_stake'];
+  const firstEpochWithStake =
+    typeof rawFirstEpoch === 'number' && Number.isFinite(rawFirstEpoch) && rawFirstEpoch >= 0
+      ? Math.floor(rawFirstEpoch)
+      : null;
+
+  // MEV commission is meaningful only for Jito participants. Gate the
+  // bps on `is_jito` so a non-Jito row never reports a stale / zero
+  // commission as if it were a real take-rate.
+  const runsJito = obj['is_jito'] === true;
+  const rawBps = obj['jito_commission_bps'];
+  const jitoCommissionBps =
+    runsJito &&
+    typeof rawBps === 'number' &&
+    Number.isFinite(rawBps) &&
+    rawBps >= 0 &&
+    rawBps <= 10_000
+      ? Math.floor(rawBps)
+      : null;
+
+  return { voteIdentity, firstEpochWithStake, jitoCommissionBps, runsJito };
 }

@@ -28,6 +28,8 @@ function makeValidator(identityPubkey: string = IDENTITY_1): Validator {
     clientVersion: null,
     clientUpdatedAt: null,
     commission: null,
+    mevCommissionBps: null,
+    runsJito: null,
   };
 }
 

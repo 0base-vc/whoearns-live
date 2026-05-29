@@ -60,6 +60,26 @@ export interface Validator {
    * DB level — see `migrations/0044_validator_commission.sql`.
    */
   commission: number | null;
+  /**
+   * Jito MEV commission in basis points (0-10000; 500 = 5%) — the
+   * cut the validator keeps from MEV tips before sharing the rest
+   * with delegators. Distinct from `commission`, which only governs
+   * inflation/staking rewards. Sourced from stakewiz's
+   * `jito_commission_bps` (which reads Jito's on-chain
+   * tip-distribution accounts) via the `stakewiz-tenure-ingester`
+   * job. `null` when the validator isn't a Jito participant or the
+   * row predates migration 0046. Like `commission`, this is a
+   * displayed delegator FACT, never an input to any tier/composite.
+   */
+  mevCommissionBps: number | null;
+  /**
+   * Whether the validator participates in Jito MEV tip distribution
+   * (`is_jito`). Lets a surface tell "0% MEV commission" (runs Jito,
+   * shares all tips) apart from "no MEV commission" (doesn't run
+   * Jito) — two different delegator stories. `null` for rows the
+   * stakewiz ingester hasn't covered yet.
+   */
+  runsJito: boolean | null;
 }
 
 /**

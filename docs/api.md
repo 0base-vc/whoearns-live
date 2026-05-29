@@ -487,7 +487,10 @@ Response shape:
     "economicMeasuredEpochs": 10,
     "economicMedianLamportsPerSlot": "48425333",
     "incomeFreshness": "2026-05-12T08:00:00.000Z",
-    "cohortAsOfEpoch": { "fromEpoch": 815, "toEpoch": 824 }
+    "cohortAsOfEpoch": { "fromEpoch": 815, "toEpoch": 824 },
+    "commission": 0,
+    "mevCommissionBps": 0,
+    "runsJito": true
   },
   "tier": "forge",
   "composite": 96,
@@ -563,6 +566,22 @@ slotsAssigned`) across the 10-epoch window, computed against the
 `top:N`, an explicit list, or `*` for every active validator).
 Tier cutoffs: `forge ≥ 95`, `anvil ≥ 80`, `hearth ≥ 40`,
 `kindling < 40`.
+
+**Commission facts (`window.commission`, `window.mevCommissionBps`,
+`window.runsJito`).** Two independent operator take-rates, surfaced
+as delegator FACTS — neither feeds the composite (WhoEarns is
+commission-NEUTRAL by design). `commission` is the on-chain
+vote-account commission (percent, 0-100) from `getVoteAccounts` — the
+cut of INFLATION / staking rewards. `mevCommissionBps` is the Jito MEV
+commission in basis points (0-10000; 500 = 5%) — the cut of MEV tips
+before the rest is shared with delegators, sourced from Jito's
+on-chain tip-distribution accounts via Stakewiz. They move
+independently: a validator can take 0% inflation commission yet keep
+100% of MEV tips, so a surface showing one without the other tells
+only half the take-rate story. `runsJito` separates a
+`mevCommissionBps` of `0` ("runs Jito, shares all tips") from `null`
+("does not run Jito at all"); both are `null` until the stakewiz
+ingester has covered the row.
 
 **Per-component `evidence`.** Each sub-component carries an
 `evidence` block alongside its `score`. The evidence describes the

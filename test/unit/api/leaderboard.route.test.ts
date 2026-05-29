@@ -661,6 +661,8 @@ function makeValidator(
     clientVersion: null,
     clientUpdatedAt: null,
     commission: null,
+    mevCommissionBps: null,
+    runsJito: null,
     ...overrides,
   };
 }

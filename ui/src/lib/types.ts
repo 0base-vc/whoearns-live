@@ -447,6 +447,24 @@ export interface NodeTierBody {
      * tick hasn't yet covered.
      */
     commission: number | null;
+    /**
+     * Jito MEV commission in basis points (0-10000; 500 = 5%) — the
+     * validator's cut of MEV tips before the rest is shared with
+     * delegators. Complements `commission` (inflation/staking yield):
+     * showing one without the other tells only half the take-rate
+     * story. Sourced on-chain (Jito tip-distribution accounts) via
+     * Stakewiz. `null` when the validator isn't a Jito participant or
+     * the row predates the column — gate on `runsJito`, never render
+     * `null` as 0%. A displayed FACT, never an input to the tier.
+     */
+    mevCommissionBps: number | null;
+    /**
+     * Whether the validator participates in Jito MEV tip
+     * distribution. Distinguishes "0% MEV commission" (`true`, shares
+     * all tips) from "no MEV commission" (`false`, doesn't run Jito).
+     * `null` when scoring is unavailable / row predates the column.
+     */
+    runsJito: boolean | null;
     cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
   };
   tier: NodeTier;

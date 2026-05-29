@@ -201,6 +201,13 @@ export class ValidatorService {
         clientVersion: null,
         clientUpdatedAt: null,
         commission,
+        // MEV commission + Jito participation are owned by the
+        // stakewiz-tenure-ingester (same as `genesisEpoch` above);
+        // refreshFromRpc doesn't load them, so the in-memory snapshot
+        // returns null and callers needing them re-fetch via
+        // `findByVote`, which SELECTs the full row.
+        mevCommissionBps: null,
+        runsJito: null,
       });
       stakeByVote.set(vote, stake);
     }

@@ -360,7 +360,7 @@ export type TierBody = Omit<NodeTierResponse, 'vote' | 'identity'>;
  */
 export function tierBodyFromResolved(
   resolved: ResolvedTier,
-  validator: Pick<Validator, 'commission'>,
+  validator: Pick<Validator, 'commission' | 'mevCommissionBps' | 'runsJito'>,
 ): TierBody {
   const { result, input, closedRows, economicLookup, cohortAsOfEpoch, cohortVotes } = resolved;
   const incomeFreshness = oldestIncomeFreshness(closedRows);
@@ -460,6 +460,18 @@ export function tierBodyFromResolved(
       // refresh tick — see `migrations/0044_validator_commission.sql`.
       // `null` for legacy rows the refresh hasn't covered yet.
       commission: validator.commission,
+      // Jito MEV commission (basis points, 0-10000) + whether the
+      // validator runs Jito at all. Sourced from stakewiz via the
+      // `stakewiz-tenure-ingester` (migration 0046). Surfaced beside
+      // `commission` because inflation commission alone is a half-
+      // truth for any validator whose income leans on MEV tips —
+      // `commission` governs staking yield, `mevCommissionBps`
+      // governs the tip split. Both are displayed delegator FACTS,
+      // never inputs to the tier (commission-neutral by design).
+      // `mevCommissionBps` is `null` (and `runsJito` false) for
+      // non-Jito validators; both `null` for pre-0046 rows.
+      mevCommissionBps: validator.mevCommissionBps,
+      runsJito: validator.runsJito,
       // Closed-epoch window bounds the cohort was evaluated over. A
       // consumer can compare these against the leaderboard's current
       // epoch to detect drift between a CDN-cached tier and a fresh
@@ -1040,6 +1052,25 @@ export interface NodeTierResponse {
      * `null` for legacy rows the refresh tick hasn't covered yet.
      */
     commission: number | null;
+    /**
+     * Jito MEV commission in basis points (0-10000; 500 = 5%) — the
+     * share the validator keeps from MEV tips before passing the rest
+     * to delegators. Complements `commission` (which only governs
+     * inflation/staking yield): a surface showing one without the
+     * other tells a delegator only half the take-rate story. Sourced
+     * from stakewiz (migration 0046). `null` when the validator isn't
+     * a Jito participant or the row predates the column — gate display
+     * on `runsJito`, never render `null` as 0%. A displayed FACT only,
+     * never an input to the tier (commission-neutral by design).
+     */
+    mevCommissionBps: number | null;
+    /**
+     * Whether the validator participates in Jito MEV tip distribution.
+     * Distinguishes "0% MEV commission" (`runsJito: true`, shares all
+     * tips) from "no MEV commission" (`runsJito: false`, doesn't run
+     * Jito). `null` for rows the stakewiz ingester hasn't covered yet.
+     */
+    runsJito: boolean | null;
     /**
      * Closed-epoch window bounds the percentile cohort was evaluated
      * over (`fromEpoch` = oldest closed epoch in the window,

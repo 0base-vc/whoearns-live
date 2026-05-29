@@ -1711,6 +1711,33 @@
             <span class="text-[color:var(--color-text-muted)]">—</span>
           {/if}
         </dd>
+
+        <!--
+          Jito MEV commission — the validator's cut of MEV tips before
+          sharing the rest with delegators. A different take-rate from
+          the inflation commission above, and one that matters here
+          because an operator's income can lean heavily on tips. Same
+          commission-NEUTRAL framing: a delegator-facing FACT, never a
+          tier input. Sourced on-chain (Jito tip-distribution accounts)
+          via Stakewiz. "No Jito" (runsJito false) is distinct from "—"
+          (unknown / not yet ingested).
+        -->
+        <dt class="text-xs uppercase tracking-wider text-[color:var(--color-text-subtle)]">
+          MEV commission
+        </dt>
+        <dd class="text-right tabular-nums">
+          {#if tierWindow.runsJito === true}
+            {#if tierWindow.mevCommissionBps !== null}
+              {Number((tierWindow.mevCommissionBps / 100).toFixed(2))}%
+            {:else}
+              <span class="text-[color:var(--color-text-muted)]">—</span>
+            {/if}
+          {:else if tierWindow.runsJito === false}
+            <span class="text-[color:var(--color-text-muted)]">No Jito</span>
+          {:else}
+            <span class="text-[color:var(--color-text-muted)]">—</span>
+          {/if}
+        </dd>
       </dl>
     </Card>
   </div>

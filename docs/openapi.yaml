@@ -1318,6 +1318,42 @@ components:
                 the window has both fees and tips ingested. Lets a UI
                 grey out the tier when the income ingester has
                 stalled, without polling a separate health surface.
+            commission:
+              type: integer
+              nullable: true
+              minimum: 0
+              maximum: 100
+              description: |
+                On-chain vote-account commission (percent, 0-100) from
+                `getVoteAccounts` — the operator's cut of INFLATION /
+                staking rewards. `null` for rows the refresh tick has
+                not yet covered. A displayed delegator FACT: WhoEarns
+                keeps its income/tier metrics commission-NEUTRAL and
+                never multiplies this into the income figure.
+            mevCommissionBps:
+              type: integer
+              nullable: true
+              minimum: 0
+              maximum: 10000
+              description: |
+                Jito MEV commission in basis points (0-10000; 500 = 5%)
+                — the operator's cut of MEV tips before the rest is
+                shared with delegators. Distinct from `commission`,
+                which governs inflation rewards only; showing one
+                without the other tells a delegator half the take-rate
+                story. Sourced from Jito's on-chain tip-distribution
+                accounts via Stakewiz. `null` when the validator is not
+                a Jito participant (see `runsJito`) or the row predates
+                the column. Also a commission-NEUTRAL displayed FACT,
+                never a tier input.
+            runsJito:
+              type: boolean
+              nullable: true
+              description: |
+                Whether the validator participates in Jito MEV tip
+                distribution. Distinguishes a `mevCommissionBps` of `0`
+                ("runs Jito, shares all tips") from `null` ("does not
+                run Jito at all"). `null` when not yet ingested.
             cohortAsOfEpoch:
               type: object
               nullable: true

@@ -1,0 +1,43 @@
+-- 0046_validator_mev_commission.sql
+--
+-- Persist each validator's Jito MEV commission so the income + hub
+-- surfaces can show it alongside the on-chain inflation commission
+-- added in 0044. Inflation commission (`commission`) only governs
+-- staking-reward yield; it says NOTHING about how much of a
+-- validator's MEV-tip income is shared with delegators. A validator
+-- can take 0% inflation commission yet keep 100% of Jito tips — so
+-- showing inflation commission alone is a half-truth for any
+-- delegator weighing an operator whose income leans on MEV.
+--
+-- Source. Unlike `commission` (read from `getVoteAccounts` on every
+-- refresh tick), the MEV commission lives in Jito's on-chain
+-- tip-distribution accounts, which we don't deserialize directly.
+-- Stakewiz's full-history indexer already reads it and exposes
+-- `jito_commission_bps` + `is_jito` on its bulk `/validators`
+-- endpoint — the SAME feed the tenure ingester already polls. So
+-- this rides the existing `stakewiz-tenure-ingester` job at no extra
+-- HTTP cost. It stays a displayed delegator FACT, never an input to
+-- any tier/composite (commission-neutral by design — see 0044 +
+-- docs/scoring.md).
+--
+-- Column choice.
+--   * `mev_commission_bps SMALLINT` — basis points 0-10000 (500 =
+--     5%). bps (not integer percent) preserves the sub-percent
+--     precision Jito allows. SMALLINT max (32767) clears 10000 with
+--     room to spare. Nullable: NULL means "not a Jito participant or
+--     not yet backfilled" — the application gates display on
+--     `runs_jito`, so NULL never renders as a fake 0%.
+--   * `runs_jito BOOLEAN` — whether the validator participates in
+--     Jito tip distribution. Distinguishes "0% MEV commission"
+--     (runs Jito, shares everything) from "no MEV commission"
+--     (doesn't run Jito at all) — two very different delegator
+--     stories that a bare NULL bps couldn't tell apart.
+--
+-- No CHECK constraint: the ingester clamps bps to [0, 10000] and
+-- derives `runs_jito` from `is_jito` before write, same posture as
+-- 0044's clamp-in-the-service-layer rationale.
+--
+-- NULLABLE column adds are metadata-only on Postgres 11+.
+ALTER TABLE validators
+  ADD COLUMN IF NOT EXISTS mev_commission_bps SMALLINT,
+  ADD COLUMN IF NOT EXISTS runs_jito BOOLEAN;

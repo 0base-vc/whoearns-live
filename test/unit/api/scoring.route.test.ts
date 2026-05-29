@@ -35,7 +35,9 @@ function makeValidator(): Validator {
     clientKind: 'unknown',
     clientVersion: null,
     clientUpdatedAt: null,
-    commission: null,
+    commission: 7,
+    mevCommissionBps: 800,
+    runsJito: true,
   };
 }
 
@@ -208,6 +210,9 @@ describe('GET /v1/validators/:idOrVote/scoring', () => {
           slotsAssigned: number;
           economicCohortSize: number;
           economicMeasuredEpochs: number;
+          commission: number | null;
+          mevCommissionBps: number | null;
+          runsJito: boolean | null;
           cohortAsOfEpoch: { fromEpoch: number; toEpoch: number } | null;
         };
         components: {
@@ -268,6 +273,10 @@ describe('GET /v1/validators/:idOrVote/scoring', () => {
     // Fixture seeds epochs 495..505 + current epoch 600 → all eleven
     // count as closed, window picks the 10 newest (496..505).
     expect(body.tier.window.cohortAsOfEpoch).toEqual({ fromEpoch: 496, toEpoch: 505 });
+    // Both commission facts surface in the window, independently.
+    expect(body.tier.window.commission).toBe(7);
+    expect(body.tier.window.mevCommissionBps).toBe(800);
+    expect(body.tier.window.runsJito).toBe(true);
     expect(body.tier.composite).toBeGreaterThanOrEqual(95);
     expect(body.tier.components.economicPercentile.score).toBe(1.0);
     expect(typeof body.tier.components.reliability.score).toBe('number');

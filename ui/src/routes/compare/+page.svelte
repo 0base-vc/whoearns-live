@@ -406,6 +406,31 @@
     return pct === null ? '—' : `${pct}%`;
   }
 
+  // MEV (Jito) commission — the cut the operator keeps from MEV tips
+  // before sharing the rest. Shown beside inflation commission because
+  // the two are different take-rates and an operator's income here can
+  // lean heavily on tips. A CONTEXT row, NOT highlighted: "No Jito"
+  // and a low Jito take-rate aren't cleanly comparable, so there's no
+  // directional winner (same posture as Node Tier). Sourced on-chain
+  // (Jito tip-distribution) via Stakewiz, on the `/scoring` window.
+  function slotMev(slot: CompareSlot | null | undefined): {
+    bps: number | null;
+    runsJito: boolean | null;
+  } {
+    return {
+      bps: slot?.scoring?.tier.window.mevCommissionBps ?? null,
+      runsJito: slot?.scoring?.tier.window.runsJito ?? null,
+    };
+  }
+  const mevA = $derived(slotMev(slotA));
+  const mevB = $derived(slotMev(slotB));
+
+  function formatMevCommission(mev: { bps: number | null; runsJito: boolean | null }): string {
+    if (mev.runsJito === false) return 'No Jito';
+    if (mev.runsJito === null) return '—';
+    return mev.bps === null ? '—' : `${Number((mev.bps / 100).toFixed(2))}%`;
+  }
+
   // Fallback epoch — pick the larger of the two so the column header
   // ("Epoch N") makes sense when one side has more recent data.
   const headerLabel = $derived(statsA?.label ?? statsB?.label ?? null);
@@ -842,6 +867,35 @@
         class="rounded-xl border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
       >
         <h3 class="inline-flex items-center text-sm font-semibold">
+          MEV commission
+          <Tooltip
+            label="About MEV commission"
+            content="The validator's cut of Jito MEV tips before the rest is shared with delegators — a different take-rate from the inflation commission above. 0% means all tips pass through; 'No Jito' means the validator doesn't run Jito. Context only (not highlighted): a no-Jito validator and a low Jito take-rate aren't cleanly comparable. Sourced on-chain via Stakewiz."
+          />
+        </h3>
+        <dl class="mt-3 grid grid-cols-2 gap-2">
+          <div class="rounded-lg bg-[color:var(--color-surface-muted)] p-3">
+            <dt class="truncate text-xs text-[color:var(--color-text-muted)]">
+              {displayName(slotA)}
+            </dt>
+            <dd class="mt-1 font-mono text-sm font-semibold tabular-nums">
+              {formatMevCommission(mevA)}
+            </dd>
+          </div>
+          <div class="rounded-lg bg-[color:var(--color-surface-muted)] p-3">
+            <dt class="truncate text-xs text-[color:var(--color-text-muted)]">
+              {displayName(slotB)}
+            </dt>
+            <dd class="mt-1 font-mono text-sm font-semibold tabular-nums">
+              {formatMevCommission(mevB)}
+            </dd>
+          </div>
+        </dl>
+      </article>
+      <article
+        class="rounded-xl border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
+      >
+        <h3 class="inline-flex items-center text-sm font-semibold">
           Node Tier
           <Tooltip
             label="About Node Tier"
@@ -967,6 +1021,23 @@
           <tr>
             <th scope="row" class="px-4 py-3 text-left font-medium">
               <span class="inline-flex items-center">
+                MEV commission
+                <Tooltip
+                  label="About MEV commission"
+                  content="The validator's cut of Jito MEV tips before the rest is shared with delegators — a different take-rate from the inflation commission above. 0% means all tips pass through; 'No Jito' means the validator doesn't run Jito. Context only (not highlighted): a no-Jito validator and a low Jito take-rate aren't cleanly comparable. Sourced on-chain via Stakewiz."
+                />
+              </span>
+            </th>
+            <td class="px-4 py-3 text-right font-mono tabular-nums">
+              {formatMevCommission(mevA)}
+            </td>
+            <td class="px-4 py-3 text-right font-mono tabular-nums">
+              {formatMevCommission(mevB)}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row" class="px-4 py-3 text-left font-medium">
+              <span class="inline-flex items-center">
                 Node Tier
                 <Tooltip
                   label="About Node Tier"
@@ -1027,8 +1098,8 @@
     </div>
     <p class="mt-3 text-xs text-[color:var(--color-text-subtle)]">
       Highlighted cells mark directional wins (for commission, lower wins). Context rows — including
-      Node Tier — are not highlighted. Total income is biased by stake size — for a stake-neutral
-      read, use Income / slot or Skip rate.
+      Node Tier and MEV commission — are not highlighted. Total income is biased by stake size — for
+      a stake-neutral read, use Income / slot or Skip rate.
       {#if leaderSlotStatsLoading}
         CU rows are loading.
       {/if}
