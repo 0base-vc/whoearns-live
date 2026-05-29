@@ -100,6 +100,25 @@
     return `${ev.rank.position} of ${ev.rank.of}`;
   });
 
+  // Ordinal suffix for the rank ("1st", "2nd", "3rd", "11th") so the
+  // headline reads as a sentence ("ranked 1st of 19 indexed
+  // validators") rather than a bare integer. English-only — the
+  // evidence copy on this surface is English throughout.
+  function ordinal(n: number): string {
+    const mod100 = n % 100;
+    if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+    switch (n % 10) {
+      case 1:
+        return `${n}st`;
+      case 2:
+        return `${n}nd`;
+      case 3:
+        return `${n}rd`;
+      default:
+        return `${n}th`;
+    }
+  }
+
   // ── CU branch derivations ──
   // The CU branch carries no per-epoch table (backend only ships
   // window-aggregate avg CU per block), so the inputs grid is just
@@ -230,7 +249,11 @@
       >
         <span class="tabular-nums">{formatLamports(eco.cohortMedianLamportsPerSlot)}</span>
       </KpiStat>
-      <KpiStat label="Rank" size="sm" title="Position in the sorted cohort.">
+      <KpiStat
+        label="Rank in indexed cohort"
+        size="sm"
+        title="Position in the sorted cohort of validators WhoEarns indexes — not the whole Solana cluster."
+      >
         <span class="tabular-nums">{economicRankLabel ?? '—'}</span>
       </KpiStat>
     </dl>
@@ -251,11 +274,14 @@
       <span class="tabular-nums font-medium text-[color:var(--color-text-default)]"
         >{score === null ? '—' : score.toFixed(4)}</span
       >
-      — rank
+      — ranked
       <span class="tabular-nums font-medium text-[color:var(--color-text-default)]"
-        >{eco.rank.position}</span
+        >{ordinal(eco.rank.position)}</span
       >
-      of <span class="tabular-nums">{eco.rank.of}</span>.
+      of
+      <span class="tabular-nums font-medium text-[color:var(--color-text-default)]"
+        >{eco.rank.of}</span
+      > indexed validators.
     </p>
 
     {#if eco.incomeBreakdown}

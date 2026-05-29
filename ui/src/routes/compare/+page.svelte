@@ -23,13 +23,16 @@
   import Card from '$lib/components/Card.svelte';
   import ValidatorSearchCombobox from '$lib/components/ValidatorSearchCombobox.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
+  import TierBadge from '$lib/components/TierBadge.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { fetchValidatorLeaderSlots } from '$lib/api';
   import { formatSol, shortenPubkey } from '$lib/format';
+  import { TIER_LABEL } from '$lib/tier';
   import { SITE_NAME, SITE_URL } from '$lib/site';
   import type { CompareData, CompareSlot } from './+page';
   import type {
     LeaderboardWindow,
+    NodeTier,
     ValidatorEpochLeaderSlots,
     ValidatorEpochRecord,
     ValidatorHistory,
@@ -365,6 +368,43 @@
   const statsB = $derived(windowStats(slotB?.history ?? null));
   const lastMonthA = $derived(lastMonthTotalSol(slotA?.history ?? null));
   const lastMonthB = $derived(lastMonthTotalSol(slotB?.history ?? null));
+
+  // ── Commission + Node Tier ────────────────────────────────────────
+  // Both come from `/scoring` (`slot.scoring`), loaded once per
+  // validator in the loader. They are 10-epoch window-aggregate values,
+  // independent of the comparison-window toggle, so they sit OUTSIDE the
+  // `METRICS` table (which is keyed off the windowed `WindowStats`).
+  //
+  // Commission is the only directional row here: a delegator keeps more
+  // of the yield at a lower commission, so lower wins. We deliberately
+  // do NOT compute a delegator APR (no activated-stake-weighted yield
+  // number — same honesty constraint as the omitted-APR note above);
+  // raw commission % is a fact straight off `getVoteAccounts`. Node
+  // Tier is a coarse 5-bucket grade shown as context, not highlighted —
+  // two validators in the same tier are not "tied", and a one-tier gap
+  // is not a clean directional win.
+  function slotCommission(slot: CompareSlot | null | undefined): number | null {
+    return slot?.scoring?.tier.window.commission ?? null;
+  }
+  function slotTier(slot: CompareSlot | null | undefined): NodeTier | null {
+    return slot?.scoring?.tier.tier ?? null;
+  }
+
+  const commissionA = $derived(slotCommission(slotA));
+  const commissionB = $derived(slotCommission(slotB));
+  const tierA = $derived(slotTier(slotA));
+  const tierB = $derived(slotTier(slotB));
+
+  // Lower commission wins. `null` on either side = no directional call.
+  const commissionWinner = $derived.by<'a' | 'b' | 'tie' | null>(() => {
+    if (commissionA === null || commissionB === null) return null;
+    if (commissionA === commissionB) return 'tie';
+    return commissionA < commissionB ? 'a' : 'b';
+  });
+
+  function formatCommission(pct: number | null): string {
+    return pct === null ? '—' : `${pct}%`;
+  }
 
   // Fallback epoch — pick the larger of the two so the column header
   // ("Epoch N") makes sense when one side has more recent data.
@@ -755,6 +795,88 @@
     </header>
 
     <div class="grid gap-3 md:hidden">
+      <!--
+        Commission + Node Tier lead the mobile stack: they're the
+        headline shortlist criteria a delegator scans first, and they
+        come from `slot.scoring` rather than the windowed `WindowStats`,
+        so they render outside the METRICS loop.
+      -->
+      <article
+        class="rounded-xl border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
+      >
+        <h3 class="inline-flex items-center text-sm font-semibold">
+          Commission (%)
+          <Tooltip
+            label="About Commission"
+            content="On-chain vote-account commission from getVoteAccounts — the cut the operator takes before rewards reach delegators. Lower leaves more for delegators. WhoEarns does not compute a delegator APR from it."
+          />
+        </h3>
+        <dl class="mt-3 grid grid-cols-2 gap-2">
+          <div
+            class={commissionWinner === 'a'
+              ? 'rounded-lg bg-[color:var(--color-status-ok-bg)] p-3'
+              : 'rounded-lg bg-[color:var(--color-surface-muted)] p-3'}
+          >
+            <dt class="truncate text-xs text-[color:var(--color-text-muted)]">
+              {displayName(slotA)}
+            </dt>
+            <dd class="mt-1 font-mono text-sm font-semibold tabular-nums">
+              {formatCommission(commissionA)}
+            </dd>
+          </div>
+          <div
+            class={commissionWinner === 'b'
+              ? 'rounded-lg bg-[color:var(--color-status-ok-bg)] p-3'
+              : 'rounded-lg bg-[color:var(--color-surface-muted)] p-3'}
+          >
+            <dt class="truncate text-xs text-[color:var(--color-text-muted)]">
+              {displayName(slotB)}
+            </dt>
+            <dd class="mt-1 font-mono text-sm font-semibold tabular-nums">
+              {formatCommission(commissionB)}
+            </dd>
+          </div>
+        </dl>
+      </article>
+      <article
+        class="rounded-xl border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-4"
+      >
+        <h3 class="inline-flex items-center text-sm font-semibold">
+          Node Tier
+          <Tooltip
+            label="About Node Tier"
+            content="10-epoch composite grade (Forge / Anvil / Hearth / Kindling, or Unrated when the sample is too thin). Context only — a coarse grade, not a stake-neutral metric."
+          />
+        </h3>
+        <dl class="mt-3 grid grid-cols-2 gap-2">
+          <div class="rounded-lg bg-[color:var(--color-surface-muted)] p-3">
+            <dt class="truncate text-xs text-[color:var(--color-text-muted)]">
+              {displayName(slotA)}
+            </dt>
+            <dd class="mt-1 flex items-center gap-1.5 text-sm font-semibold">
+              {#if tierA !== null}
+                <TierBadge tier={tierA} size={16} />
+                <span>{TIER_LABEL[tierA]}</span>
+              {:else}
+                <span class="font-mono">—</span>
+              {/if}
+            </dd>
+          </div>
+          <div class="rounded-lg bg-[color:var(--color-surface-muted)] p-3">
+            <dt class="truncate text-xs text-[color:var(--color-text-muted)]">
+              {displayName(slotB)}
+            </dt>
+            <dd class="mt-1 flex items-center gap-1.5 text-sm font-semibold">
+              {#if tierB !== null}
+                <TierBadge tier={tierB} size={16} />
+                <span>{TIER_LABEL[tierB]}</span>
+              {:else}
+                <span class="font-mono">—</span>
+              {/if}
+            </dd>
+          </div>
+        </dl>
+      </article>
       {#each METRICS as metric (metric.key)}
         {@const va = metric.extract(statsA)}
         {@const vb = metric.extract(statsB)}
@@ -810,6 +932,69 @@
           </tr>
         </thead>
         <tbody class="divide-y divide-[color:var(--color-border-default)]">
+          <!--
+            Commission + Node Tier head the table — the headline
+            shortlist criteria. Sourced from `slot.scoring`, not the
+            windowed `WindowStats`, so they're hand-rolled rows rather
+            than METRICS entries. Commission is directional (lower wins);
+            Node Tier is an unhighlighted context grade.
+          -->
+          <tr>
+            <th scope="row" class="px-4 py-3 text-left font-medium">
+              <span class="inline-flex items-center">
+                Commission (%)
+                <Tooltip
+                  label="About Commission"
+                  content="On-chain vote-account commission from getVoteAccounts — the cut the operator takes before rewards reach delegators. Lower leaves more for delegators. WhoEarns does not compute a delegator APR from it."
+                />
+              </span>
+            </th>
+            <td
+              class="px-4 py-3 text-right font-mono tabular-nums"
+              class:bg-[color:var(--color-status-ok-bg)]={commissionWinner === 'a'}
+              class:font-semibold={commissionWinner === 'a'}
+            >
+              {formatCommission(commissionA)}
+            </td>
+            <td
+              class="px-4 py-3 text-right font-mono tabular-nums"
+              class:bg-[color:var(--color-status-ok-bg)]={commissionWinner === 'b'}
+              class:font-semibold={commissionWinner === 'b'}
+            >
+              {formatCommission(commissionB)}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row" class="px-4 py-3 text-left font-medium">
+              <span class="inline-flex items-center">
+                Node Tier
+                <Tooltip
+                  label="About Node Tier"
+                  content="10-epoch composite grade (Forge / Anvil / Hearth / Kindling, or Unrated when the sample is too thin). Context only — a coarse grade, not a stake-neutral metric."
+                />
+              </span>
+            </th>
+            <td class="px-4 py-3 text-right">
+              {#if tierA !== null}
+                <span class="inline-flex items-center justify-end gap-1.5 font-semibold">
+                  <TierBadge tier={tierA} size={16} />
+                  <span>{TIER_LABEL[tierA]}</span>
+                </span>
+              {:else}
+                <span class="font-mono tabular-nums">—</span>
+              {/if}
+            </td>
+            <td class="px-4 py-3 text-right">
+              {#if tierB !== null}
+                <span class="inline-flex items-center justify-end gap-1.5 font-semibold">
+                  <TierBadge tier={tierB} size={16} />
+                  <span>{TIER_LABEL[tierB]}</span>
+                </span>
+              {:else}
+                <span class="font-mono tabular-nums">—</span>
+              {/if}
+            </td>
+          </tr>
           {#each METRICS as metric (metric.key)}
             {@const va = metric.extract(statsA)}
             {@const vb = metric.extract(statsB)}
@@ -841,8 +1026,9 @@
       </table>
     </div>
     <p class="mt-3 text-xs text-[color:var(--color-text-subtle)]">
-      Highlighted cells mark directional wins. Context rows are not highlighted. Total income is
-      biased by stake size — for a stake-neutral read, use Income / slot or Skip rate.
+      Highlighted cells mark directional wins (for commission, lower wins). Context rows — including
+      Node Tier — are not highlighted. Total income is biased by stake size — for a stake-neutral
+      read, use Income / slot or Skip rate.
       {#if leaderSlotStatsLoading}
         CU rows are loading.
       {/if}

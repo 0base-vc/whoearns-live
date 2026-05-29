@@ -11,8 +11,13 @@
  * URL itself is the source of truth (no client-side state needed),
  * so a paste/share/bookmark of `?a=...&b=...` round-trips cleanly.
  */
-import { fetchCurrentEpoch, fetchValidatorHistory } from '$lib/api';
-import type { CurrentEpoch, LeaderboardWindow, ValidatorHistory } from '$lib/types';
+import { fetchCurrentEpoch, fetchScoring, fetchValidatorHistory } from '$lib/api';
+import type {
+  CurrentEpoch,
+  LeaderboardWindow,
+  ScoringResponse,
+  ValidatorHistory,
+} from '$lib/types';
 import type { PageLoad } from './$types';
 
 export interface CompareSlot {
@@ -20,6 +25,16 @@ export interface CompareSlot {
   input: string;
   /** Resolved data, or null if the validator wasn't found / errored. */
   history: ValidatorHistory | null;
+  /**
+   * Node Tier + on-chain commission for this validator, from
+   * `/v1/validators/:id/scoring`. Surfaces the Node Tier and commission
+   * compare rows. Both are 10-epoch window-aggregate values that don't
+   * vary with the comparison-window toggle, so they're fetched once
+   * here rather than per-row. `null` when the validator wasn't found or
+   * the scoring fetch failed — the compare rows render an em-dash, the
+   * income/performance rows are unaffected.
+   */
+  scoring: ScoringResponse | null;
   errorMessage: string | null;
 }
 
@@ -32,12 +47,20 @@ export interface CompareData {
 
 async function fetchSlot(input: string, fetchFn: typeof fetch): Promise<CompareSlot> {
   try {
-    const history = await fetchValidatorHistory(input, 30, fetchFn);
-    return { input, history, errorMessage: null };
+    // History is the primary fetch (its failure = "not found"). Scoring
+    // (tier + commission) is best-effort and resolved in parallel: a
+    // scoring miss degrades to em-dash compare rows but must not turn a
+    // resolvable validator into a not-found state.
+    const [history, scoring] = await Promise.all([
+      fetchValidatorHistory(input, 30, fetchFn),
+      fetchScoring(input, fetchFn).catch(() => null),
+    ]);
+    return { input, history, scoring, errorMessage: null };
   } catch (err) {
     return {
       input,
       history: null,
+      scoring: null,
       errorMessage: err instanceof Error ? err.message : String(err),
     };
   }

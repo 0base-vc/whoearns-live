@@ -47,6 +47,7 @@
     ApiError,
   } from '$lib/api';
   import Card from '$lib/components/Card.svelte';
+  import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
   import AddressDisplay from '$lib/components/AddressDisplay.svelte';
   import EllipsisAddress from '$lib/components/EllipsisAddress.svelte';
   import OperatorWalletConnectionStatus from '$lib/components/OperatorWalletConnectionStatus.svelte';
@@ -1272,6 +1273,71 @@
   </dl>
 </Card>
 
+<!--
+  Benefit-led card ABOVE the signing ritual. The signing steps below
+  are all crypto mechanics; on their own they read as cost with no
+  visible reward. This card names what an operator actually gains by
+  claiming, each item verified against the hub (`/v/[id]`):
+    - verified badge          → `VerifiedBadge` renders once `claimed`
+    - operator-wallet heatmap → `ActivityHeatmap` per registered wallet
+    - GitHub identity chip     → `githubLink` chip in the hub hero
+    - profile customization    → moniker note / Twitter / narrative
+    - opt-out control          → `optedOut` removes the validator from
+                                 the public dashboard
+  Descriptive voice — what you get, not a sales pitch. Shown in both
+  modes (pre-claim and edit) so the payoff stays visible.
+-->
+<Card class="mt-6">
+  <h2 class="text-base font-semibold">What claiming unlocks</h2>
+  <p class="mt-2 text-sm text-[color:var(--color-text-muted)]">
+    A verified claim turns this read-only profile into one you control:
+  </p>
+  <ul class="mt-3 space-y-2.5 text-sm text-[color:var(--color-text-muted)]">
+    <li class="flex gap-2.5">
+      <VerifiedBadge size={18} />
+      <span>
+        <strong class="font-medium text-[color:var(--color-text-default)]">Verified badge</strong>
+        — your profile and leaderboard rows show the verified mark, signalling the operator stands behind
+        this validator.
+      </span>
+    </li>
+    <li class="flex gap-2.5">
+      <span aria-hidden="true" class="mt-0.5 shrink-0 text-[color:var(--color-brand-500)]">▦</span>
+      <span>
+        <strong class="font-medium text-[color:var(--color-text-default)]"
+          >Operator-wallet activity heatmap</strong
+        >
+        — register up to three operator wallets and surface a year of their on-chain activity on the hub.
+      </span>
+    </li>
+    <li class="flex gap-2.5">
+      <span aria-hidden="true" class="mt-0.5 shrink-0 text-[color:var(--color-brand-500)]">◐</span>
+      <span>
+        <strong class="font-medium text-[color:var(--color-text-default)]"
+          >GitHub-linked identity</strong
+        >
+        — prove a GitHub account via a signed Gist; the hub shows a linked GitHub chip on your identity.
+      </span>
+    </li>
+    <li class="flex gap-2.5">
+      <span aria-hidden="true" class="mt-0.5 shrink-0 text-[color:var(--color-brand-500)]">✎</span>
+      <span>
+        <strong class="font-medium text-[color:var(--color-text-default)]"
+          >Profile customization</strong
+        >
+        — set a Twitter / X handle and a short operator note, and hide the 0base.vc footer on your page.
+      </span>
+    </li>
+    <li class="flex gap-2.5">
+      <span aria-hidden="true" class="mt-0.5 shrink-0 text-[color:var(--color-brand-500)]">⊘</span>
+      <span>
+        <strong class="font-medium text-[color:var(--color-text-default)]">Opt-out control</strong>
+        — remove this validator from the public dashboard if you would rather not be listed.
+      </span>
+    </li>
+  </ul>
+</Card>
+
 {#if !status.claimed}
   <!-- ─────────── First-time claim ─────────── -->
   <Card tone="accent" class="mt-6">
@@ -2132,16 +2198,17 @@
   </Card>
 {/if}
 
+<!--
+  Mechanics + security framing. The "what you gain" framing now lives
+  in the benefit card above the form; this card is intentionally the
+  how-and-why-it's-safe explanation that complements it.
+-->
 <Card class="mt-6">
-  <h2 class="text-base font-semibold">What does claiming do?</h2>
+  <h2 class="text-base font-semibold">How claiming works</h2>
   <ul class="mt-2 list-disc space-y-1 pl-6 text-sm text-[color:var(--color-text-muted)]">
     <li>
       Proves you control the validator's identity keypair (the one Solana's
       <code class="font-mono">getVoteAccounts</code> reports for this vote).
-    </li>
-    <li>
-      Unlocks profile editing: Twitter handle, hiding the 0base.vc footer on your page, opting out
-      of the public dashboard.
     </li>
     <li>
       Doesn't change anything on-chain. No transactions, no gas, no token approvals. Just a

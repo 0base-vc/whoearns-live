@@ -44,6 +44,7 @@
   import AddressDisplay from '$lib/components/AddressDisplay.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
   import TierBadge from '$lib/components/TierBadge.svelte';
+  import ShareWidget from '$lib/components/ShareWidget.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { serializeJsonLd } from '$lib/json-ld';
   import { SITE_NAME, SITE_URL } from '$lib/site';
@@ -102,6 +103,24 @@
     };
     return map[scoring.tier.tier];
   });
+
+  /**
+   * On-chain vote-account commission (integer 0–100) for the income
+   * hero. Sourced from the already-loaded `/scoring` payload's tier
+   * window — no extra fetch. `null` when scoring is unavailable
+   * (unrated / opted-out / 404) OR when the backend refresh tick
+   * hasn't covered this validator's row yet (legacy rows).
+   *
+   * IMPORTANT — honesty contract (see `docs/scoring.md` design-
+   * principle #1): WhoEarns income is OPERATOR income (block fees +
+   * tips → operator identity), framed commission-NEUTRAL. Commission
+   * is surfaced as STANDALONE context for the delegator's own
+   * inflation-reward math; it is deliberately NOT multiplied against
+   * the displayed income number. `(1 − commission) × operatorIncome`
+   * is the wrong formula — commission applies to inflation rewards we
+   * do not track, not to the fee/tip income shown here.
+   */
+  const commissionPct = $derived<number | null>(scoring?.tier.window.commission ?? null);
 
   /**
    * True when the user hit an unknown pubkey and the indexer just
@@ -594,36 +613,95 @@
     </div>
 
     <!--
-      The "money number". Promoted from a side-dl (where it was
-      essentially the same visual weight as the `Last epoch` label)
-      to a dedicated hero block with an accent-coloured 4xl digit.
-      It's the primary reason this page exists — a delegator
-      sanity-checking their validator's earnings, an operator
-      comparing epochs, a bidder evaluating a candidate.
+      Right-hand hero column. Holds (1) the share/embed widget — the
+      same component the hub uses, mounted here so the CANONICAL,
+      SEO-indexed surface every delegator lands on has the growth-loop
+      share affordance the hidden hub already had; and (2) the "money
+      number" income block below it.
 
-      Hidden entirely in the `isTracking && !hasAnyHistory` state
-      below, because "◎0" reads as a fact ("this validator earned
-      zero") rather than "still ingesting" — the tracking banner
-      carries the correct message for that case.
+      The widget is always rendered (even in the tracking / no-history
+      state) — a delegator who lands on a freshly-tracked validator can
+      still share the page. The income block keeps its own
+      `hasAnyHistory` gate so "◎0" never reads as a stated fact during
+      ingestion.
     -->
-    {#if hasAnyHistory}
-      <div class="shrink-0 text-left lg:min-w-64 lg:text-right">
-        <p
-          class="inline-flex items-center text-xs font-semibold uppercase tracking-wider text-[color:var(--color-text-subtle)]"
-        >
-          Total income · last month
-          <Tooltip
-            label="About last-month income"
-            content="Block fees + on-chain Jito tips summed across the most recent month-sized window we have indexed. Pre-commission — this is what the operator earned, not what delegators received."
-          />
-        </p>
-        <p
-          class="mt-1 text-4xl font-semibold tracking-tight text-[color:var(--color-brand-500)] sm:text-5xl"
-        >
-          ◎{formatSol(lastMonthTotalSol.toString())}
-        </p>
-      </div>
-    {/if}
+    <div class="flex shrink-0 flex-col gap-4 lg:min-w-64 lg:items-end">
+      <!-- Share widget — top-right of hero, mirroring the hub placement. -->
+      <ShareWidget
+        vote={history.vote}
+        siteUrl={SITE_URL}
+        tierLabel={tierName ? `${tierName} tier` : undefined}
+        display={history.name ?? undefined}
+      />
+
+      <!--
+        The "money number". Promoted from a side-dl (where it was
+        essentially the same visual weight as the `Last epoch` label)
+        to a dedicated hero block with an accent-coloured 4xl digit.
+        It's the primary reason this page exists — a delegator
+        sanity-checking their validator's earnings, an operator
+        comparing epochs, a bidder evaluating a candidate.
+
+        Hidden entirely in the `isTracking && !hasAnyHistory` state
+        below, because "◎0" reads as a fact ("this validator earned
+        zero") rather than "still ingesting" — the tracking banner
+        carries the correct message for that case.
+      -->
+      {#if hasAnyHistory}
+        <div class="text-left lg:text-right">
+          <p
+            class="inline-flex items-center text-xs font-semibold uppercase tracking-wider text-[color:var(--color-text-subtle)]"
+          >
+            Total income · last month
+            <Tooltip
+              label="About last-month income"
+              content="Block fees + on-chain Jito tips summed across the most recent month-sized window we have indexed. Pre-commission — this is what the operator earned, not what delegators received."
+            />
+          </p>
+          <p
+            class="mt-1 text-4xl font-semibold tracking-tight text-[color:var(--color-brand-500)] sm:text-5xl"
+          >
+            ◎{formatSol(lastMonthTotalSol.toString())}
+          </p>
+          {#if commissionPct !== null}
+            <p class="mt-1 text-xs text-[color:var(--color-text-muted)]">
+              Commission <span class="font-semibold text-[color:var(--color-text-default)]"
+                >{commissionPct}%</span
+              >
+            </p>
+          {/if}
+          <!--
+            Persistent, always-visible honesty caption (replaces relying
+            on the hover tooltip alone). States plainly that this number
+            is OPERATOR income, NOT the delegator's staking yield — block
+            fees + tips accrue to the operator identity; only MEV tips
+            are partly shared; the delegator's actual yield is inflation
+            rewards (which we do not track) minus this validator's
+            commission. We deliberately do NOT compute a fabricated
+            "delegator yield" — `(1 − commission) × operatorIncome` is
+            the wrong formula (commission applies to inflation, not to
+            the fee/tip income shown here). See `docs/scoring.md`
+            design-principle #1 (commission-neutral).
+
+            `max-w-xs` keeps the multi-line caption from sprawling the
+            full hero width; `lg:ml-auto` right-aligns the block under
+            the right-aligned income number on desktop.
+          -->
+          <p
+            class="mt-2 max-w-xs text-xs leading-relaxed text-[color:var(--color-text-muted)] lg:ml-auto"
+          >
+            Operator income — fees + tips the validator earns. Not your staking yield: delegators
+            earn inflation rewards (not shown here) minus
+            {#if commissionPct !== null}
+              this validator's {commissionPct}% commission;
+            {:else}
+              the validator's commission;
+            {/if}
+            block fees go to the operator, only MEV tips are partly shared.
+          </p>
+        </div>
+      {/if}
+    </div>
   </div>
 </Card>
 

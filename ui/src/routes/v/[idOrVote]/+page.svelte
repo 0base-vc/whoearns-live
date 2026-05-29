@@ -1003,6 +1003,28 @@
           explains which gate fired.
         -->
         {#if compositeMath}
+          <!--
+            Per-label glossary deep-link. The sub-component LABELS in
+            the breakdown table double as a one-tap jump to their
+            definition at the moment of confusion — a reader stuck on
+            "Economic percentile" taps the `?` and lands on
+            `/glossary#economic-percentile`. Kept OUTSIDE the row's
+            toggle `<button>` (an `<a>` can't nest in a `<button>`,
+            and two competing click targets in one control is a
+            usability trap); the `?` sits beside the button instead.
+            Slugs are the literal counterparts of the glossary's
+            `slugify()` output for "Reliability" / "Economic
+            percentile" / "CU subscore".
+          -->
+          {#snippet glossaryLink(slug: string, label: string)}
+            <a
+              href={`/glossary#${slug}`}
+              class="ml-1 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-dotted border-[color:var(--color-text-subtle)] text-[10px] font-normal leading-none text-[color:var(--color-text-subtle)] transition-colors hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+              aria-label={`${label} — definition in glossary`}
+            >
+              ?
+            </a>
+          {/snippet}
           <div class="overflow-x-auto">
             <!--
               `<colgroup>` pins explicit widths so the metric-name
@@ -1062,6 +1084,7 @@
                         >
                       {/if}
                     </button>
+                    {@render glossaryLink('reliability', 'Reliability')}
                   </th>
                   <td class="text-right tabular-nums pt-2.5 px-2"
                     >{compositeMath.reliabilityPct.toFixed(1)}%</td
@@ -1114,10 +1137,25 @@
                       </span>
                       <span>Economic percentile</span>
                     </button>
+                    {@render glossaryLink('economic-percentile', 'Economic percentile')}
                   </th>
-                  <td class="text-right tabular-nums pt-2.5 px-2"
-                    >{compositeMath.economicPct.toFixed(1)}%</td
-                  >
+                  <!--
+                    Cohort size rendered INLINE with the percentile so
+                    "100.0%" can never be misread as "#1 on all of
+                    Solana". The denominator (the indexed-validator
+                    cohort, ~dozens, not mainnet's ~1500) sits right
+                    against the headline number, not only in the
+                    footnote below. Stacked as a small muted second
+                    line so the numeric column width is unchanged.
+                  -->
+                  <td class="text-right pt-2.5 px-2">
+                    <span class="tabular-nums">{compositeMath.economicPct.toFixed(1)}%</span>
+                    <span
+                      class="block text-[10px] font-normal text-[color:var(--color-text-muted)]"
+                    >
+                      {tierWindow.economicCohortSize.toLocaleString()}-validator cohort
+                    </span>
+                  </td>
                   <td
                     class="text-right tabular-nums pt-2.5 px-2 text-[color:var(--color-text-muted)]"
                     >0.63</td
@@ -1166,6 +1204,7 @@
                       </span>
                       <span>CU subscore</span>
                     </button>
+                    {@render glossaryLink('cu-subscore', 'CU subscore')}
                   </th>
                   <td class="text-right tabular-nums pt-2.5 px-2"
                     >{compositeMath.cuSubscorePct.toFixed(1)}%</td
