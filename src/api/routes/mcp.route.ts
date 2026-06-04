@@ -303,7 +303,7 @@ const mcpRoutes: FastifyPluginAsync<McpRoutesDeps> = async (
         title: 'Get validator income history',
         description:
           'Returns per-epoch income history for ONE validator. Pass either a vote pubkey OR an identity pubkey — both resolve to the same validator. Items are newest-first. ' +
-          'Each item carries slotsAssigned/Produced/Skipped, blockBaseFeesTotalLamports, blockPriorityFeesTotalLamports, blockTipsTotalLamports, totalIncomeLamports, and peerBenchmark: the indexed-validator median income per leader slot for the same epoch when the sample has at least 3 validators. ' +
+          'Each item carries slot counts (slotsAssigned/Produced/Skipped + skipRate), fee/tip/income totals (blockBaseFeesTotalLamports, blockPriorityFeesTotalLamports, blockFeesTotalLamports, blockTipsTotalLamports, totalIncomeLamports), activatedStakeLamports, and freshness timestamps. NOTE: peer benchmarks (mean/median per-slot income), the same-client cohort, and per-epoch compute-unit aggregates are NOT in this slim projection — fetch them from the REST GET /v1/validators/:idOrVote/history endpoint.' +
           SHARED_TOOL_PROVENANCE_NOTE,
         inputSchema: {
           voteOrIdentity: z

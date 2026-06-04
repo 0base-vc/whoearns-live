@@ -38,14 +38,19 @@ export interface ValidatorsHistoryRoutesDeps {
   epochsRepo: Pick<EpochsRepository, 'findByEpoch' | 'findCurrent'>;
   aggregatesRepo: Pick<AggregatesRepository, 'findManyByEpochsTopN'>;
   /**
-   * Compute-unit aggregator. Powers the per-epoch `avgComputeUnitsPerProducedBlock`
-   * (this validator) and `serviceAverageCu` (cluster-wide) fields on the
-   * history response — the income-page CU chart's two series. Both are
-   * derived from `processed_blocks`; no new ingestion path.
+   * Compute-unit aggregator. Powers the per-epoch
+   * `avgComputeUnitsPerProducedBlock` (this validator), `serviceAverageCu`
+   * (all tracked validators — NOT the whole cluster; `processed_blocks`
+   * only covers tracked validators' leader slots), and `sameClientAverageCu`
+   * (tracked validators sharing this one's client) fields on the history
+   * response — the income-page CU chart's three series. All derived from
+   * `processed_blocks`; no new ingestion path.
    */
   processedBlocksRepo: Pick<
     ProcessedBlocksRepository,
-    'getEpochComputeUnitsByVote' | 'getEpochComputeUnitsServiceWide'
+    | 'getEpochComputeUnitsByVote'
+    | 'getEpochComputeUnitsServiceWide'
+    | 'getEpochComputeUnitsByClient'
   >;
   watchedDynamicRepo: Pick<WatchedDynamicRepository, 'touchLookup' | 'add'>;
   validatorService: Pick<ValidatorService, 'trackOnDemand' | 'getActivatedStakeLamports'>;
@@ -283,20 +288,30 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // benchmark blocks. Both are bulk-fetched by distinct epoch to keep
     // the round-trip count at O(1) per response regardless of `limit`.
     const distinctEpochs = Array.from(new Set(rows.map((r) => r.epoch)));
-    const [epochInfos, aggregates, validatorCuByEpoch, serviceCuByEpoch] = await Promise.all([
-      Promise.all(distinctEpochs.map((e) => epochsRepo.findByEpoch(e))),
-      aggregatesRepo.findManyByEpochsTopN(distinctEpochs, DEFAULT_CLUSTER_TOP_N),
-      // Per-epoch validator CU, keyed by VOTE. The repo resolves the
-      // set of identity keys the vote ran across `distinctEpochs`, so
-      // an epoch produced under two identities (a mid-epoch identity
-      // rotation) — or a window spanning an ordinary cross-epoch
-      // rotation — folds every block, not just the one identity a
-      // given history row happens to carry.
-      processedBlocksRepo.getEpochComputeUnitsByVote(validator.votePubkey, distinctEpochs),
-      // Service-wide average it is plotted against — keyed by epoch;
-      // absent / zero-produced-block epochs collapse to `null`.
-      processedBlocksRepo.getEpochComputeUnitsServiceWide(distinctEpochs),
-    ]);
+    // Same-client cohort key: this validator's current client, unless
+    // unclassified ('unknown') — pooling all "unknown" validators would
+    // be a meaningless cohort, so pass null and the same-client series
+    // simply doesn't render.
+    const targetClientKind =
+      validator.clientKind && validator.clientKind !== 'unknown' ? validator.clientKind : null;
+    const [epochInfos, aggregates, validatorCuByEpoch, serviceCuByEpoch, sameClientCuByEpoch] =
+      await Promise.all([
+        Promise.all(distinctEpochs.map((e) => epochsRepo.findByEpoch(e))),
+        aggregatesRepo.findManyByEpochsTopN(distinctEpochs, DEFAULT_CLUSTER_TOP_N),
+        // Per-epoch validator CU, keyed by VOTE. The repo resolves the
+        // set of identity keys the vote ran across `distinctEpochs`, so
+        // an epoch produced under two identities (a mid-epoch identity
+        // rotation) — or a window spanning an ordinary cross-epoch
+        // rotation — folds every block, not just the one identity a
+        // given history row happens to carry.
+        processedBlocksRepo.getEpochComputeUnitsByVote(validator.votePubkey, distinctEpochs),
+        // Service-wide average it is plotted against — keyed by epoch;
+        // absent / zero-produced-block epochs collapse to `null`.
+        processedBlocksRepo.getEpochComputeUnitsServiceWide(distinctEpochs),
+        // Same-client average — the subset of tracked validators running
+        // `targetClientKind`. Empty map when the target client is unknown.
+        processedBlocksRepo.getEpochComputeUnitsByClient(distinctEpochs, targetClientKind),
+      ]);
     const epochByNumber = new Map<number, EpochInfo>();
     distinctEpochs.forEach((e, i) => {
       const info = epochInfos[i];
@@ -308,6 +323,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
         epoch,
         isCurrent: !(epochByNumber.get(epoch) ?? synthEpochInfo(epoch)).isClosed,
       })),
+      targetClientKind,
     );
     const peerBenchmarkByEpoch = new Map<number, EpochPeerBenchmark>(
       peerBenchmarks.map((b) => [b.epoch, b]),
@@ -320,6 +336,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
       const computeUnits = {
         validator: validatorCuByEpoch.get(row.epoch) ?? null,
         serviceAverage: serviceCuByEpoch.get(row.epoch) ?? null,
+        sameClient: sameClientCuByEpoch.get(row.epoch) ?? null,
       };
       return serializeValidator(row, info, serialCtx, aggregate, peerBenchmark, computeUnits);
     });

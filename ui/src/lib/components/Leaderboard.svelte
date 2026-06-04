@@ -432,7 +432,7 @@
             class="min-h-11 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-1.5 text-sm sm:min-h-0"
             aria-label="Filter validators by bracket"
           >
-            <option value="all">All validators</option>
+            <option value="all">All indexed</option>
             <optgroup label="By stake">
               <option value="stake_lt_100k">Small (&lt;100k SOL)</option>
               <option value="stake_lt_500k">Small (&lt;500k SOL)</option>

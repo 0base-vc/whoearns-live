@@ -309,7 +309,7 @@ const TRUST_SEPARATOR = ' • ';
  * keep the two in sync if a new client ships. Sentence-case is the
  * public-surface convention; the lowercased enum stays on the wire.
  */
-const TRUST_CLIENT_LABEL: Record<string, string> = {
+export const TRUST_CLIENT_LABEL: Record<string, string> = {
   // Original 7 — gossip-version-string classifier output
   agave: 'Agave',
   jito_solana: 'Jito-Solana',

@@ -5,11 +5,14 @@
   CSS-variable theming so dark mode + the global reduced-motion reset
   in `app.css` apply automatically).
 
-  Two series:
+  Three series:
     - This validator's `avgComputeUnitsPerProducedBlock` per epoch.
-    - The service-wide `serviceAverageCu` per epoch.
+    - The `serviceAverageCu` per epoch (all tracked validators).
+    - The `sameClientAverageCu` per epoch (tracked validators running
+      this one's client) — `null` when the client is unknown / no
+      same-client peer produced a block.
 
-  Both API fields are stringified integers in the tens of millions and
+  All API fields are stringified integers in the tens of millions and
   may be `null`. Null points are dropped (the series skips the epoch —
   a gap) rather than plotted as 0, which would read as a real "zero CU"
   data point.
@@ -17,6 +20,7 @@
 <script lang="ts">
   import { LineChart, Tooltip } from 'layerchart';
   import type { ValidatorEpochRecord } from '$lib/types';
+  import { TRUST_CLIENT_LABEL } from '$lib/tier';
 
   let { history }: { history: ValidatorEpochRecord[] } = $props();
 
@@ -24,14 +28,22 @@
     epoch: number;
     validatorCu: number | null;
     serviceCu: number | null;
+    sameClientCu: number | null;
   }
 
   // Mirrors IncomeChart's palette so the two charts read as a pair:
-  // amber = this validator, slate = the comparison series.
+  // amber = this validator, slate = service, sky = same-client.
   const VALIDATOR_COLOR = '#f59e0b';
   const SERVICE_COLOR = '#64748b';
+  const SAME_CLIENT_COLOR = '#0ea5e9';
   const RUNNING_DASH = '6 3';
   const SERVICE_DASH = '10 5';
+  const SAME_CLIENT_DASH = '4 4';
+  // Minimum same-client cohort to plot the line — matches IncomeChart's
+  // gate so the two charts surface the same-client series together. The
+  // count lives on the income benchmark (`peerBenchmark`) on each row;
+  // the CU aggregate itself returns no per-cohort count.
+  const PEER_BENCHMARK_MIN_VALIDATORS = 3;
   const AXIS_TEXT_FILL = 'var(--color-text-muted)';
   const AXIS_SUBTLE_FILL = 'var(--color-text-subtle)';
 
@@ -55,13 +67,37 @@
     return parseCu(row.serviceAverageCu);
   }
 
+  function sameClientCu(row: ValidatorEpochRecord): number | null {
+    // Gate on the income benchmark's same-client cohort size so a
+    // 1-2 validator client doesn't plot a line that's essentially this
+    // validator compared against itself.
+    const cohort = row.peerBenchmark?.sameClientSampleValidators ?? 0;
+    if (cohort < PEER_BENCHMARK_MIN_VALIDATORS) return null;
+    return parseCu(row.sameClientAverageCu);
+  }
+
   // Keep an epoch only when it has at least one plottable CU value.
   // Epochs with neither would otherwise widen the x-axis with empty
   // space.
   const sortedHistory = $derived(
     [...history]
       .sort((a, b) => a.epoch - b.epoch)
-      .filter((row) => validatorCu(row) !== null || serviceCu(row) !== null),
+      .filter(
+        (row) => validatorCu(row) !== null || serviceCu(row) !== null || sameClientCu(row) !== null,
+      ),
+  );
+
+  // Friendly client name for the same-client series label, off the
+  // benchmark's `clientKind` (identical across epochs).
+  const clientLabel = $derived.by<string | null>(() => {
+    const kind =
+      sortedHistory.find((r) => (r.peerBenchmark?.clientKind ?? null) !== null)?.peerBenchmark
+        ?.clientKind ?? null;
+    if (kind === null) return null;
+    return TRUST_CLIENT_LABEL[kind] ?? kind;
+  });
+  const sameClientSeriesLabel = $derived(
+    clientLabel === null ? 'Same client' : `${clientLabel} avg`,
   );
 
   const chartData = $derived.by<Point[]>(() =>
@@ -69,6 +105,7 @@
       epoch: row.epoch,
       validatorCu: validatorCu(row),
       serviceCu: serviceCu(row),
+      sameClientCu: sameClientCu(row),
     })),
   );
 
@@ -104,6 +141,7 @@
 
   const hasValidator = $derived(chartData.some((p) => p.validatorCu !== null));
   const hasService = $derived(chartData.some((p) => p.serviceCu !== null));
+  const hasSameClient = $derived(chartData.some((p) => p.sameClientCu !== null));
 
   interface SeriesConfig {
     key: string;
@@ -140,11 +178,21 @@
     if (hasService) {
       s.push({
         key: 'service_average',
-        label: 'Service average',
+        label: 'Indexed average',
         value: 'serviceCu',
         color: SERVICE_COLOR,
         data: chartData,
         props: { 'stroke-dasharray': SERVICE_DASH, opacity: 0.9 },
+      });
+    }
+    if (hasSameClient) {
+      s.push({
+        key: 'same_client',
+        label: sameClientSeriesLabel,
+        value: 'sameClientCu',
+        color: SAME_CLIENT_COLOR,
+        data: chartData,
+        props: { 'stroke-dasharray': SAME_CLIENT_DASH, opacity: 0.9 },
       });
     }
     return s;
@@ -156,7 +204,10 @@
       items.push({ label: 'This validator', color: VALIDATOR_COLOR, dashed: false });
     }
     if (hasService) {
-      items.push({ label: 'Service average', color: SERVICE_COLOR, dashed: true });
+      items.push({ label: 'Indexed average', color: SERVICE_COLOR, dashed: true });
+    }
+    if (hasSameClient) {
+      items.push({ label: sameClientSeriesLabel, color: SAME_CLIENT_COLOR, dashed: true });
     }
     return items;
   });
@@ -195,17 +246,10 @@
     return new Intl.NumberFormat('en').format(value);
   }
 
-  /** Validator CU as a signed % delta vs the service average. */
-  function percentVsService(point: Point | null): number | null {
-    if (
-      point === null ||
-      point.validatorCu === null ||
-      point.serviceCu === null ||
-      point.serviceCu <= 0
-    ) {
-      return null;
-    }
-    return point.validatorCu / point.serviceCu - 1;
+  /** Signed % delta of the validator vs a comparison series. */
+  function percentVs(value: number | null, baseline: number | null): number | null {
+    if (value === null || baseline === null || baseline <= 0) return null;
+    return value / baseline - 1;
   }
 
   function formatSignedPercent(value: number | null): string {
@@ -293,16 +337,38 @@
                 </Tooltip.Item>
               {/if}
               {#if point?.serviceCu !== null && point?.serviceCu !== undefined}
-                <Tooltip.Item label="Service average" value={point.serviceCu} color={SERVICE_COLOR}>
+                <Tooltip.Item label="Indexed average" value={point.serviceCu} color={SERVICE_COLOR}>
                   {formatCu(point.serviceCu)}
                 </Tooltip.Item>
               {/if}
+              {#if point?.sameClientCu !== null && point?.sameClientCu !== undefined}
+                <Tooltip.Item
+                  label={sameClientSeriesLabel}
+                  value={point.sameClientCu}
+                  color={SAME_CLIENT_COLOR}
+                >
+                  {formatCu(point.sameClientCu)}
+                </Tooltip.Item>
+              {/if}
             </Tooltip.List>
-            {#if percentVsService(point ?? null) !== null}
+            {#if point !== null && (point.serviceCu !== null || point.sameClientCu !== null)}
               <div
                 class="mt-2 space-y-1 border-t border-[color:var(--color-border-subtle)] pt-2 text-xs text-[color:var(--color-text-muted)]"
               >
-                <div>% vs service: {formatSignedPercent(percentVsService(point ?? null))}</div>
+                {#if point.serviceCu !== null}
+                  <div>
+                    % vs indexed avg: {formatSignedPercent(
+                      percentVs(point.validatorCu, point.serviceCu),
+                    )}
+                  </div>
+                {/if}
+                {#if point.sameClientCu !== null}
+                  <div>
+                    % vs {sameClientSeriesLabel}: {formatSignedPercent(
+                      percentVs(point.validatorCu, point.sameClientCu),
+                    )}
+                  </div>
+                {/if}
               </div>
             {/if}
           </Tooltip.Root>
@@ -315,7 +381,8 @@
         <tr>
           <th scope="col">Epoch</th>
           <th scope="col">This validator compute units per block</th>
-          <th scope="col">Service average compute units per block</th>
+          <th scope="col">Indexed average compute units per block</th>
+          <th scope="col">{sameClientSeriesLabel} compute units per block</th>
         </tr>
       </thead>
       <tbody>
@@ -324,6 +391,7 @@
             <th scope="row">{point.epoch}</th>
             <td>{formatCuExact(point.validatorCu)}</td>
             <td>{formatCuExact(point.serviceCu)}</td>
+            <td>{formatCuExact(point.sameClientCu)}</td>
           </tr>
         {/each}
       </tbody>
@@ -346,5 +414,10 @@
         </li>
       {/each}
     </ul>
+    {#if hasSameClient}
+      <p class="mt-1 text-[11px] text-[color:var(--color-text-subtle)]">
+        The same-client line groups peers by their current client, applied across past epochs.
+      </p>
+    {/if}
   {/if}
 </section>

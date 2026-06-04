@@ -301,6 +301,9 @@ interface IndexedIncomePerSlotBenchmarkRow {
   sample_validators: number;
   sample_slots: string;
   median_income_lamports_per_slot: string;
+  avg_income_lamports_per_slot: string;
+  same_client_sample_validators: number;
+  same_client_avg_income_lamports_per_slot: string | null;
 }
 
 /**
@@ -1462,6 +1465,7 @@ export class StatsRepository {
 
   async findIndexedIncomePerSlotBenchmarks(
     requested: IndexedIncomePerSlotBenchmarkRequest[],
+    targetClientKind: string | null,
   ): Promise<EpochPeerBenchmark[]> {
     if (requested.length === 0) return [];
 
@@ -1470,7 +1474,7 @@ export class StatsRepository {
       unique.set(item.epoch, item.isCurrent);
     }
 
-    const params: Array<number | boolean | PeerBenchmarkBasis> = [];
+    const params: Array<number | boolean | string | null> = [];
     const valuesSql: string[] = [];
     let param = 1;
     for (const [epoch, isCurrent] of unique.entries()) {
@@ -1480,6 +1484,11 @@ export class StatsRepository {
       valuesSql.push(`($${param++}::bigint, $${param++}::boolean, $${param++}::text)`);
       params.push(epoch, isCurrent, basis);
     }
+    // Same-client cohort filter. `null` (target client unknown / not a
+    // real client) makes every `= $clientParam` FILTER match nothing,
+    // so the same-client aggregates collapse to (0, NULL) — no line.
+    const clientParam = param++;
+    params.push(targetClientKind);
 
     const { rows } = await this.pool.query<IndexedIncomePerSlotBenchmarkRow>(
       `WITH requested(epoch, is_current, basis) AS (
@@ -1496,9 +1505,19 @@ export class StatsRepository {
             (
               COALESCE(evs.block_fees_total_lamports, 0)
               + COALESCE(evs.block_tips_total_lamports, 0)
-            )::numeric AS income_lamports
+            )::numeric AS income_lamports,
+            -- Join on vote_pubkey (the validators PK) — NOT identity:
+            -- validators.identity_pubkey has no unique constraint and one
+            -- identity can own multiple vote rows (vote rotation), so an
+            -- identity join would fan out evs rows and inflate the COUNT
+            -- + skew the AVG. vote_pubkey is unique, so at most one match.
+            -- LEFT JOIN keeps the indexed cohort intact; a vote without a
+            -- validators row gets client_kind NULL, which the same-client
+            -- FILTER simply never matches.
+            v.client_kind AS client_kind
           FROM requested r
           JOIN epoch_validator_stats evs ON evs.epoch = r.epoch
+          LEFT JOIN validators v ON v.vote_pubkey = evs.vote_pubkey
           WHERE evs.slots_updated_at IS NOT NULL
             AND (
               evs.fees_updated_at IS NOT NULL
@@ -1527,6 +1546,7 @@ export class StatsRepository {
             epoch,
             basis,
             denominator,
+            client_kind,
             income_lamports / denominator::numeric AS income_per_slot
           FROM scored
         )
@@ -1535,8 +1555,15 @@ export class StatsRepository {
           basis,
           COUNT(*)::int AS sample_validators,
           COALESCE(SUM(denominator), 0)::bigint::text AS sample_slots,
+          -- Median kept for v1 back-compat (existing consumers read it);
+          -- the income chart now plots the mean (avg) below.
           percentile_cont(0.5) WITHIN GROUP (ORDER BY income_per_slot)::numeric::text
-            AS median_income_lamports_per_slot
+            AS median_income_lamports_per_slot,
+          AVG(income_per_slot)::numeric::text AS avg_income_lamports_per_slot,
+          COUNT(*) FILTER (WHERE client_kind = $${clientParam})::int
+            AS same_client_sample_validators,
+          (AVG(income_per_slot) FILTER (WHERE client_kind = $${clientParam}))::numeric::text
+            AS same_client_avg_income_lamports_per_slot
         FROM per_validator
         GROUP BY epoch, basis
         HAVING COUNT(*) >= ${PEER_BENCHMARK_MIN_VALIDATORS}
@@ -1551,6 +1578,15 @@ export class StatsRepository {
       sampleSlots: Number(row.sample_slots),
       medianIncomeLamportsPerSlot: row.median_income_lamports_per_slot,
       medianIncomeSolPerSlot: decimalLamportsToSol(row.median_income_lamports_per_slot),
+      avgIncomeLamportsPerSlot: row.avg_income_lamports_per_slot,
+      avgIncomeSolPerSlot: decimalLamportsToSol(row.avg_income_lamports_per_slot),
+      clientKind: targetClientKind,
+      sameClientSampleValidators: Number(row.same_client_sample_validators),
+      sameClientAvgIncomeLamportsPerSlot: row.same_client_avg_income_lamports_per_slot,
+      sameClientAvgIncomeSolPerSlot:
+        row.same_client_avg_income_lamports_per_slot === null
+          ? null
+          : decimalLamportsToSol(row.same_client_avg_income_lamports_per_slot),
       basis: row.basis,
     }));
   }

@@ -150,8 +150,38 @@ export interface EpochPeerBenchmark {
   sample: 'indexed_validators';
   sampleValidators: number;
   sampleSlots: number;
+  /**
+   * MEDIAN per-leader-slot income across the indexed cohort. Retained
+   * for v1 back-compat — the income chart switched to the mean
+   * (`avgIncome*`), but existing API consumers may still read these.
+   */
   medianIncomeLamportsPerSlot: string;
   medianIncomeSolPerSlot: string;
+  /**
+   * MEAN per-leader-slot income across the indexed cohort — what the
+   * income chart's peer line now plots (consistent with the CU chart's
+   * average). NOT a cluster figure: the cohort is the validators
+   * WhoEarns indexes, opt-outs excluded. The tier-scoring percentile
+   * keeps its own median basis (`findEconomicPercentile`) — robustness
+   * matters more for a score than for a visual comparison line.
+   */
+  avgIncomeLamportsPerSlot: string;
+  avgIncomeSolPerSlot: string;
+  /**
+   * Same-client cohort — the subset of the indexed sample whose
+   * current `client_kind` matches the validator being viewed.
+   * `clientKind` names that client (`null` when the target's client
+   * is unknown). The avg fields are `null` when no same-client peer
+   * had measurable income this epoch; `sameClientSampleValidators`
+   * carries the cohort size so a consumer can gate the line on a
+   * minimum sample. Client is point-in-time (current gossip value
+   * applied across history) — exact for the recent window, an
+   * approximation for older epochs.
+   */
+  clientKind: string | null;
+  sameClientSampleValidators: number;
+  sameClientAvgIncomeLamportsPerSlot: string | null;
+  sameClientAvgIncomeSolPerSlot: string | null;
   basis: PeerBenchmarkBasis;
 }
 
@@ -451,6 +481,12 @@ export interface ValidatorCurrentEpochResponse {
     sampleSlots: number;
     medianIncomeLamportsPerSlot: string;
     medianIncomeSolPerSlot: string;
+    avgIncomeLamportsPerSlot: string;
+    avgIncomeSolPerSlot: string;
+    clientKind: string | null;
+    sameClientSampleValidators: number;
+    sameClientAvgIncomeLamportsPerSlot: string | null;
+    sameClientAvgIncomeSolPerSlot: string | null;
     basis: PeerBenchmarkBasis;
   } | null;
 
@@ -474,4 +510,15 @@ export interface ValidatorCurrentEpochResponse {
    * response; `null` elsewhere. Additive — Phase: compute-unit exposure.
    */
   serviceAverageCu: string | null;
+  /**
+   * Produced-block-count-weighted average CU per produced block for
+   * the epoch across the SAME-CLIENT cohort — tracked validators whose
+   * current `client_kind` matches the validator being viewed. Lets the
+   * CU chart show "how dense are blocks from peers running my client".
+   * Stringified. `null` when no same-client tracked validator produced
+   * a block this epoch (or the target's client is unknown). Client is
+   * point-in-time. Always present on the history response; `null`
+   * elsewhere. Additive — Phase: income-improvement.
+   */
+  sameClientAverageCu: string | null;
 }

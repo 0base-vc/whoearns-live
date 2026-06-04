@@ -280,12 +280,22 @@ The response wraps `items: ValidatorEpochRecord[]` with validator metadata,
 claim/profile state, and a `tracking` boolean that is true when the lookup
 caused the validator to be added to the watched set.
 
-Each item also includes `peerBenchmark`, an indexed-validator median for
-`totalIncome / leaderSlots` in the same epoch. Closed epochs use
-`slotsAssigned`; the running epoch uses `slotsElapsedAssigned`. The benchmark
-is `null` until at least three indexed validators have income/slot facts. This
-benchmark is populated on the history endpoint; single-epoch endpoints that
-reuse `ValidatorEpochRecord` may return `peerBenchmark: null`.
+Each item also includes `peerBenchmark`, an indexed-validator **average**
+(mean) for `totalIncome / leaderSlots` in the same epoch — the cohort is the
+validators WhoEarns indexes (opt-outs excluded), not the whole cluster. The
+median (`medianIncomeLamportsPerSlot` / `medianIncomeSolPerSlot`) is retained
+alongside the mean (`avgIncome*`) for backward compatibility; the income chart
+plots the mean. It also
+carries a same-client cohort (`clientKind`, `sameClientSampleValidators`,
+`sameClientAvgIncomeLamportsPerSlot`, `sameClientAvgIncomeSolPerSlot`) — the
+same average restricted to indexed validators running this one's client, so the
+chart can plot "vs my client". Closed epochs use `slotsAssigned`; the running
+epoch uses `slotsElapsedAssigned`. The benchmark is `null` until at least three
+indexed validators have income/slot facts. (The Node Tier _percentile_ keeps
+its own median basis — robustness matters more for a score than a chart line.)
+The CU chart adds a matching `sameClientAverageCu` alongside `serviceAverageCu`.
+These are populated on the history endpoint; single-epoch endpoints that reuse
+`ValidatorEpochRecord` may return `peerBenchmark: null`.
 
 ## `GET /v1/validators/:idOrVote/current-epoch`
 
@@ -756,19 +766,22 @@ Returns composite profile-level badges (Phase 2):
   "tier": {
     "tier": "forge",
     "composite": 96,
-    "windowEpochs": 5
+    "windowEpochs": 10
   }
 }
 ```
 
 - `tenure.landmark` is one of `MAINNET_BETA_LAUNCH`, `CYCLE_1_OG`,
   `CROSS_CHAIN_ERA`, `DEFI_2`, `PRE_FTX`, `JITO_V2`,
-  `FIREDANCER_LAUNCH`, `recent_operator`. The oldest landmark the
+  `FIREDANCER_LAUNCH`, `RECENT`, `recent_operator`. The oldest landmark the
   validator predates wins (no double-counting).
-- `client.kind` enum: `agave`, `jito_solana`, `firedancer`,
-  `frankendancer`, `paladin`, `sig`, `unknown`. Sourced from
-  `getClusterNodes.version`; `unknown` is the neutral default before
-  the cluster-nodes ingester has run.
+- `client.kind` enum (the full `ClientBadge` set, 15 values): `agave`,
+  `jito_solana`, `firedancer`, `frankendancer`, `paladin`, `sig`,
+  `solana_labs`, `agave_bam`, `rakurai`, `harmonic_firedancer`,
+  `harmonic_agave`, `harmonic_frankendancer`, `firebam`, `raiku`, and
+  `unknown`. The canonical source is now validators.app (the
+  `getClusterNodes.version` regex ingester was disabled); `unknown` is
+  the neutral default before the validators.app client ingester has run.
 - `tier` mirrors `GET /v1/validators/:idOrVote/tier`. Bundled here so
   a profile page renders the full badge row in one round-trip.
 

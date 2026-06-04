@@ -222,7 +222,7 @@ the OpenAPI 3.1 spec.
 | GET    | `/v1/validators/:vote/history`       | Per-epoch history for one validator.                        |
 | POST   | `/v1/validators/current-epoch/batch` | Same as above for up to 200 validators in one request.      |
 | GET    | `/v1/validators/:vote/epochs/:epoch` | Historical per-epoch stats for one validator.               |
-| GET    | `/v1/claim/:vote/status`             | Public claim/profile state for a validator.                 |
+| GET    | `/v1/claims/:vote`                   | Public claim/profile state for a validator.                 |
 | POST   | `/mcp`                               | Streamable HTTP MCP server for AI agents.                   |
 
 Validator response shape:
@@ -273,7 +273,7 @@ Error envelope:
 
 A read-only Model Context Protocol server is exposed at `/mcp` over
 POST-only Streamable HTTP (no auth, stateless). AI agents — Claude Desktop,
-Claude Code, custom MCP clients — can call four tools without
+Claude Code, custom MCP clients — can call six tools without
 scraping the UI or parsing OpenAPI:
 
 | Tool                         | Description                                                                                 |
@@ -282,6 +282,8 @@ scraping the UI or parsing OpenAPI:
 | `get_leaderboard`            | Top-N validators for live-trend, current, stable, final, or Decade windows.                 |
 | `get_validator`              | Per-epoch history for one validator (vote OR identity pubkey).                              |
 | `get_validator_leader_slots` | Stored leader-slot facts for one validator epoch, including CU efficiency; no live RPC hit. |
+| `get_validator_tier`         | Node Tier composite + component breakdown for one validator (vote OR identity pubkey).      |
+| `get_validator_badges`       | Tenure + client-kind + tier badge row for one validator (vote OR identity pubkey).          |
 
 The MCP transport is public and unauthenticated, so it uses the same
 per-IP rate limiter as the HTTP API. Tool input schemas additionally

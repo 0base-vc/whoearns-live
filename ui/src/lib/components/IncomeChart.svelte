@@ -1,20 +1,25 @@
 <script lang="ts">
   import { LineChart, Tooltip } from 'layerchart';
   import type { ValidatorEpochRecord } from '$lib/types';
+  import { TRUST_CLIENT_LABEL } from '$lib/tier';
 
   let { history }: { history: ValidatorEpochRecord[] } = $props();
 
   interface Point {
     epoch: number;
     validatorIncomePerSlot: number | null;
-    peerMedianIncomePerSlot: number | null;
+    peerAvgIncomePerSlot: number | null;
     peerSampleValidators: number | null;
+    sameClientIncomePerSlot: number | null;
+    sameClientSampleValidators: number | null;
   }
 
   const VALIDATOR_COLOR = '#f59e0b';
   const PEER_COLOR = '#64748b';
+  const SAME_CLIENT_COLOR = '#0ea5e9';
   const RUNNING_DASH = '6 3';
   const PEER_DASH = '10 5';
+  const SAME_CLIENT_DASH = '4 4';
   const PEER_BENCHMARK_MIN_VALIDATORS = 3;
   const INCOME_PER_SLOT_DECIMALS = 4;
   const AXIS_TEXT_FILL = 'var(--color-text-muted)';
@@ -33,12 +38,31 @@
     return income / denominator;
   }
 
-  function peerMedianIncomePerSlot(row: ValidatorEpochRecord): number | null {
+  // Indexed-cohort MEAN per-leader-slot income (was a median). Gated on
+  // a minimum sample so a thin epoch doesn't plot a noisy point.
+  function peerAvgIncomePerSlot(row: ValidatorEpochRecord): number | null {
     const benchmark = row.peerBenchmark;
     if (benchmark === null || benchmark.sampleValidators < PEER_BENCHMARK_MIN_VALIDATORS) {
       return null;
     }
-    const income = Number(benchmark.medianIncomeSolPerSlot);
+    const income = Number(benchmark.avgIncomeSolPerSlot);
+    return Number.isFinite(income) ? income : null;
+  }
+
+  // Same-client cohort MEAN — the subset of the indexed sample running
+  // this validator's client. `null` (no line) when the client is
+  // unknown, no same-client peer had income, or the cohort is below the
+  // minimum sample.
+  function sameClientIncomePerSlot(row: ValidatorEpochRecord): number | null {
+    const benchmark = row.peerBenchmark;
+    if (
+      benchmark === null ||
+      benchmark.sameClientAvgIncomeSolPerSlot === null ||
+      benchmark.sameClientSampleValidators < PEER_BENCHMARK_MIN_VALIDATORS
+    ) {
+      return null;
+    }
+    const income = Number(benchmark.sameClientAvgIncomeSolPerSlot);
     return Number.isFinite(income) ? income : null;
   }
 
@@ -48,15 +72,33 @@
       .filter((row) => validatorIncomePerSlot(row) !== null),
   );
 
+  // Friendly client name for the same-client series label, taken from
+  // the benchmark's `clientKind` (identical across epochs). `null` →
+  // the same-client series doesn't render.
+  const clientLabel = $derived.by<string | null>(() => {
+    const kind =
+      sortedHistory.find((r) => (r.peerBenchmark?.clientKind ?? null) !== null)?.peerBenchmark
+        ?.clientKind ?? null;
+    if (kind === null) return null;
+    return TRUST_CLIENT_LABEL[kind] ?? kind;
+  });
+  const sameClientSeriesLabel = $derived(
+    clientLabel === null ? 'Same client' : `${clientLabel} avg`,
+  );
+
   const chartData = $derived.by<Point[]>(() =>
     sortedHistory.map((row) => {
-      const peerMedian = peerMedianIncomePerSlot(row);
+      const peerAvg = peerAvgIncomePerSlot(row);
+      const sameClient = sameClientIncomePerSlot(row);
       return {
         epoch: row.epoch,
         validatorIncomePerSlot: validatorIncomePerSlot(row),
-        peerMedianIncomePerSlot: peerMedian,
+        peerAvgIncomePerSlot: peerAvg,
         peerSampleValidators:
-          peerMedian === null ? null : (row.peerBenchmark?.sampleValidators ?? null),
+          peerAvg === null ? null : (row.peerBenchmark?.sampleValidators ?? null),
+        sameClientIncomePerSlot: sameClient,
+        sameClientSampleValidators:
+          sameClient === null ? null : (row.peerBenchmark?.sameClientSampleValidators ?? null),
       };
     }),
   );
@@ -81,7 +123,8 @@
   );
 
   const hasValidator = $derived(chartData.some((p) => p.validatorIncomePerSlot !== null));
-  const hasPeerMedian = $derived(chartData.some((p) => p.peerMedianIncomePerSlot !== null));
+  const hasPeerAvg = $derived(chartData.some((p) => p.peerAvgIncomePerSlot !== null));
+  const hasSameClient = $derived(chartData.some((p) => p.sameClientIncomePerSlot !== null));
 
   interface SeriesConfig {
     key: string;
@@ -115,14 +158,24 @@
         });
       }
     }
-    if (hasPeerMedian) {
+    if (hasPeerAvg) {
       s.push({
-        key: 'peer_median',
-        label: 'Indexed median',
-        value: 'peerMedianIncomePerSlot',
+        key: 'peer_avg',
+        label: 'Indexed average',
+        value: 'peerAvgIncomePerSlot',
         color: PEER_COLOR,
         data: chartData,
         props: { 'stroke-dasharray': PEER_DASH, opacity: 0.9 },
+      });
+    }
+    if (hasSameClient) {
+      s.push({
+        key: 'same_client',
+        label: sameClientSeriesLabel,
+        value: 'sameClientIncomePerSlot',
+        color: SAME_CLIENT_COLOR,
+        data: chartData,
+        props: { 'stroke-dasharray': SAME_CLIENT_DASH, opacity: 0.9 },
       });
     }
     return s;
@@ -132,8 +185,11 @@
     const items: Array<{ label: string; color: string; dashed: boolean }> = [
       { label: 'This validator', color: VALIDATOR_COLOR, dashed: false },
     ];
-    if (hasPeerMedian) {
-      items.push({ label: 'Indexed median', color: PEER_COLOR, dashed: true });
+    if (hasPeerAvg) {
+      items.push({ label: 'Indexed average', color: PEER_COLOR, dashed: true });
+    }
+    if (hasSameClient) {
+      items.push({ label: sameClientSeriesLabel, color: SAME_CLIENT_COLOR, dashed: true });
     }
     return items;
   });
@@ -147,16 +203,9 @@
 
   const hasAnySeries = $derived(series.length > 0);
 
-  function percentVsMedian(point: Point | null): number | null {
-    if (
-      point === null ||
-      point.validatorIncomePerSlot === null ||
-      point.peerMedianIncomePerSlot === null ||
-      point.peerMedianIncomePerSlot <= 0
-    ) {
-      return null;
-    }
-    return point.validatorIncomePerSlot / point.peerMedianIncomePerSlot - 1;
+  function percentVs(value: number | null, baseline: number | null): number | null {
+    if (value === null || baseline === null || baseline <= 0) return null;
+    return value / baseline - 1;
   }
 
   function formatSignedPercent(value: number | null): string {
@@ -248,23 +297,44 @@
               >
                 {formatIncomePerSlot(point?.validatorIncomePerSlot)}
               </Tooltip.Item>
-              {#if point?.peerMedianIncomePerSlot !== null && point?.peerMedianIncomePerSlot !== undefined}
+              {#if point?.peerAvgIncomePerSlot !== null && point?.peerAvgIncomePerSlot !== undefined}
                 <Tooltip.Item
-                  label="Indexed median"
-                  value={point.peerMedianIncomePerSlot}
+                  label="Indexed average"
+                  value={point.peerAvgIncomePerSlot}
                   color={PEER_COLOR}
                 >
-                  {formatIncomePerSlot(point.peerMedianIncomePerSlot)}
+                  {formatIncomePerSlot(point.peerAvgIncomePerSlot)}
+                </Tooltip.Item>
+              {/if}
+              {#if point?.sameClientIncomePerSlot !== null && point?.sameClientIncomePerSlot !== undefined}
+                <Tooltip.Item
+                  label={sameClientSeriesLabel}
+                  value={point.sameClientIncomePerSlot}
+                  color={SAME_CLIENT_COLOR}
+                >
+                  {formatIncomePerSlot(point.sameClientIncomePerSlot)}
                 </Tooltip.Item>
               {/if}
             </Tooltip.List>
-            {#if point?.peerMedianIncomePerSlot !== null && point?.peerMedianIncomePerSlot !== undefined}
+            {#if point !== null && (point.peerAvgIncomePerSlot !== null || point.sameClientIncomePerSlot !== null)}
               <div
                 class="mt-2 space-y-1 border-t border-[color:var(--color-border-subtle)] pt-2 text-xs text-[color:var(--color-text-muted)]"
               >
-                <div>% vs median: {formatSignedPercent(percentVsMedian(point))}</div>
-                {#if point.peerSampleValidators !== null}
-                  <div>n={point.peerSampleValidators}</div>
+                {#if point.peerAvgIncomePerSlot !== null}
+                  <div>
+                    % vs indexed avg: {formatSignedPercent(
+                      percentVs(point.validatorIncomePerSlot, point.peerAvgIncomePerSlot),
+                    )}
+                    {#if point.peerSampleValidators !== null}(n={point.peerSampleValidators}){/if}
+                  </div>
+                {/if}
+                {#if point.sameClientIncomePerSlot !== null}
+                  <div>
+                    % vs {sameClientSeriesLabel}: {formatSignedPercent(
+                      percentVs(point.validatorIncomePerSlot, point.sameClientIncomePerSlot),
+                    )}
+                    {#if point.sameClientSampleValidators !== null}(n={point.sameClientSampleValidators}){/if}
+                  </div>
                 {/if}
               </div>
             {/if}
@@ -278,8 +348,10 @@
         <tr>
           <th scope="col">Epoch</th>
           <th scope="col">This validator SOL per leader slot</th>
-          <th scope="col">Indexed median SOL per leader slot</th>
+          <th scope="col">Indexed average SOL per leader slot</th>
           <th scope="col">Indexed validator sample size</th>
+          <th scope="col">{sameClientSeriesLabel} SOL per leader slot</th>
+          <th scope="col">Same-client sample size</th>
         </tr>
       </thead>
       <tbody>
@@ -292,11 +364,17 @@
                 : formatIncomePerSlot(point.validatorIncomePerSlot)}
             </td>
             <td>
-              {point.peerMedianIncomePerSlot === null
+              {point.peerAvgIncomePerSlot === null
                 ? 'not available'
-                : formatIncomePerSlot(point.peerMedianIncomePerSlot)}
+                : formatIncomePerSlot(point.peerAvgIncomePerSlot)}
             </td>
             <td>{point.peerSampleValidators ?? 'not available'}</td>
+            <td>
+              {point.sameClientIncomePerSlot === null
+                ? 'not available'
+                : formatIncomePerSlot(point.sameClientIncomePerSlot)}
+            </td>
+            <td>{point.sameClientSampleValidators ?? 'not available'}</td>
           </tr>
         {/each}
       </tbody>
@@ -319,5 +397,10 @@
         </li>
       {/each}
     </ul>
+    {#if hasSameClient}
+      <p class="mt-1 text-[11px] text-[color:var(--color-text-subtle)]">
+        The same-client line groups peers by their current client, applied across past epochs.
+      </p>
+    {/if}
   {/if}
 </section>
