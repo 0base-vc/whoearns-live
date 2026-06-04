@@ -151,13 +151,19 @@ export interface EpochPeerBenchmark {
   sampleValidators: number;
   sampleSlots: number;
   /**
-   * MEAN per-leader-slot income across the indexed cohort (was a
-   * median — the income chart's peer line is now an average so it
-   * reads consistently with the CU chart's "service average"). NOT a
-   * cluster figure: the cohort is the validators WhoEarns indexes,
-   * opt-outs excluded. The tier-scoring percentile keeps its own
-   * median basis (`findEconomicPercentile`) — robustness matters more
-   * for a score than for a visual comparison line.
+   * MEDIAN per-leader-slot income across the indexed cohort. Retained
+   * for v1 back-compat — the income chart switched to the mean
+   * (`avgIncome*`), but existing API consumers may still read these.
+   */
+  medianIncomeLamportsPerSlot: string;
+  medianIncomeSolPerSlot: string;
+  /**
+   * MEAN per-leader-slot income across the indexed cohort — what the
+   * income chart's peer line now plots (consistent with the CU chart's
+   * average). NOT a cluster figure: the cohort is the validators
+   * WhoEarns indexes, opt-outs excluded. The tier-scoring percentile
+   * keeps its own median basis (`findEconomicPercentile`) — robustness
+   * matters more for a score than for a visual comparison line.
    */
   avgIncomeLamportsPerSlot: string;
   avgIncomeSolPerSlot: string;
@@ -473,6 +479,8 @@ export interface ValidatorCurrentEpochResponse {
     sample: 'indexed_validators';
     sampleValidators: number;
     sampleSlots: number;
+    medianIncomeLamportsPerSlot: string;
+    medianIncomeSolPerSlot: string;
     avgIncomeLamportsPerSlot: string;
     avgIncomeSolPerSlot: string;
     clientKind: string | null;

@@ -153,6 +153,8 @@ describe('GET /v1/validators/:idOrVote/history', () => {
       sample: 'indexed_validators',
       sampleValidators: 12,
       sampleSlots: 120,
+      medianIncomeLamportsPerSlot: '90000',
+      medianIncomeSolPerSlot: '0.00009',
       avgIncomeLamportsPerSlot: '100000',
       avgIncomeSolPerSlot: '0.0001',
       clientKind: null,

@@ -93,6 +93,8 @@ export interface ValidatorEpochRecord {
     sample: 'indexed_validators';
     sampleValidators: number;
     sampleSlots: number;
+    medianIncomeLamportsPerSlot: string;
+    medianIncomeSolPerSlot: string;
     avgIncomeLamportsPerSlot: string;
     avgIncomeSolPerSlot: string;
     clientKind: string | null;

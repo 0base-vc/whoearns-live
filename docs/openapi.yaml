@@ -2077,6 +2077,8 @@ components:
               sample,
               sampleValidators,
               sampleSlots,
+              medianIncomeLamportsPerSlot,
+              medianIncomeSolPerSlot,
               avgIncomeLamportsPerSlot,
               avgIncomeSolPerSlot,
               clientKind,
@@ -2091,6 +2093,13 @@ components:
               enum: [indexed_validators]
             sampleValidators: { type: integer, minimum: 0 }
             sampleSlots: { type: integer, minimum: 0 }
+            medianIncomeLamportsPerSlot:
+              type: string
+              description: >
+                Median decimal lamports per leader slot across the indexed
+                cohort. Retained for v1 back-compat; the income chart now
+                plots the mean (`avgIncomeLamportsPerSlot`).
+            medianIncomeSolPerSlot: { type: string }
             avgIncomeLamportsPerSlot:
               type: string
               description: Mean decimal lamports per leader slot across the indexed cohort.

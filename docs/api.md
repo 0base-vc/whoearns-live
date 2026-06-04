@@ -282,7 +282,10 @@ caused the validator to be added to the watched set.
 
 Each item also includes `peerBenchmark`, an indexed-validator **average**
 (mean) for `totalIncome / leaderSlots` in the same epoch — the cohort is the
-validators WhoEarns indexes (opt-outs excluded), not the whole cluster. It also
+validators WhoEarns indexes (opt-outs excluded), not the whole cluster. The
+median (`medianIncomeLamportsPerSlot` / `medianIncomeSolPerSlot`) is retained
+alongside the mean (`avgIncome*`) for backward compatibility; the income chart
+plots the mean. It also
 carries a same-client cohort (`clientKind`, `sameClientSampleValidators`,
 `sameClientAvgIncomeLamportsPerSlot`, `sameClientAvgIncomeSolPerSlot`) — the
 same average restricted to indexed validators running this one's client, so the

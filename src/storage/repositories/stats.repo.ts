@@ -300,6 +300,7 @@ interface IndexedIncomePerSlotBenchmarkRow {
   basis: PeerBenchmarkBasis;
   sample_validators: number;
   sample_slots: string;
+  median_income_lamports_per_slot: string;
   avg_income_lamports_per_slot: string;
   same_client_sample_validators: number;
   same_client_avg_income_lamports_per_slot: string | null;
@@ -1554,6 +1555,10 @@ export class StatsRepository {
           basis,
           COUNT(*)::int AS sample_validators,
           COALESCE(SUM(denominator), 0)::bigint::text AS sample_slots,
+          -- Median kept for v1 back-compat (existing consumers read it);
+          -- the income chart now plots the mean (avg) below.
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY income_per_slot)::numeric::text
+            AS median_income_lamports_per_slot,
           AVG(income_per_slot)::numeric::text AS avg_income_lamports_per_slot,
           COUNT(*) FILTER (WHERE client_kind = $${clientParam})::int
             AS same_client_sample_validators,
@@ -1571,6 +1576,8 @@ export class StatsRepository {
       sample: 'indexed_validators',
       sampleValidators: Number(row.sample_validators),
       sampleSlots: Number(row.sample_slots),
+      medianIncomeLamportsPerSlot: row.median_income_lamports_per_slot,
+      medianIncomeSolPerSlot: decimalLamportsToSol(row.median_income_lamports_per_slot),
       avgIncomeLamportsPerSlot: row.avg_income_lamports_per_slot,
       avgIncomeSolPerSlot: decimalLamportsToSol(row.avg_income_lamports_per_slot),
       clientKind: targetClientKind,

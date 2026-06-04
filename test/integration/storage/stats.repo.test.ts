@@ -522,6 +522,8 @@ describe('StatsRepository', () => {
     });
     expect(Number(byEpoch.get(500)?.avgIncomeLamportsPerSlot)).toBe(40);
     expect(byEpoch.get(500)?.avgIncomeSolPerSlot).toBe('0.00000004');
+    // Median retained for back-compat; [10,40,70] median == mean == 40.
+    expect(Number(byEpoch.get(500)?.medianIncomeLamportsPerSlot)).toBe(40);
 
     expect(byEpoch.get(501)).toMatchObject({
       sampleValidators: 3,
@@ -530,6 +532,7 @@ describe('StatsRepository', () => {
     });
     expect(Number(byEpoch.get(501)?.avgIncomeLamportsPerSlot)).toBe(300);
     expect(byEpoch.get(501)?.avgIncomeSolPerSlot).toBe('0.0000003');
+    expect(Number(byEpoch.get(501)?.medianIncomeLamportsPerSlot)).toBe(300);
   });
 
   it('findIndexedIncomePerSlotBenchmarks: includes fact-backed zero income and excludes opted-out, missing-income, and zero-denominator rows', async () => {
@@ -602,9 +605,11 @@ describe('StatsRepository', () => {
       sampleSlots: 29,
       basis: 'income_per_assigned_slot',
     });
-    // Included per-slot incomes are [1000, 0, 200] → mean 400 (the
-    // series is now an average, not the former median of 200).
+    // Included per-slot incomes are [1000, 0, 200] → mean 400, median 200
+    // — both computed; the chart uses the mean, the median stays for v1
+    // back-compat.
     expect(Number(benchmark?.avgIncomeLamportsPerSlot)).toBe(400);
+    expect(Number(benchmark?.medianIncomeLamportsPerSlot)).toBe(200);
   });
 
   it('findIndexedIncomePerSlotBenchmarks: suppresses low-sample epochs', async () => {
@@ -685,8 +690,9 @@ describe('StatsRepository', () => {
       clientKind: 'agave',
       sameClientSampleValidators: 2,
     });
-    // Indexed cohort = all 3: mean per-slot = (100 + 300 + 800) / 3 = 400.
+    // Indexed cohort = all 3: mean = (100 + 300 + 800) / 3 = 400, median 300.
     expect(Number(benchmark?.avgIncomeLamportsPerSlot)).toBe(400);
+    expect(Number(benchmark?.medianIncomeLamportsPerSlot)).toBe(300);
     // Same-client (agave only) = (100 + 300) / 2 = 200 — distinct from
     // the indexed average, proving the FILTER restricts the cohort.
     expect(Number(benchmark?.sameClientAvgIncomeLamportsPerSlot)).toBe(200);

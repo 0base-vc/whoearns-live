@@ -64,6 +64,8 @@ function serializePeerBenchmark(
     sample: benchmark.sample,
     sampleValidators: benchmark.sampleValidators,
     sampleSlots: benchmark.sampleSlots,
+    medianIncomeLamportsPerSlot: benchmark.medianIncomeLamportsPerSlot,
+    medianIncomeSolPerSlot: benchmark.medianIncomeSolPerSlot,
     avgIncomeLamportsPerSlot: benchmark.avgIncomeLamportsPerSlot,
     avgIncomeSolPerSlot: benchmark.avgIncomeSolPerSlot,
     clientKind: benchmark.clientKind,
