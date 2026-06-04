@@ -43,6 +43,18 @@ describe('validator-info-bulk-ingester job', () => {
     expect(refresh).toHaveBeenCalledTimes(2);
   });
 
+  it('skips the heavy refresh when the signal is already aborted', async () => {
+    // Early-abort guard — no `getConfigProgramAccounts` (~3 MB) or
+    // batch UPDATE should fire if the scheduler is shutting down.
+    const refresh = vi.fn().mockResolvedValue({ observed: 0, updated: 0 });
+    const job = makeJob(refresh);
+    const aborted = new AbortController();
+    aborted.abort();
+
+    await expect(job.tick(aborted.signal)).resolves.toBeUndefined();
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
   it('no-ops cleanly when nothing drifted (updated = 0)', async () => {
     const refresh = vi.fn().mockResolvedValue({ observed: 2000, updated: 0 });
     const job = makeJob(refresh);

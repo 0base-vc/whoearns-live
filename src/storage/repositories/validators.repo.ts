@@ -267,6 +267,25 @@ export class ValidatorsRepository {
     const websites = infos.map((i) => i.website);
     const keybases = infos.map((i) => i.keybaseUsername);
     const icons = infos.map((i) => i.iconUrl);
+    // UNNEST silently truncates to the shortest array, so a future
+    // length mismatch would corrupt the batch (rows shifted/dropped).
+    // All six arrays are `.map()`-derived from the same `infos` list —
+    // a mismatch is a programming error, so fail fast with a clear
+    // message rather than writing a silently-truncated batch (same
+    // posture as `upsertClientBatch`).
+    if (
+      identities.length !== names.length ||
+      identities.length !== details.length ||
+      identities.length !== websites.length ||
+      identities.length !== keybases.length ||
+      identities.length !== icons.length
+    ) {
+      throw new Error(
+        `upsertInfoBatch: array length mismatch ` +
+          `(identities=${identities.length}, names=${names.length}, details=${details.length}, ` +
+          `websites=${websites.length}, keybases=${keybases.length}, icons=${icons.length})`,
+      );
+    }
     const { rowCount } = await this.pool.query(
       `UPDATE validators v
           SET name             = src.name,

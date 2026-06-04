@@ -45,6 +45,10 @@ export function createValidatorInfoBulkIngesterJob(deps: ValidatorInfoBulkIngest
     name: VALIDATOR_INFO_BULK_INGESTER_JOB_NAME,
     intervalMs: deps.intervalMs,
     async tick(signal: AbortSignal): Promise<void> {
+      // Early guard: don't pay the ~3 MB getConfigProgramAccounts +
+      // batch UPDATE on shutdown. The post-refresh guard below still
+      // catches mid-flight aborts where the RPC had already started.
+      if (signal.aborted) return;
       try {
         const { observed, updated } = await deps.validatorService.refreshAllValidatorInfo();
         if (signal.aborted) return;

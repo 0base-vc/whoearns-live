@@ -519,6 +519,38 @@ describe('ValidatorService.refreshAllValidatorInfo', () => {
     expect((await repo.findByVote(VOTE_A))?.name).toBe('Kept');
   });
 
+  it('counts observed pre-dedup so duplicate-identity records are visible (observed > unique)', async () => {
+    const repo = new FakeValidatorsRepo();
+    await repo.upsert({
+      votePubkey: VOTE_A,
+      identityPubkey: IDENTITY_A,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    // Same identity appears TWICE in the Config program response —
+    // shouldn't happen in practice, but if it ever does, `observed`
+    // surfaces the drift instead of silently collapsing to 1.
+    const rpc = {
+      getVoteAccounts: vi.fn(),
+      getConfigProgramAccounts: vi
+        .fn()
+        .mockResolvedValue([
+          infoAccount(IDENTITY_A, { name: 'First' }),
+          infoAccount(IDENTITY_A, { name: 'Second' }),
+        ]),
+    };
+    const service = new ValidatorService({
+      validatorsRepo: repo as unknown as ValidatorsRepository,
+      rpc: rpc as unknown as SolanaRpcClient,
+      logger: silent,
+    });
+
+    const res = await service.refreshAllValidatorInfo();
+    expect(res.observed).toBe(2); // both parsed records counted
+    // Last-write-wins on the Map collapse — the repo sees the second.
+    expect((await repo.findByVote(VOTE_A))?.name).toBe('Second');
+  });
+
   it('is a zero-row write on a second, no-drift tick (IS DISTINCT FROM guard)', async () => {
     const repo = new FakeValidatorsRepo();
     await repo.upsert({

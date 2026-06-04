@@ -352,18 +352,24 @@ export class ValidatorService {
    * repo's UNNEST join can't match a target row twice.
    *
    * Throws on RPC failure (the job logs + retries next tick). Returns
-   * `{ observed, updated }` — observed = parsed info records, updated
-   * = rows whose moniker actually changed (the repo's IS DISTINCT
-   * FROM guard makes a no-drift tick a zero-row write).
+   * `{ observed, updated }`:
+   *   - `observed` = parsed validator-info records carrying a signer
+   *     identity (PRE-dedup). `observed > byIdentity.size` surfaces
+   *     duplicate-identity records — should never happen in practice,
+   *     but counting pre-dedup means the caller can see it if it does.
+   *   - `updated` = rows whose moniker actually changed (the repo's
+   *     IS DISTINCT FROM guard makes a no-drift tick a zero-row write).
    */
   async refreshAllValidatorInfo(): Promise<{ observed: number; updated: number }> {
     const accounts = await this.rpc.getConfigProgramAccounts();
     const byIdentity = new Map<IdentityPubkey, ValidatorInfo>();
+    let observed = 0;
     for (const account of accounts) {
       const parsed = account.account.data.parsed;
       if (parsed.type !== 'validatorInfo') continue;
       const identity = parsed.info.keys.find((k) => k.signer)?.pubkey;
       if (identity === undefined || identity.length === 0) continue;
+      observed += 1;
       const cd = parsed.info.configData;
       byIdentity.set(identity as IdentityPubkey, {
         identityPubkey: identity as IdentityPubkey,
@@ -374,9 +380,8 @@ export class ValidatorService {
         iconUrl: normaliseHttpUrlOrNull(cd.iconUrl),
       });
     }
-    const infos = [...byIdentity.values()];
-    const { updated } = await this.validatorsRepo.upsertInfoBatch(infos);
-    return { observed: infos.length, updated };
+    const { updated } = await this.validatorsRepo.upsertInfoBatch([...byIdentity.values()]);
+    return { observed, updated };
   }
 
   /**
