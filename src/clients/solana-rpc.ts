@@ -903,7 +903,7 @@ export class SolanaRpcClient {
       },
     ]);
     for (const row of rows) {
-      if (row.account.data.parsed.type === 'validatorInfo') return row;
+      if (row.account.data.parsed?.type === 'validatorInfo') return row;
     }
     return null;
   }

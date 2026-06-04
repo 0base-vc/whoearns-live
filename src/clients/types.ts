@@ -284,13 +284,17 @@ export interface RpcGetSignaturesOptions {
  *      we match an info record back to our `validators.identity_pubkey`.
  *
  * Non-validatorInfo Config accounts (stake-config, etc.) are returned
- * by the same RPC call; callers MUST filter on `parsed.type`.
+ * by the same RPC call; callers MUST guard on `parsed?.type`. The
+ * `parsed` field is optional because the `jsonParsed` encoder falls
+ * back to a raw `[base64, "base64"]` tuple for accounts whose layout
+ * it can't decode — accessing `.type` on the fallback shape throws,
+ * so the type reflects the optionality at compile time.
  */
 export interface RpcValidatorInfoAccount {
   pubkey: string;
   account: {
     data: {
-      parsed: {
+      parsed?: {
         type: string;
         info: {
           keys: Array<{ pubkey: string; signer: boolean }>;
@@ -303,7 +307,7 @@ export interface RpcValidatorInfoAccount {
           };
         };
       };
-      program: string;
+      program?: string;
     };
   };
 }
