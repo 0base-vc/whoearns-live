@@ -134,13 +134,14 @@ wallet-activity / SIMD-curation features. All have safe defaults — a
 deployment that doesn't `--set` any of them still runs every job at
 the documented interval.
 
-| Value                             | Env var                       | Default             | Drives                                                   |
-| --------------------------------- | ----------------------------- | ------------------- | -------------------------------------------------------- |
-| `config.clusterNodesIntervalMs`   | `CLUSTER_NODES_INTERVAL_MS`   | `1800000`           | Phase 2 gossip ContactInfo refresh (client-kind/version) |
-| `config.validatorInfoIntervalMs`  | `VALIDATOR_INFO_INTERVAL_MS`  | `21600000`          | Phase 2 on-chain validator-info refresh (watched set)    |
-| `config.walletActivityIntervalMs` | `WALLET_ACTIVITY_INTERVAL_MS` | `21600000`          | Phase 4 wallet daily-activity indexer                    |
-| `config.simdCurationIntervalMs`   | `SIMD_CURATION_INTERVAL_MS`   | `43200000`          | Phase 5 SIMD AI-curation pass                            |
-| `anthropic.model`                 | `ANTHROPIC_MODEL`             | `claude-sonnet-4-6` | Phase 5 model identifier (non-secret; ConfigMap)         |
+| Value                                | Env var                           | Default             | Drives                                                   |
+| ------------------------------------ | --------------------------------- | ------------------- | -------------------------------------------------------- |
+| `config.clusterNodesIntervalMs`      | `CLUSTER_NODES_INTERVAL_MS`       | `1800000`           | Phase 2 gossip ContactInfo refresh (client-kind/version) |
+| `config.validatorInfoIntervalMs`     | `VALIDATOR_INFO_INTERVAL_MS`      | `21600000`          | Phase 2 on-chain validator-info refresh (watched set)    |
+| `config.validatorInfoBulkIntervalMs` | `VALIDATOR_INFO_BULK_INTERVAL_MS` | `21600000`          | Cluster-wide validator-info ingester (search by moniker) |
+| `config.walletActivityIntervalMs`    | `WALLET_ACTIVITY_INTERVAL_MS`     | `21600000`          | Phase 4 wallet daily-activity indexer                    |
+| `config.simdCurationIntervalMs`      | `SIMD_CURATION_INTERVAL_MS`       | `43200000`          | Phase 5 SIMD AI-curation pass                            |
+| `anthropic.model`                    | `ANTHROPIC_MODEL`                 | `claude-sonnet-4-6` | Phase 5 model identifier (non-secret; ConfigMap)         |
 
 > The large interval values are deliberately QUOTED strings in
 > `values.yaml` — Helm widens bare integers to float64, which would

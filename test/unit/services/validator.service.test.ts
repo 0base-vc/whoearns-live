@@ -411,6 +411,139 @@ describe('ValidatorService.refreshValidatorInfoForIdentity', () => {
   });
 });
 
+describe('ValidatorService.refreshAllValidatorInfo', () => {
+  function infoAccount(
+    identity: string,
+    configData: {
+      name?: string;
+      details?: string;
+      website?: string;
+      iconUrl?: string;
+      keybaseUsername?: string;
+    },
+    opts: { type?: string; signer?: boolean } = {},
+  ): RpcValidatorInfoAccount {
+    return {
+      pubkey: 'Config1111111111111111111111111111111111111',
+      account: {
+        data: {
+          parsed: {
+            type: opts.type ?? 'validatorInfo',
+            info: {
+              keys: [
+                { pubkey: 'Va1idator1nfo111111111111111111111111111111', signer: false },
+                { pubkey: identity, signer: opts.signer ?? true },
+              ],
+              configData,
+            },
+          },
+          program: 'spl-config',
+        },
+      },
+    };
+  }
+
+  it('fills monikers cluster-wide from one getConfigProgramAccounts pull', async () => {
+    const repo = new FakeValidatorsRepo();
+    await repo.upsert({
+      votePubkey: VOTE_A,
+      identityPubkey: IDENTITY_A,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    await repo.upsert({
+      votePubkey: VOTE_B,
+      identityPubkey: IDENTITY_B,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+
+    // Before: neither validator has a name, so a moniker search misses both.
+    expect(await repo.searchByText('chainflow', 10)).toHaveLength(0);
+
+    const rpc = {
+      getVoteAccounts: vi.fn(),
+      getConfigProgramAccounts: vi.fn().mockResolvedValue([
+        infoAccount(IDENTITY_A, {
+          name: '  Chainflow  ',
+          keybaseUsername: 'chainflow',
+          website: 'https://chainflow.io',
+        }),
+        infoAccount(IDENTITY_B, { name: 'Chainflow Experimental' }),
+      ]),
+    };
+    const service = new ValidatorService({
+      validatorsRepo: repo as unknown as ValidatorsRepository,
+      rpc: rpc as unknown as SolanaRpcClient,
+      logger: silent,
+    });
+
+    const res = await service.refreshAllValidatorInfo();
+    expect(res).toEqual({ observed: 2, updated: 2 });
+
+    // After: BOTH Chainflow validators are now findable by name — the
+    // discovery bug this job fixes.
+    const hits = await repo.searchByText('chainflow', 10);
+    expect(hits.map((r) => r.votePubkey).sort()).toEqual([VOTE_A, VOTE_B].sort());
+    const a = await repo.findByVote(VOTE_A);
+    expect(a?.name).toBe('Chainflow'); // whitespace-normalised
+    expect(a?.website).toBe('https://chainflow.io/'); // http(s)-normalised
+  });
+
+  it('skips non-validatorInfo accounts and records without a signer identity', async () => {
+    const repo = new FakeValidatorsRepo();
+    await repo.upsert({
+      votePubkey: VOTE_A,
+      identityPubkey: IDENTITY_A,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    const rpc = {
+      getVoteAccounts: vi.fn(),
+      getConfigProgramAccounts: vi.fn().mockResolvedValue([
+        infoAccount(IDENTITY_A, { name: 'Kept' }),
+        // A stake-config (non-validatorInfo) account returned by the same RPC.
+        infoAccount(IDENTITY_C, { name: 'StakeConfig' }, { type: 'stakeConfig' }),
+        // A validatorInfo record with no signer key — identity unreadable.
+        infoAccount(IDENTITY_B, { name: 'NoSigner' }, { signer: false }),
+      ]),
+    };
+    const service = new ValidatorService({
+      validatorsRepo: repo as unknown as ValidatorsRepository,
+      rpc: rpc as unknown as SolanaRpcClient,
+      logger: silent,
+    });
+
+    const res = await service.refreshAllValidatorInfo();
+    expect(res.observed).toBe(1); // only the validatorInfo+signer record counts
+    expect((await repo.findByVote(VOTE_A))?.name).toBe('Kept');
+  });
+
+  it('is a zero-row write on a second, no-drift tick (IS DISTINCT FROM guard)', async () => {
+    const repo = new FakeValidatorsRepo();
+    await repo.upsert({
+      votePubkey: VOTE_A,
+      identityPubkey: IDENTITY_A,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    const rpc = {
+      getVoteAccounts: vi.fn(),
+      getConfigProgramAccounts: vi
+        .fn()
+        .mockResolvedValue([infoAccount(IDENTITY_A, { name: 'Stable' })]),
+    };
+    const service = new ValidatorService({
+      validatorsRepo: repo as unknown as ValidatorsRepository,
+      rpc: rpc as unknown as SolanaRpcClient,
+      logger: silent,
+    });
+
+    expect((await service.refreshAllValidatorInfo()).updated).toBe(1);
+    expect((await service.refreshAllValidatorInfo()).updated).toBe(0);
+  });
+});
+
 describe('ValidatorService.assessClaimEligibility', () => {
   it('shares the on-demand cooldown so a verify probe does not double the RPC fetch', async () => {
     const rpc = makeRpcStub();

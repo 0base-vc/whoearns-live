@@ -298,6 +298,13 @@ config:
   # (operator renames / icon changes). 6 hr × 4 watched validators
   # = 16 RPC calls/day; very light.
   validatorInfoIntervalMs: '21600000'
+  # Cluster-wide on-chain validator-info ingester — ONE bulk
+  # `getConfigProgramAccounts` pull (~2000 records, ~3 MB) that fills
+  # name/keybase/website/icon for EVERY published validator, not just
+  # the watched set. Makes `/v1/validators/search` find validators by
+  # moniker that nobody has explicitly tracked. 6 hr; the repo's
+  # IS DISTINCT FROM guard makes a no-rename tick a zero-row write.
+  validatorInfoBulkIntervalMs: '21600000'
   # Phase 4 — wallet-activity indexer cadence. 6 hr is the right
   # resolution for a daily-bucketed heatmap; cuts RPC pressure by
   # ~4× vs hourly. Idempotent so partial runs are safe.

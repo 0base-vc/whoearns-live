@@ -43,6 +43,7 @@ data:
   # Phase 2 — gossip + validator-info refresh cadences.
   CLUSTER_NODES_INTERVAL_MS: {{ .Values.config.clusterNodesIntervalMs | default 1800000 | quote }}
   VALIDATOR_INFO_INTERVAL_MS: {{ .Values.config.validatorInfoIntervalMs | default 21600000 | quote }}
+  VALIDATOR_INFO_BULK_INTERVAL_MS: {{ .Values.config.validatorInfoBulkIntervalMs | default 21600000 | quote }}
   # Phase 4 — wallet daily-activity indexer cadence.
   WALLET_ACTIVITY_INTERVAL_MS: {{ .Values.config.walletActivityIntervalMs | default 21600000 | quote }}
   # Phase 4-extension — wallet fee backfill cadence + per-tick

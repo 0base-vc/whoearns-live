@@ -4,7 +4,13 @@ import { normaliseHttpUrlOrNull } from '../core/url.js';
 import type { StatsRepository } from '../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import type { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
-import type { Epoch, IdentityPubkey, Validator, VotePubkey } from '../types/domain.js';
+import type {
+  Epoch,
+  IdentityPubkey,
+  Validator,
+  ValidatorInfo,
+  VotePubkey,
+} from '../types/domain.js';
 
 export type WatchMode = 'explicit' | 'all' | 'top';
 
@@ -319,6 +325,58 @@ export class ValidatorService {
       'validator.service: validator-info captured',
     );
     return { found: true };
+  }
+
+  /**
+   * Cluster-wide validator-info refresh. ONE `getConfigProgramAccounts`
+   * call returns every PUBLISHED on-chain moniker (~2000 records,
+   * ~3 MB on mainnet); we project each to a `ValidatorInfo` keyed by
+   * identity and batch-upsert.
+   *
+   * This is the ONLY path that fills name / keybase / website / icon
+   * for validators NOBODY has explicitly tracked. The per-identity
+   * `refreshValidatorInfoForIdentity` only runs for the watched set +
+   * on-demand-added validators, so without this the public
+   * `/v1/validators/search` could match monikers for that handful
+   * only — every other active validator sat in `validators` with a
+   * NULL `name`, findable by pubkey but NOT by name. (A user searching
+   * "chainflow" would miss the main Chainflow validator entirely
+   * unless someone had already pulled it in by pubkey.)
+   *
+   * Identity comes from the Config account's signer key: `keys[]`
+   * holds the Validator-Info program id (non-signer) and the
+   * validator identity (the lone signer). Records we can't read an
+   * identity from, and non-`validatorInfo` Config accounts (stake-
+   * config, etc.) returned by the same RPC, are skipped. Duplicate
+   * identities (shouldn't happen) collapse last-write-wins so the
+   * repo's UNNEST join can't match a target row twice.
+   *
+   * Throws on RPC failure (the job logs + retries next tick). Returns
+   * `{ observed, updated }` — observed = parsed info records, updated
+   * = rows whose moniker actually changed (the repo's IS DISTINCT
+   * FROM guard makes a no-drift tick a zero-row write).
+   */
+  async refreshAllValidatorInfo(): Promise<{ observed: number; updated: number }> {
+    const accounts = await this.rpc.getConfigProgramAccounts();
+    const byIdentity = new Map<IdentityPubkey, ValidatorInfo>();
+    for (const account of accounts) {
+      const parsed = account.account.data.parsed;
+      if (parsed.type !== 'validatorInfo') continue;
+      const identity = parsed.info.keys.find((k) => k.signer)?.pubkey;
+      if (identity === undefined || identity.length === 0) continue;
+      const cd = parsed.info.configData;
+      byIdentity.set(identity as IdentityPubkey, {
+        identityPubkey: identity as IdentityPubkey,
+        name: normaliseText(cd.name),
+        details: normaliseText(cd.details),
+        website: normaliseHttpUrlOrNull(cd.website),
+        keybaseUsername: normaliseText(cd.keybaseUsername),
+        iconUrl: normaliseHttpUrlOrNull(cd.iconUrl),
+      });
+    }
+    const infos = [...byIdentity.values()];
+    const { updated } = await this.validatorsRepo.upsertInfoBatch(infos);
+    return { observed: infos.length, updated };
   }
 
   /**

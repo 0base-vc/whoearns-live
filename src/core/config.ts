@@ -208,6 +208,15 @@ export const ConfigSchema = z.object({
   // = 16 calls/day, and validators rarely rename faster than that.
   // `watchMode=all` deployments see a proportionally larger burst.
   VALIDATOR_INFO_INTERVAL_MS: PositiveInt.default(6 * 60 * 60 * 1000),
+  // Cluster-wide on-chain validator-info ingester — ONE bulk
+  // `getConfigProgramAccounts` pull (~2000 records, ~3 MB) that fills
+  // name/keybase/website/icon for EVERY published validator, not just
+  // the watched set. This is what makes `/v1/validators/search` find
+  // validators by moniker that nobody has explicitly tracked. 6 h
+  // default: monikers change on a multi-day scale and the repo's
+  // `upsertInfoBatch` IS DISTINCT FROM guard makes a no-rename tick a
+  // zero-row write.
+  VALIDATOR_INFO_BULK_INTERVAL_MS: PositiveInt.default(6 * 60 * 60 * 1000),
   // Periodic gossip ContactInfo refresh — drives Phase 2 client-kind
   // and client-version indexing on the full cluster (~2000 entries).
   // 30 minutes balances "fresh enough for Firedancer-Pioneer badges
