@@ -1069,12 +1069,16 @@ export class ProcessedBlocksRepository {
       compute_units_consumed: string;
       produced_blocks: string;
     }>(
-      // EXISTS semi-join (NOT a JOIN): `validators.identity_pubkey` has
-      // no unique constraint — one identity can own multiple vote rows
-      // (rotation) — so a plain JOIN would count a block once per
-      // matching row. EXISTS counts each produced block exactly once
-      // whenever ANY validators row for its leader identity runs the
-      // client.
+      // EXISTS semi-join (NOT a JOIN — counts each produced block once).
+      // Resolve the block's leader identity to a vote, and thus a
+      // CURRENT client, through THAT epoch's `epoch_validator_stats` row
+      // — NOT directly via `validators.identity_pubkey`. A validator
+      // that rotated identity carries its historical identity on the
+      // block (`processed_blocks.leader_identity`) but its current
+      // identity on `validators`; matching `evs` per epoch keeps its
+      // pre-rotation blocks in the same-client cohort, mirroring the
+      // validator-specific CU path (`getEpochComputeUnitsByVote`). The
+      // join to `validators` is on the unique `vote_pubkey`.
       `SELECT pb.epoch::text AS epoch,
               COALESCE(SUM(pb.compute_units_consumed)
                 FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS compute_units_consumed,
@@ -1083,8 +1087,10 @@ export class ProcessedBlocksRepository {
         WHERE pb.epoch = ANY($1::bigint[])
           AND EXISTS (
             SELECT 1
-              FROM validators v
-             WHERE v.identity_pubkey = pb.leader_identity
+              FROM epoch_validator_stats evs
+              JOIN validators v ON v.vote_pubkey = evs.vote_pubkey
+             WHERE evs.epoch = pb.epoch
+               AND evs.identity_pubkey = pb.leader_identity
                AND v.client_kind = $2
           )
         GROUP BY pb.epoch`,
