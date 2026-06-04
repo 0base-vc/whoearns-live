@@ -75,6 +75,7 @@
   });
 
   let trigger: HTMLButtonElement | undefined = $state();
+  let popover: HTMLSpanElement | undefined = $state();
   let open = $state(false);
   /**
    * Viewport coordinates for the `position: fixed` popover, recomputed
@@ -89,13 +90,16 @@
     let x = align === 'center' ? r.left + r.width / 2 : align === 'left' ? r.left : r.right;
     const y = placement === 'top' ? r.top : r.bottom;
     // Keep the `position: fixed` popover inside the viewport on narrow
-    // screens. The box (max-w-xs, but capped to the viewport width on
-    // small screens — see `max-w-[calc(100vw-1rem)]` on the render) is
+    // screens. Clamp against the popover's REAL rendered width once it
+    // is mounted; before the first paint fall back to the max width the
+    // CSS allows — `max-w-[calc(100vw-1rem)]` (viewport − 16px) below the
+    // `sm` breakpoint, `max-w-xs` (320px) at `sm` and up. The box is
     // anchored by `align` via a CSS transform, so derive its left/right
     // edges from `x` and nudge `x` back inside an 8px gutter on overflow.
     if (typeof window !== 'undefined') {
       const gutter = 8;
-      const boxW = Math.min(320, window.innerWidth - 2 * gutter);
+      const fallbackW = window.innerWidth < 640 ? window.innerWidth - 2 * gutter : 320;
+      const boxW = popover?.offsetWidth ?? fallbackW;
       const leftEdge = align === 'center' ? x - boxW / 2 : align === 'left' ? x : x - boxW;
       const rightEdge = leftEdge + boxW;
       if (leftEdge < gutter) x += gutter - leftEdge;
@@ -120,6 +124,13 @@
     if (!open) reposition();
     open = !open;
   }
+
+  // Once the popover is in the DOM, re-clamp using its real measured
+  // width — the first reposition() in show()/toggle() runs before the
+  // popover mounts and falls back to the CSS max-width estimate.
+  $effect(() => {
+    if (open && popover !== undefined) reposition();
+  });
 
   /**
    * Click-outside + Escape dismissal. Listeners are attached lazily
@@ -187,6 +198,7 @@
 
   {#if open && popoverPos !== null}
     <span
+      bind:this={popover}
       id={popoverId}
       role="tooltip"
       style:left={`${popoverPos.x}px`}
