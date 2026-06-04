@@ -52,6 +52,7 @@ function makeConfig(): AppConfig {
     HTTP_PORT: 8080,
     HTTP_HOST: '0.0.0.0',
     METRICS_PORT: 0,
+    WORKER_METRICS_PORT: 0,
     SITE_URL: 'https://test.example.com',
     SITE_NAME: 'TestSite',
     SOLANA_RPC_URL: 'https://example.invalid',

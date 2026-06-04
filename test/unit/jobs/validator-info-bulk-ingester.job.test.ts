@@ -29,18 +29,15 @@ describe('validator-info-bulk-ingester job', () => {
     expect(refresh).toHaveBeenCalledTimes(2);
   });
 
-  it('swallows RPC failures and retries on the next tick', async () => {
-    const refresh = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('rpc 503'))
-      .mockResolvedValueOnce({ observed: 1, updated: 1 });
+  it('propagates RPC failures so the scheduler records outcome=fail', async () => {
+    // Previously this job self-caught its throws and returned normally,
+    // which made the scheduler count every failure as `outcome=success`
+    // — a permanently-failing tick read as healthy in Prometheus. The
+    // contract is now: throw out, let `Scheduler.runLoop`'s outer catch
+    // log at `error` and increment `jobs_executed_total{outcome="fail"}`.
+    const refresh = vi.fn().mockRejectedValue(new Error('rpc 503'));
     const job = makeJob(refresh);
-
-    // A failing tick must not throw out of the scheduler loop.
-    await expect(job.tick(ctrl.signal)).resolves.toBeUndefined();
-    await job.tick(ctrl.signal);
-
-    expect(refresh).toHaveBeenCalledTimes(2);
+    await expect(job.tick(ctrl.signal)).rejects.toThrow('rpc 503');
   });
 
   it('skips the heavy refresh when the signal is already aborted', async () => {
