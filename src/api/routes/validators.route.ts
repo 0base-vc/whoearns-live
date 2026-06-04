@@ -768,7 +768,8 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
    * counters grow during the response cache window and would make
    * a tier ride the running-epoch values.
    *
-   * P1 composite: `0.3 × reliability + 0.7 × economicPercentile`.
+   * P1 composite: `0.3 × reliability + 0.7 × economicScore`, where
+   * `economicScore = 0.9 × economicPercentile + 0.1 × cuSubscore`.
    * `reliability` = `1 − wilsonInterval(slotsSkipped, slotsAssigned).upper`
    * (pessimistic block-production rate). `economicPercentile` =
    * `PERCENT_RANK()` of this validator's median per-leader-slot
@@ -777,7 +778,7 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
    * Phase 1, "Why no vote credits."
    *
    * Confidence floors → `tier: "unrated"`: `slotsAssigned < 10`,
-   * cohort size < 10, this validator measured in < 4 closed epochs,
+   * cohort size < 10, this validator measured in < 10 closed epochs,
    * or `economicPercentile === null`.
    *
    * Reliability floor: when `skip_rate > 0.20` the tier is hard-

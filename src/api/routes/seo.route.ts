@@ -386,13 +386,14 @@ Use closed epochs before deriving public claims from these facts.
 Node Tier composite — pessimistic block-production reliability
 (Wilson upper bound on skip rate) + economic-productivity percentile
 (cohort rank of median per-leader-slot income across 10 closed epochs).
-Formula: 0.3 × reliability + 0.7 × economicPercentile. The cohort is
+Formula: 0.3 × reliability + 0.7 × economicScore (economicScore =
+0.9 × economicPercentile + 0.1 × cuSubscore). The cohort is
 the INDEXED-VALIDATOR set (the deployment's WatchMode), not the full
 Solana cluster. Accepts a vote OR identity pubkey; no query params.
 Returns { vote, identity, window, tier, composite, components }. tier
 is forge | anvil | hearth | kindling | unrated; composite is null
 when tier is unrated (thin samples — slotsAssigned < 10, cohort < 10,
-or measuredEpochs < 4). Tier is hard-capped at kindling when skip
+or measuredEpochs < 10). Tier is hard-capped at kindling when skip
 rate exceeds 20%, regardless of economic percentile. See
 docs/scoring.md Phase 1 for the rationale on excluding vote credits.
 Closed-epoch data only — no live RPC.
@@ -574,7 +575,7 @@ GitHub: https://github.com/0base-vc/whoearns-live (MIT)
       // the human name picks up spaces or punctuation later.
       name_for_model: SITE_NAME.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
       description_for_human:
-        'Query AI-assisted Solana validator income intelligence: per-epoch block fees, on-chain Jito tips, and cluster rankings.',
+        'Query AI-assisted Solana validator income intelligence: per-epoch block fees, on-chain Jito tips, and indexed-validator rankings.',
       description_for_model:
         'Use to look up AI-assisted Solana validator income intelligence from reproducible on-chain data. Provides validator name search, per-epoch slot production, block-fee earnings (base + priority), on-chain Jito tips, live-trend leaderboard rankings, and stored leader-slot facts for watched validators. Accepts both vote and identity pubkeys. Closed-epoch data is final; running-epoch data is a live lower bound. Numeric values are strings (parse lamports as BigInt). Missing slot or income data is represented by null numerics and hasSlots/hasIncome booleans; leader-slot completeness is represented by quality.complete and pending/fetch-error counts. Do not treat operator income as delegator APY unless commission and distribution policy are explicitly modeled.',
       auth: { type: 'none' },

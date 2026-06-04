@@ -23,17 +23,21 @@ and this project follows [Semantic Versioning](https://semver.org/).
     `unrated` — from pessimistic block-production reliability (Wilson
     upper bound on skip rate) blended with an economic-percentile rank
     against the indexed cohort (`PERCENT_RANK()` of median per-leader-
-    slot income across a 5-closed-epoch window), served at
+    slot income across a 10-closed-epoch window), served at
     `GET /v1/validators/:idOrVote/tier` and bundled with the tenure /
     client badges at `GET /v1/validators/:idOrVote/badges`. Capped at
     `kindling` when `skip_rate > 0.20` regardless of economic percentile.
   - **Tenure landmarks** (Mainnet-beta launch, Cycle 1 OG, Cross-chain era,
     DeFi 2, Pre-FTX, Jito v2, Firedancer launch) and **client kind**
     classification (Agave / Jito-Solana / Firedancer / Frankendancer /
-    Paladin / Sig / Unknown) on the badges payload.
+    Paladin / Sig / Unknown) on the badges payload. The canonical source
+    is now validators.app, which resolves 14 client kinds — the seven
+    above plus the fork/new-client variants `agave_bam`, `rakurai`,
+    `harmonic_firedancer`, `harmonic_agave`, `harmonic_frankendancer`,
+    `firebam`, `raiku`, and `solana_labs`.
   - **Operator claim flow** (Ed25519 sign-over-nonce + Keybase-style
     GitHub Gist verification + operator-wallet registration), exposed
-    as `GET /v1/claims/:vote`, `PUT /v1/claims/:vote/verify`,
+    as `GET /v1/claims/:vote`, `PUT /v1/claims/:vote`,
     `PUT /v1/claims/:vote/profile`, `PUT /v1/claims/:vote/github`,
     `POST /v1/claims/:vote/wallets`, plus an append-only forensic audit
     log at `GET /v1/claims/:vote/audit`.
@@ -98,7 +102,7 @@ and this project follows [Semantic Versioning](https://semver.org/).
   longer a public delegation signal. The new composite is
   `0.3 × reliability + 0.7 × economicPercentile`, where
   `economicPercentile` is the cohort rank of this validator's median
-  per-leader-slot income across the 5-epoch window — both halves are
+  per-leader-slot income across the 10-epoch window — both halves are
   on-chain-signed facts the validator cannot inflate. Response shape
   changes: `window.voteCredits` / `window.maxCredits` /
   `window.voteCreditsUpdatedAt` are gone, replaced by
@@ -116,12 +120,12 @@ and this project follows [Semantic Versioning](https://semver.org/).
   `cohortAsOfEpoch` fields and the same
   `components.reliability` / `components.economicPercentile` shape
   as the HTTP route.
-- **BREAKING** — New cohort floors: validators with fewer than 4
-  measured closed epochs (was 3), or in a cohort of fewer than 10
+- **BREAKING** — New cohort floors: validators with fewer than 10
+  measured closed epochs, or in a cohort of fewer than 10
   peers, drop to `unrated` until the cohort matures. Production
   validators that were previously classified may temporarily appear
   unrated after the deploy until the income ingester has run for at
-  least 4 closed epochs across ≥10 indexed peers. A new hard
+  least 10 closed epochs across ≥10 indexed peers. A new hard
   reliability floor caps the tier at `kindling` when
   `skip_rate > 0.20` regardless of economic percentile.
 - **BREAKING** — New `window.cohortAsOfEpoch` field on the `/tier`

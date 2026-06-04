@@ -766,19 +766,22 @@ Returns composite profile-level badges (Phase 2):
   "tier": {
     "tier": "forge",
     "composite": 96,
-    "windowEpochs": 5
+    "windowEpochs": 10
   }
 }
 ```
 
 - `tenure.landmark` is one of `MAINNET_BETA_LAUNCH`, `CYCLE_1_OG`,
   `CROSS_CHAIN_ERA`, `DEFI_2`, `PRE_FTX`, `JITO_V2`,
-  `FIREDANCER_LAUNCH`, `recent_operator`. The oldest landmark the
+  `FIREDANCER_LAUNCH`, `RECENT`, `recent_operator`. The oldest landmark the
   validator predates wins (no double-counting).
-- `client.kind` enum: `agave`, `jito_solana`, `firedancer`,
-  `frankendancer`, `paladin`, `sig`, `unknown`. Sourced from
-  `getClusterNodes.version`; `unknown` is the neutral default before
-  the cluster-nodes ingester has run.
+- `client.kind` enum (the full `ClientBadge` set, 15 values): `agave`,
+  `jito_solana`, `firedancer`, `frankendancer`, `paladin`, `sig`,
+  `solana_labs`, `agave_bam`, `rakurai`, `harmonic_firedancer`,
+  `harmonic_agave`, `harmonic_frankendancer`, `firebam`, `raiku`, and
+  `unknown`. The canonical source is now validators.app (the
+  `getClusterNodes.version` regex ingester was disabled); `unknown` is
+  the neutral default before the validators.app client ingester has run.
 - `tier` mirrors `GET /v1/validators/:idOrVote/tier`. Bundled here so
   a profile page renders the full badge row in one round-trip.
 

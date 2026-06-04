@@ -138,26 +138,52 @@ in `validators` with a NULL `name`, findable by pubkey but never by
 name. The repo's `upsertInfoBatch` uses an `IS DISTINCT FROM` guard,
 so a tick where nothing renamed is a zero-row write.
 
-### Cluster-nodes ingester (`CLUSTER_NODES_INTERVAL_MS`, default 30min)
+### Cluster-nodes ingester (`CLUSTER_NODES_INTERVAL_MS`, default 30min) — DISABLED
 
-Polls `getClusterNodes` (~500 KB) and writes each gossip identity's
-`(client_kind, client_version)` to `validators`. Drives the
-client-family badges (Agave / Jito-Solana / Firedancer / ...). No
-cursor — every tick re-classifies the full cluster.
+**Disabled (code retained).** This job polls `getClusterNodes` (~500 KB)
+and writes each gossip identity's `(client_kind, client_version)` to
+`validators` by regex-matching the gossip version string. Its scheduler
+registration was removed from `entrypoints/worker.ts` — the regex
+classifier and the validators.app classifier both write the same
+columns, and because cluster-nodes ran ~12× more often it would
+repeatedly overwrite the richer validators.app fork classifications
+(e.g. demoting `agave_bam` back to `agave`), livelocking the steady
+state on the wrong value. The factory (`createClusterNodesIngesterJob`)
+is kept for reference and tests but no longer ticks.
+
+### Validators.app client ingester (`VALIDATORS_APP_INTERVAL_MS`, default ~2h)
+
+The live client-kind source. Pulls canonical client classifications
+from validators.app (whose gossip CRDS decoder distinguishes the fork /
+new-client variants the regex matcher cannot) and writes
+`(client_kind, client_version)` to `validators`. This drives the
+client-family badges (Agave / Jito-Solana / Firedancer / ... plus
+`agave_bam`, `rakurai`, `harmonic_*`, `firebam`, `raiku`,
+`solana_labs`). External HTTP rather than Solana RPC, so it runs last
+in the cold-start stagger.
 
 ### Wallet-activity ingester (`WALLET_ACTIVITY_INTERVAL_MS`, default 6h)
 
 Enumerates registered `operator_wallets` and runs
-`getSignaturesForAddress` once per wallet, upserting per-day tx
-counts into `wallet_daily_activity`. The upsert is idempotent, so a
-partial tick is resumed on the next one.
+`getSignaturesForAddress` per wallet, then calls
+`getTransactionFeeAndPayer` per signature and keeps only **outgoing**
+txs (`feePayer === wallet`). It upserts both per-day tx counts and
+per-day tx-fee totals (`tx_fees_lamports`) into `wallet_daily_activity`;
+both columns reflect the same outgoing-only set. RPC is tiered — the
+walk selects `primaryRpc` vs the optional `archiveRpc` by phase (initial
+/ incremental / backfill) and logs the chosen `rpcMode`. The upsert is
+idempotent, so a partial tick is resumed on the next one.
 
-### SIMD curation pipeline (`SIMD_CURATION_INTERVAL_MS`, default 12h)
+### SIMD curation pipeline (`SIMD_CURATION_INTERVAL_MS`, default 12h) — not yet scheduled
 
 Enriches pending `simd_proposals` rows via the Anthropic API
 (`ANTHROPIC_MODEL`). Gated on `ANTHROPIC_API_KEY`: with no key the
-pipeline is disabled and SIMDs stay pre-review. This is the only job
-that calls an API other than Solana RPC.
+pipeline is disabled and SIMDs stay pre-review. This would be the only
+job that calls an API other than Solana RPC. **Not yet wired into the
+scheduler** — no registration exists in `entrypoints/worker.ts`, so the
+job does not tick and the `simd_proposals` table stays empty until it is
+scheduled. The `GET /v1/simd-proposals` reader is live but returns an
+empty list in the meantime.
 
 The RPC-bursty jobs above carry staggered first-tick delays
 (`initialDelayMs` in `entrypoints/worker.ts`) so a cold start does

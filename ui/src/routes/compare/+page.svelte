@@ -58,7 +58,9 @@
   let leaderSlotStatsLoading = $state(false);
 
   const PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-  const LAST_MONTH_EPOCHS = 16;
+  // Closed epochs ≈ 30 days (round(30 / ~2-day epoch)); matches the
+  // income page + the hub's "Last 30 days" so the figure agrees.
+  const LAST_MONTH_EPOCHS = 15;
   const DECADE_EPOCH_COUNT = 10;
   const WINDOW_OPTIONS: Array<{ key: LeaderboardWindow; label: string }> = [
     { key: 'live_trend', label: 'Live trend' },
@@ -203,7 +205,7 @@
   function lastMonthTotalSol(history: ValidatorHistory | null): number | null {
     if (history === null || history.items.length === 0) return null;
     let total = 0;
-    for (const r of history.items.slice(0, LAST_MONTH_EPOCHS)) {
+    for (const r of history.items.filter((x) => !x.isCurrentEpoch).slice(0, LAST_MONTH_EPOCHS)) {
       const fees = r.blockFeesTotalSol === null ? 0 : Number(r.blockFeesTotalSol);
       const mev = r.blockTipsTotalSol === null ? 0 : Number(r.blockTipsTotalSol);
       total += (Number.isFinite(fees) ? fees : 0) + (Number.isFinite(mev) ? mev : 0);
@@ -789,7 +791,7 @@
             <AddressDisplay pubkey={slot.history.vote} head={8} tail={8} />
           </p>
           <p class="mt-4 text-xs uppercase tracking-wide text-[color:var(--color-text-muted)]">
-            Total income (last month)
+            Total income (last 30 days)
           </p>
           <p class="mt-1 text-3xl font-semibold tracking-tight text-[color:var(--color-brand-500)]">
             {#if (i === 0 ? lastMonthA : lastMonthB) !== null}

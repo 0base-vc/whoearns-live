@@ -72,7 +72,11 @@
     return new Intl.NumberFormat('en').format(n);
   }
 
-  const LAST_MONTH_EPOCHS = 16;
+  // ≈ round(30 / ~2-day epoch) CLOSED epochs — matches the hub's
+  // "Last 30 days" window (which also excludes the running epoch) so the
+  // same "last 30 days" figure agrees across the income page, compare,
+  // and the validator hub.
+  const LAST_30D_EPOCHS = 15;
 
   let { data }: { data: PageData } = $props();
 
@@ -160,20 +164,22 @@
   const safeWebsiteUrl = $derived(safeOperatorUrl(history.website));
   const safeIconUrl = $derived(safeOperatorUrl(history.iconUrl));
 
-  const lastMonthRows = $derived<ValidatorEpochRecord[]>(history.items.slice(0, LAST_MONTH_EPOCHS));
-  const lastMonthFeesSol = $derived<number>(
-    lastMonthRows.reduce((acc, r) => {
+  const last30dRows = $derived<ValidatorEpochRecord[]>(
+    history.items.filter((r) => !r.isCurrentEpoch).slice(0, LAST_30D_EPOCHS),
+  );
+  const last30dFeesSol = $derived<number>(
+    last30dRows.reduce((acc, r) => {
       const v = r.blockFeesTotalSol === null ? 0 : Number(r.blockFeesTotalSol);
       return acc + (Number.isFinite(v) ? v : 0);
     }, 0),
   );
-  const lastMonthMevSol = $derived<number>(
-    lastMonthRows.reduce((acc, r) => {
+  const last30dMevSol = $derived<number>(
+    last30dRows.reduce((acc, r) => {
       const v = r.blockTipsTotalSol === null ? 0 : Number(r.blockTipsTotalSol);
       return acc + (Number.isFinite(v) ? v : 0);
     }, 0),
   );
-  const lastMonthTotalSol = $derived<number>(lastMonthFeesSol + lastMonthMevSol);
+  const last30dTotalSol = $derived<number>(last30dFeesSol + last30dMevSol);
 
   const latestClosedRow = $derived<ValidatorEpochRecord | null>(
     history.items.find((r) => r.isFinal) ?? null,
@@ -210,7 +216,7 @@
   // standardises on the slightly wider bullet across both pages.
   const pageTitle = $derived(`${titleLabel} • Epoch income • ${SITE_NAME}`);
   const pageDescription = $derived(
-    `Per-epoch income for ${titleLabel}: block fees, on-chain Jito tips, slot production, and indexed-validator average income per leader slot over the most recent month-sized window.`,
+    `Per-epoch income for ${titleLabel}: block fees, on-chain Jito tips, slot production, and indexed-validator average income per leader slot over the most recent 30-day window.`,
   );
 
   /**
@@ -259,10 +265,10 @@
         variableMeasured: [
           {
             '@type': 'PropertyValue',
-            name: 'lastMonthIncomeSol',
-            value: lastMonthTotalSol > 0 ? lastMonthTotalSol.toFixed(9) : '0',
+            name: 'last30dIncomeSol',
+            value: last30dTotalSol > 0 ? last30dTotalSol.toFixed(9) : '0',
             description:
-              'Block fees + on-chain Jito tip earnings (in SOL) over the most recent month-sized window',
+              'Block fees + on-chain Jito tip earnings (in SOL) over the most recent 30-day window (closed epochs)',
           },
           {
             '@type': 'PropertyValue',
@@ -674,16 +680,16 @@
           <p
             class="inline-flex items-center text-xs font-semibold uppercase tracking-wider text-[color:var(--color-text-subtle)]"
           >
-            Total income · last month
+            Total income · last 30 days
             <Tooltip
-              label="About last-month income"
-              content="Block fees + on-chain Jito tips over the most recent month-sized indexed window. This is OPERATOR income — it accrues to the validator identity, not to delegators. A delegator's staking yield is inflation rewards (not tracked here) minus the validator's commission; block fees go to the operator and only MEV tips are partly shared."
+              label="About last-30-days income"
+              content="Block fees + on-chain Jito tips over the most recent 30-day indexed window (closed epochs). This is OPERATOR income — it accrues to the validator identity, not to delegators. A delegator's staking yield is inflation rewards (not tracked here) minus the validator's commission; block fees go to the operator and only MEV tips are partly shared."
             />
           </p>
           <p
             class="mt-1 text-4xl font-semibold tracking-tight text-[color:var(--color-brand-500)] sm:text-5xl"
           >
-            ◎{formatSol(lastMonthTotalSol.toString())}
+            ◎{formatSol(last30dTotalSol.toString())}
           </p>
           {#if commissionPct !== null || runsJito !== null}
             <p
@@ -1016,9 +1022,9 @@
             </th>
             <th scope="col" class="px-4 py-3 text-right">
               <span class="inline-flex items-center justify-end">
-                MEV
+                MEV tips
                 <Tooltip
-                  label="About MEV"
+                  label="About MEV tips"
                   placement="bottom"
                   content="On-chain Jito tips derived from this validator's produced blocks. This is the live MEV signal used in totals."
                 />
