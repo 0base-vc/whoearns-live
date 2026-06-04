@@ -21,6 +21,7 @@
   import { LineChart, Tooltip } from 'layerchart';
   import type { ValidatorEpochRecord } from '$lib/types';
   import { TRUST_CLIENT_LABEL } from '$lib/tier';
+  import ChartEmptyState from './ChartEmptyState.svelte';
 
   let { history }: { history: ValidatorEpochRecord[] } = $props();
 
@@ -90,8 +91,10 @@
   // Friendly client name for the same-client series label, off the
   // benchmark's `clientKind` (identical across epochs).
   const clientLabel = $derived.by<string | null>(() => {
+    // Off the unfiltered `history` (not `sortedHistory`) so the client
+    // name still resolves in the empty state.
     const kind =
-      sortedHistory.find((r) => (r.peerBenchmark?.clientKind ?? null) !== null)?.peerBenchmark
+      history.find((r) => (r.peerBenchmark?.clientKind ?? null) !== null)?.peerBenchmark
         ?.clientKind ?? null;
     if (kind === null) return null;
     return TRUST_CLIENT_LABEL[kind] ?? kind;
@@ -142,6 +145,24 @@
   const hasValidator = $derived(chartData.some((p) => p.validatorCu !== null));
   const hasService = $derived(chartData.some((p) => p.serviceCu !== null));
   const hasSameClient = $derived(chartData.some((p) => p.sameClientCu !== null));
+
+  // Latest cohort numbers, shown small in the empty state when this
+  // validator has no produced-block line yet; newest epoch with a value
+  // wins. Read from the unfiltered `history` to stay correct regardless
+  // of the per-row plot filter.
+  const cohortContext = $derived.by<Array<{ label: string; value: string }>>(() => {
+    const newestFirst = [...history].sort((a, b) => b.epoch - a.epoch);
+    const stats: Array<{ label: string; value: string }> = [];
+    const serviceRow = newestFirst.find((r) => serviceCu(r) !== null);
+    if (serviceRow !== undefined) {
+      stats.push({ label: 'Indexed average', value: formatCu(serviceCu(serviceRow)) });
+    }
+    const sameClientRow = newestFirst.find((r) => sameClientCu(r) !== null);
+    if (sameClientRow !== undefined) {
+      stats.push({ label: sameClientSeriesLabel, value: formatCu(sameClientCu(sameClientRow)) });
+    }
+    return stats;
+  });
 
   interface SeriesConfig {
     key: string;
@@ -219,8 +240,6 @@
     return first !== undefined && last !== undefined ? { first, last } : null;
   });
 
-  const hasAnySeries = $derived(series.length > 0);
-
   /**
    * Compact human-readable CU formatting for axis ticks + tooltip.
    * Tens of millions render as e.g. `31.2M`; smaller values fall back
@@ -273,18 +292,18 @@
         Average compute units per produced block. Dashed final segment = running epoch.
       </p>
     </div>
-    {#if epochRange !== null}
+    {#if epochRange !== null && hasValidator}
       <span class="whitespace-nowrap text-xs text-[color:var(--color-text-subtle)]">
         Epoch {epochRange.first} - {epochRange.last}
       </span>
     {/if}
   </header>
 
-  {#if !hasAnySeries}
-    <p class="py-12 text-center text-sm text-[color:var(--color-text-muted)]">
-      No compute-unit data to plot yet. Once the indexer processes produced blocks, points will
-      appear here.
-    </p>
+  {#if !hasValidator}
+    <ChartEmptyState
+      message="No produced-block compute units for this validator in this window yet. Its line appears once the indexer records blocks it produces — usually from the next epoch it's tracked."
+      cohortStats={cohortContext}
+    />
   {:else}
     <div
       class="h-72 w-full"
