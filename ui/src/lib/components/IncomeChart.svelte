@@ -2,6 +2,7 @@
   import { LineChart, Tooltip } from 'layerchart';
   import type { ValidatorEpochRecord } from '$lib/types';
   import { TRUST_CLIENT_LABEL } from '$lib/tier';
+  import ChartEmptyState from './ChartEmptyState.svelte';
 
   let { history }: { history: ValidatorEpochRecord[] } = $props();
 
@@ -76,8 +77,11 @@
   // the benchmark's `clientKind` (identical across epochs). `null` →
   // the same-client series doesn't render.
   const clientLabel = $derived.by<string | null>(() => {
+    // Off the unfiltered `history` (not `sortedHistory`) so the client
+    // name is still resolved for the empty state, where the own-income
+    // filter would otherwise leave no rows to read `clientKind` from.
     const kind =
-      sortedHistory.find((r) => (r.peerBenchmark?.clientKind ?? null) !== null)?.peerBenchmark
+      history.find((r) => (r.peerBenchmark?.clientKind ?? null) !== null)?.peerBenchmark
         ?.clientKind ?? null;
     if (kind === null) return null;
     return TRUST_CLIENT_LABEL[kind] ?? kind;
@@ -125,6 +129,30 @@
   const hasValidator = $derived(chartData.some((p) => p.validatorIncomePerSlot !== null));
   const hasPeerAvg = $derived(chartData.some((p) => p.peerAvgIncomePerSlot !== null));
   const hasSameClient = $derived(chartData.some((p) => p.sameClientIncomePerSlot !== null));
+
+  // Latest cohort numbers, shown small in the empty state when this
+  // validator has no own line yet. Read from the unfiltered `history`
+  // (the own-income filter behind `sortedHistory` drops the very rows
+  // the benchmark lives on); newest epoch with a value wins.
+  const cohortContext = $derived.by<Array<{ label: string; value: string }>>(() => {
+    const newestFirst = [...history].sort((a, b) => b.epoch - a.epoch);
+    const stats: Array<{ label: string; value: string }> = [];
+    const peerRow = newestFirst.find((r) => peerAvgIncomePerSlot(r) !== null);
+    if (peerRow !== undefined) {
+      stats.push({
+        label: 'Indexed average',
+        value: `${formatIncomePerSlot(peerAvgIncomePerSlot(peerRow))} SOL/slot`,
+      });
+    }
+    const sameClientRow = newestFirst.find((r) => sameClientIncomePerSlot(r) !== null);
+    if (sameClientRow !== undefined) {
+      stats.push({
+        label: sameClientSeriesLabel,
+        value: `${formatIncomePerSlot(sameClientIncomePerSlot(sameClientRow))} SOL/slot`,
+      });
+    }
+    return stats;
+  });
 
   interface SeriesConfig {
     key: string;
@@ -201,8 +229,6 @@
     return first !== undefined && last !== undefined ? { first, last } : null;
   });
 
-  const hasAnySeries = $derived(series.length > 0);
-
   function percentVs(value: number | null, baseline: number | null): number | null {
     if (value === null || baseline === null || baseline <= 0) return null;
     return value / baseline - 1;
@@ -236,18 +262,18 @@
         Total income normalized by scheduled leader slots. Dashed final segment = running epoch.
       </p>
     </div>
-    {#if epochRange !== null}
+    {#if epochRange !== null && hasValidator}
       <span class="whitespace-nowrap text-xs text-[color:var(--color-text-subtle)]">
         Epoch {epochRange.first} - {epochRange.last}
       </span>
     {/if}
   </header>
 
-  {#if !hasAnySeries}
-    <p class="py-12 text-center text-sm text-[color:var(--color-text-muted)]">
-      No epoch income data to plot yet. Once the indexer processes leader-slot income, points will
-      appear here.
-    </p>
+  {#if !hasValidator}
+    <ChartEmptyState
+      message="No leader-slot income for this validator in this window yet. Its line appears once the indexer records blocks it produces — usually from the next epoch it's tracked."
+      cohortStats={cohortContext}
+    />
   {:else}
     <div
       class="h-72 w-full"
