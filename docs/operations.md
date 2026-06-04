@@ -129,8 +129,9 @@ SQL migrations live in `src/storage/migrations/` and are applied by
 The worker runs a fixed set of cooperative-timer jobs (see
 [`architecture.md`](./architecture.md) for the data-flow view). The
 core ingestion jobs — epoch watcher, slot ingester, fee ingester,
-aggregates, closed-epoch reconciler, validator-info refresh — are
-covered there. The Phase 2-6 gamification jobs are:
+aggregates, closed-epoch reconciler, validator-info refresh,
+validator-info bulk ingester — are covered there. The Phase 2-6
+gamification jobs are:
 
 | Job                      | Env interval                  | Default | What it does                                                                                                                                                                                                                                                                                |
 | ------------------------ | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -139,11 +140,11 @@ covered there. The Phase 2-6 gamification jobs are:
 | SIMD curation pipeline   | `SIMD_CURATION_INTERVAL_MS`   | 12 h    | Enriches pending `simd_proposals` rows via the Anthropic API. **Gated on `ANTHROPIC_API_KEY`** — unset means curation is disabled entirely (the SIMD route still serves already-curated rows; new SIMDs stay pre-review). `ANTHROPIC_MODEL` selects the model, default `claude-sonnet-4-6`. |
 
 Cold-start note: the RPC-bursty jobs (slot/fee ingest, cluster-nodes,
-wallet-activity, validator-info, closed-epoch reconcile) carry
-staggered first-tick delays so a fresh boot doesn't fire every job's
-first RPC call at second 0 — see `initialDelayMs` in
-`src/entrypoints/worker.ts`. The epoch watcher and aggregates job
-still tick immediately.
+wallet-activity, validator-info refresh, validator-info bulk ingester,
+closed-epoch reconcile) carry staggered first-tick delays so a fresh
+boot doesn't fire every job's first RPC call at second 0 — see
+`initialDelayMs` in `src/entrypoints/worker.ts`. The epoch watcher and
+aggregates job still tick immediately.
 
 Each tick emits `jobs_executed_total{job,outcome}` and
 `jobs_tick_duration_seconds{job}` on the `/metrics` endpoint — alert

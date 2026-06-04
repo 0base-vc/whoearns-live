@@ -51,6 +51,15 @@ and this project follows [Semantic Versioning](https://semver.org/).
     available.
 - MCP tools `get_validator_tier` and `get_validator_badges` mirroring
   the public HTTP surface.
+- Cluster-wide validator-info bulk ingester (`VALIDATOR_INFO_BULK_INTERVAL_MS`,
+  default 6h) — one `getConfigProgramAccounts` pull (~2000 records, ~3 MB)
+  per tick fills `name` / `keybase_username` / `website` / `icon_url` for
+  every published validator, not just the watched set. Lets
+  `GET /v1/validators/search` match a moniker like "Chainflow" for
+  validators nobody has explicitly tracked. The new
+  `ValidatorsRepository.upsertInfoBatch` writes the cluster in one
+  `UPDATE ... FROM UNNEST` round-trip with an `IS DISTINCT FROM` guard,
+  so a tick where no operator renamed is a zero-row write.
 
 ### Changed
 
