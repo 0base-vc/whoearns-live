@@ -19,6 +19,7 @@ import type {
 } from '../../types/domain.js';
 import { cacheControl } from '../cache-control.js';
 import { setNoStoreCache } from '../cache-headers.js';
+import { validatorDynamicWatchAttemptsTotal } from '../metrics.js';
 import { HistoryQuerySchema, VoteOrIdentityParamSchema } from '../schemas/requests.js';
 import { serializeValidator } from '../serializers/validator-response.js';
 import { unwrap } from '../zod-helpers.js';
@@ -53,7 +54,7 @@ export interface ValidatorsHistoryRoutesDeps {
     | 'getEpochComputeUnitsByClient'
   >;
   watchedDynamicRepo: Pick<WatchedDynamicRepository, 'touchLookup' | 'add'>;
-  validatorService: Pick<ValidatorService, 'trackOnDemand' | 'getActivatedStakeLamports'>;
+  validatorService: Pick<ValidatorService, 'trackOnDemand' | 'ensureActivatedStakeLamports'>;
   /**
    * Phase 3 profile decoration. When present, the response merges
    * `twitter_handle` + `hide_footer_cta` + `opted_out` onto the top-
@@ -210,28 +211,120 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // isn't slowed by bookkeeping.
     void watchedDynamicRepo.touchLookup(validator.votePubkey);
 
-    // Ensure known validators can enter the dynamic watched set without
-    // re-entering `trackOnDemand`. The unknown-validator path may refresh
-    // vote accounts via RPC; doing that on every known direct hit would
-    // reintroduce cold-start RPC amplification. This path only trusts the
-    // in-memory stake cache populated by the validator refresh job.
-    const activatedStakeLamports = validatorService.getActivatedStakeLamports(validator.votePubkey);
-    if (
-      activatedStakeLamports !== null &&
-      activatedStakeLamports >= DYNAMIC_WATCH_MIN_ACTIVATED_STAKE_LAMPORTS
-    ) {
-      void watchedDynamicRepo
-        .add({
-          votePubkey: validator.votePubkey,
-          activatedStakeLamportsAtAdd: activatedStakeLamports,
-        })
-        .catch((err) => {
+    // Known-validator dynamic-watch ensure. The API process's
+    // ValidatorService cache is never primed by the periodic refresh job
+    // (that's worker-only), so `ensureActivatedStakeLamports` lazily
+    // populates it via one throttled, in-flight-deduped RPC on cache miss.
+    // The discriminated return tells us why we either added or skipped.
+    //
+    // Before this change (pre PR #25 + #26), nearly every direct hit took
+    // the unknown path through `trackOnDemand`, which had its own refresh.
+    // The bulk-info-ingester (PR #25) flipped ~554 validators to the known
+    // path and exposed a permanent cache miss in the API process — the
+    // route silently skipped registration, so the fee-ingester never picked
+    // them up.
+    //
+    // CRITICAL: this is FIRE-AND-FORGET. We MUST NOT await ensure() on the
+    // response critical path. The history data is already local in
+    // `statsRepo`; the dynamic-watch registration is purely an observation
+    // side-effect for the fee-ingester to pick up later. Awaiting would
+    // serialize every cold-cache detail-page request behind a multi-second
+    // (and potentially multi-retry, 30s × 3 = 90s on the documented
+    // defaults) `getVoteAccounts` round-trip — turning an outage of the
+    // upstream RPC into an outage of /v1/validators/.../history itself.
+    // Codex PR #28 review flagged this as P2; race-safety reviewer #3
+    // flagged it as a TTFB concern. Background-dispatch removes both.
+    const baseLog = {
+      event: 'ensure_watched_dynamic',
+      source: 'validators-history.known-path',
+      vote: validator.votePubkey,
+      identity: validator.identityPubkey,
+    };
+    void validatorService
+      .ensureActivatedStakeLamports(validator.votePubkey)
+      .then((ensured) => {
+        if (ensured.source === 'refresh-failed') {
+          validatorDynamicWatchAttemptsTotal.inc({ outcome: 'refresh_failed' });
           request.log.warn(
-            { err, vote: validator.votePubkey },
-            'validators-history: ensure-watched add failed (non-fatal)',
+            { ...baseLog, outcome: 'refresh_failed', err: ensured.error },
+            'ensure-watched-dynamic: lazy refresh failed; validator not registered this tick',
           );
-        });
-    }
+          return;
+        }
+        if (ensured.source === 'unknown-vote') {
+          // DB has the row, RPC dropped it. Skip silently — no counter,
+          // no log. Re-tries are bounded by the success cooldown inside
+          // the service.
+          return;
+        }
+        if (ensured.lamports < DYNAMIC_WATCH_MIN_ACTIVATED_STAKE_LAMPORTS) {
+          validatorDynamicWatchAttemptsTotal.inc({ outcome: 'below_stake_floor' });
+          request.log.debug(
+            {
+              ...baseLog,
+              outcome: 'below_stake_floor',
+              source_kind: ensured.source,
+              activatedStakeLamports: ensured.lamports.toString(),
+              floorLamports: DYNAMIC_WATCH_MIN_ACTIVATED_STAKE_LAMPORTS.toString(),
+            },
+            'ensure-watched-dynamic: stake below floor; intentional skip',
+          );
+          return;
+        }
+        const stake = ensured.lamports;
+        const wasColdMiss = ensured.source === 'refresh';
+        return watchedDynamicRepo
+          .add({ votePubkey: validator.votePubkey, activatedStakeLamportsAtAdd: stake })
+          .then(() => {
+            if (wasColdMiss) {
+              validatorDynamicWatchAttemptsTotal.inc({ outcome: 'cold_miss_refreshed' });
+              request.log.info(
+                {
+                  ...baseLog,
+                  outcome: 'cold_miss_refreshed',
+                  activatedStakeLamports: stake.toString(),
+                },
+                'ensure-watched-dynamic: cold cache miss lazily filled; validator registered',
+              );
+            }
+            // cache-hit + add success path stays log-quiet (SCORING-tier traffic).
+          })
+          .catch((err: unknown) => {
+            validatorDynamicWatchAttemptsTotal.inc({ outcome: 'db_add_failed' });
+            const pgCode = (err as { code?: string } | null)?.code;
+            const fields = {
+              ...baseLog,
+              outcome: 'db_add_failed',
+              pgCode,
+              activatedStakeLamports: stake.toString(),
+              err,
+            };
+            if (pgCode === '23503') {
+              // FK violation: validators row vanished between findByVote()
+              // above and this add(). That's a hard consistency bug —
+              // emit at error.
+              request.log.error(
+                fields,
+                'ensure-watched-dynamic: FK violation — validators row missing (consistency bug)',
+              );
+            } else {
+              request.log.warn(
+                fields,
+                'ensure-watched-dynamic: dynamic-watch upsert failed (non-fatal)',
+              );
+            }
+          });
+      })
+      .catch((err: unknown) => {
+        // Defensive: `ensureActivatedStakeLamports` is documented to never
+        // throw (refresh failures resolve to source: 'refresh-failed').
+        // If that contract is ever violated, surface the bug instead of
+        // swallowing it — the rest of the request has already returned.
+        request.log.error(
+          { ...baseLog, err },
+          'ensure-watched-dynamic: ensure() rejected — contract violation',
+        );
+      });
 
     // Phase 3: pull the validator's profile + claim in parallel with
     // history. If the operator has opted out, the short-circuit

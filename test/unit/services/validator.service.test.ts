@@ -353,6 +353,204 @@ describe('ValidatorService.trackOnDemand', () => {
   });
 });
 
+/**
+ * `ensureActivatedStakeLamports` is the seam the API process uses to
+ * lazily populate its stake cache on the known-validator path. The API
+ * `ValidatorService` instance has no periodic `refreshFromRpc` tick
+ * (that runs on the worker only), so without lazy refresh, bulk-ingested
+ * validators (see PR #25) would sit at a permanent cache miss and never
+ * make it into `watched_validators_dynamic`. These tests lock down the
+ * cache-hit / refresh-fill / refresh-failure / dedup / negative-cache
+ * invariants of that seam.
+ */
+describe('ValidatorService.ensureActivatedStakeLamports', () => {
+  /**
+   * Type-safe helper for poking the private fields these tests rely on.
+   * Keeps the casts readable + isolated.
+   */
+  type ServiceInternals = {
+    onDemandMissUntilByPubkey: Map<string, number>;
+    nextOnDemandRefreshAllowedAtMs: number;
+  };
+
+  it('returns source=cache without RPC when the cache is warm and leaves the negative cache untouched', async () => {
+    const repo = new FakeValidatorsRepo();
+    const rpc = makeRpcStub();
+    const service = makeService(rpc, repo);
+
+    // Seed the cache via a real refresh.
+    await service.refreshFromRpc(0);
+    (rpc.getVoteAccounts as ReturnType<typeof vi.fn>).mockClear();
+
+    const result = await service.ensureActivatedStakeLamports(VOTE_A);
+    expect(result).toEqual({ source: 'cache', lamports: 1_000_000_000_000n });
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(0);
+    // The negative cache is reserved for trackOnDemand's unknown-pubkey
+    // probes — known-path lookups must never write to it.
+    expect((service as unknown as ServiceInternals).onDemandMissUntilByPubkey.size).toBe(0);
+  });
+
+  it('cache-cold triggers one RPC refresh and returns source=refresh; second call within cooldown stays at cache', async () => {
+    const repo = new FakeValidatorsRepo();
+    const rpc = makeRpcStub();
+    const service = makeService(rpc, repo);
+
+    const first = await service.ensureActivatedStakeLamports(VOTE_A);
+    expect(first).toEqual({ source: 'refresh', lamports: 1_000_000_000_000n });
+
+    const second = await service.ensureActivatedStakeLamports(VOTE_A);
+    expect(second).toEqual({ source: 'cache', lamports: 1_000_000_000_000n });
+
+    // One RPC across both calls. NOTE: it's the cache-first lookup at the
+    // top of `ensureActivatedStakeLamports` that prevents the second RPC,
+    // NOT the success cooldown — by the time control would reach
+    // `refreshOnDemandVoteAccounts`, the first refresh has already
+    // populated the entry, so we return at the cache-hit branch. The
+    // cooldown is what defends a DIFFERENT-vote cache-miss within the
+    // 5-min window (covered separately). Asserting both here as defense-
+    // in-depth: RPC call count AND cooldown gate engaged.
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
+    expect((service as unknown as ServiceInternals).nextOnDemandRefreshAllowedAtMs).toBeGreaterThan(
+      Date.now(),
+    );
+  });
+
+  it('cache-cold + vote not in RPC reply returns source=unknown-vote and does not write the negative cache', async () => {
+    const repo = new FakeValidatorsRepo();
+    // Snapshot only carries VOTE_A; VOTE_B is absent.
+    const rpc = makeRpcStub({
+      current: [voteAccountsFixture.current[0]!],
+      delinquent: [],
+    });
+    const service = makeService(rpc, repo);
+
+    const result = await service.ensureActivatedStakeLamports(VOTE_B);
+    expect(result).toEqual({ source: 'unknown-vote' });
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
+    // Same invariant as the cache-warm case: known-path lookups must
+    // never pollute trackOnDemand's negative cache.
+    expect((service as unknown as ServiceInternals).onDemandMissUntilByPubkey.size).toBe(0);
+  });
+
+  it('returns source=refresh-failed without throwing and engages the failure cooldown', async () => {
+    const repo = new FakeValidatorsRepo();
+    const rpc: Pick<SolanaRpcClient, 'getVoteAccounts'> = {
+      getVoteAccounts: vi.fn().mockRejectedValue(new Error('upstream timeout')),
+    };
+    const service = makeService(rpc, repo);
+
+    const before = Date.now();
+    // The first call must resolve (not reject) — the contract is that
+    // route handlers can `await` without try/catch.
+    await expect(service.ensureActivatedStakeLamports(VOTE_A)).resolves.toEqual(
+      expect.objectContaining({ source: 'refresh-failed' }),
+    );
+
+    // The cooldown gate should now be ~30s in the future (failure cooldown).
+    const nextAt = (service as unknown as ServiceInternals).nextOnDemandRefreshAllowedAtMs;
+    expect(nextAt).toBeGreaterThanOrEqual(before + 25_000);
+    expect(nextAt).toBeLessThanOrEqual(before + 35_000 + 1_000);
+
+    // Negative cache is reserved for trackOnDemand — refresh failures
+    // here must not write to it. Retry pressure is bounded by the
+    // refreshOnDemandVoteAccounts cooldown gate alone (verified by the
+    // 'second call within failure cooldown' test below).
+    expect((service as unknown as ServiceInternals).onDemandMissUntilByPubkey.size).toBe(0);
+  });
+
+  it('second call within failure cooldown returns refresh-failed and does NOT re-issue an RPC', async () => {
+    // Regression guard for the cold-cache stampede flagged in Codex PR
+    // review of #28: previously the refreshOnDemandVoteAccounts gate
+    // only engaged when `lastRefresh.length > 0`, so an RPC outage on
+    // a fresh-boot empty cache let every subsequent caller bypass the
+    // 30s failure cooldown and burst one RPC per request. Now the gate
+    // engages immediately; the second call sees the cooldown, gets the
+    // previous error re-thrown, and the route reports `refresh-failed`
+    // without touching the upstream.
+    const repo = new FakeValidatorsRepo();
+    const rpc: Pick<SolanaRpcClient, 'getVoteAccounts'> = {
+      getVoteAccounts: vi.fn().mockRejectedValue(new Error('upstream timeout')),
+    };
+    const service = makeService(rpc, repo);
+
+    const first = await service.ensureActivatedStakeLamports(VOTE_A);
+    expect(first).toMatchObject({ source: 'refresh-failed' });
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
+
+    // Second call — a DIFFERENT vote, to prove the cooldown gate (not
+    // any per-vote dedup) is what stops the second RPC. The cache is
+    // still cold (lastRefresh.length === 0) and the cooldown is still
+    // active. The gate must engage and re-throw, which `ensure` maps
+    // to `refresh-failed` — the SAME failure mode, not a `unknown-vote`
+    // miscategorization that would silently skip the metric/log.
+    const second = await service.ensureActivatedStakeLamports(VOTE_B);
+    expect(second).toMatchObject({ source: 'refresh-failed' });
+    if (second.source === 'refresh-failed') {
+      expect((second.error as Error).message).toBe('upstream timeout');
+    }
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1); // STILL one — no second RPC.
+  });
+
+  it('after the failure cooldown expires, the next call retries the RPC', async () => {
+    // Recovery path: the cooldown isn't a permanent shutout. After the
+    // window passes, the next ensure() call is allowed to attempt RPC
+    // again — confirms the failed-attempt error doesn't stick once the
+    // cooldown clears.
+    const repo = new FakeValidatorsRepo();
+    const rpc: Pick<SolanaRpcClient, 'getVoteAccounts'> = {
+      getVoteAccounts: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('upstream timeout'))
+        .mockResolvedValueOnce(voteAccountsFixture),
+    };
+    const service = makeService(rpc, repo);
+
+    await service.ensureActivatedStakeLamports(VOTE_A); // refresh-failed, sets 30s cooldown
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
+
+    // Reach into internals to expire the cooldown without faking time —
+    // mirrors the existing `service as ServiceInternals` pattern used
+    // elsewhere in this file and keeps the test deterministic without
+    // pulling in vi.useFakeTimers globals.
+    (service as unknown as ServiceInternals).nextOnDemandRefreshAllowedAtMs = Date.now() - 1;
+
+    const third = await service.ensureActivatedStakeLamports(VOTE_A);
+    expect(third).toMatchObject({ source: 'refresh', lamports: 1_000_000_000_000n });
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(2); // second RPC fired
+  });
+
+  it('two parallel cold-cache callers share a single RPC fetch (stampede dedup)', async () => {
+    const repo = new FakeValidatorsRepo();
+    // Manually-deferred promise so both callers race the same in-flight
+    // refresh. Without dedup we'd see two parallel `getVoteAccounts`
+    // calls; with it, both ensure() awaits resolve off one fetch.
+    let resolveAccounts: ((value: typeof voteAccountsFixture) => void) | undefined;
+    const accountsPromise = new Promise<typeof voteAccountsFixture>((resolve) => {
+      resolveAccounts = resolve;
+    });
+    const rpc: Pick<SolanaRpcClient, 'getVoteAccounts'> = {
+      getVoteAccounts: vi.fn().mockReturnValue(accountsPromise),
+    };
+    const service = makeService(rpc, repo);
+
+    // Kick off both ensure() calls without awaiting — they should
+    // collide on the same in-flight `onDemandRefreshPromise`.
+    const pA = service.ensureActivatedStakeLamports(VOTE_A);
+    const pB = service.ensureActivatedStakeLamports(VOTE_B);
+    // Yield once so both calls reach their `await refreshOnDemandVoteAccounts()`.
+    await Promise.resolve();
+    // Now resolve the deferred RPC; both ensures unwind off the same fetch.
+    resolveAccounts!(voteAccountsFixture);
+
+    const [resultA, resultB] = await Promise.all([pA, pB]);
+    expect(resultA).toEqual({ source: 'refresh', lamports: 1_000_000_000_000n });
+    expect(resultB).toEqual({ source: 'refresh', lamports: 500_000_000_000n });
+    // The load-bearing invariant: one RPC, two callers — the
+    // onDemandRefreshPromise dedupe must collapse them.
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('ValidatorService.refreshValidatorInfoForIdentity', () => {
   function validatorInfo(configData: {
     name?: string;

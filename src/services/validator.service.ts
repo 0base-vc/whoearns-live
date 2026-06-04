@@ -15,6 +15,28 @@ import type {
 export type WatchMode = 'explicit' | 'all' | 'top';
 
 /**
+ * Outcome of {@link ValidatorService.ensureActivatedStakeLamports}.
+ *
+ *   - `cache`          — cache was warm; no RPC issued.
+ *   - `refresh`        — cache was cold; on-demand RPC refresh primed
+ *                        it and the vote was found in the snapshot.
+ *   - `unknown-vote`   — cache was cold; refresh ran but vote is not
+ *                        in `getVoteAccounts` (e.g. permanently
+ *                        delinquent + dropped). Caller should skip
+ *                        registering, not retry.
+ *   - `refresh-failed` — RPC threw. Caller should keep serving its
+ *                        best-effort response and try again on the
+ *                        next request (the 30s failure cooldown
+ *                        inside `refreshOnDemandVoteAccounts` will
+ *                        absorb retry storms).
+ */
+export type EnsureStakeResult =
+  | { source: 'cache'; lamports: bigint }
+  | { source: 'refresh'; lamports: bigint }
+  | { source: 'unknown-vote' }
+  | { source: 'refresh-failed'; error: unknown };
+
+/**
  * Coerce a raw validator-info string into `null | string`:
  *   - `undefined` → null
  *   - strings that trim to empty → null
@@ -84,6 +106,16 @@ export class ValidatorService {
   private lastStakeByVote: Map<VotePubkey, number> = new Map();
   private onDemandRefreshPromise: Promise<void> | null = null;
   private nextOnDemandRefreshAllowedAtMs = 0;
+  /**
+   * Last error thrown by `refreshOnDemandVoteAccounts`, retained so the
+   * cooldown gate can re-throw it when the cache is still cold. Without
+   * this, an RPC outage on a fresh-boot empty cache would let every
+   * subsequent caller (a different unknown pubkey through `trackOnDemand`
+   * or a different known vote through `ensureActivatedStakeLamports`)
+   * bypass the cooldown via the legacy `lastRefresh.length > 0` carve-out
+   * and burst one RPC per request. Cleared on the next successful refresh.
+   */
+  private lastOnDemandRefreshError: unknown = null;
   private onDemandMissUntilByPubkey: Map<string, number> = new Map();
   private readonly onDemandNegativeCacheMaxEntries: number;
 
@@ -117,6 +149,45 @@ export class ValidatorService {
     // integers, but we want ToBigInt to succeed).
     if (raw <= 0) return 0n;
     return BigInt(Math.floor(raw));
+  }
+
+  /**
+   * Cache-first stake lookup with one-shot lazy refresh on miss.
+   *
+   * Built for the API process, whose `ValidatorService` cache is never
+   * primed by a periodic `refreshFromRpc` tick (only the worker's
+   * epoch-watcher does that). Bulk-ingested validators (see PR #25)
+   * hit the known path in `validators-history.route` and would otherwise
+   * see a permanent cache miss, silently skipping registration into
+   * `watched_validators_dynamic`.
+   *
+   * Reuses {@link refreshOnDemandVoteAccounts}, inheriting:
+   *   - in-flight dedupe via `onDemandRefreshPromise` (concurrent
+   *     callers collapse to one RPC),
+   *   - 5-minute success cooldown (`ON_DEMAND_REFRESH_COOLDOWN_MS`),
+   *   - 30-second failure cooldown (`ON_DEMAND_REFRESH_FAILURE_COOLDOWN_MS`),
+   *   - cold-start gate bypass when `lastRefresh.length === 0`.
+   *
+   * Does NOT touch `onDemandMissUntilByPubkey`: that negative cache
+   * exists to throttle unknown-pubkey probes from `trackOnDemand` and
+   * MUST NOT gate known validators here.
+   *
+   * Never throws — route handlers can `await` without try/catch and
+   * dispatch on the returned discriminator.
+   */
+  async ensureActivatedStakeLamports(vote: VotePubkey): Promise<EnsureStakeResult> {
+    const cached = this.getActivatedStakeLamports(vote);
+    if (cached !== null) return { source: 'cache', lamports: cached };
+
+    try {
+      await this.refreshOnDemandVoteAccounts();
+    } catch (error) {
+      return { source: 'refresh-failed', error };
+    }
+
+    const refreshed = this.getActivatedStakeLamports(vote);
+    if (refreshed === null) return { source: 'unknown-vote' };
+    return { source: 'refresh', lamports: refreshed };
   }
 
   /**
@@ -720,12 +791,26 @@ export class ValidatorService {
       await this.onDemandRefreshPromise;
       return;
     }
-    // Cooldown gate: when the cache is already primed, accept stale
-    // data rather than burst the upstream RPC. Cold start (cache
-    // empty) bypasses the gate so a freshly-booted pod can prime its
-    // cache on the first request without waiting for the periodic
-    // epoch-watcher tick.
-    if (this.lastRefresh.length > 0 && Date.now() < this.nextOnDemandRefreshAllowedAtMs) {
+    // Cooldown gate. Honoured ALWAYS — including the cold-start case
+    // where `lastRefresh` is still empty. The previous carve-out
+    // (`lastRefresh.length > 0 &&` ...) let an RPC outage on a fresh-
+    // boot empty cache burst one RPC per request: the 30s failure
+    // cooldown was set, but the gate ignored it while the cache was
+    // empty, so the next request (different pubkey for trackOnDemand,
+    // or any known-path `ensureActivatedStakeLamports` caller) tried
+    // RPC again. Now the gate engages immediately; the next caller
+    // either gets the warm cache (success path) OR a re-thrown
+    // "previous refresh failed" error (failure path), and the upstream
+    // gets exactly one attempt per 30s window during an outage.
+    if (Date.now() < this.nextOnDemandRefreshAllowedAtMs) {
+      // If the cache is cold AND the previous attempt failed, the
+      // caller can't tell "RPC down" from "validator legitimately not
+      // in the snapshot" without us re-throwing. With a primed cache,
+      // staying silent is correct — accept staleness, let the caller
+      // proceed with what we've got.
+      if (this.lastRefresh.length === 0 && this.lastOnDemandRefreshError !== null) {
+        throw this.lastOnDemandRefreshError;
+      }
       return;
     }
 
@@ -736,8 +821,10 @@ export class ValidatorService {
         // refresh.
         await this.refreshFromRpc(0);
         this.nextOnDemandRefreshAllowedAtMs = Date.now() + ON_DEMAND_REFRESH_COOLDOWN_MS;
+        this.lastOnDemandRefreshError = null;
       } catch (err) {
         this.nextOnDemandRefreshAllowedAtMs = Date.now() + ON_DEMAND_REFRESH_FAILURE_COOLDOWN_MS;
+        this.lastOnDemandRefreshError = err;
         throw err;
       } finally {
         this.onDemandRefreshPromise = null;

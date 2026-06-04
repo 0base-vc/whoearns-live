@@ -198,6 +198,30 @@ export function routeLabelFor(opts: { routeUrl?: string | undefined; rawUrl: str
 }
 
 /**
+ * `validator_dynamic_watch_attempts_total` — per-outcome counter for the
+ * known-validator path in `validators-history.route`. Exists because
+ * the route lazily refreshes the per-process stake cache on miss, and
+ * a sustained `cold_miss_refreshed` rate is the long-term signal that
+ * boot-time pre-warm would be worth adding. Cardinality: 4 series.
+ *
+ * Outcomes:
+ *   - `cold_miss_refreshed` — cache miss → RPC refresh OK → add fired
+ *   - `refresh_failed`      — cache miss → RPC threw (vote-not-in-snapshot
+ *                             is silently skipped, NOT counted here —
+ *                             it's an expected steady-state for permanently
+ *                             delinquent validators and the counter would
+ *                             only generate alert noise)
+ *   - `below_stake_floor`   — stake < 1 SOL after refresh, intentional skip
+ *   - `db_add_failed`       — upsert into watched_validators_dynamic failed
+ */
+export const validatorDynamicWatchAttemptsTotal = new Counter({
+  name: 'validator_dynamic_watch_attempts_total',
+  help: 'Outcome of known-path dynamic-watch registration attempts.',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
+/**
  * Test-only hook to clear the registry between cases.
  */
 export function _resetMetricsForTesting(): void {
