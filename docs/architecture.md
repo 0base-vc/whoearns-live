@@ -187,7 +187,8 @@ For any `(epoch, vote)`:
 4. Aggregates job recomputes cluster medians from `processed_blocks`
    and `epoch_validator_stats`.
 5. History API reads `epoch_validator_stats` in bulk to attach the
-   indexed-validator median income per leader slot for each epoch.
+   indexed-validator average (mean) income per leader slot for each
+   epoch (the legacy median is retained alongside it for back-compat).
 
 The API reads a single `epoch_validator_stats` row and serialises it.
 Each family's freshness is surfaced as a separate timestamp so a

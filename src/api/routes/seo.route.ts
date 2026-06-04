@@ -366,7 +366,10 @@ identity pubkey. Returns { vote, identity, name, iconUrl, website,
 items: ValidatorEpochRecord[], claimed, profile }. Items are newest-
 first. Each item carries a full fee decomposition (base/priority/tip
 totals + medians) and peerBenchmark, the indexed-validator average
-income per leader slot when the epoch sample has at least 3 validators.
+income per leader slot when the epoch sample has at least 3 validators
+(plus a same-client cohort: clientKind, sameClientSampleValidators,
+sameClientAvgIncomeSolPerSlot). Per-epoch compute units:
+avgComputeUnitsPerProducedBlock, serviceAverageCu, sameClientAverageCu.
 
 ### GET /v1/validators/{idOrVote}/current-epoch
 Same as one history item but for the running epoch only. Cheaper.

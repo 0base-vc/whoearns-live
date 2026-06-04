@@ -172,7 +172,7 @@
       </h3>
       <p class="mt-2">
         {#if locale === 'ko'}
-          밸리데이터 수익을 한눈에 비교하세요. leader slot당 수익에서 indexed validator 중앙값을
+          밸리데이터 수익을 한눈에 비교하세요. leader slot당 수익에서 indexed validator 평균을
           꾸준히 앞서는 운영자를 식별할 수 있습니다. 홈페이지의 <a
             href="/"
             class="font-medium text-[color:var(--color-brand-500)] hover:underline">리더보드</a

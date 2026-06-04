@@ -130,6 +130,11 @@
       en: "A small (10%) part of the Node Tier economic half: the cohort percentile of a validator's average compute units packed into each produced block. It's a block-density lens — how much work per block — NOT a quality measure, and it never on its own forces an unrated tier. A validator that produced no blocks falls back to its economic percentile here.",
       ko: 'Node Tier economic 절반의 작은(10%) 부분으로, validator가 생산한 블록 하나당 평균 compute units의 cohort percentile입니다. 블록당 작업량을 보는 밀도 관점이지 품질 척도가 아니며, 단독으로 unrated tier를 강제하지 않습니다. 블록을 하나도 생산하지 않은 validator는 여기서 자신의 economic percentile로 대체됩니다.',
     },
+    {
+      term: 'Indexed average',
+      en: "The dashed peer line on the income and compute-unit charts: the MEAN per leader slot — income, or compute units per block — across the validators WhoEarns indexes that epoch (opt-outs excluded). NOT a whole-cluster figure. Note it's a different statistic from the Node Tier's Economic percentile, which ranks the MEDIAN: the chart uses a mean for a quick visual read; the tier uses a median because it's more robust for a score. A third 'same-client' line averages only the peers running the same validator client.",
+      ko: "income 및 compute-unit 차트의 점선 피어 라인으로, 해당 에폭에 WhoEarns가 인덱싱하는 validator들의 leader slot당 평균(MEAN) — 수입 또는 블록당 compute units — 입니다 (opt-out 제외). 클러스터 전체 값이 아닙니다. Node Tier의 Economic percentile과는 다른 통계라는 점에 유의하세요. percentile은 중앙값(MEDIAN)으로 순위를 매깁니다 — 차트는 빠른 시각 비교용으로 평균을, tier는 점수의 견고함을 위해 중앙값을 씁니다. 세 번째 'same-client' 라인은 같은 클라이언트를 쓰는 피어만 평균냅니다.",
+    },
   ];
 
   /**
