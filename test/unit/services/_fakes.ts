@@ -9,6 +9,7 @@
  * via the service's constructor dependency shape is enough.
  */
 
+import type { EnsureStakeResult } from '../../../src/services/validator.service.js';
 import {
   EMPTY_ECONOMIC_LOOKUP,
   type UpsertSlotStatsArgs,
@@ -1654,8 +1655,27 @@ export class FakeValidatorService {
     [];
   activatedStakeLamports: bigint | null = null;
 
+  /**
+   * Queue of {@link EnsureStakeResult} for `ensureActivatedStakeLamports`.
+   * Defaults derive from `activatedStakeLamports` so existing tests that
+   * set the field continue to assert the same observable add/skip
+   * behavior without test-code changes.
+   */
+  ensureResponses: EnsureStakeResult[] = [];
+  readonly ensureCalls: VotePubkey[] = [];
+
   getActivatedStakeLamports(_vote: VotePubkey): bigint | null {
     return this.activatedStakeLamports;
+  }
+
+  async ensureActivatedStakeLamports(vote: VotePubkey): Promise<EnsureStakeResult> {
+    this.ensureCalls.push(vote);
+    const queued = this.ensureResponses.shift();
+    if (queued !== undefined) return queued;
+    if (this.activatedStakeLamports !== null) {
+      return { source: 'cache', lamports: this.activatedStakeLamports };
+    }
+    return { source: 'unknown-vote' };
   }
 
   async trackOnDemand(

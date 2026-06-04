@@ -15,6 +15,28 @@ import type {
 export type WatchMode = 'explicit' | 'all' | 'top';
 
 /**
+ * Outcome of {@link ValidatorService.ensureActivatedStakeLamports}.
+ *
+ *   - `cache`          — cache was warm; no RPC issued.
+ *   - `refresh`        — cache was cold; on-demand RPC refresh primed
+ *                        it and the vote was found in the snapshot.
+ *   - `unknown-vote`   — cache was cold; refresh ran but vote is not
+ *                        in `getVoteAccounts` (e.g. permanently
+ *                        delinquent + dropped). Caller should skip
+ *                        registering, not retry.
+ *   - `refresh-failed` — RPC threw. Caller should keep serving its
+ *                        best-effort response and try again on the
+ *                        next request (the 30s failure cooldown
+ *                        inside `refreshOnDemandVoteAccounts` will
+ *                        absorb retry storms).
+ */
+export type EnsureStakeResult =
+  | { source: 'cache'; lamports: bigint }
+  | { source: 'refresh'; lamports: bigint }
+  | { source: 'unknown-vote' }
+  | { source: 'refresh-failed'; error: unknown };
+
+/**
  * Coerce a raw validator-info string into `null | string`:
  *   - `undefined` → null
  *   - strings that trim to empty → null
@@ -117,6 +139,45 @@ export class ValidatorService {
     // integers, but we want ToBigInt to succeed).
     if (raw <= 0) return 0n;
     return BigInt(Math.floor(raw));
+  }
+
+  /**
+   * Cache-first stake lookup with one-shot lazy refresh on miss.
+   *
+   * Built for the API process, whose `ValidatorService` cache is never
+   * primed by a periodic `refreshFromRpc` tick (only the worker's
+   * epoch-watcher does that). Bulk-ingested validators (see PR #25)
+   * hit the known path in `validators-history.route` and would otherwise
+   * see a permanent cache miss, silently skipping registration into
+   * `watched_validators_dynamic`.
+   *
+   * Reuses {@link refreshOnDemandVoteAccounts}, inheriting:
+   *   - in-flight dedupe via `onDemandRefreshPromise` (concurrent
+   *     callers collapse to one RPC),
+   *   - 5-minute success cooldown (`ON_DEMAND_REFRESH_COOLDOWN_MS`),
+   *   - 30-second failure cooldown (`ON_DEMAND_REFRESH_FAILURE_COOLDOWN_MS`),
+   *   - cold-start gate bypass when `lastRefresh.length === 0`.
+   *
+   * Does NOT touch `onDemandMissUntilByPubkey`: that negative cache
+   * exists to throttle unknown-pubkey probes from `trackOnDemand` and
+   * MUST NOT gate known validators here.
+   *
+   * Never throws — route handlers can `await` without try/catch and
+   * dispatch on the returned discriminator.
+   */
+  async ensureActivatedStakeLamports(vote: VotePubkey): Promise<EnsureStakeResult> {
+    const cached = this.getActivatedStakeLamports(vote);
+    if (cached !== null) return { source: 'cache', lamports: cached };
+
+    try {
+      await this.refreshOnDemandVoteAccounts();
+    } catch (error) {
+      return { source: 'refresh-failed', error };
+    }
+
+    const refreshed = this.getActivatedStakeLamports(vote);
+    if (refreshed === null) return { source: 'unknown-vote' };
+    return { source: 'refresh', lamports: refreshed };
   }
 
   /**

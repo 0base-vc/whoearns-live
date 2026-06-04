@@ -353,6 +353,146 @@ describe('ValidatorService.trackOnDemand', () => {
   });
 });
 
+/**
+ * `ensureActivatedStakeLamports` is the seam the API process uses to
+ * lazily populate its stake cache on the known-validator path. The API
+ * `ValidatorService` instance has no periodic `refreshFromRpc` tick
+ * (that runs on the worker only), so without lazy refresh, bulk-ingested
+ * validators (see PR #25) would sit at a permanent cache miss and never
+ * make it into `watched_validators_dynamic`. These tests lock down the
+ * cache-hit / refresh-fill / refresh-failure / dedup / negative-cache
+ * invariants of that seam.
+ */
+describe('ValidatorService.ensureActivatedStakeLamports', () => {
+  /**
+   * Type-safe helper for poking the private fields these tests rely on.
+   * Keeps the casts readable + isolated.
+   */
+  type ServiceInternals = {
+    onDemandMissUntilByPubkey: Map<string, number>;
+    nextOnDemandRefreshAllowedAtMs: number;
+  };
+
+  it('returns source=cache without RPC when the cache is warm and leaves the negative cache untouched', async () => {
+    const repo = new FakeValidatorsRepo();
+    const rpc = makeRpcStub();
+    const service = makeService(rpc, repo);
+
+    // Seed the cache via a real refresh.
+    await service.refreshFromRpc(0);
+    (rpc.getVoteAccounts as ReturnType<typeof vi.fn>).mockClear();
+
+    const result = await service.ensureActivatedStakeLamports(VOTE_A);
+    expect(result).toEqual({ source: 'cache', lamports: 1_000_000_000_000n });
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(0);
+    // The negative cache is reserved for trackOnDemand's unknown-pubkey
+    // probes — known-path lookups must never write to it.
+    expect((service as unknown as ServiceInternals).onDemandMissUntilByPubkey.size).toBe(0);
+  });
+
+  it('cache-cold triggers one RPC refresh and returns source=refresh; second call within cooldown stays at cache', async () => {
+    const repo = new FakeValidatorsRepo();
+    const rpc = makeRpcStub();
+    const service = makeService(rpc, repo);
+
+    const first = await service.ensureActivatedStakeLamports(VOTE_A);
+    expect(first).toEqual({ source: 'refresh', lamports: 1_000_000_000_000n });
+
+    const second = await service.ensureActivatedStakeLamports(VOTE_A);
+    expect(second).toEqual({ source: 'cache', lamports: 1_000_000_000_000n });
+
+    // One RPC across both calls. NOTE: it's the cache-first lookup at the
+    // top of `ensureActivatedStakeLamports` that prevents the second RPC,
+    // NOT the success cooldown — by the time control would reach
+    // `refreshOnDemandVoteAccounts`, the first refresh has already
+    // populated the entry, so we return at the cache-hit branch. The
+    // cooldown is what defends a DIFFERENT-vote cache-miss within the
+    // 5-min window (covered separately). Asserting both here as defense-
+    // in-depth: RPC call count AND cooldown gate engaged.
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
+    expect((service as unknown as ServiceInternals).nextOnDemandRefreshAllowedAtMs).toBeGreaterThan(
+      Date.now(),
+    );
+  });
+
+  it('cache-cold + vote not in RPC reply returns source=unknown-vote and does not write the negative cache', async () => {
+    const repo = new FakeValidatorsRepo();
+    // Snapshot only carries VOTE_A; VOTE_B is absent.
+    const rpc = makeRpcStub({
+      current: [voteAccountsFixture.current[0]!],
+      delinquent: [],
+    });
+    const service = makeService(rpc, repo);
+
+    const result = await service.ensureActivatedStakeLamports(VOTE_B);
+    expect(result).toEqual({ source: 'unknown-vote' });
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
+    // Same invariant as the cache-warm case: known-path lookups must
+    // never pollute trackOnDemand's negative cache.
+    expect((service as unknown as ServiceInternals).onDemandMissUntilByPubkey.size).toBe(0);
+  });
+
+  it('returns source=refresh-failed without throwing and engages the failure cooldown', async () => {
+    const repo = new FakeValidatorsRepo();
+    const rpc: Pick<SolanaRpcClient, 'getVoteAccounts'> = {
+      getVoteAccounts: vi.fn().mockRejectedValue(new Error('upstream timeout')),
+    };
+    const service = makeService(rpc, repo);
+
+    const before = Date.now();
+    // The first call must resolve (not reject) — the contract is that
+    // route handlers can `await` without try/catch.
+    await expect(service.ensureActivatedStakeLamports(VOTE_A)).resolves.toEqual(
+      expect.objectContaining({ source: 'refresh-failed' }),
+    );
+
+    // The cooldown gate should now be ~30s in the future (failure cooldown).
+    const nextAt = (service as unknown as ServiceInternals).nextOnDemandRefreshAllowedAtMs;
+    expect(nextAt).toBeGreaterThanOrEqual(before + 25_000);
+    expect(nextAt).toBeLessThanOrEqual(before + 35_000 + 1_000);
+
+    // Negative cache is reserved for trackOnDemand — refresh failures
+    // here must not write to it. (The cooldown gate alone bounds retry
+    // pressure for OTHER votes that may be queried next: when
+    // `lastRefresh.length === 0` the cold-start bypass intentionally
+    // overrides the cooldown so the very first RPC attempt isn't
+    // permanently shut out — this is the same posture as
+    // `trackOnDemand` and is verified by its own test suite.)
+    expect((service as unknown as ServiceInternals).onDemandMissUntilByPubkey.size).toBe(0);
+  });
+
+  it('two parallel cold-cache callers share a single RPC fetch (stampede dedup)', async () => {
+    const repo = new FakeValidatorsRepo();
+    // Manually-deferred promise so both callers race the same in-flight
+    // refresh. Without dedup we'd see two parallel `getVoteAccounts`
+    // calls; with it, both ensure() awaits resolve off one fetch.
+    let resolveAccounts: ((value: typeof voteAccountsFixture) => void) | undefined;
+    const accountsPromise = new Promise<typeof voteAccountsFixture>((resolve) => {
+      resolveAccounts = resolve;
+    });
+    const rpc: Pick<SolanaRpcClient, 'getVoteAccounts'> = {
+      getVoteAccounts: vi.fn().mockReturnValue(accountsPromise),
+    };
+    const service = makeService(rpc, repo);
+
+    // Kick off both ensure() calls without awaiting — they should
+    // collide on the same in-flight `onDemandRefreshPromise`.
+    const pA = service.ensureActivatedStakeLamports(VOTE_A);
+    const pB = service.ensureActivatedStakeLamports(VOTE_B);
+    // Yield once so both calls reach their `await refreshOnDemandVoteAccounts()`.
+    await Promise.resolve();
+    // Now resolve the deferred RPC; both ensures unwind off the same fetch.
+    resolveAccounts!(voteAccountsFixture);
+
+    const [resultA, resultB] = await Promise.all([pA, pB]);
+    expect(resultA).toEqual({ source: 'refresh', lamports: 1_000_000_000_000n });
+    expect(resultB).toEqual({ source: 'refresh', lamports: 500_000_000_000n });
+    // The load-bearing invariant: one RPC, two callers — the
+    // onDemandRefreshPromise dedupe must collapse them.
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('ValidatorService.refreshValidatorInfoForIdentity', () => {
   function validatorInfo(configData: {
     name?: string;

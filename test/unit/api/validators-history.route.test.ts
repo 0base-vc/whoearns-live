@@ -13,11 +13,15 @@
  * skinny here so these tests exercise just the routing logic.
  */
 
-import { pino } from 'pino';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { pino, type Logger } from 'pino';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { cacheControl } from '../../../src/api/cache-control.js';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
+import {
+  _resetMetricsForTesting,
+  validatorDynamicWatchAttemptsTotal,
+} from '../../../src/api/metrics.js';
 import validatorsHistoryRoutes from '../../../src/api/routes/validators-history.route.js';
 import { LAMPORTS_PER_SOL } from '../../../src/core/lamports.js';
 import type { ValidatorService } from '../../../src/services/validator.service.js';
@@ -58,7 +62,48 @@ interface Ctx {
   validatorService: FakeValidatorService;
 }
 
-async function makeCtx(): Promise<Ctx> {
+/**
+ * Captured pino log line. `level` is pino's numeric level (info=30,
+ * warn=40, error=50, debug=20). Tests read this list to assert on
+ * structured log discriminators (e.g. `event: 'ensure_watched_dynamic'`).
+ */
+interface CapturedLog {
+  level: number;
+  msg: string;
+  // Any extra mergingObject fields the call site passed.
+  [key: string]: unknown;
+}
+
+/**
+ * Build a pino logger whose every line is appended to `lines`. The
+ * destination stream simply parses the JSON pino writes and pushes it
+ * onto the array — keeps the assertion API close to the call site
+ * (pino's mergingObject becomes top-level fields on the entry).
+ */
+function makeCapturingLogger(opts: { level?: string } = {}): {
+  logger: Logger;
+  lines: CapturedLog[];
+} {
+  const lines: CapturedLog[] = [];
+  const stream = {
+    write(chunk: string): void {
+      try {
+        lines.push(JSON.parse(chunk) as CapturedLog);
+      } catch {
+        // Pino should always emit valid JSON; if it doesn't, swallow
+        // so a stray non-JSON line can't crash the test runner.
+      }
+    },
+  };
+  const logger = pino({ level: opts.level ?? 'debug' }, stream);
+  return { logger: logger as unknown as Logger, lines };
+}
+
+interface MakeCtxOpts {
+  logger?: Logger;
+}
+
+async function makeCtx(opts: MakeCtxOpts = {}): Promise<Ctx> {
   const stats = new FakeStatsRepo();
   const validators = new FakeValidatorsRepo();
   const epochs = new FakeEpochsRepo();
@@ -71,8 +116,9 @@ async function makeCtx(): Promise<Ctx> {
   const watchedDynamic = new FakeWatchedDynamicRepo();
   const validatorService = new FakeValidatorService();
 
-  const app = makeTestApp(silent);
-  setErrorHandler(app, silent);
+  const logger = opts.logger ?? silent;
+  const app = makeTestApp(logger);
+  setErrorHandler(app, logger);
   await app.register(validatorsHistoryRoutes, {
     statsRepo: stats as unknown as StatsRepository,
     validatorsRepo: validators as unknown as ValidatorsRepository,
@@ -93,6 +139,27 @@ async function makeCtx(): Promise<Ctx> {
     watchedDynamic,
     validatorService,
   };
+}
+
+/**
+ * Read the current value of a single label combination from a prom-client
+ * Counter. The default registry returns the cumulative `MetricObject` —
+ * `.values[]` is the per-label-set array. Tests use this to assert
+ * `validator_dynamic_watch_attempts_total{outcome='cold_miss_refreshed'} === 1`
+ * style invariants without parsing the wire-format Prometheus exposition.
+ */
+async function counterValue(
+  counter: typeof validatorDynamicWatchAttemptsTotal,
+  labels: Record<string, string>,
+): Promise<number> {
+  const snapshot = await counter.get();
+  const match = snapshot.values.find((v) => {
+    for (const [k, want] of Object.entries(labels)) {
+      if ((v.labels as Record<string, string>)[k] !== want) return false;
+    }
+    return true;
+  });
+  return match?.value ?? 0;
 }
 
 /**
@@ -459,5 +526,383 @@ describe('GET /v1/validators/:idOrVote/history', () => {
       '50000000',
     );
     await ctx.app.close();
+  });
+});
+
+/**
+ * Tests for the lazy-cache-refresh seam (`ensureActivatedStakeLamports`)
+ * introduced to fix the silent-skip bug exposed by the PR #25
+ * validator-info bulk ingester. The route now switches on the
+ * discriminated `EnsureStakeResult` from the service and emits a
+ * Prometheus counter (`validator_dynamic_watch_attempts_total`) per
+ * outcome, plus structured log discriminators at the appropriate level.
+ *
+ * Each test reset the prom registry in `beforeEach` so counter
+ * assertions are independent of test order.
+ */
+describe('GET /v1/validators/:idOrVote/history — lazy stake-cache refresh', () => {
+  beforeEach(() => {
+    _resetMetricsForTesting();
+  });
+
+  it('source=cache above floor → add fires, no cold_miss_refreshed counter, no info log', async () => {
+    const { logger, lines } = makeCapturingLogger({ level: 'info' });
+    const ctx = await makeCtx({ logger });
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    // Default fake fallback: when only `activatedStakeLamports` is set,
+    // ensureActivatedStakeLamports returns `{source: 'cache', lamports}`.
+    ctx.validatorService.activatedStakeLamports = LAMPORTS_PER_SOL;
+
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/history?limit=10`,
+    });
+    expect(res.statusCode).toBe(200);
+    // Flush the fire-and-forget add().then() chain.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ctx.validatorService.ensureCalls).toEqual([VOTE_1]);
+    expect(ctx.validatorService.trackCalls).toHaveLength(0);
+    const row = await ctx.watchedDynamic.findByVote(VOTE_1);
+    expect(row).not.toBeNull();
+    expect(row?.activatedStakeLamportsAtAdd).toBe(LAMPORTS_PER_SOL);
+    // Cache-hit is intentionally silent: no cold_miss_refreshed counter.
+    expect(
+      await counterValue(validatorDynamicWatchAttemptsTotal, {
+        outcome: 'cold_miss_refreshed',
+      }),
+    ).toBe(0);
+    // Cache-hit emits NO ensure_watched_dynamic info-level log.
+    const ensureLogs = lines.filter(
+      (l) => l['event'] === 'ensure_watched_dynamic' && l.level >= 30,
+    );
+    expect(ensureLogs).toEqual([]);
+
+    await ctx.app.close();
+  });
+
+  it('source=refresh above floor → add fires, cold_miss_refreshed counter + info log', async () => {
+    const { logger, lines } = makeCapturingLogger({ level: 'info' });
+    const ctx = await makeCtx({ logger });
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    const stake = 5n * LAMPORTS_PER_SOL;
+    ctx.validatorService.ensureResponses.push({ source: 'refresh', lamports: stake });
+
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/history?limit=10`,
+    });
+    expect(res.statusCode).toBe(200);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const row = await ctx.watchedDynamic.findByVote(VOTE_1);
+    expect(row).not.toBeNull();
+    expect(row?.activatedStakeLamportsAtAdd).toBe(stake);
+    expect(
+      await counterValue(validatorDynamicWatchAttemptsTotal, {
+        outcome: 'cold_miss_refreshed',
+      }),
+    ).toBe(1);
+    // The structured log carries the discriminator + outcome + vote +
+    // the stringified stake — that's the Loki query operators alert on.
+    const coldMissLogs = lines.filter(
+      (l) =>
+        l['event'] === 'ensure_watched_dynamic' &&
+        l['outcome'] === 'cold_miss_refreshed' &&
+        l.level === 30,
+    );
+    expect(coldMissLogs).toHaveLength(1);
+    expect(coldMissLogs[0]).toMatchObject({
+      event: 'ensure_watched_dynamic',
+      source: 'validators-history.known-path',
+      vote: VOTE_1,
+      outcome: 'cold_miss_refreshed',
+      activatedStakeLamports: '5000000000',
+    });
+
+    await ctx.app.close();
+  });
+
+  it('source=refresh below floor → no add, below_stake_floor counter, debug log only', async () => {
+    // Capture at debug so we see the log; below_stake_floor logs at debug.
+    const { logger, lines: debugLines } = makeCapturingLogger({ level: 'debug' });
+    const ctx = await makeCtx({ logger });
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    ctx.validatorService.ensureResponses.push({
+      source: 'refresh',
+      lamports: LAMPORTS_PER_SOL - 1n,
+    });
+
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/history?limit=10`,
+    });
+    expect(res.statusCode).toBe(200);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ctx.validatorService.trackCalls).toHaveLength(0);
+    expect(await ctx.watchedDynamic.findByVote(VOTE_1)).toBeNull();
+    expect(
+      await counterValue(validatorDynamicWatchAttemptsTotal, {
+        outcome: 'below_stake_floor',
+      }),
+    ).toBe(1);
+    const belowFloorLogs = debugLines.filter(
+      (l) => l['event'] === 'ensure_watched_dynamic' && l['outcome'] === 'below_stake_floor',
+    );
+    expect(belowFloorLogs).toHaveLength(1);
+    expect(belowFloorLogs[0]).toMatchObject({
+      outcome: 'below_stake_floor',
+      source_kind: 'refresh',
+    });
+    // Level 20 = debug.
+    expect(belowFloorLogs[0]?.level).toBe(20);
+    await ctx.app.close();
+
+    // Second pass at info-level: counter still bumps, but no log line
+    // is captured (debug-only). Discipline: counter is the long-term
+    // signal, log is opt-in.
+    _resetMetricsForTesting();
+    const { logger: infoLogger, lines: infoLines } = makeCapturingLogger({ level: 'info' });
+    const ctx2 = await makeCtx({ logger: infoLogger });
+    await ctx2.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    ctx2.validatorService.ensureResponses.push({
+      source: 'refresh',
+      lamports: LAMPORTS_PER_SOL - 1n,
+    });
+    const res2 = await ctx2.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/history?limit=10`,
+    });
+    expect(res2.statusCode).toBe(200);
+    expect(
+      await counterValue(validatorDynamicWatchAttemptsTotal, {
+        outcome: 'below_stake_floor',
+      }),
+    ).toBe(1);
+    const ensureLogsAtInfo = infoLines.filter((l) => l['event'] === 'ensure_watched_dynamic');
+    expect(ensureLogsAtInfo).toEqual([]);
+    await ctx2.app.close();
+  });
+
+  it('source=refresh-failed → 200, refresh_failed counter, warn log with err, no add', async () => {
+    const { logger, lines } = makeCapturingLogger({ level: 'warn' });
+    const ctx = await makeCtx({ logger });
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    // One closed-epoch stats row so history has something to return —
+    // the availability invariant says we still serve history even when
+    // the lazy refresh fails.
+    await ctx.stats.upsertSlotStats({
+      epoch: 500,
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      slotsAssigned: 10,
+      slotsProduced: 9,
+      slotsSkipped: 1,
+    });
+    await ctx.stats.addFeeDelta({
+      epoch: 500,
+      identityPubkey: IDENTITY_1,
+      deltaLamports: 1_000_000n,
+    });
+    await ctx.epochs.upsert(makeEpochInfo(500, 0, 431_999, { isClosed: true }));
+    ctx.validatorService.ensureResponses.push({
+      source: 'refresh-failed',
+      error: new Error('rpc down'),
+    });
+
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/history?limit=10`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { items: unknown[] };
+    expect(body.items).toHaveLength(1);
+    expect(await ctx.watchedDynamic.findByVote(VOTE_1)).toBeNull();
+    expect(
+      await counterValue(validatorDynamicWatchAttemptsTotal, {
+        outcome: 'refresh_failed',
+      }),
+    ).toBe(1);
+    const failLogs = lines.filter(
+      (l) =>
+        l['event'] === 'ensure_watched_dynamic' &&
+        l['outcome'] === 'refresh_failed' &&
+        l.level === 40,
+    );
+    expect(failLogs).toHaveLength(1);
+    expect(failLogs[0]).toMatchObject({
+      event: 'ensure_watched_dynamic',
+      outcome: 'refresh_failed',
+      vote: VOTE_1,
+    });
+    // The captured err is serialised by pino. We assert its message is
+    // surfaced (the field key pino uses for Error instances is `err`).
+    expect((failLogs[0]?.['err'] as { message?: string } | undefined)?.message).toBe('rpc down');
+    await ctx.app.close();
+  });
+
+  it('source=unknown-vote → 200, no counter, no log (silent skip)', async () => {
+    const { logger, lines } = makeCapturingLogger({ level: 'debug' });
+    const ctx = await makeCtx({ logger });
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    ctx.validatorService.ensureResponses.push({ source: 'unknown-vote' });
+
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/history?limit=10`,
+    });
+    expect(res.statusCode).toBe(200);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ctx.validatorService.trackCalls).toHaveLength(0);
+    expect(await ctx.watchedDynamic.findByVote(VOTE_1)).toBeNull();
+    // No counter outcome series exists yet — the silent path skips
+    // both the inc and the log.
+    expect(
+      await counterValue(validatorDynamicWatchAttemptsTotal, { outcome: 'refresh_failed' }),
+    ).toBe(0);
+    expect(
+      await counterValue(validatorDynamicWatchAttemptsTotal, {
+        outcome: 'below_stake_floor',
+      }),
+    ).toBe(0);
+    expect(
+      await counterValue(validatorDynamicWatchAttemptsTotal, {
+        outcome: 'cold_miss_refreshed',
+      }),
+    ).toBe(0);
+    expect(
+      await counterValue(validatorDynamicWatchAttemptsTotal, { outcome: 'db_add_failed' }),
+    ).toBe(0);
+    expect(lines.filter((l) => l['event'] === 'ensure_watched_dynamic')).toEqual([]);
+    await ctx.app.close();
+  });
+
+  it('db_add_failed with Postgres FK violation 23503 escalates to error-level log', async () => {
+    const { logger, lines } = makeCapturingLogger({ level: 'warn' });
+    const ctx = await makeCtx({ logger });
+    await ctx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    ctx.validatorService.ensureResponses.push({
+      source: 'cache',
+      lamports: LAMPORTS_PER_SOL,
+    });
+    // Force the upsert to fail with a pg FK violation.
+    const fkErr = Object.assign(new Error('insert or update violates foreign key constraint'), {
+      code: '23503',
+    });
+    const addSpy = vi.spyOn(ctx.watchedDynamic, 'add').mockRejectedValueOnce(fkErr);
+
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/history?limit=10`,
+    });
+    expect(res.statusCode).toBe(200);
+    // Flush the .catch() chain.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(addSpy).toHaveBeenCalledTimes(1);
+    expect(
+      await counterValue(validatorDynamicWatchAttemptsTotal, { outcome: 'db_add_failed' }),
+    ).toBe(1);
+    // FK violation → error-level (50), not warn (40).
+    const errorLogs = lines.filter(
+      (l) =>
+        l['event'] === 'ensure_watched_dynamic' &&
+        l['outcome'] === 'db_add_failed' &&
+        l.level === 50,
+    );
+    expect(errorLogs).toHaveLength(1);
+    expect(errorLogs[0]).toMatchObject({
+      outcome: 'db_add_failed',
+      pgCode: '23503',
+    });
+    await ctx.app.close();
+
+    // Second pass with a generic Error (no .code): same counter bump,
+    // but log drops to warn level (40). Proves 23503 is the only path
+    // that pages.
+    _resetMetricsForTesting();
+    const { logger: warnLogger, lines: warnLines } = makeCapturingLogger({ level: 'warn' });
+    const ctx2 = await makeCtx({ logger: warnLogger });
+    await ctx2.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    ctx2.validatorService.ensureResponses.push({
+      source: 'cache',
+      lamports: LAMPORTS_PER_SOL,
+    });
+    const genericErr = new Error('connection terminated');
+    vi.spyOn(ctx2.watchedDynamic, 'add').mockRejectedValueOnce(genericErr);
+
+    const res2 = await ctx2.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/history?limit=10`,
+    });
+    expect(res2.statusCode).toBe(200);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(
+      await counterValue(validatorDynamicWatchAttemptsTotal, { outcome: 'db_add_failed' }),
+    ).toBe(1);
+    const warnAddFailLogs = warnLines.filter(
+      (l) =>
+        l['event'] === 'ensure_watched_dynamic' &&
+        l['outcome'] === 'db_add_failed' &&
+        l.level === 40,
+    );
+    expect(warnAddFailLogs).toHaveLength(1);
+    expect(warnAddFailLogs[0]).toMatchObject({
+      outcome: 'db_add_failed',
+    });
+    // No error-level log for the generic failure path.
+    const errorAddFailLogs = warnLines.filter(
+      (l) =>
+        l['event'] === 'ensure_watched_dynamic' &&
+        l['outcome'] === 'db_add_failed' &&
+        l.level === 50,
+    );
+    expect(errorAddFailLogs).toEqual([]);
+    await ctx2.app.close();
   });
 });
