@@ -115,6 +115,16 @@ spec:
               containerPort: {{ .Values.config.metricsPort }}
               protocol: TCP
             {{- end }}
+            {{- if and .Values.config.workerMetricsPort (gt (int .Values.config.workerMetricsPort) 0) }}
+            # Worker-process scrape target. Distinct from `metrics`
+            # because api.js and worker.js are separate processes with
+            # separate `prom-client` registries — scheduler counters
+            # (`jobs_executed_total{job,outcome}`) only land here. Same
+            # cluster-internal posture as `metrics`.
+            - name: worker-metrics
+              containerPort: {{ .Values.config.workerMetricsPort }}
+              protocol: TCP
+            {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}

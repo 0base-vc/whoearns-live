@@ -66,6 +66,25 @@ export const ConfigSchema = z.object({
   METRICS_PORT: NonNegativeInt.default(0),
 
   /**
+   * Port for the WORKER process's own Prometheus `/metrics` listener.
+   *
+   * Why this is separate from `METRICS_PORT`: API and worker run as
+   * TWO Node processes in the same pod (see `deploy/docker/entrypoint.sh`).
+   * `prom-client` registries are per-process, so a metric the worker
+   * increments (e.g. `jobs_executed_total{outcome=fail}` from the
+   * scheduler) is invisible from the API's `/metrics` — and both
+   * processes read the same env, so they can't share the port.
+   *
+   * `0` (default) → no worker metrics endpoint. Set to a port distinct
+   * from `METRICS_PORT` (conventionally `METRICS_PORT + 1`, e.g. 9092)
+   * to expose scheduler counters / Node.js process metrics from the
+   * worker. The Helm chart adds a second Service port + ServiceMonitor
+   * endpoint when set, so the same Prometheus scrape config picks both
+   * up without bespoke wiring.
+   */
+  WORKER_METRICS_PORT: NonNegativeInt.default(0),
+
+  /**
    * Public-facing canonical URL for this deployment. Used in:
    *   - Dynamic SEO assets (sitemap.xml, robots.txt, llms.txt) where every
    *     URL must absolute-reference the deployment domain.

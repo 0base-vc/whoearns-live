@@ -1,6 +1,8 @@
+import { createServer as createHttpServer } from 'node:http';
 import { loadConfig } from '../core/config.js';
 import { createLogger } from '../core/logger.js';
 import { ShutdownManager } from '../core/shutdown.js';
+import { registry as metricsRegistry } from '../api/metrics.js';
 import { closePool, createPool } from '../storage/db.js';
 import { BlockFetcher } from '../clients/block-fetcher.js';
 import { SolanaRpcClient } from '../clients/solana-rpc.js';
@@ -473,6 +475,48 @@ export async function startWorker(): Promise<void> {
 
   scheduler.start();
   logger.info({ jobs: scheduler.size }, 'worker:scheduler-started');
+
+  // Worker-process Prometheus `/metrics` listener. The API process owns
+  // `METRICS_PORT`; the worker can't share that port (both processes
+  // load the same env), and `prom-client` registries are per-process —
+  // counters the scheduler increments (`jobs_executed_total{outcome}`,
+  // `jobs_tick_duration_seconds`) only show up here. Plain node `http`
+  // is enough — the worker has no other HTTP surface and pulling in
+  // Fastify just for one route is wasted weight.
+  if (config.WORKER_METRICS_PORT > 0) {
+    const metricsServer = createHttpServer((req, res) => {
+      if (req.url !== '/metrics' || req.method !== 'GET') {
+        res.statusCode = 404;
+        res.end();
+        return;
+      }
+      metricsRegistry
+        .metrics()
+        .then((body) => {
+          res.statusCode = 200;
+          res.setHeader('Content-Type', metricsRegistry.contentType);
+          res.end(body);
+        })
+        .catch((err: unknown) => {
+          logger.error({ err }, 'worker:metrics-listener-render-failed');
+          res.statusCode = 500;
+          res.end();
+        });
+    });
+    await new Promise<void>((resolve, reject) => {
+      metricsServer.once('error', reject);
+      metricsServer.listen(config.WORKER_METRICS_PORT, '0.0.0.0', () => {
+        metricsServer.removeListener('error', reject);
+        resolve();
+      });
+    });
+    logger.info({ port: config.WORKER_METRICS_PORT }, 'worker:metrics-listener-started');
+    shutdown.register('worker-metrics-listener', async () => {
+      await new Promise<void>((resolve) => {
+        metricsServer.close(() => resolve());
+      });
+    });
+  }
 
   // Optional Yellowstone gRPC block subscriber. Runs alongside the
   // polling-path fee-ingester rather than replacing it — gRPC handles

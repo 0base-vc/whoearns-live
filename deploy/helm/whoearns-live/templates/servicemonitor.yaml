@@ -54,4 +54,25 @@ spec:
       metricRelabelings:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+    {{- if and .Values.config.workerMetricsPort (gt (int .Values.config.workerMetricsPort) 0) }}
+    # Second endpoint for the worker-process registry. Distinct port
+    # (configured via `config.workerMetricsPort`) because api.js and
+    # worker.js are separate Node processes with separate `prom-client`
+    # registries — scheduler counters (`jobs_executed_total{outcome}`,
+    # `jobs_tick_duration_seconds`) only land on this port. Same
+    # interval/timeout/relabeling pipeline as the api endpoint so
+    # operators don't have to maintain two scrape configs.
+    - port: worker-metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval | default "30s" | quote }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout | default "10s" | quote }}
+      {{- with .Values.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
 {{- end }}
