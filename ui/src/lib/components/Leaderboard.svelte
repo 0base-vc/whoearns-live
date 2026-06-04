@@ -435,7 +435,6 @@
           bind:value={window}
           onchange={() => void load(sort, window)}
           class="min-h-11 w-full rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 text-base"
-          aria-label="Leaderboard window"
         >
           {#each WINDOW_OPTIONS as option (option.key)}
             <option value={option.key}>{option.label}</option>
@@ -448,7 +447,6 @@
           bind:value={bracket}
           onchange={handleBracketChange}
           class="min-h-11 w-full rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 text-base"
-          aria-label="Filter validators by bracket"
         >
           {@render bracketOptions()}
         </select>
@@ -459,7 +457,6 @@
           bind:value={sort}
           onchange={() => void load(sort, window)}
           class="min-h-11 w-full rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 text-base"
-          aria-label="Sort validators by"
         >
           {#each COLUMNS as col (col.key)}
             <option value={col.key}>{col.label}</option>
@@ -494,7 +491,6 @@
           bind:value={bracket}
           onchange={handleBracketChange}
           class="rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-1.5 text-sm"
-          aria-label="Filter validators by bracket"
         >
           {@render bracketOptions()}
         </select>
