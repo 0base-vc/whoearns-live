@@ -125,6 +125,19 @@ Re-fetches on-chain validator-info (moniker, icon) for the watched
 set only and updates `validators`. A one-shot backfill for watched
 validators with no info record also runs once after worker start.
 
+### Validator-info bulk ingester (`VALIDATOR_INFO_BULK_INTERVAL_MS`, default 6h)
+
+Sibling to the watched-set refresh above, but cluster-wide: one bulk
+`getConfigProgramAccounts` pull (~2000 records, ~3 MB on mainnet)
+fills `name`/`keybase_username`/`website`/`icon_url` for **every**
+published validator, not just the watched set. Without it a
+validator's `name` is only populated once it has been tracked (in the
+watch list, or opened/added on-demand), so `/v1/validators/search`
+could match monikers for that subset only — every other validator sat
+in `validators` with a NULL `name`, findable by pubkey but never by
+name. The repo's `upsertInfoBatch` uses an `IS DISTINCT FROM` guard,
+so a tick where nothing renamed is a zero-row write.
+
 ### Cluster-nodes ingester (`CLUSTER_NODES_INTERVAL_MS`, default 30min)
 
 Polls `getClusterNodes` (~500 KB) and writes each gossip identity's

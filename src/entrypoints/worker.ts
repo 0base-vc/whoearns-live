@@ -27,6 +27,7 @@ import { createEpochWatcherJob } from '../jobs/epoch-watcher.job.js';
 import { createFeeIngesterJob } from '../jobs/fee-ingester.job.js';
 import { createIncomeReconcilerJob } from '../jobs/income-reconciler.job.js';
 import { createValidatorInfoRefreshJob } from '../jobs/validator-info-refresh.job.js';
+import { createValidatorInfoBulkIngesterJob } from '../jobs/validator-info-bulk-ingester.job.js';
 import { createSlotIngesterJob } from '../jobs/slot-ingester.job.js';
 import { createWalletActivityIngesterJob } from '../jobs/wallet-activity-ingester.job.js';
 import { createStakewizTenureIngesterJob } from '../jobs/stakewiz-tenure-ingester.job.js';
@@ -314,6 +315,24 @@ export async function startWorker(): Promise<void> {
     }),
     // +20s: one RPC per watched validator; off the cold-start path.
     initialDelayMs: 20_000,
+  });
+
+  // Cluster-wide on-chain validator-info ingester. Sibling to the
+  // watched-set `validator-info-refresh` above, but pulls the WHOLE
+  // published cluster in one `getConfigProgramAccounts` so
+  // `/v1/validators/search` can find ANY validator by moniker — not
+  // just the watched/added subset. See the job docstring.
+  scheduler.register({
+    ...createValidatorInfoBulkIngesterJob({
+      validatorService,
+      intervalMs: config.VALIDATOR_INFO_BULK_INTERVAL_MS,
+      logger,
+    }),
+    // +120s: a single ~3 MB getProgramAccounts against the primary
+    // RPC — the heaviest single payload in the stagger, and not
+    // latency-sensitive (6 h cadence), so it boots last, well clear
+    // of the cold-start live-path ingest jobs.
+    initialDelayMs: 120_000,
   });
 
   // DEPRECATED — `cluster-nodes-ingester` registration removed.

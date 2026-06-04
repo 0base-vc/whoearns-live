@@ -233,6 +233,83 @@ export class ValidatorsRepository {
   }
 
   /**
+   * Batch variant of `upsertInfo` for the CLUSTER-WIDE moniker fill.
+   *
+   * `upsertInfo` issues one UPDATE per record — fine for the handful
+   * of watched validators the `validator-info-refresh` job touches,
+   * but the `validator-info-bulk-ingester` writes the WHOLE published
+   * cluster (~2000 records from `getConfigProgramAccounts`) every
+   * tick. This collapses that into a single `UPDATE ... FROM UNNEST`
+   * round-trip (same shape as `upsertClientBatch`).
+   *
+   * Identity is the natural key. Rows whose identity isn't in
+   * `validators` are silently no-op'd by the `UPDATE ... FROM`
+   * no-match — the Config program carries info for identities we may
+   * not track, and that's fine.
+   *
+   * The `IS DISTINCT FROM` guard is load-bearing here in a way it
+   * isn't on the per-identity path: at ~2000 records every few hours
+   * an unconditional write would re-stamp `info_updated_at` on every
+   * row each tick — defeating the boot-time
+   * `findValidatorsWithMissingInfo` scan and churning the table for
+   * no reason. With the guard, a steady-state tick where nothing
+   * renamed writes ZERO rows. Returns `{ updated }` = rows that
+   * actually changed, so the caller can log drift vs. a no-op tick.
+   *
+   * NULLs are written through (an operator who cleared their on-chain
+   * name clears ours too), same as `upsertInfo`.
+   */
+  async upsertInfoBatch(infos: ReadonlyArray<ValidatorInfo>): Promise<{ updated: number }> {
+    if (infos.length === 0) return { updated: 0 };
+    const identities = infos.map((i) => i.identityPubkey);
+    const names = infos.map((i) => i.name);
+    const details = infos.map((i) => i.details);
+    const websites = infos.map((i) => i.website);
+    const keybases = infos.map((i) => i.keybaseUsername);
+    const icons = infos.map((i) => i.iconUrl);
+    // UNNEST silently truncates to the shortest array, so a future
+    // length mismatch would corrupt the batch (rows shifted/dropped).
+    // All six arrays are `.map()`-derived from the same `infos` list —
+    // a mismatch is a programming error, so fail fast with a clear
+    // message rather than writing a silently-truncated batch (same
+    // posture as `upsertClientBatch`).
+    if (
+      identities.length !== names.length ||
+      identities.length !== details.length ||
+      identities.length !== websites.length ||
+      identities.length !== keybases.length ||
+      identities.length !== icons.length
+    ) {
+      throw new Error(
+        `upsertInfoBatch: array length mismatch ` +
+          `(identities=${identities.length}, names=${names.length}, details=${details.length}, ` +
+          `websites=${websites.length}, keybases=${keybases.length}, icons=${icons.length})`,
+      );
+    }
+    const { rowCount } = await this.pool.query(
+      `UPDATE validators v
+          SET name             = src.name,
+              details          = src.details,
+              website          = src.website,
+              keybase_username = src.keybase_username,
+              icon_url         = src.icon_url,
+              info_updated_at  = NOW()
+         FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+              AS src(identity_pubkey, name, details, website, keybase_username, icon_url)
+        WHERE v.identity_pubkey = src.identity_pubkey
+          AND (
+            v.name             IS DISTINCT FROM src.name OR
+            v.details          IS DISTINCT FROM src.details OR
+            v.website          IS DISTINCT FROM src.website OR
+            v.keybase_username IS DISTINCT FROM src.keybase_username OR
+            v.icon_url         IS DISTINCT FROM src.icon_url
+          )`,
+      [identities, names, details, websites, keybases, icons],
+    );
+    return { updated: rowCount ?? 0 };
+  }
+
+  /**
    * Batch-write client classification + version + freshness for many
    * identities in one statement. UNNEST-driven so a 2000-validator
    * refresh is one round-trip.
