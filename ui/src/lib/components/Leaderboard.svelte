@@ -31,16 +31,19 @@
   const DECIMALS_PER_SLOT = 6;
   const DECIMALS_TOTAL = 3;
 
+  // Ordered along one axis — most live / narrowest window on the left,
+  // progressively more settled / wider to the right: running epoch only
+  // → +1 final → +2 finals → a single closed epoch → a 10-epoch block.
   const WINDOW_OPTIONS: Array<{ key: LeaderboardWindow; label: string; detail: string }> = [
-    {
-      key: 'live_trend',
-      label: 'Live trend',
-      detail: 'Current epoch so far + latest final epoch',
-    },
     {
       key: 'current_only',
       label: 'Current only',
       detail: 'Only elapsed slots in the running epoch',
+    },
+    {
+      key: 'live_trend',
+      label: 'Live trend',
+      detail: 'Current epoch so far + latest final epoch',
     },
     {
       key: 'stable_trend',
@@ -48,14 +51,14 @@
       detail: 'Current epoch so far + two final epochs',
     },
     {
-      key: 'decade_epoch',
-      label: 'Decade',
-      detail: 'Latest complete 10-epoch block',
-    },
-    {
       key: 'final_epoch',
       label: 'Final epoch',
       detail: 'Latest closed epoch only',
+    },
+    {
+      key: 'decade_epoch',
+      label: 'Decade',
+      detail: 'Latest complete 10-epoch block',
     },
   ];
 
@@ -393,16 +396,87 @@
       {/if}
     </div>
 
-    <div class="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-      <!-- Left: window (which sample period to view) — a segmented
-           control because it's a view-mode switch, not a filter. -->
+    <!--
+      Controls. Below `md` (the card-list range, which has no sortable
+      column headers) all three render as compact, identically-styled
+      dropdowns — View (window mode), Bracket, Sort. At `md`+ (the table
+      range) the window becomes a segmented control and the bracket an
+      inline select; sorting is done via the table headers, so there's no
+      sort dropdown there. The bracket <option>s are shared by both
+      selects through the snippet below to avoid duplicating the list.
+    -->
+    {#snippet bracketOptions()}
+      <option value="all">All indexed</option>
+      <optgroup label="By stake">
+        <option value="stake_lt_100k">Small (&lt;100k SOL)</option>
+        <option value="stake_lt_500k">Small (&lt;500k SOL)</option>
+      </optgroup>
+      <option value="newcomer">Newcomers</option>
+      <optgroup label="By client">
+        {#each CLIENT_BRACKET_KINDS as ck (ck.kind)}
+          <option value={`client:${ck.kind}`}>{ck.label}</option>
+        {/each}
+      </optgroup>
+    {/snippet}
+
+    {#snippet controlLabel(text: string)}
+      <span
+        class="text-[11px] font-medium uppercase tracking-wide text-[color:var(--color-text-subtle)]"
+        >{text}</span
+      >
+    {/snippet}
+
+    <!-- Mobile (< md): three consistent dropdowns, View full-width then
+         Bracket + Sort side by side. -->
+    <div class="grid grid-cols-2 gap-x-3 gap-y-2 md:hidden">
+      <label class="col-span-2 flex flex-col gap-1">
+        {@render controlLabel('View')}
+        <select
+          bind:value={window}
+          onchange={() => void load(sort, window)}
+          class="min-h-11 w-full rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 text-base"
+          aria-label="Leaderboard window"
+        >
+          {#each WINDOW_OPTIONS as option (option.key)}
+            <option value={option.key}>{option.label}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="flex flex-col gap-1">
+        {@render controlLabel('Bracket')}
+        <select
+          bind:value={bracket}
+          onchange={handleBracketChange}
+          class="min-h-11 w-full rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 text-base"
+          aria-label="Filter validators by bracket"
+        >
+          {@render bracketOptions()}
+        </select>
+      </label>
+      <label class="flex flex-col gap-1">
+        {@render controlLabel('Sort by')}
+        <select
+          bind:value={sort}
+          onchange={() => void load(sort, window)}
+          class="min-h-11 w-full rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 text-base"
+          aria-label="Sort validators by"
+        >
+          {#each COLUMNS as col (col.key)}
+            <option value={col.key}>{col.label}</option>
+          {/each}
+        </select>
+      </label>
+    </div>
+
+    <!-- Desktop (md+): segmented window switch + inline bracket filter. -->
+    <div class="hidden md:flex md:items-center md:justify-between md:gap-3">
       <div
-        class="flex w-full flex-wrap gap-1 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-1 sm:inline-flex sm:w-fit"
+        class="inline-flex w-fit flex-wrap gap-1 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-1"
       >
         {#each WINDOW_OPTIONS as option (option.key)}
           <button
             type="button"
-            class="flex-1 rounded-md px-2 py-1 text-center text-[11px] font-medium transition-colors sm:flex-none sm:px-3 sm:py-1.5 sm:text-xs"
+            class="rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
             class:bg-[color:var(--color-brand-500)]={window === option.key}
             class:text-white={window === option.key}
             class:text-[color:var(--color-text-muted)]={window !== option.key}
@@ -414,52 +488,17 @@
           </button>
         {/each}
       </div>
-
-      <!--
-        Right: the controls that narrow / reorder the list. The bracket
-        FILTER is a single dropdown (stake + client kinds grouped via
-        <optgroup>) so it reads as a filter, not a second row of view
-        tabs. The sort dropdown is mobile-only — desktop sorts via the
-        column headers. `min-h-11` keeps the WCAG 2.5.5 touch target on
-        mobile.
-      -->
-      <div class="flex flex-wrap items-center gap-3">
-        <label class="flex items-center gap-2 text-xs">
-          <span class="text-[color:var(--color-text-subtle)]">Bracket</span>
-          <select
-            bind:value={bracket}
-            onchange={handleBracketChange}
-            class="min-h-11 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-1.5 text-base sm:min-h-0 sm:text-sm"
-            aria-label="Filter validators by bracket"
-          >
-            <option value="all">All indexed</option>
-            <optgroup label="By stake">
-              <option value="stake_lt_100k">Small (&lt;100k SOL)</option>
-              <option value="stake_lt_500k">Small (&lt;500k SOL)</option>
-            </optgroup>
-            <option value="newcomer">Newcomers</option>
-            <optgroup label="By client">
-              {#each CLIENT_BRACKET_KINDS as ck (ck.kind)}
-                <option value={`client:${ck.kind}`}>{ck.label}</option>
-              {/each}
-            </optgroup>
-          </select>
-        </label>
-
-        <label class="flex items-center gap-2 text-sm md:hidden">
-          <span class="text-[color:var(--color-text-subtle)]">Sort by</span>
-          <select
-            bind:value={sort}
-            onchange={() => void load(sort, window)}
-            class="min-h-11 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-base"
-            aria-label="Sort validators by"
-          >
-            {#each COLUMNS as col (col.key)}
-              <option value={col.key}>{col.label}</option>
-            {/each}
-          </select>
-        </label>
-      </div>
+      <label class="flex items-center gap-2 text-sm">
+        <span class="text-[color:var(--color-text-subtle)]">Bracket</span>
+        <select
+          bind:value={bracket}
+          onchange={handleBracketChange}
+          class="rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-1.5 text-sm"
+          aria-label="Filter validators by bracket"
+        >
+          {@render bracketOptions()}
+        </select>
+      </label>
     </div>
   </header>
 
