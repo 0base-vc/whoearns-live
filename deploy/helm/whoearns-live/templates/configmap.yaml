@@ -12,6 +12,7 @@ data:
   SITE_URL: {{ .Values.config.siteUrl | default "http://localhost:8080" | quote }}
   SITE_NAME: {{ .Values.config.siteName | default "WhoEarns" | quote }}
   METRICS_PORT: {{ .Values.config.metricsPort | default 0 | quote }}
+  WORKER_METRICS_PORT: {{ .Values.config.workerMetricsPort | default 0 | quote }}
   API_RATE_LIMIT_MAX: {{ .Values.config.apiRateLimitMax | default 60 | quote }}
   API_RATE_LIMIT_WINDOW_MS: {{ .Values.config.apiRateLimitWindowMs | default 60000 | quote }}
   TRUST_PROXY_HOPS: {{ .Values.config.trustProxyHops | default 0 | quote }}

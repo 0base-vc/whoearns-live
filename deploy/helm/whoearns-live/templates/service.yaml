@@ -25,6 +25,14 @@ spec:
       targetPort: metrics
       protocol: TCP
     {{- end }}
+    {{- if and .Values.config.workerMetricsPort (gt (int .Values.config.workerMetricsPort) 0) }}
+    # Worker-process scrape port. See `metricsPort` notes — same
+    # posture, just a different process's registry.
+    - name: worker-metrics
+      port: {{ .Values.config.workerMetricsPort }}
+      targetPort: worker-metrics
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "whoearns.selectorLabels" . | nindent 4 }}
 ---
@@ -50,6 +58,14 @@ spec:
     - name: metrics
       port: {{ .Values.config.metricsPort }}
       targetPort: metrics
+      protocol: TCP
+    {{- end }}
+    {{- if and .Values.config.workerMetricsPort (gt (int .Values.config.workerMetricsPort) 0) }}
+    # Worker-process scrape port. See `metricsPort` notes — same
+    # posture, just a different process's registry.
+    - name: worker-metrics
+      port: {{ .Values.config.workerMetricsPort }}
+      targetPort: worker-metrics
       protocol: TCP
     {{- end }}
   selector:

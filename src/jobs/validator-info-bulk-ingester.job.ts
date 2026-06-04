@@ -37,7 +37,13 @@ export const VALIDATOR_INFO_BULK_INGESTER_JOB_NAME = 'validator-info-bulk-ingest
  * no-rename tick a zero-row write. Same "one bulk pull + idempotent
  * batch upsert" shape as the validators.app and stakewiz ingesters.
  *
- * Failure mode: any throw is logged at warn and retried next tick.
+ * Failure mode: any throw propagates to the scheduler, which logs at
+ * `error` and records `jobs_executed_total{outcome="fail"}`. We do NOT
+ * catch in here — the prior self-catch downgraded fatals to a warn
+ * line and let the scheduler count the tick as `outcome=success`, so a
+ * tick that threw on every run looked healthy in metrics. The cluster-
+ * wide moniker fill silently never landed (this is exactly how the
+ * "Chainflow not findable by name" bug stayed invisible for hours).
  * No cursor — the upsert is idempotent and re-running is harmless.
  */
 export function createValidatorInfoBulkIngesterJob(deps: ValidatorInfoBulkIngesterJobDeps): Job {
@@ -49,26 +55,15 @@ export function createValidatorInfoBulkIngesterJob(deps: ValidatorInfoBulkIngest
       // batch UPDATE on shutdown. The post-refresh guard below still
       // catches mid-flight aborts where the RPC had already started.
       if (signal.aborted) return;
-      try {
-        const { observed, updated } = await deps.validatorService.refreshAllValidatorInfo();
-        if (signal.aborted) return;
-        // Only log at `info` when a moniker actually drifted. With the
-        // IS DISTINCT FROM guard, the steady-state tick updates 0 rows
-        // and would otherwise spam ~4 lines/day at this cadence.
-        if (updated > 0) {
-          deps.logger.info({ observed, updated }, 'validator-info-bulk-ingester: monikers updated');
-        } else {
-          deps.logger.debug(
-            { observed },
-            'validator-info-bulk-ingester: no moniker drift this tick',
-          );
-        }
-      } catch (err) {
-        if (signal.aborted) return;
-        deps.logger.warn(
-          { err },
-          'validator-info-bulk-ingester: tick failed, will retry next interval',
-        );
+      const { observed, updated } = await deps.validatorService.refreshAllValidatorInfo();
+      if (signal.aborted) return;
+      // Only log at `info` when a moniker actually drifted. With the
+      // IS DISTINCT FROM guard, the steady-state tick updates 0 rows
+      // and would otherwise spam ~4 lines/day at this cadence.
+      if (updated > 0) {
+        deps.logger.info({ observed, updated }, 'validator-info-bulk-ingester: monikers updated');
+      } else {
+        deps.logger.debug({ observed }, 'validator-info-bulk-ingester: no moniker drift this tick');
       }
     },
   };

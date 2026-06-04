@@ -490,6 +490,60 @@ describe('ValidatorService.refreshAllValidatorInfo', () => {
     expect(a?.website).toBe('https://chainflow.io/'); // http(s)-normalised
   });
 
+  it('skips Config accounts the jsonParsed encoder fell back to raw bytes for', async () => {
+    // Real-world response shape from a primary RPC: for accounts the
+    // `jsonParsed` encoder can't decode (every Config account that isn't
+    // a `validatorInfo`), `data` comes back as a `[base64, "base64"]`
+    // tuple instead of a `{parsed, program}` object. The pre-fix loop
+    // dereferenced `data.parsed.type` before filtering and threw on the
+    // first such row — the entire bulk fill silently never landed, so
+    // unwatched validators (e.g. the main Chainflow vs. the experimental
+    // one) were never findable by moniker via /v1/validators/search.
+    const repo = new FakeValidatorsRepo();
+    await repo.upsert({
+      votePubkey: VOTE_A,
+      identityPubkey: IDENTITY_A,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    await repo.upsert({
+      votePubkey: VOTE_B,
+      identityPubkey: IDENTITY_B,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+    const rawTupleAccount = {
+      pubkey: 'StakeConfig11111111111111111111111111111111',
+      account: {
+        data: ['BAAAAAAAAAA=', 'base64'] as unknown as RpcValidatorInfoAccount['account']['data'],
+      },
+    } as RpcValidatorInfoAccount;
+    const rpc = {
+      getVoteAccounts: vi.fn(),
+      getConfigProgramAccounts: vi
+        .fn()
+        .mockResolvedValue([
+          rawTupleAccount,
+          infoAccount(IDENTITY_A, { name: 'Chainflow' }),
+          rawTupleAccount,
+          infoAccount(IDENTITY_B, { name: 'Chainflow Experimental' }),
+        ]),
+    };
+    const service = new ValidatorService({
+      validatorsRepo: repo as unknown as ValidatorsRepository,
+      rpc: rpc as unknown as SolanaRpcClient,
+      logger: silent,
+    });
+
+    const res = await service.refreshAllValidatorInfo();
+    expect(res).toEqual({ observed: 2, updated: 2 });
+
+    // Both Chainflow validators are now findable — the discovery bug
+    // (one matches, the other doesn't) does not reappear.
+    const hits = await repo.searchByText('chainflow', 10);
+    expect(hits.map((r) => r.votePubkey).sort()).toEqual([VOTE_A, VOTE_B].sort());
+  });
+
   it('skips non-validatorInfo accounts and records without a signer identity', async () => {
     const repo = new FakeValidatorsRepo();
     await repo.upsert({

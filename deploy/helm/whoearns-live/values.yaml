@@ -193,6 +193,25 @@ config:
   # 9091 is the conventional choice (Prometheus itself uses 9090,
   # node exporters land in 9091-9100).
   metricsPort: 0
+  # Port for the WORKER process's own `/metrics` listener.
+  # The pod runs api.js + worker.js as two separate Node processes —
+  # `prom-client` registries are per-process, so scheduler counters
+  # (`jobs_executed_total{job,outcome}`, `jobs_tick_duration_seconds`,
+  # plus Node default metrics from the worker) only ever land in
+  # the worker's registry and are NOT visible on `metricsPort`. Both
+  # processes load the same env, so they can't share a port.
+  #
+  # `0` (default) → worker has no metrics listener. Set this to a port
+  # distinct from `metricsPort` (conventionally `metricsPort + 1`, e.g.
+  # 9092) and the chart auto-wires:
+  #   - Service `worker-metrics` port (cluster-internal, not in Ingress)
+  #   - StatefulSet containerPort
+  #   - ServiceMonitor second endpoint so the same Prometheus scrape
+  #     config picks both ports up without further wiring
+  # The pod annotations (`prometheus.io/scrape`/`port`) still point at
+  # `metricsPort` — annotation-based discovery is single-port; use the
+  # ServiceMonitor path for full coverage.
+  workerMetricsPort: 0
   # Per-IP request cap on /v1/* (excluded: /healthz). 60/min = comfortable
   # UI traffic, tight enough that cluster-wide scraping trips early.
   apiRateLimitMax: 60

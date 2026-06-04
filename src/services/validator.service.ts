@@ -309,7 +309,11 @@ export class ValidatorService {
       return { found: false };
     }
     if (account === null) return { found: false };
-    const cd = account.account.data.parsed.info.configData;
+    // `getValidatorInfoForIdentity` already filters to `parsed.type === 'validatorInfo'`,
+    // so `parsed` is non-undefined here in practice — but the type leaves
+    // it optional (raw-tuple fallback shape), so guard for compile-time safety.
+    const cd = account.account.data.parsed?.info.configData;
+    if (cd === undefined) return { found: false };
     await this.validatorsRepo.upsertInfo([
       {
         identityPubkey: identity,
@@ -365,8 +369,12 @@ export class ValidatorService {
     const byIdentity = new Map<IdentityPubkey, ValidatorInfo>();
     let observed = 0;
     for (const account of accounts) {
+      // `parsed` is undefined for Config accounts the jsonParsed encoder
+      // can't decode (stake-config, etc. fall back to a raw byte tuple).
+      // Dereferencing it before the type check throws and kills the whole
+      // tick — the cluster-wide moniker fill silently never lands.
       const parsed = account.account.data.parsed;
-      if (parsed.type !== 'validatorInfo') continue;
+      if (parsed?.type !== 'validatorInfo') continue;
       const identity = parsed.info.keys.find((k) => k.signer)?.pubkey;
       if (identity === undefined || identity.length === 0) continue;
       observed += 1;
