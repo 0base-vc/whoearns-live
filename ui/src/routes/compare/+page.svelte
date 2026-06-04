@@ -63,11 +63,11 @@
   const LAST_MONTH_EPOCHS = 15;
   const DECADE_EPOCH_COUNT = 10;
   const WINDOW_OPTIONS: Array<{ key: LeaderboardWindow; label: string }> = [
-    { key: 'live_trend', label: 'Live trend' },
     { key: 'current_only', label: 'Current only' },
+    { key: 'live_trend', label: 'Live trend' },
     { key: 'stable_trend', label: 'Stable trend' },
-    { key: 'decade_epoch', label: 'Decade' },
     { key: 'final_epoch', label: 'Final epoch' },
+    { key: 'decade_epoch', label: 'Decade' },
   ];
 
   function leaderSlotStatsKey(vote: string, epoch: number): string {
