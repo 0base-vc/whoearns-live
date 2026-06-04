@@ -54,14 +54,15 @@ export interface ValidatorEpochRecord {
   /**
    * Compute-units surface (additive). `avgComputeUnitsPerProducedBlock`
    * is this validator's average CU per produced block for the epoch;
-   * `serviceAverageCu` is the service-wide average CU per produced
-   * block across all validators for the same epoch. Both are
-   * stringified integers (tens of millions, safe to `Number()`-parse)
-   * and may be `null` — the validator field when it produced 0 blocks
-   * that epoch, the service field when no data exists.
+   * `serviceAverageCu` is the average across all tracked validators;
+   * `sameClientAverageCu` restricts that average to tracked validators
+   * running this one's client (`null` when the client is unknown or no
+   * same-client peer produced a block). All stringified integers (tens
+   * of millions, safe to `Number()`-parse) and may be `null`.
    */
   avgComputeUnitsPerProducedBlock: string | null;
   serviceAverageCu: string | null;
+  sameClientAverageCu: string | null;
 
   lastUpdatedAt: string | null;
   freshness: {
@@ -92,8 +93,12 @@ export interface ValidatorEpochRecord {
     sample: 'indexed_validators';
     sampleValidators: number;
     sampleSlots: number;
-    medianIncomeLamportsPerSlot: string;
-    medianIncomeSolPerSlot: string;
+    avgIncomeLamportsPerSlot: string;
+    avgIncomeSolPerSlot: string;
+    clientKind: string | null;
+    sameClientSampleValidators: number;
+    sameClientAvgIncomeLamportsPerSlot: string | null;
+    sameClientAvgIncomeSolPerSlot: string | null;
     basis: 'income_per_assigned_slot' | 'income_per_elapsed_assigned_slot';
   } | null;
 }

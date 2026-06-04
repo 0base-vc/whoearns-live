@@ -2063,18 +2063,26 @@ components:
         peerBenchmark:
           type: [object, 'null']
           description: |
-            Indexed-validator median total income per scheduled leader
-            slot for the same epoch. Current epochs use elapsed assigned
-            slots; closed epochs use final assigned slots. Populated on
-            `/v1/validators/{idOrVote}/history`; other endpoints that
-            reuse this record shape may return null.
+            Indexed-validator total income per scheduled leader slot for
+            the same epoch, as the cohort MEAN (was a median — the income
+            chart's peer line is now an average). NOT a cluster figure:
+            the cohort is the validators WhoEarns indexes, opt-outs
+            excluded. `sameClient*` carries the same average restricted to
+            indexed validators running this one's client. Current epochs
+            use elapsed assigned slots; closed epochs use final assigned
+            slots. Populated on `/v1/validators/{idOrVote}/history`; other
+            endpoints that reuse this record shape may return null.
           required:
             [
               sample,
               sampleValidators,
               sampleSlots,
-              medianIncomeLamportsPerSlot,
-              medianIncomeSolPerSlot,
+              avgIncomeLamportsPerSlot,
+              avgIncomeSolPerSlot,
+              clientKind,
+              sameClientSampleValidators,
+              sameClientAvgIncomeLamportsPerSlot,
+              sameClientAvgIncomeSolPerSlot,
               basis,
             ]
           properties:
@@ -2083,10 +2091,24 @@ components:
               enum: [indexed_validators]
             sampleValidators: { type: integer, minimum: 0 }
             sampleSlots: { type: integer, minimum: 0 }
-            medianIncomeLamportsPerSlot:
+            avgIncomeLamportsPerSlot:
               type: string
-              description: Decimal lamports per leader slot; may include fractional lamports.
-            medianIncomeSolPerSlot: { type: string }
+              description: Mean decimal lamports per leader slot across the indexed cohort.
+            avgIncomeSolPerSlot: { type: string }
+            clientKind:
+              type: [string, 'null']
+              description: |
+                The validator's client the same-client cohort was filtered
+                to (e.g. `agave_bam`). `null` when the client is unknown —
+                then the `sameClient*` fields carry no cohort.
+            sameClientSampleValidators: { type: integer, minimum: 0 }
+            sameClientAvgIncomeLamportsPerSlot:
+              type: [string, 'null']
+              description: |
+                Mean lamports per leader slot across indexed validators
+                running `clientKind`. `null` when no same-client peer had
+                measurable income this epoch.
+            sameClientAvgIncomeSolPerSlot: { type: [string, 'null'] }
             basis:
               type: string
               enum: [income_per_assigned_slot, income_per_elapsed_assigned_slot]
@@ -2112,6 +2134,16 @@ components:
             Stringified. `null` when no tracked validator produced a
             block this epoch. Always present on
             `/v1/validators/{idOrVote}/history`; `null` elsewhere.
+        sameClientAverageCu:
+          type: [string, 'null']
+          description: |
+            Produced-block-count-weighted average CU per produced block
+            for the epoch across tracked validators running THIS
+            validator's client — the same-client benchmark on the income-
+            page CU chart. Stringified. `null` when the client is unknown
+            or no same-client tracked validator produced a block this
+            epoch. Always present on `/v1/validators/{idOrVote}/history`;
+            `null` elsewhere.
 
     ValidatorEpochLeaderSlots:
       type: object

@@ -1437,6 +1437,39 @@ export class FakeProcessedBlocksRepo {
     return out;
   }
 
+  /**
+   * Mirror of `ProcessedBlocksRepository.getEpochComputeUnitsByClient`.
+   * The real query joins `validators` for `client_kind`; the fake reads
+   * an optional `clientByIdentity` map (leader identity → client) so a
+   * test can model same-client cohorts. Unwired or `clientKind: null`
+   * → empty map, matching the real method's null-client short-circuit
+   * (the same-client query's correctness is covered by the stats/CU
+   * integration tests against a real DB).
+   */
+  clientByIdentity?: Map<string, string>;
+  async getEpochComputeUnitsByClient(
+    epochs: Epoch[],
+    clientKind: string | null,
+  ): Promise<Map<Epoch, bigint | null>> {
+    const out = new Map<Epoch, bigint | null>();
+    if (clientKind === null || this.clientByIdentity === undefined) return out;
+    const epochSet = new Set(epochs);
+    const acc = new Map<Epoch, { cu: bigint; blocks: number }>();
+    for (const row of this.rows.values()) {
+      if (!epochSet.has(row.epoch)) continue;
+      if (row.blockStatus !== 'produced') continue;
+      if (this.clientByIdentity.get(row.leaderIdentity) !== clientKind) continue;
+      const e = acc.get(row.epoch) ?? { cu: 0n, blocks: 0 };
+      e.cu += row.computeUnitsConsumed;
+      e.blocks += 1;
+      acc.set(row.epoch, e);
+    }
+    for (const [epoch, { cu, blocks }] of acc) {
+      out.set(epoch, blocks > 0 ? cu / BigInt(blocks) : null);
+    }
+    return out;
+  }
+
   /** Mirror of `ProcessedBlocksRepository.getWindowedComputeUnitsByVote`. */
   async getWindowedComputeUnitsByVote(
     epochs: Epoch[],

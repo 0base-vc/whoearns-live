@@ -153,8 +153,12 @@ describe('GET /v1/validators/:idOrVote/history', () => {
       sample: 'indexed_validators',
       sampleValidators: 12,
       sampleSlots: 120,
-      medianIncomeLamportsPerSlot: '100000',
-      medianIncomeSolPerSlot: '0.0001',
+      avgIncomeLamportsPerSlot: '100000',
+      avgIncomeSolPerSlot: '0.0001',
+      clientKind: null,
+      sameClientSampleValidators: 0,
+      sameClientAvgIncomeLamportsPerSlot: null,
+      sameClientAvgIncomeSolPerSlot: null,
       basis: 'income_per_assigned_slot',
     });
     await ctx.epochs.upsert(makeEpochInfo(500, 0, 431_999, { isClosed: true }));
@@ -177,7 +181,7 @@ describe('GET /v1/validators/:idOrVote/history', () => {
         epoch: number;
         peerBenchmark: {
           sampleValidators: number;
-          medianIncomeLamportsPerSlot: string;
+          avgIncomeLamportsPerSlot: string;
           basis: string;
         } | null;
       }>;
@@ -189,7 +193,7 @@ describe('GET /v1/validators/:idOrVote/history', () => {
     expect(body.items[0]?.epoch).toBe(500);
     expect(body.items[0]?.peerBenchmark).toMatchObject({
       sampleValidators: 12,
-      medianIncomeLamportsPerSlot: '100000',
+      avgIncomeLamportsPerSlot: '100000',
       basis: 'income_per_assigned_slot',
     });
     // Not an auto-track response.

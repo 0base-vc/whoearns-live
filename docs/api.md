@@ -280,12 +280,19 @@ The response wraps `items: ValidatorEpochRecord[]` with validator metadata,
 claim/profile state, and a `tracking` boolean that is true when the lookup
 caused the validator to be added to the watched set.
 
-Each item also includes `peerBenchmark`, an indexed-validator median for
-`totalIncome / leaderSlots` in the same epoch. Closed epochs use
-`slotsAssigned`; the running epoch uses `slotsElapsedAssigned`. The benchmark
-is `null` until at least three indexed validators have income/slot facts. This
-benchmark is populated on the history endpoint; single-epoch endpoints that
-reuse `ValidatorEpochRecord` may return `peerBenchmark: null`.
+Each item also includes `peerBenchmark`, an indexed-validator **average**
+(mean) for `totalIncome / leaderSlots` in the same epoch — the cohort is the
+validators WhoEarns indexes (opt-outs excluded), not the whole cluster. It also
+carries a same-client cohort (`clientKind`, `sameClientSampleValidators`,
+`sameClientAvgIncomeLamportsPerSlot`, `sameClientAvgIncomeSolPerSlot`) — the
+same average restricted to indexed validators running this one's client, so the
+chart can plot "vs my client". Closed epochs use `slotsAssigned`; the running
+epoch uses `slotsElapsedAssigned`. The benchmark is `null` until at least three
+indexed validators have income/slot facts. (The Node Tier _percentile_ keeps
+its own median basis — robustness matters more for a score than a chart line.)
+The CU chart adds a matching `sameClientAverageCu` alongside `serviceAverageCu`.
+These are populated on the history endpoint; single-epoch endpoints that reuse
+`ValidatorEpochRecord` may return `peerBenchmark: null`.
 
 ## `GET /v1/validators/:idOrVote/current-epoch`
 

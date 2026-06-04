@@ -454,7 +454,7 @@ describe('StatsRepository', () => {
     await expect(repo.rebuildIncomeTotalsFromProcessedBlocks(500, ['I1'])).resolves.toBe(0);
   });
 
-  it('findIndexedIncomePerSlotBenchmarks: computes closed and current epoch medians with the right denominator', async () => {
+  it('findIndexedIncomePerSlotBenchmarks: computes closed and current epoch averages with the right denominator', async () => {
     await seedIncomeRow({
       epoch: 500,
       vote: 'ClosedA',
@@ -505,10 +505,13 @@ describe('StatsRepository', () => {
       fees: 5_000n,
     });
 
-    const benchmarks = await repo.findIndexedIncomePerSlotBenchmarks([
-      { epoch: 500, isCurrent: false },
-      { epoch: 501, isCurrent: true },
-    ]);
+    const benchmarks = await repo.findIndexedIncomePerSlotBenchmarks(
+      [
+        { epoch: 500, isCurrent: false },
+        { epoch: 501, isCurrent: true },
+      ],
+      null,
+    );
     const byEpoch = new Map(benchmarks.map((b) => [b.epoch, b]));
 
     expect(byEpoch.get(500)).toMatchObject({
@@ -517,16 +520,16 @@ describe('StatsRepository', () => {
       sampleSlots: 300,
       basis: 'income_per_assigned_slot',
     });
-    expect(Number(byEpoch.get(500)?.medianIncomeLamportsPerSlot)).toBe(40);
-    expect(byEpoch.get(500)?.medianIncomeSolPerSlot).toBe('0.00000004');
+    expect(Number(byEpoch.get(500)?.avgIncomeLamportsPerSlot)).toBe(40);
+    expect(byEpoch.get(500)?.avgIncomeSolPerSlot).toBe('0.00000004');
 
     expect(byEpoch.get(501)).toMatchObject({
       sampleValidators: 3,
       sampleSlots: 30,
       basis: 'income_per_elapsed_assigned_slot',
     });
-    expect(Number(byEpoch.get(501)?.medianIncomeLamportsPerSlot)).toBe(300);
-    expect(byEpoch.get(501)?.medianIncomeSolPerSlot).toBe('0.0000003');
+    expect(Number(byEpoch.get(501)?.avgIncomeLamportsPerSlot)).toBe(300);
+    expect(byEpoch.get(501)?.avgIncomeSolPerSlot).toBe('0.0000003');
   });
 
   it('findIndexedIncomePerSlotBenchmarks: includes fact-backed zero income and excludes opted-out, missing-income, and zero-denominator rows', async () => {
@@ -588,9 +591,10 @@ describe('StatsRepository', () => {
        VALUES ('OptedOutVote', TRUE)`,
     );
 
-    const [benchmark] = await repo.findIndexedIncomePerSlotBenchmarks([
-      { epoch: 502, isCurrent: false },
-    ]);
+    const [benchmark] = await repo.findIndexedIncomePerSlotBenchmarks(
+      [{ epoch: 502, isCurrent: false }],
+      null,
+    );
 
     expect(benchmark).toMatchObject({
       epoch: 502,
@@ -598,7 +602,9 @@ describe('StatsRepository', () => {
       sampleSlots: 29,
       basis: 'income_per_assigned_slot',
     });
-    expect(Number(benchmark?.medianIncomeLamportsPerSlot)).toBe(200);
+    // Included per-slot incomes are [1000, 0, 200] → mean 400 (the
+    // series is now an average, not the former median of 200).
+    expect(Number(benchmark?.avgIncomeLamportsPerSlot)).toBe(400);
   });
 
   it('findIndexedIncomePerSlotBenchmarks: suppresses low-sample epochs', async () => {
@@ -618,8 +624,61 @@ describe('StatsRepository', () => {
     });
 
     await expect(
-      repo.findIndexedIncomePerSlotBenchmarks([{ epoch: 503, isCurrent: false }]),
+      repo.findIndexedIncomePerSlotBenchmarks([{ epoch: 503, isCurrent: false }], null),
     ).resolves.toEqual([]);
+  });
+
+  it('findIndexedIncomePerSlotBenchmarks: computes a same-client cohort average alongside the indexed average', async () => {
+    // Three indexed validators in epoch 510 (denominator = slotsAssigned
+    // = 10 each): two on agave, one on firedancer, distinct per-slot
+    // incomes — 100, 300 (agave) and 800 (firedancer) lamports/slot.
+    await seedIncomeRow({
+      epoch: 510,
+      vote: 'AgaveVoteA',
+      identity: 'AgaveIdA',
+      slotsAssigned: 10,
+      fees: 1_000n,
+    });
+    await seedIncomeRow({
+      epoch: 510,
+      vote: 'AgaveVoteB',
+      identity: 'AgaveIdB',
+      slotsAssigned: 10,
+      fees: 3_000n,
+    });
+    await seedIncomeRow({
+      epoch: 510,
+      vote: 'FdVote',
+      identity: 'FdId',
+      slotsAssigned: 10,
+      fees: 8_000n,
+    });
+    // The benchmark LEFT JOINs `validators` for `client_kind`, so the
+    // cohort filter needs real validators rows keyed by identity.
+    await fixture!.pool.query(
+      `INSERT INTO validators (vote_pubkey, identity_pubkey, first_seen_epoch, last_seen_epoch, client_kind)
+       VALUES ('AgaveVoteA', 'AgaveIdA', 510, 510, 'agave'),
+              ('AgaveVoteB', 'AgaveIdB', 510, 510, 'agave'),
+              ('FdVote', 'FdId', 510, 510, 'firedancer')
+       ON CONFLICT (vote_pubkey) DO UPDATE SET client_kind = EXCLUDED.client_kind`,
+    );
+
+    const [benchmark] = await repo.findIndexedIncomePerSlotBenchmarks(
+      [{ epoch: 510, isCurrent: false }],
+      'agave',
+    );
+
+    expect(benchmark).toMatchObject({
+      epoch: 510,
+      sampleValidators: 3,
+      clientKind: 'agave',
+      sameClientSampleValidators: 2,
+    });
+    // Indexed cohort = all 3: mean per-slot = (100 + 300 + 800) / 3 = 400.
+    expect(Number(benchmark?.avgIncomeLamportsPerSlot)).toBe(400);
+    // Same-client (agave only) = (100 + 300) / 2 = 200 — distinct from
+    // the indexed average, proving the FILTER restricts the cohort.
+    expect(Number(benchmark?.sameClientAvgIncomeLamportsPerSlot)).toBe(200);
   });
 
   it('findTopNByWindow: excludes pure placeholders but keeps fact-backed skipped slots', async () => {

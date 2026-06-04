@@ -1046,6 +1046,49 @@ export class ProcessedBlocksRepository {
   }
 
   /**
+   * Same-client average compute units per produced block, per epoch —
+   * like `getEpochComputeUnitsServiceWide` but pooling ONLY the blocks
+   * of tracked validators whose current `client_kind` matches the
+   * given client. Powers the "same-client average" series on the CU
+   * chart. Keyed by epoch; `null` for an epoch with no same-client
+   * produced blocks. A `clientKind` of `null` (target client unknown
+   * / not a real client) returns an empty map — no cohort to pool.
+   *
+   * Client is point-in-time: `validators.client_kind` is the latest
+   * gossip-derived value, applied across history — exact for the
+   * recent window, an approximation for older epochs.
+   */
+  async getEpochComputeUnitsByClient(
+    epochs: Epoch[],
+    clientKind: string | null,
+  ): Promise<Map<Epoch, bigint | null>> {
+    const out = new Map<Epoch, bigint | null>();
+    if (epochs.length === 0 || clientKind === null) return out;
+    const { rows } = await this.pool.query<{
+      epoch: string;
+      compute_units_consumed: string;
+      produced_blocks: string;
+    }>(
+      `SELECT pb.epoch::text AS epoch,
+              COALESCE(SUM(pb.compute_units_consumed)
+                FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS compute_units_consumed,
+              COUNT(*) FILTER (WHERE pb.block_status = 'produced')::bigint AS produced_blocks
+         FROM processed_blocks pb
+         JOIN validators v ON v.identity_pubkey = pb.leader_identity
+        WHERE pb.epoch = ANY($1::bigint[])
+          AND v.client_kind = $2
+        GROUP BY pb.epoch`,
+      [epochs, clientKind],
+    );
+    for (const row of rows) {
+      const cu = toIntegerBigInt(row.compute_units_consumed ?? '0', 'compute units');
+      const blocks = Number(row.produced_blocks ?? '0');
+      out.set(Number(row.epoch), bigintAverage(cu, blocks));
+    }
+    return out;
+  }
+
+  /**
    * Windowed average compute units per produced block, per validator
    * VOTE, pooled across the given window epochs. Keyed by vote pubkey;
    * `null` for a vote that produced no blocks across the window.

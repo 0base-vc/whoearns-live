@@ -15,14 +15,17 @@ export type SerializerContext = Record<string, never>;
 /**
  * Per-epoch compute-unit block threaded onto the history response.
  * `validator` is this validator's average CU per produced block for
- * the epoch; `serviceAverage` is the service-wide producedBlock-
- * weighted average. Both `null` when the epoch has no produced-block
- * denominator. Defaults to all-null for callers that do not surface
- * CU (the current-epoch / batch / per-epoch routes).
+ * the epoch; `serviceAverage` is the producedBlock-weighted average
+ * across all tracked validators; `sameClient` is the same average
+ * restricted to tracked validators running this one's client. All
+ * `null` when the epoch has no matching produced-block denominator.
+ * Defaults to all-null for callers that do not surface CU (the
+ * current-epoch / batch / per-epoch routes).
  */
 export interface ComputeUnitsBlock {
   validator: bigint | null;
   serviceAverage: bigint | null;
+  sameClient: bigint | null;
 }
 
 function maxDate(...dates: (Date | null)[]): Date | null {
@@ -61,8 +64,12 @@ function serializePeerBenchmark(
     sample: benchmark.sample,
     sampleValidators: benchmark.sampleValidators,
     sampleSlots: benchmark.sampleSlots,
-    medianIncomeLamportsPerSlot: benchmark.medianIncomeLamportsPerSlot,
-    medianIncomeSolPerSlot: benchmark.medianIncomeSolPerSlot,
+    avgIncomeLamportsPerSlot: benchmark.avgIncomeLamportsPerSlot,
+    avgIncomeSolPerSlot: benchmark.avgIncomeSolPerSlot,
+    clientKind: benchmark.clientKind,
+    sameClientSampleValidators: benchmark.sameClientSampleValidators,
+    sameClientAvgIncomeLamportsPerSlot: benchmark.sameClientAvgIncomeLamportsPerSlot,
+    sameClientAvgIncomeSolPerSlot: benchmark.sameClientAvgIncomeSolPerSlot,
     basis: benchmark.basis,
   };
 }
@@ -81,7 +88,7 @@ export function serializeValidator(
   _ctx?: SerializerContext,
   cluster: EpochAggregate | null = null,
   peerBenchmark: EpochPeerBenchmark | null = null,
-  computeUnits: ComputeUnitsBlock = { validator: null, serviceAverage: null },
+  computeUnits: ComputeUnitsBlock = { validator: null, serviceAverage: null, sameClient: null },
 ): ValidatorCurrentEpochResponse {
   const hasSlots = stats.slotsUpdatedAt !== null;
   const hasIncome = stats.feesUpdatedAt !== null;
@@ -197,6 +204,8 @@ export function serializeValidator(
       computeUnits.validator === null ? null : computeUnits.validator.toString(),
     serviceAverageCu:
       computeUnits.serviceAverage === null ? null : computeUnits.serviceAverage.toString(),
+    sameClientAverageCu:
+      computeUnits.sameClient === null ? null : computeUnits.sameClient.toString(),
   };
 }
 
@@ -269,5 +278,6 @@ export function serializeValidatorPlaceholder(args: {
     peerBenchmark: serializePeerBenchmark(args.peerBenchmark ?? null),
     avgComputeUnitsPerProducedBlock: null,
     serviceAverageCu: null,
+    sameClientAverageCu: null,
   };
 }

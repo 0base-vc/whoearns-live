@@ -144,8 +144,12 @@ describe('serializeValidator', () => {
       sample: 'indexed_validators',
       sampleValidators: 25,
       sampleSlots: 1000,
-      medianIncomeLamportsPerSlot: '12345.5',
-      medianIncomeSolPerSlot: '0.0000123455',
+      avgIncomeLamportsPerSlot: '12345.5',
+      avgIncomeSolPerSlot: '0.0000123455',
+      clientKind: 'agave',
+      sameClientSampleValidators: 8,
+      sameClientAvgIncomeLamportsPerSlot: '15000',
+      sameClientAvgIncomeSolPerSlot: '0.000015',
       basis: 'income_per_assigned_slot',
     });
 
@@ -153,8 +157,12 @@ describe('serializeValidator', () => {
       sample: 'indexed_validators',
       sampleValidators: 25,
       sampleSlots: 1000,
-      medianIncomeLamportsPerSlot: '12345.5',
-      medianIncomeSolPerSlot: '0.0000123455',
+      avgIncomeLamportsPerSlot: '12345.5',
+      avgIncomeSolPerSlot: '0.0000123455',
+      clientKind: 'agave',
+      sameClientSampleValidators: 8,
+      sameClientAvgIncomeLamportsPerSlot: '15000',
+      sameClientAvgIncomeSolPerSlot: '0.000015',
       basis: 'income_per_assigned_slot',
     });
   });
