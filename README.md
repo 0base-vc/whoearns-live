@@ -178,6 +178,7 @@ See [`.env.example`](./.env.example) for the authoritative list.
 | `AGGREGATES_INTERVAL_MS`             | `300000`                                            | How often the worker recomputes cluster medians.                                                                                  |
 | `CLOSED_EPOCH_RECONCILE_INTERVAL_MS` | `300000`                                            | How often the worker repairs the latest closed epoch from leader-slot facts.                                                      |
 | `VALIDATOR_INFO_INTERVAL_MS`         | `21600000`                                          | How often watched validator identity metadata is refreshed.                                                                       |
+| `VALIDATOR_INFO_BULK_INTERVAL_MS`    | `21600000`                                          | How often every published validator's moniker is bulk-fetched so search finds untracked validators by name.                       |
 | `SLOT_FINALITY_BUFFER`               | `32`                                                | Blocks within this distance from the tip are considered not yet final and are skipped.                                            |
 | `SHUTDOWN_TIMEOUT_MS`                | `15000`                                             | Grace period for in-flight work on SIGTERM.                                                                                       |
 

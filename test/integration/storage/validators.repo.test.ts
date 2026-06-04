@@ -193,4 +193,98 @@ describe('ValidatorsRepository', () => {
       'VoteBeta2222222222222222222222222222222222',
     ]);
   });
+
+  it('upsertInfoBatch: bulk-fills monikers cluster-wide and no-ops unchanged rows', async () => {
+    await repo.upsert({
+      votePubkey: 'VoteGamma33333333333333333333333333333333',
+      identityPubkey: 'IdentityGamma3333333333333333333333333333',
+      firstSeenEpoch: 20,
+      lastSeenEpoch: 22,
+    });
+    await repo.upsert({
+      votePubkey: 'VoteDelta444444444444444444444444444444444',
+      identityPubkey: 'IdentityDelta4444444444444444444444444444',
+      firstSeenEpoch: 20,
+      lastSeenEpoch: 21,
+    });
+
+    // Before the bulk fill, neither row has a name → no moniker match.
+    expect(await repo.searchByText('chainflow', 10)).toHaveLength(0);
+
+    const first = await repo.upsertInfoBatch([
+      {
+        identityPubkey: 'IdentityGamma3333333333333333333333333333',
+        name: 'Chainflow',
+        details: null,
+        website: 'https://chainflow.io/',
+        keybaseUsername: 'chainflow',
+        iconUrl: null,
+      },
+      {
+        identityPubkey: 'IdentityDelta4444444444444444444444444444',
+        name: 'Chainflow Experimental',
+        details: null,
+        website: null,
+        keybaseUsername: null,
+        iconUrl: null,
+      },
+      // Identity not present in `validators` — silently no-op'd by the join.
+      {
+        identityPubkey: 'IdentityGhost00000000000000000000000000000',
+        name: 'Ghost',
+        details: null,
+        website: null,
+        keybaseUsername: null,
+        iconUrl: null,
+      },
+    ]);
+    expect(first.updated).toBe(2);
+
+    // Both Chainflow validators are now discoverable by name.
+    const hits = await repo.searchByText('chainflow', 10);
+    expect(hits.map((row) => row.votePubkey).sort()).toEqual(
+      [
+        'VoteDelta444444444444444444444444444444444',
+        'VoteGamma33333333333333333333333333333333',
+      ].sort(),
+    );
+    const gamma = await repo.findByVote('VoteGamma33333333333333333333333333333333');
+    expect(gamma?.name).toBe('Chainflow');
+    expect(gamma?.keybaseUsername).toBe('chainflow');
+    expect(gamma?.infoUpdatedAt).toBeInstanceOf(Date);
+
+    // Re-running with identical info writes zero rows (IS DISTINCT FROM guard).
+    const second = await repo.upsertInfoBatch([
+      {
+        identityPubkey: 'IdentityGamma3333333333333333333333333333',
+        name: 'Chainflow',
+        details: null,
+        website: 'https://chainflow.io/',
+        keybaseUsername: 'chainflow',
+        iconUrl: null,
+      },
+    ]);
+    expect(second.updated).toBe(0);
+
+    // A genuine rename is detected and written.
+    const renamed = await repo.upsertInfoBatch([
+      {
+        identityPubkey: 'IdentityGamma3333333333333333333333333333',
+        name: 'Chainflow v2',
+        details: null,
+        website: 'https://chainflow.io/',
+        keybaseUsername: 'chainflow',
+        iconUrl: null,
+      },
+    ]);
+    expect(renamed.updated).toBe(1);
+    expect((await repo.findByVote('VoteGamma33333333333333333333333333333333'))?.name).toBe(
+      'Chainflow v2',
+    );
+  });
+
+  it('upsertInfoBatch: empty input is a no-op', async () => {
+    const res = await repo.upsertInfoBatch([]);
+    expect(res.updated).toBe(0);
+  });
 });

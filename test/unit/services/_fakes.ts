@@ -112,6 +112,47 @@ export class FakeValidatorsRepo {
     return { updated };
   }
 
+  /** In-memory mirror of ValidatorsRepository.upsertInfoBatch — the
+   *  cluster-wide bulk path. Like `upsertInfo` but only counts +
+   *  touches rows whose moniker fields actually changed (mirrors the
+   *  real repo's IS DISTINCT FROM guard), so tests can assert a
+   *  no-drift tick writes nothing. */
+  async upsertInfoBatch(
+    infos: ReadonlyArray<{
+      identityPubkey: IdentityPubkey;
+      name: string | null;
+      details: string | null;
+      website: string | null;
+      keybaseUsername: string | null;
+      iconUrl: string | null;
+    }>,
+  ): Promise<{ updated: number }> {
+    let updated = 0;
+    for (const info of infos) {
+      for (const [k, row] of this.rows.entries()) {
+        if (row.identityPubkey !== info.identityPubkey) continue;
+        const unchanged =
+          row.name === info.name &&
+          row.details === info.details &&
+          row.website === info.website &&
+          row.keybaseUsername === info.keybaseUsername &&
+          row.iconUrl === info.iconUrl;
+        if (unchanged) continue;
+        this.rows.set(k, {
+          ...row,
+          name: info.name,
+          details: info.details,
+          website: info.website,
+          keybaseUsername: info.keybaseUsername,
+          iconUrl: info.iconUrl,
+          infoUpdatedAt: new Date(),
+        });
+        updated += 1;
+      }
+    }
+    return { updated };
+  }
+
   /** In-memory mirror of ValidatorsRepository.findValidatorsWithMissingInfo.
    *  Filters against the caller-supplied candidate identity list. */
   async findValidatorsWithMissingInfo(
