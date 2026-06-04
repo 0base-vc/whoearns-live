@@ -1657,11 +1657,15 @@ export class FakeValidatorService {
 
   /**
    * Queue of {@link EnsureStakeResult} for `ensureActivatedStakeLamports`.
+   * Accepts a resolved value (the common case) OR a `Promise` — pushing
+   * a deferred promise lets a test assert the route ships its response
+   * BEFORE ensure() resolves (the fire-and-forget invariant added in
+   * response to Codex's "keep history off the RPC cold path" review).
    * Defaults derive from `activatedStakeLamports` so existing tests that
    * set the field continue to assert the same observable add/skip
    * behavior without test-code changes.
    */
-  ensureResponses: EnsureStakeResult[] = [];
+  ensureResponses: Array<EnsureStakeResult | Promise<EnsureStakeResult>> = [];
   readonly ensureCalls: VotePubkey[] = [];
 
   getActivatedStakeLamports(_vote: VotePubkey): bigint | null {
@@ -1671,7 +1675,7 @@ export class FakeValidatorService {
   async ensureActivatedStakeLamports(vote: VotePubkey): Promise<EnsureStakeResult> {
     this.ensureCalls.push(vote);
     const queued = this.ensureResponses.shift();
-    if (queued !== undefined) return queued;
+    if (queued !== undefined) return queued; // `await` unwraps both Promise and plain value.
     if (this.activatedStakeLamports !== null) {
       return { source: 'cache', lamports: this.activatedStakeLamports };
     }

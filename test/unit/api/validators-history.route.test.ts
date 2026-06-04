@@ -24,7 +24,10 @@ import {
 } from '../../../src/api/metrics.js';
 import validatorsHistoryRoutes from '../../../src/api/routes/validators-history.route.js';
 import { LAMPORTS_PER_SOL } from '../../../src/core/lamports.js';
-import type { ValidatorService } from '../../../src/services/validator.service.js';
+import type {
+  EnsureStakeResult,
+  ValidatorService,
+} from '../../../src/services/validator.service.js';
 import type { AggregatesRepository } from '../../../src/storage/repositories/aggregates.repo.js';
 import type { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
 import type { ProcessedBlocksRepository } from '../../../src/storage/repositories/processed-blocks.repo.js';
@@ -163,6 +166,22 @@ async function counterValue(
 }
 
 /**
+ * Drain background-dispatched effects from the fire-and-forget
+ * `ensureActivatedStakeLamports().then().then()` chain. The route ships
+ * its response immediately and only then resolves the ensure() promise
+ * (and any chained `watchedDynamicRepo.add().then().catch()`), so
+ * assertions on counters / logs / repo writes have to wait for those
+ * microtasks + macrotasks to settle. `setImmediate` flushes everything
+ * queued in the current event loop in one shot — more robust than the
+ * older `await Promise.resolve()` pattern (which depended on the exact
+ * microtask depth of the chain and silently lost coverage when the
+ * chain grew).
+ */
+async function drainBackgroundEffects(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
  * Seed one produced block carrying a known compute-unit total so the
  * history route's per-epoch CU aggregation has data to fold.
  */
@@ -271,8 +290,7 @@ describe('GET /v1/validators/:idOrVote/history', () => {
     // trackOnDemand. Known validators already resolved from local DB,
     // so this path must not trigger a full upstream vote-account
     // refresh just to make the fee-ingester watch the vote.
-    await Promise.resolve();
-    await Promise.resolve();
+    await drainBackgroundEffects();
     expect(ctx.validatorService.trackCalls).toHaveLength(0);
     expect(await ctx.watchedDynamic.findByVote(VOTE_1)).not.toBeNull();
 
@@ -294,8 +312,7 @@ describe('GET /v1/validators/:idOrVote/history', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    await Promise.resolve();
-    await Promise.resolve();
+    await drainBackgroundEffects();
     expect(ctx.validatorService.trackCalls).toHaveLength(0);
     expect(await ctx.watchedDynamic.findByVote(VOTE_1)).toBeNull();
     await ctx.app.close();
@@ -564,8 +581,7 @@ describe('GET /v1/validators/:idOrVote/history — lazy stake-cache refresh', ()
     });
     expect(res.statusCode).toBe(200);
     // Flush the fire-and-forget add().then() chain.
-    await Promise.resolve();
-    await Promise.resolve();
+    await drainBackgroundEffects();
 
     expect(ctx.validatorService.ensureCalls).toEqual([VOTE_1]);
     expect(ctx.validatorService.trackCalls).toHaveLength(0);
@@ -604,8 +620,7 @@ describe('GET /v1/validators/:idOrVote/history — lazy stake-cache refresh', ()
       url: `/v1/validators/${VOTE_1}/history?limit=10`,
     });
     expect(res.statusCode).toBe(200);
-    await Promise.resolve();
-    await Promise.resolve();
+    await drainBackgroundEffects();
 
     const row = await ctx.watchedDynamic.findByVote(VOTE_1);
     expect(row).not.toBeNull();
@@ -655,8 +670,7 @@ describe('GET /v1/validators/:idOrVote/history — lazy stake-cache refresh', ()
       url: `/v1/validators/${VOTE_1}/history?limit=10`,
     });
     expect(res.statusCode).toBe(200);
-    await Promise.resolve();
-    await Promise.resolve();
+    await drainBackgroundEffects();
     expect(ctx.validatorService.trackCalls).toHaveLength(0);
     expect(await ctx.watchedDynamic.findByVote(VOTE_1)).toBeNull();
     expect(
@@ -785,8 +799,7 @@ describe('GET /v1/validators/:idOrVote/history — lazy stake-cache refresh', ()
       url: `/v1/validators/${VOTE_1}/history?limit=10`,
     });
     expect(res.statusCode).toBe(200);
-    await Promise.resolve();
-    await Promise.resolve();
+    await drainBackgroundEffects();
     expect(ctx.validatorService.trackCalls).toHaveLength(0);
     expect(await ctx.watchedDynamic.findByVote(VOTE_1)).toBeNull();
     // No counter outcome series exists yet — the silent path skips
@@ -836,8 +849,7 @@ describe('GET /v1/validators/:idOrVote/history — lazy stake-cache refresh', ()
     });
     expect(res.statusCode).toBe(200);
     // Flush the .catch() chain.
-    await Promise.resolve();
-    await Promise.resolve();
+    await drainBackgroundEffects();
     expect(addSpy).toHaveBeenCalledTimes(1);
     expect(
       await counterValue(validatorDynamicWatchAttemptsTotal, { outcome: 'db_add_failed' }),
@@ -880,8 +892,7 @@ describe('GET /v1/validators/:idOrVote/history — lazy stake-cache refresh', ()
       url: `/v1/validators/${VOTE_1}/history?limit=10`,
     });
     expect(res2.statusCode).toBe(200);
-    await Promise.resolve();
-    await Promise.resolve();
+    await drainBackgroundEffects();
     expect(
       await counterValue(validatorDynamicWatchAttemptsTotal, { outcome: 'db_add_failed' }),
     ).toBe(1);
@@ -904,5 +915,62 @@ describe('GET /v1/validators/:idOrVote/history — lazy stake-cache refresh', ()
     );
     expect(errorAddFailLogs).toEqual([]);
     await ctx2.app.close();
+  });
+
+  it('does NOT block the response on the ensure() RPC critical path (fire-and-forget invariant)', async () => {
+    // Critical SLO guard for Codex PR #28 review (comment 3357084206):
+    // an RPC outage on a cold API cache must NOT regress the route from
+    // a fast best-effort DB response to a multi-second await on the
+    // upstream RPC. The route ships its response immediately; the
+    // dynamic-watch registration is purely a side-effect that runs in
+    // the background. This test wires `ensureResponses` with a deferred
+    // promise the test controls — the inject() call MUST resolve while
+    // that deferred is still pending. If a future refactor accidentally
+    // adds an `await` on the ensure path, the inject() blocks until we
+    // resolve the deferred, and the ordering assertion below trips.
+    const localCtx = await makeCtx({ logger: silent });
+    await localCtx.epochs.upsert(makeEpochInfo(500, 0, 431_999, { isClosed: true }));
+    localCtx.stats.rows.set(`500:${VOTE_1}`, makeStats(500, VOTE_1, IDENTITY_1));
+    await localCtx.validators.upsert({
+      votePubkey: VOTE_1,
+      identityPubkey: IDENTITY_1,
+      firstSeenEpoch: 500,
+      lastSeenEpoch: 500,
+    });
+
+    let resolveEnsure: (value: EnsureStakeResult) => void = () => {};
+    const ensureDeferred = new Promise<EnsureStakeResult>((resolve) => {
+      resolveEnsure = resolve;
+    });
+    localCtx.validatorService.ensureResponses.push(ensureDeferred);
+
+    let ensureResolvedAt: number | null = null;
+    void ensureDeferred.then(() => {
+      ensureResolvedAt = Date.now();
+    });
+
+    // Fire the request — should ship without waiting for ensure().
+    const res = await localCtx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/history`,
+    });
+    const responseSentAt = Date.now();
+    expect(res.statusCode).toBe(200);
+
+    // ensure() is STILL pending — the response shipped first.
+    expect(ensureResolvedAt).toBeNull();
+    expect(localCtx.validatorService.ensureCalls).toEqual([VOTE_1]);
+    // No registration yet either (the add chain hangs off ensure).
+    expect(await localCtx.watchedDynamic.findByVote(VOTE_1)).toBeNull();
+
+    // Now release ensure with a cache-hit-shaped result and drain the
+    // background dispatch — registration should land in watched_dynamic.
+    resolveEnsure({ source: 'cache', lamports: LAMPORTS_PER_SOL });
+    await drainBackgroundEffects();
+
+    expect(ensureResolvedAt).not.toBeNull();
+    expect(ensureResolvedAt!).toBeGreaterThanOrEqual(responseSentAt);
+    expect(await localCtx.watchedDynamic.findByVote(VOTE_1)).not.toBeNull();
+    await localCtx.app.close();
   });
 });
