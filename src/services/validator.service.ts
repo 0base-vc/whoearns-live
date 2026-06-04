@@ -106,6 +106,16 @@ export class ValidatorService {
   private lastStakeByVote: Map<VotePubkey, number> = new Map();
   private onDemandRefreshPromise: Promise<void> | null = null;
   private nextOnDemandRefreshAllowedAtMs = 0;
+  /**
+   * Last error thrown by `refreshOnDemandVoteAccounts`, retained so the
+   * cooldown gate can re-throw it when the cache is still cold. Without
+   * this, an RPC outage on a fresh-boot empty cache would let every
+   * subsequent caller (a different unknown pubkey through `trackOnDemand`
+   * or a different known vote through `ensureActivatedStakeLamports`)
+   * bypass the cooldown via the legacy `lastRefresh.length > 0` carve-out
+   * and burst one RPC per request. Cleared on the next successful refresh.
+   */
+  private lastOnDemandRefreshError: unknown = null;
   private onDemandMissUntilByPubkey: Map<string, number> = new Map();
   private readonly onDemandNegativeCacheMaxEntries: number;
 
@@ -781,12 +791,26 @@ export class ValidatorService {
       await this.onDemandRefreshPromise;
       return;
     }
-    // Cooldown gate: when the cache is already primed, accept stale
-    // data rather than burst the upstream RPC. Cold start (cache
-    // empty) bypasses the gate so a freshly-booted pod can prime its
-    // cache on the first request without waiting for the periodic
-    // epoch-watcher tick.
-    if (this.lastRefresh.length > 0 && Date.now() < this.nextOnDemandRefreshAllowedAtMs) {
+    // Cooldown gate. Honoured ALWAYS — including the cold-start case
+    // where `lastRefresh` is still empty. The previous carve-out
+    // (`lastRefresh.length > 0 &&` ...) let an RPC outage on a fresh-
+    // boot empty cache burst one RPC per request: the 30s failure
+    // cooldown was set, but the gate ignored it while the cache was
+    // empty, so the next request (different pubkey for trackOnDemand,
+    // or any known-path `ensureActivatedStakeLamports` caller) tried
+    // RPC again. Now the gate engages immediately; the next caller
+    // either gets the warm cache (success path) OR a re-thrown
+    // "previous refresh failed" error (failure path), and the upstream
+    // gets exactly one attempt per 30s window during an outage.
+    if (Date.now() < this.nextOnDemandRefreshAllowedAtMs) {
+      // If the cache is cold AND the previous attempt failed, the
+      // caller can't tell "RPC down" from "validator legitimately not
+      // in the snapshot" without us re-throwing. With a primed cache,
+      // staying silent is correct — accept staleness, let the caller
+      // proceed with what we've got.
+      if (this.lastRefresh.length === 0 && this.lastOnDemandRefreshError !== null) {
+        throw this.lastOnDemandRefreshError;
+      }
       return;
     }
 
@@ -797,8 +821,10 @@ export class ValidatorService {
         // refresh.
         await this.refreshFromRpc(0);
         this.nextOnDemandRefreshAllowedAtMs = Date.now() + ON_DEMAND_REFRESH_COOLDOWN_MS;
+        this.lastOnDemandRefreshError = null;
       } catch (err) {
         this.nextOnDemandRefreshAllowedAtMs = Date.now() + ON_DEMAND_REFRESH_FAILURE_COOLDOWN_MS;
+        this.lastOnDemandRefreshError = err;
         throw err;
       } finally {
         this.onDemandRefreshPromise = null;

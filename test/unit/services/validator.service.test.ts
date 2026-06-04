@@ -452,13 +452,71 @@ describe('ValidatorService.ensureActivatedStakeLamports', () => {
     expect(nextAt).toBeLessThanOrEqual(before + 35_000 + 1_000);
 
     // Negative cache is reserved for trackOnDemand — refresh failures
-    // here must not write to it. (The cooldown gate alone bounds retry
-    // pressure for OTHER votes that may be queried next: when
-    // `lastRefresh.length === 0` the cold-start bypass intentionally
-    // overrides the cooldown so the very first RPC attempt isn't
-    // permanently shut out — this is the same posture as
-    // `trackOnDemand` and is verified by its own test suite.)
+    // here must not write to it. Retry pressure is bounded by the
+    // refreshOnDemandVoteAccounts cooldown gate alone (verified by the
+    // 'second call within failure cooldown' test below).
     expect((service as unknown as ServiceInternals).onDemandMissUntilByPubkey.size).toBe(0);
+  });
+
+  it('second call within failure cooldown returns refresh-failed and does NOT re-issue an RPC', async () => {
+    // Regression guard for the cold-cache stampede flagged in Codex PR
+    // review of #28: previously the refreshOnDemandVoteAccounts gate
+    // only engaged when `lastRefresh.length > 0`, so an RPC outage on
+    // a fresh-boot empty cache let every subsequent caller bypass the
+    // 30s failure cooldown and burst one RPC per request. Now the gate
+    // engages immediately; the second call sees the cooldown, gets the
+    // previous error re-thrown, and the route reports `refresh-failed`
+    // without touching the upstream.
+    const repo = new FakeValidatorsRepo();
+    const rpc: Pick<SolanaRpcClient, 'getVoteAccounts'> = {
+      getVoteAccounts: vi.fn().mockRejectedValue(new Error('upstream timeout')),
+    };
+    const service = makeService(rpc, repo);
+
+    const first = await service.ensureActivatedStakeLamports(VOTE_A);
+    expect(first).toMatchObject({ source: 'refresh-failed' });
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
+
+    // Second call — a DIFFERENT vote, to prove the cooldown gate (not
+    // any per-vote dedup) is what stops the second RPC. The cache is
+    // still cold (lastRefresh.length === 0) and the cooldown is still
+    // active. The gate must engage and re-throw, which `ensure` maps
+    // to `refresh-failed` — the SAME failure mode, not a `unknown-vote`
+    // miscategorization that would silently skip the metric/log.
+    const second = await service.ensureActivatedStakeLamports(VOTE_B);
+    expect(second).toMatchObject({ source: 'refresh-failed' });
+    if (second.source === 'refresh-failed') {
+      expect((second.error as Error).message).toBe('upstream timeout');
+    }
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1); // STILL one — no second RPC.
+  });
+
+  it('after the failure cooldown expires, the next call retries the RPC', async () => {
+    // Recovery path: the cooldown isn't a permanent shutout. After the
+    // window passes, the next ensure() call is allowed to attempt RPC
+    // again — confirms the failed-attempt error doesn't stick once the
+    // cooldown clears.
+    const repo = new FakeValidatorsRepo();
+    const rpc: Pick<SolanaRpcClient, 'getVoteAccounts'> = {
+      getVoteAccounts: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('upstream timeout'))
+        .mockResolvedValueOnce(voteAccountsFixture),
+    };
+    const service = makeService(rpc, repo);
+
+    await service.ensureActivatedStakeLamports(VOTE_A); // refresh-failed, sets 30s cooldown
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(1);
+
+    // Reach into internals to expire the cooldown without faking time —
+    // mirrors the existing `service as ServiceInternals` pattern used
+    // elsewhere in this file and keeps the test deterministic without
+    // pulling in vi.useFakeTimers globals.
+    (service as unknown as ServiceInternals).nextOnDemandRefreshAllowedAtMs = Date.now() - 1;
+
+    const third = await service.ensureActivatedStakeLamports(VOTE_A);
+    expect(third).toMatchObject({ source: 'refresh', lamports: 1_000_000_000_000n });
+    expect(rpc.getVoteAccounts).toHaveBeenCalledTimes(2); // second RPC fired
   });
 
   it('two parallel cold-cache callers share a single RPC fetch (stampede dedup)', async () => {
