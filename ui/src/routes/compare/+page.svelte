@@ -746,7 +746,7 @@
   {#each WINDOW_OPTIONS as option (option.key)}
     <button
       type="button"
-      class="rounded-md px-3 py-1.5 text-sm font-medium transition-colors"
+      class="rounded-md px-3 py-2 text-sm font-medium transition-colors sm:py-1.5"
       class:bg-[color:var(--color-brand-500)]={windowMode === option.key}
       class:text-white={windowMode === option.key}
       class:text-[color:var(--color-text-muted)]={windowMode !== option.key}

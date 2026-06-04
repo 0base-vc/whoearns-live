@@ -397,12 +397,12 @@
       <!-- Left: window (which sample period to view) — a segmented
            control because it's a view-mode switch, not a filter. -->
       <div
-        class="inline-flex w-fit flex-wrap gap-1 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-1"
+        class="flex w-full flex-wrap gap-1 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] p-1 sm:inline-flex sm:w-fit"
       >
         {#each WINDOW_OPTIONS as option (option.key)}
           <button
             type="button"
-            class="rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
+            class="flex-1 rounded-md px-2 py-1 text-center text-[11px] font-medium transition-colors sm:flex-none sm:px-3 sm:py-1.5 sm:text-xs"
             class:bg-[color:var(--color-brand-500)]={window === option.key}
             class:text-white={window === option.key}
             class:text-[color:var(--color-text-muted)]={window !== option.key}
@@ -429,7 +429,7 @@
           <select
             bind:value={bracket}
             onchange={handleBracketChange}
-            class="min-h-11 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-1.5 text-sm sm:min-h-0"
+            class="min-h-11 rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-1.5 text-base sm:min-h-0 sm:text-sm"
             aria-label="Filter validators by bracket"
           >
             <option value="all">All indexed</option>
@@ -696,7 +696,7 @@
         class="border-t border-[color:var(--color-border-default)] px-5 py-3 text-xs text-[color:var(--color-text-subtle)]"
       >
         Showing top {data.items.length}. The public API returns up to 500 rows at
-        <code
+        <code class="break-all"
           >/v1/leaderboard?window={window}&amp;limit=500&amp;sort={sort}{isFiltered
             ? `&bracket=${bracket}`
             : ''}</code
