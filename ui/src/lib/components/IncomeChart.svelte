@@ -397,5 +397,10 @@
         </li>
       {/each}
     </ul>
+    {#if hasSameClient}
+      <p class="mt-1 text-[11px] text-[color:var(--color-text-subtle)]">
+        The same-client line groups peers by their current client, applied across past epochs.
+      </p>
+    {/if}
   {/if}
 </section>

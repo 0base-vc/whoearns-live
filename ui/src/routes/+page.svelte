@@ -43,7 +43,7 @@
     },
     {
       title: 'Peer benchmark',
-      body: 'Income is normalized per leader slot and compared against the indexed-validator median, so stake size does not hide execution quality.',
+      body: 'Income is normalized per leader slot and compared against the indexed-validator average, so stake size does not hide execution quality.',
     },
     {
       title: 'Open data',

@@ -179,7 +179,7 @@
           >를 확인하세요.
         {:else}
           Compare validator earnings side by side. Identify operators who consistently beat the
-          indexed median in income per leader slot. Open the
+          indexed average in income per leader slot. Open the
           <a href="/" class="font-medium text-[color:var(--color-brand-500)] hover:underline"
             >leaderboard</a
           > on the homepage.
@@ -192,8 +192,8 @@
       </h3>
       <p class="mt-2">
         {t(
-          'Benchmark your validator against the indexed-validator median for every epoch. Identify when a configuration change actually lifted income per leader slot instead of only increasing absolute income through more stake.',
-          '각 epoch에서 본인의 밸리데이터를 indexed validator median과 벤치마크하세요. 설정 변경이 단순히 stake 증가로 총수익만 올린 것인지, leader slot당 수익까지 실제로 끌어올렸는지 구분할 수 있습니다.',
+          'Benchmark your validator against the indexed-validator average for every epoch. Identify when a configuration change actually lifted income per leader slot instead of only increasing absolute income through more stake.',
+          '각 epoch에서 본인의 밸리데이터를 indexed validator 평균과 벤치마크하세요. 설정 변경이 단순히 stake 증가로 총수익만 올린 것인지, leader slot당 수익까지 실제로 끌어올렸는지 구분할 수 있습니다.',
         )}
       </p>
     </div>

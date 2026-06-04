@@ -123,7 +123,7 @@
       path: '/v1/validators/{idOrVote}/history',
       summary: 'Per-epoch history for a validator',
       description:
-        'Rows returned newest-first. Each row carries `isFinal`, `hasSlots`, `hasIncome`, and `peerBenchmark` for indexed-validator median income per leader slot.',
+        'Rows returned newest-first. Each row carries `isFinal`, `hasSlots`, `hasIncome`, and `peerBenchmark` for indexed-validator average income per leader slot.',
       params: [
         {
           name: 'limit',

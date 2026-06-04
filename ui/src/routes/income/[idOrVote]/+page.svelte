@@ -210,7 +210,7 @@
   // standardises on the slightly wider bullet across both pages.
   const pageTitle = $derived(`${titleLabel} • Epoch income • ${SITE_NAME}`);
   const pageDescription = $derived(
-    `Per-epoch income for ${titleLabel}: block fees, on-chain Jito tips, slot production, and indexed-validator median income per leader slot over the most recent month-sized window.`,
+    `Per-epoch income for ${titleLabel}: block fees, on-chain Jito tips, slot production, and indexed-validator average income per leader slot over the most recent month-sized window.`,
   );
 
   /**

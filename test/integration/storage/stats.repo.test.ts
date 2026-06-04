@@ -662,6 +662,17 @@ describe('StatsRepository', () => {
               ('FdVote', 'FdId', 510, 510, 'firedancer')
        ON CONFLICT (vote_pubkey) DO UPDATE SET client_kind = EXCLUDED.client_kind`,
     );
+    // Rotation regression guard: a SECOND validators row reusing
+    // AgaveIdA's identity under a different vote. `identity_pubkey` has
+    // no unique constraint, so a benchmark that joined on identity would
+    // fan AgaveVoteA's row out and double-count it (sampleValidators 4,
+    // sameClient 3). Joining on the unique vote_pubkey must keep the
+    // cohort at 3 / 2.
+    await fixture!.pool.query(
+      `INSERT INTO validators (vote_pubkey, identity_pubkey, first_seen_epoch, last_seen_epoch, client_kind)
+       VALUES ('AgaveVoteA_old', 'AgaveIdA', 509, 509, 'agave')
+       ON CONFLICT (vote_pubkey) DO UPDATE SET client_kind = EXCLUDED.client_kind`,
+    );
 
     const [benchmark] = await repo.findIndexedIncomePerSlotBenchmarks(
       [{ epoch: 510, isCurrent: false }],

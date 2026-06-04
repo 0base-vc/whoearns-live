@@ -1505,14 +1505,18 @@ export class StatsRepository {
               COALESCE(evs.block_fees_total_lamports, 0)
               + COALESCE(evs.block_tips_total_lamports, 0)
             )::numeric AS income_lamports,
-            -- LEFT JOIN so the indexed cohort (avg + COUNT) is unchanged
-            -- by the client lookup; client_kind is NULL for any evs row
-            -- without a validators match and simply never matches the
-            -- same-client FILTER.
+            -- Join on vote_pubkey (the validators PK) — NOT identity:
+            -- validators.identity_pubkey has no unique constraint and one
+            -- identity can own multiple vote rows (vote rotation), so an
+            -- identity join would fan out evs rows and inflate the COUNT
+            -- + skew the AVG. vote_pubkey is unique, so at most one match.
+            -- LEFT JOIN keeps the indexed cohort intact; a vote without a
+            -- validators row gets client_kind NULL, which the same-client
+            -- FILTER simply never matches.
             v.client_kind AS client_kind
           FROM requested r
           JOIN epoch_validator_stats evs ON evs.epoch = r.epoch
-          LEFT JOIN validators v ON v.identity_pubkey = evs.identity_pubkey
+          LEFT JOIN validators v ON v.vote_pubkey = evs.vote_pubkey
           WHERE evs.slots_updated_at IS NOT NULL
             AND (
               evs.fees_updated_at IS NOT NULL

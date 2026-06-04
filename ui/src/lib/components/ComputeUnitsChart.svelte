@@ -39,6 +39,11 @@
   const RUNNING_DASH = '6 3';
   const SERVICE_DASH = '10 5';
   const SAME_CLIENT_DASH = '4 4';
+  // Minimum same-client cohort to plot the line — matches IncomeChart's
+  // gate so the two charts surface the same-client series together. The
+  // count lives on the income benchmark (`peerBenchmark`) on each row;
+  // the CU aggregate itself returns no per-cohort count.
+  const PEER_BENCHMARK_MIN_VALIDATORS = 3;
   const AXIS_TEXT_FILL = 'var(--color-text-muted)';
   const AXIS_SUBTLE_FILL = 'var(--color-text-subtle)';
 
@@ -63,6 +68,11 @@
   }
 
   function sameClientCu(row: ValidatorEpochRecord): number | null {
+    // Gate on the income benchmark's same-client cohort size so a
+    // 1-2 validator client doesn't plot a line that's essentially this
+    // validator compared against itself.
+    const cohort = row.peerBenchmark?.sameClientSampleValidators ?? 0;
+    if (cohort < PEER_BENCHMARK_MIN_VALIDATORS) return null;
     return parseCu(row.sameClientAverageCu);
   }
 
@@ -168,7 +178,7 @@
     if (hasService) {
       s.push({
         key: 'service_average',
-        label: 'Service average',
+        label: 'Indexed average',
         value: 'serviceCu',
         color: SERVICE_COLOR,
         data: chartData,
@@ -194,7 +204,7 @@
       items.push({ label: 'This validator', color: VALIDATOR_COLOR, dashed: false });
     }
     if (hasService) {
-      items.push({ label: 'Service average', color: SERVICE_COLOR, dashed: true });
+      items.push({ label: 'Indexed average', color: SERVICE_COLOR, dashed: true });
     }
     if (hasSameClient) {
       items.push({ label: sameClientSeriesLabel, color: SAME_CLIENT_COLOR, dashed: true });
@@ -327,7 +337,7 @@
                 </Tooltip.Item>
               {/if}
               {#if point?.serviceCu !== null && point?.serviceCu !== undefined}
-                <Tooltip.Item label="Service average" value={point.serviceCu} color={SERVICE_COLOR}>
+                <Tooltip.Item label="Indexed average" value={point.serviceCu} color={SERVICE_COLOR}>
                   {formatCu(point.serviceCu)}
                 </Tooltip.Item>
               {/if}
@@ -347,7 +357,7 @@
               >
                 {#if point.serviceCu !== null}
                   <div>
-                    % vs service: {formatSignedPercent(
+                    % vs indexed avg: {formatSignedPercent(
                       percentVs(point.validatorCu, point.serviceCu),
                     )}
                   </div>
@@ -371,7 +381,7 @@
         <tr>
           <th scope="col">Epoch</th>
           <th scope="col">This validator compute units per block</th>
-          <th scope="col">Service average compute units per block</th>
+          <th scope="col">Indexed average compute units per block</th>
           <th scope="col">{sameClientSeriesLabel} compute units per block</th>
         </tr>
       </thead>
@@ -404,5 +414,10 @@
         </li>
       {/each}
     </ul>
+    {#if hasSameClient}
+      <p class="mt-1 text-[11px] text-[color:var(--color-text-subtle)]">
+        The same-client line groups peers by their current client, applied across past epochs.
+      </p>
+    {/if}
   {/if}
 </section>

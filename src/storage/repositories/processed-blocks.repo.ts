@@ -1069,14 +1069,24 @@ export class ProcessedBlocksRepository {
       compute_units_consumed: string;
       produced_blocks: string;
     }>(
+      // EXISTS semi-join (NOT a JOIN): `validators.identity_pubkey` has
+      // no unique constraint — one identity can own multiple vote rows
+      // (rotation) — so a plain JOIN would count a block once per
+      // matching row. EXISTS counts each produced block exactly once
+      // whenever ANY validators row for its leader identity runs the
+      // client.
       `SELECT pb.epoch::text AS epoch,
               COALESCE(SUM(pb.compute_units_consumed)
                 FILTER (WHERE pb.block_status = 'produced'), 0)::numeric AS compute_units_consumed,
               COUNT(*) FILTER (WHERE pb.block_status = 'produced')::bigint AS produced_blocks
          FROM processed_blocks pb
-         JOIN validators v ON v.identity_pubkey = pb.leader_identity
         WHERE pb.epoch = ANY($1::bigint[])
-          AND v.client_kind = $2
+          AND EXISTS (
+            SELECT 1
+              FROM validators v
+             WHERE v.identity_pubkey = pb.leader_identity
+               AND v.client_kind = $2
+          )
         GROUP BY pb.epoch`,
       [epochs, clientKind],
     );
