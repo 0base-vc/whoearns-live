@@ -31,9 +31,12 @@
   const DECIMALS_PER_SLOT = 6;
   const DECIMALS_TOTAL = 3;
 
-  // Ordered along one axis — most live / narrowest window on the left,
-  // progressively more settled / wider to the right: running epoch only
-  // → +1 final → +2 finals → a single closed epoch → a 10-epoch block.
+  // Ordered by how "live" the window is — left = most tied to the running
+  // epoch, right = fully settled history. The first three include the
+  // running epoch (adding 0, then 1, then 2 closed epochs for stability);
+  // the last two are closed-only — a single latest epoch, then a 10-epoch
+  // block. This is the liveness axis, NOT a window-size order (final_epoch
+  // is one epoch, narrower than stable_trend's three).
   const WINDOW_OPTIONS: Array<{ key: LeaderboardWindow; label: string; detail: string }> = [
     {
       key: 'current_only',
