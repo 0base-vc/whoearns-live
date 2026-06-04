@@ -1792,7 +1792,7 @@
                   <button
                     type="button"
                     onclick={cancelUnregister}
-                    class="text-xs text-[color:var(--color-text-muted)] hover:text-[color:var(--color-text-default)]"
+                    class="-my-1 inline-flex min-h-11 items-center px-2 text-xs text-[color:var(--color-text-muted)] hover:text-[color:var(--color-text-default)]"
                   >
                     Cancel
                   </button>
@@ -1800,7 +1800,7 @@
                   <button
                     type="button"
                     onclick={() => startUnregister(entry.walletRef)}
-                    class="text-xs text-red-600 hover:underline dark:text-red-400"
+                    class="-my-1 inline-flex min-h-11 items-center px-2 text-xs text-red-600 hover:underline dark:text-red-400"
                   >
                     Remove
                   </button>
@@ -1832,7 +1832,7 @@
                 <button
                   type="button"
                   onclick={generateUnregisterEnvelope}
-                  class="mt-2 inline-flex min-h-9 items-center rounded-lg border border-red-500/60 px-3 py-1 text-xs font-semibold text-red-600 transition-colors hover:bg-red-500 hover:text-white dark:text-red-400"
+                  class="mt-2 inline-flex min-h-11 items-center rounded-lg border border-red-500/60 px-3 py-1 text-xs font-semibold text-red-600 transition-colors hover:bg-red-500 hover:text-white dark:text-red-400"
                 >
                   {unregisterEnvelope === null ? 'Generate signable nonce' : 'Regenerate'}
                 </button>
@@ -1845,7 +1845,7 @@
                     <button
                       type="button"
                       onclick={() => copyToClipboard(unregisterCliCommand)}
-                      class="inline-flex min-h-9 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+                      class="inline-flex min-h-11 shrink-0 items-center justify-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-medium hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
                     >
                       Copy
                     </button>
@@ -1860,7 +1860,7 @@
                     type="button"
                     onclick={handleSubmitUnregister}
                     disabled={unregisterSubmitting || unregisterSig.trim().length === 0}
-                    class="mt-2 min-h-9 w-full rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    class="mt-2 min-h-11 w-full rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {unregisterSubmitting ? 'Removing…' : 'Remove wallet'}
                   </button>
@@ -2084,7 +2084,7 @@
                       type="button"
                       data-testid="operator-wallet-confirm-retry"
                       onclick={retryMemoConfirmation}
-                      class="inline-flex min-h-9 items-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-semibold hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+                      class="inline-flex min-h-11 items-center rounded-lg border border-[color:var(--color-border-default)] px-3 py-1 text-xs font-semibold hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
                     >
                       Check confirmation again
                     </button>
@@ -2092,7 +2092,7 @@
                       type="button"
                       data-testid="operator-wallet-resign"
                       onclick={resignMemoTransaction}
-                      class="inline-flex min-h-9 items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1 text-xs font-semibold text-[color:var(--color-brand-500)] hover:bg-[color:var(--color-brand-500)] hover:text-white"
+                      class="inline-flex min-h-11 items-center rounded-lg border border-[color:var(--color-brand-500)] px-3 py-1 text-xs font-semibold text-[color:var(--color-brand-500)] hover:bg-[color:var(--color-brand-500)] hover:text-white"
                     >
                       Re-sign a new memo transaction
                     </button>

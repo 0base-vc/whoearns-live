@@ -499,7 +499,7 @@
     color-blind viewers can read intensity by number.
   -->
   <footer
-    class="mt-3 flex items-center justify-end gap-1 text-[10px] text-[color:var(--color-text-muted)]"
+    class="mt-3 flex flex-wrap items-center justify-end gap-x-1 gap-y-1 text-[10px] text-[color:var(--color-text-muted)]"
   >
     <!--
       Unit-prefixed label. Count mode reads "Txs per day"; fees mode
@@ -508,7 +508,9 @@
       infer the unit from context. The "Less … More" framing of an
       earlier revision was directional but unit-less.
     -->
-    <span>{mode === 'fees' ? 'Fees (lam/day):' : 'Txs per day:'}</span>
+    <span class="w-full text-right sm:w-auto"
+      >{mode === 'fees' ? 'Fees (lam/day):' : 'Txs per day:'}</span
+    >
     {#each [0, 1, 2, 3, 4] as bucket (bucket)}
       <span class="flex flex-col items-center gap-0.5">
         <span

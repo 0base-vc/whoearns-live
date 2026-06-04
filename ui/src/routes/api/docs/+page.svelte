@@ -333,7 +333,7 @@
           <code class="flex-1 break-all font-mono text-[11px] sm:truncate">{ep.example}</code>
           <button
             type="button"
-            class="shrink-0 rounded-md border border-[color:var(--color-border-default)] px-2 py-1 text-[11px] font-medium text-[color:var(--color-text-muted)] hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
+            class="shrink-0 rounded-md border border-[color:var(--color-border-default)] px-2.5 py-1.5 text-[11px] font-medium text-[color:var(--color-text-muted)] hover:border-[color:var(--color-brand-500)] hover:text-[color:var(--color-brand-500)]"
             onclick={() => copy(ep.example)}
             aria-label={`Copy ${ep.path} example URL`}
           >

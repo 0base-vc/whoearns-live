@@ -75,6 +75,7 @@
   });
 
   let trigger: HTMLButtonElement | undefined = $state();
+  let popover: HTMLSpanElement | undefined = $state();
   let open = $state(false);
   /**
    * Viewport coordinates for the `position: fixed` popover, recomputed
@@ -86,8 +87,25 @@
   function reposition() {
     if (trigger === undefined) return;
     const r = trigger.getBoundingClientRect();
-    const x = align === 'center' ? r.left + r.width / 2 : align === 'left' ? r.left : r.right;
+    let x = align === 'center' ? r.left + r.width / 2 : align === 'left' ? r.left : r.right;
     const y = placement === 'top' ? r.top : r.bottom;
+    // Keep the `position: fixed` popover inside the viewport on narrow
+    // screens. Clamp against the popover's REAL rendered width once it
+    // is mounted; before the first paint fall back to the max width the
+    // CSS allows — `max-w-[calc(100vw-1rem)]` (viewport − 16px) below the
+    // `sm` breakpoint, `max-w-xs` (320px) at `sm` and up. The box is
+    // anchored by `align` via a CSS transform, so derive its left/right
+    // edges from `x` and nudge `x` back inside an 8px gutter on overflow.
+    if (typeof window !== 'undefined') {
+      const gutter = 8;
+      const fallbackW = window.innerWidth < 640 ? window.innerWidth - 2 * gutter : 320;
+      const boxW = popover?.offsetWidth ?? fallbackW;
+      const leftEdge = align === 'center' ? x - boxW / 2 : align === 'left' ? x : x - boxW;
+      const rightEdge = leftEdge + boxW;
+      if (leftEdge < gutter) x += gutter - leftEdge;
+      else if (rightEdge > window.innerWidth - gutter)
+        x -= rightEdge - (window.innerWidth - gutter);
+    }
     popoverPos = { x, y };
   }
 
@@ -106,6 +124,13 @@
     if (!open) reposition();
     open = !open;
   }
+
+  // Once the popover is in the DOM, re-clamp using its real measured
+  // width — the first reposition() in show()/toggle() runs before the
+  // popover mounts and falls back to the CSS max-width estimate.
+  $effect(() => {
+    if (open && popover !== undefined) reposition();
+  });
 
   /**
    * Click-outside + Escape dismissal. Listeners are attached lazily
@@ -173,11 +198,12 @@
 
   {#if open && popoverPos !== null}
     <span
+      bind:this={popover}
       id={popoverId}
       role="tooltip"
       style:left={`${popoverPos.x}px`}
       style:top={`${popoverPos.y}px`}
-      class="pointer-events-none fixed z-50 w-max max-w-xs whitespace-normal rounded-md border border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-left text-xs font-normal normal-case leading-relaxed tracking-normal text-[color:var(--color-text-default)] shadow-lg {popoverClasses}"
+      class="pointer-events-none fixed z-50 w-max max-w-[calc(100vw-1rem)] whitespace-normal rounded-md border sm:max-w-xs border-[color:var(--color-border-default)] bg-[color:var(--color-surface)] px-3 py-2 text-left text-xs font-normal normal-case leading-relaxed tracking-normal text-[color:var(--color-text-default)] shadow-lg {popoverClasses}"
     >
       {content}
     </span>

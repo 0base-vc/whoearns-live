@@ -1243,9 +1243,9 @@
             <table class="w-full text-sm">
               <colgroup>
                 <col />
-                <col class="w-20" />
-                <col class="w-20" />
-                <col class="w-24" />
+                <col class="w-14 sm:w-20" />
+                <col class="w-14 sm:w-20" />
+                <col class="w-16 sm:w-24" />
               </colgroup>
               <thead
                 class="text-[10px] uppercase tracking-wider text-[color:var(--color-text-muted)]"
