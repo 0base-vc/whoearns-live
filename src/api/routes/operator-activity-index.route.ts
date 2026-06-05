@@ -11,6 +11,7 @@ import type { WalletActivityRepository } from '../../storage/repositories/wallet
 import type { Validator } from '../../types/domain.js';
 import { cacheControl } from '../cache-control.js';
 import { VoteOrIdentityParamSchema } from '../schemas/requests.js';
+import { findValidatorByVoteOrIdentity } from '../validator-lookup.js';
 
 export interface OaiRoutesDeps {
   validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>;
@@ -311,10 +312,10 @@ const oaiRoutes: FastifyPluginAsync<OaiRoutesDeps> = async (
           issues: params.error.issues,
         });
       }
-      let validator = await opts.validatorsRepo.findByVote(params.data.idOrVote);
-      if (validator === null) {
-        validator = await opts.validatorsRepo.findByIdentity(params.data.idOrVote);
-      }
+      const validator = await findValidatorByVoteOrIdentity(
+        opts.validatorsRepo,
+        params.data.idOrVote,
+      );
       if (validator === null) {
         throw new NotFoundError('validator', params.data.idOrVote);
       }

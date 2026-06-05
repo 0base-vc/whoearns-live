@@ -1,7 +1,7 @@
 <script lang="ts">
   import { LineChart, Tooltip } from 'layerchart';
   import type { ValidatorEpochRecord } from '$lib/types';
-  import { TRUST_CLIENT_LABEL } from '$lib/tier';
+  import { labelForClientKind } from '$lib/tier';
   import ChartEmptyState from './ChartEmptyState.svelte';
 
   let { history }: { history: ValidatorEpochRecord[] } = $props();
@@ -84,7 +84,7 @@
       history.find((r) => (r.peerBenchmark?.clientKind ?? null) !== null)?.peerBenchmark
         ?.clientKind ?? null;
     if (kind === null) return null;
-    return TRUST_CLIENT_LABEL[kind] ?? kind;
+    return labelForClientKind(kind);
   });
   const sameClientSeriesLabel = $derived(
     clientLabel === null ? 'Same client' : `${clientLabel} avg`,

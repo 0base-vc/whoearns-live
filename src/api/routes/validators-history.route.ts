@@ -23,6 +23,7 @@ import { validatorDynamicWatchAttemptsTotal } from '../metrics.js';
 import { HistoryQuerySchema, VoteOrIdentityParamSchema } from '../schemas/requests.js';
 import { serializeValidator } from '../serializers/validator-response.js';
 import { unwrap } from '../zod-helpers.js';
+import { findValidatorByVoteOrIdentity } from '../validator-lookup.js';
 
 /**
  * Sample size used when joining the cluster benchmark onto history rows.
@@ -169,10 +170,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // Try vote first, then fall back to identity. Both paths resolve to
     // the `validators` row — we need its vote/identity pair to call the
     // stats repo and to include both in the response.
-    let validator = await validatorsRepo.findByVote(params.idOrVote);
-    if (validator === null) {
-      validator = await validatorsRepo.findByIdentity(params.idOrVote);
-    }
+    const validator = await findValidatorByVoteOrIdentity(validatorsRepo, params.idOrVote);
 
     // Unknown pubkey → attempt auto-track. Resolves via RPC, enforces
     // the stake floor (`assessClaimEligibility`-grade policy), upserts

@@ -10,8 +10,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { fetchCurrentEpoch, fetchLeaderboard } from '$lib/api';
-  import { formatSolFixed, shortenPubkey } from '$lib/format';
+  import { formatCompactCu, formatSolFixed, shortenPubkey } from '$lib/format';
+  import { TRUST_CLIENT_LABEL } from '$lib/tier';
   import type {
+    ClientKind,
     CurrentEpoch,
     Leaderboard,
     LeaderboardBracket,
@@ -65,28 +67,33 @@
     },
   ];
 
-  // The 14 canonical client kinds the backend accepts as
+  // The canonical client kinds the backend accepts as
   // `?bracket=client:<kind>`, rendered as the "By client" <optgroup>
-  // in the bracket dropdown. Sentence-case labels; the lowercased
-  // enum rides on the wire. Mirrors the `ClientKind` union in
-  // `$lib/types` (minus `unknown` / `solana_labs`, which aren't
-  // bracketable cohorts). The non-client brackets (all / stake /
-  // newcomer) are inline <option>s in the template.
-  const CLIENT_BRACKET_KINDS: Array<{ kind: string; label: string }> = [
-    { kind: 'agave', label: 'Agave' },
-    { kind: 'jito_solana', label: 'Jito-Solana' },
-    { kind: 'firedancer', label: 'Firedancer' },
-    { kind: 'frankendancer', label: 'Frankendancer' },
-    { kind: 'paladin', label: 'Paladin' },
-    { kind: 'sig', label: 'Sig' },
-    { kind: 'agave_bam', label: 'Agave (BAM)' },
-    { kind: 'rakurai', label: 'Rakurai' },
-    { kind: 'harmonic_firedancer', label: 'Harmonic Firedancer' },
-    { kind: 'harmonic_agave', label: 'Harmonic Agave' },
-    { kind: 'harmonic_frankendancer', label: 'Harmonic Frankendancer' },
-    { kind: 'firebam', label: 'FireBAM' },
-    { kind: 'raiku', label: 'Raiku' },
+  // in the bracket dropdown. The lowercased enum rides on the wire;
+  // labels are sourced from `TRUST_CLIENT_LABEL` (the single typed
+  // client-kind → label map in `$lib/tier`) so this list can't drift
+  // from the `ClientBadge` pill the way a hand-copied table once did.
+  // Mirrors the `ClientKind` union in `$lib/types` minus `unknown` /
+  // `solana_labs`, which aren't bracketable cohorts. The non-client
+  // brackets (all / stake / newcomer) are inline <option>s in the
+  // template.
+  const CLIENT_BRACKET_KIND_LIST: ClientKind[] = [
+    'agave',
+    'jito_solana',
+    'firedancer',
+    'frankendancer',
+    'paladin',
+    'sig',
+    'agave_bam',
+    'rakurai',
+    'harmonic_firedancer',
+    'harmonic_agave',
+    'harmonic_frankendancer',
+    'firebam',
+    'raiku',
   ];
+  const CLIENT_BRACKET_KINDS: Array<{ kind: ClientKind; label: string }> =
+    CLIENT_BRACKET_KIND_LIST.map((kind) => ({ kind, label: TRUST_CLIENT_LABEL[kind] }));
 
   const COLUMNS: Array<{
     key: LeaderboardSort;
@@ -259,16 +266,7 @@
    * (matches the table's existing null placeholder).
    */
   function windowedCuText(item: LeaderboardItem): string {
-    if (item.windowedCu == null) return '—';
-    const n = Number(item.windowedCu);
-    if (!Number.isFinite(n)) return '—';
-    if (Math.abs(n) >= 1_000_000) {
-      return `${new Intl.NumberFormat('en', { maximumFractionDigits: 1 }).format(n / 1_000_000)}M`;
-    }
-    if (Math.abs(n) >= 1_000) {
-      return `${new Intl.NumberFormat('en', { maximumFractionDigits: 1 }).format(n / 1_000)}K`;
-    }
-    return new Intl.NumberFormat('en').format(n);
+    return formatCompactCu(item.windowedCu, { nullText: '—' });
   }
 
   function cellText(item: LeaderboardItem, key: LeaderboardSort): string {

@@ -764,16 +764,10 @@ const claimV2Routes: FastifyPluginAsync<ClaimV2RoutesDeps> = async (
       identitySignatureB58: body.identitySignatureB58,
     });
     if (!verifyResult.ok) {
-      const humanMessage =
-        verifyResult.reason === 'expired'
-          ? 'The signed nonce has expired. Generate a fresh one and re-sign.'
-          : verifyResult.reason === 'bad_identity_signature'
-            ? 'The validator identity signature did not verify against the nonce.'
-            : 'One of the supplied pubkeys is not a valid base58 Solana pubkey.';
       return sendError(reply, {
         code: verifyResult.reason,
         statusCode: 403,
-        message: humanMessage,
+        message: humanMessageForWalletFailure(verifyResult.reason),
         requestId: request.id,
       });
     }

@@ -19,7 +19,8 @@
     - `size`: `sm` (compact inline) / `md` (default)
 -->
 <script lang="ts">
-  import type { ClientBlock, ClientKind } from '$lib/types';
+  import type { ClientBlock } from '$lib/types';
+  import { TRUST_CLIENT_LABEL } from '$lib/tier';
 
   type Size = 'sm' | 'md';
 
@@ -29,35 +30,6 @@
   }
 
   let { client, size = 'md' }: Props = $props();
-
-  /**
-   * Public-facing labels. The enum is lowercase + underscored for
-   * machine consumers; humans get sentence case + spaces.
-   */
-  const CLIENT_LABEL: Record<ClientKind, string> = {
-    // Original 7 kinds — gossip-version-string classifier
-    agave: 'Agave',
-    jito_solana: 'Jito-Solana',
-    firedancer: 'Firedancer',
-    frankendancer: 'Frankendancer',
-    paladin: 'Paladin',
-    sig: 'Sig',
-    // Canonical client variants from validators.app gossip-CRDS decode.
-    // These all share an upstream version-string format with their
-    // base client (e.g. HarmonicFrankendancer publishes the same
-    // `0.9xx.x` series as upstream Frankendancer), so they can ONLY
-    // be distinguished via the 16-bit `ContactInfo.version.client`
-    // field — which is why we need validators.app as a data source.
-    solana_labs: 'Solana Labs',
-    agave_bam: 'Agave (BAM)',
-    rakurai: 'Rakurai',
-    harmonic_firedancer: 'Harmonic Firedancer',
-    harmonic_agave: 'Harmonic Agave',
-    harmonic_frankendancer: 'Harmonic Frankendancer',
-    firebam: 'FireBAM',
-    raiku: 'Raiku',
-    unknown: 'Unknown client',
-  };
 
   /**
    * Days after which a gossip-derived client observation is "stale."
@@ -79,7 +51,7 @@
 
   const isUnknown = $derived(client.kind === 'unknown');
 
-  const label = $derived(CLIENT_LABEL[client.kind] ?? CLIENT_LABEL.unknown);
+  const label = $derived(TRUST_CLIENT_LABEL[client.kind] ?? TRUST_CLIENT_LABEL.unknown);
 
   // Combine kind + version into a single string — `Firedancer 0.405.20218`.
   // Drop the version when null (the validator never broadcast one) so we

@@ -20,7 +20,8 @@
 <script lang="ts">
   import { LineChart, Tooltip } from 'layerchart';
   import type { ValidatorEpochRecord } from '$lib/types';
-  import { TRUST_CLIENT_LABEL } from '$lib/tier';
+  import { formatCompactCu } from '$lib/format';
+  import { labelForClientKind } from '$lib/tier';
   import ChartEmptyState from './ChartEmptyState.svelte';
 
   let { history }: { history: ValidatorEpochRecord[] } = $props();
@@ -97,7 +98,7 @@
       history.find((r) => (r.peerBenchmark?.clientKind ?? null) !== null)?.peerBenchmark
         ?.clientKind ?? null;
     if (kind === null) return null;
-    return TRUST_CLIENT_LABEL[kind] ?? kind;
+    return labelForClientKind(kind);
   });
   const sameClientSeriesLabel = $derived(
     clientLabel === null ? 'Same client' : `${clientLabel} avg`,
@@ -247,16 +248,7 @@
    * tooltip and sr-only table never show a misleading `0`.
    */
   function formatCu(value: number | null | undefined): string {
-    if (value === null || value === undefined) return 'n/a';
-    const n = Number(value);
-    if (!Number.isFinite(n)) return 'n/a';
-    if (Math.abs(n) >= 1_000_000) {
-      return `${new Intl.NumberFormat('en', { maximumFractionDigits: 1 }).format(n / 1_000_000)}M`;
-    }
-    if (Math.abs(n) >= 1_000) {
-      return `${new Intl.NumberFormat('en', { maximumFractionDigits: 1 }).format(n / 1_000)}K`;
-    }
-    return new Intl.NumberFormat('en').format(n);
+    return formatCompactCu(value, { nullText: 'n/a' });
   }
 
   /** Exact thousands-separated integer for the accessible data table. */

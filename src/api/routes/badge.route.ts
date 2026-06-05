@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest 
 import satori from 'satori';
 import type { AppConfig } from '../../core/config.js';
 import { NotFoundError, ValidationError } from '../../core/errors.js';
+import { computeSkipRate } from '../../core/skip-rate.js';
 import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
@@ -357,10 +358,9 @@ const badgeRoutes: FastifyPluginAsync<BadgeRoutesDeps> = async (
         totalIncomeSol = (Number(totalLamports) / 1_000_000_000).toString();
       }
 
-      const skipRate =
-        latestRow && latestRow.slotsAssigned > 0
-          ? latestRow.slotsSkipped / latestRow.slotsAssigned
-          : null;
+      const skipRate = latestRow
+        ? computeSkipRate(latestRow.slotsSkipped, latestRow.slotsAssigned)
+        : null;
 
       const content = describeValidatorForBadge({
         siteName: opts.config.SITE_NAME,

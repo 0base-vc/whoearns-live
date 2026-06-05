@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { AppError, NotFoundError, ValidationError } from '../../core/errors.js';
 import { LAMPORTS_PER_SOL, lamportsToSol, lamportsToString } from '../../core/lamports.js';
+import { computeSkipRate } from '../../core/skip-rate.js';
 import { TtlCache } from '../../core/ttl-cache.js';
 import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import { narrowToDocumentedKind } from '../../services/client-kind.js';
@@ -259,7 +260,7 @@ function toRow(
 ): LeaderboardRow {
   const total = stats.blockFeesTotalLamports + stats.blockTipsTotalLamports;
   const perSlot = stats.windowSlots > 0 ? total / BigInt(stats.windowSlots) : null;
-  const skipRate = stats.windowSlots > 0 ? stats.slotsSkipped / stats.windowSlots : null;
+  const skipRate = computeSkipRate(stats.slotsSkipped, stats.windowSlots);
   const stake = stats.activatedStakeLamports;
   const incomePerStake = stake !== null && stake > 0n ? Number(total) / Number(stake) : null;
 

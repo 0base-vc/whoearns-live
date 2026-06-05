@@ -31,6 +31,7 @@
   import type { PageData } from './$types';
   import type { NodeTier, ValidatorEpochRecord } from '$lib/types';
   import {
+    formatCompactCu,
     formatNumberOrDash,
     formatSkipRate,
     formatSol,
@@ -64,12 +65,7 @@
    * column). "—" when the epoch produced no blocks (null CU).
    */
   function epochCuText(cu: string | null): string {
-    if (cu === null) return '—';
-    const n = Number(cu);
-    if (!Number.isFinite(n)) return '—';
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-    return new Intl.NumberFormat('en').format(n);
+    return formatCompactCu(cu, { nullText: '—' });
   }
 
   // ≈ round(30 / ~2-day epoch) CLOSED epochs — matches the hub's

@@ -655,6 +655,58 @@ export class FakeStatsRepo {
     return updated;
   }
 
+  /**
+   * Mirror of `StatsRepository.recomputeMedians` — the single-pass
+   * recompute that writes all five per-block medians together. Computes
+   * each median from its sibling source map and stamps every matching
+   * row's five median columns in one pass, returning the matched-row
+   * count ONCE (not summed across columns), exactly like the real
+   * method's single UPDATE. No-op on empty identities.
+   */
+  async recomputeMedians(epoch: Epoch, identities: IdentityPubkey[]): Promise<number> {
+    if (identities.length === 0) return 0;
+    const medianOf = (values: bigint[] | undefined): bigint | null => {
+      if (!values || values.length === 0) return null;
+      const sorted = [...values].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2n : sorted[mid]!;
+    };
+    let updated = 0;
+    for (const identity of identities) {
+      const k = `${epoch}:${identity}`;
+      const medianFee = medianOf(this.processedBlocksByEpochIdentity.get(k));
+      const medianBase = medianOf(this.processedBaseByEpochIdentity.get(k));
+      const medianPriority = medianOf(this.processedPriorityByEpochIdentity.get(k));
+      const medianTip = medianOf(this.processedTipsByEpochIdentity.get(k));
+      const medianTotal = medianOf(this.processedTotalsByEpochIdentity.get(k));
+      // The real UPDATE's sub-SELECT emits one row per identity that has
+      // any produced block; without produced blocks there is no `sub`
+      // row, so the identity is skipped. Mirror that: skip when this
+      // identity contributed no per-block fee values.
+      if (medianFee === null) continue;
+      for (const [rowKey, row] of this.rows.entries()) {
+        if (row.epoch === epoch && row.identityPubkey === identity) {
+          const now = new Date();
+          this.rows.set(rowKey, {
+            ...row,
+            medianFeeLamports: medianFee,
+            medianFeeUpdatedAt: now,
+            medianBaseFeeLamports: medianBase,
+            medianBaseFeeUpdatedAt: now,
+            medianPriorityFeeLamports: medianPriority,
+            medianPriorityFeeUpdatedAt: now,
+            medianTipLamports: medianTip,
+            medianTipUpdatedAt: now,
+            medianTotalLamports: medianTotal,
+            medianTotalUpdatedAt: now,
+          });
+          updated += 1;
+        }
+      }
+    }
+    return updated;
+  }
+
   /** Mirror of base-fee median recompute. */
   async recomputeMedianBaseFees(epoch: Epoch, identities: IdentityPubkey[]): Promise<number> {
     return this.recomputeMedianFrom(epoch, identities, 'base');

@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppConfig } from '../../core/config.js';
+import { computeSkipRate } from '../../core/skip-rate.js';
 import { TtlCache } from '../../core/ttl-cache.js';
 import { normaliseHttpUrlOrNull } from '../../core/url.js';
 import type { AggregatesRepository } from '../../storage/repositories/aggregates.repo.js';
@@ -18,19 +19,13 @@ import type {
   WindowedLeaderboardStats,
 } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
-import type {
-  EpochAggregate,
-  EpochInfo,
-  EpochValidatorStats,
-  IdentityPubkey,
-  Validator,
-  VotePubkey,
-} from '../../types/domain.js';
+import type { EpochAggregate, EpochInfo, EpochValidatorStats } from '../../types/domain.js';
 import {
   serializeValidatorEpochSlotStats,
   type ValidatorEpochSlotStatsResponse,
 } from '../serializers/leader-slots-response.js';
 import { PubkeySchema } from '../schemas/pubkey.js';
+import { findValidatorByVoteOrIdentity } from '../validator-lookup.js';
 import { oldestIncomeFreshness } from '../../services/node-tier.js';
 import type { NodeTier } from '../../services/node-tier.js';
 import { resolveTierForValidator, type CohortAsOfEpoch } from './validators.route.js';
@@ -739,7 +734,7 @@ function serializeLeaderboardRow(
   const blockFees = stats.blockFeesTotalLamports;
   const blockTips = stats.blockTipsTotalLamports;
   const total = blockFees + blockTips;
-  const skipRate = stats.windowSlots > 0 ? stats.slotsSkipped / stats.windowSlots : null;
+  const skipRate = computeSkipRate(stats.slotsSkipped, stats.windowSlots);
   const stake = stats.activatedStakeLamports;
   const incomePerStake = stake !== null && stake > 0n ? Number(total) / Number(stake) : null;
   const incomePerSlot = stats.windowSlots > 0 ? total / BigInt(stats.windowSlots) : null;
@@ -785,22 +780,6 @@ function serializeCluster(a: EpochAggregate): {
   };
 }
 
-async function resolveValidator(
-  opts: McpRoutesDeps,
-  voteOrIdentity: string,
-): Promise<Validator | null> {
-  // Try vote first, then identity — same dual-lookup pattern the
-  // /income page uses. Operators rotate identities, but the vote
-  // pubkey lives forever, so we query that first.
-  let validator: Validator | null = await opts.validatorsRepo.findByVote(
-    voteOrIdentity as VotePubkey,
-  );
-  if (validator === null) {
-    validator = await opts.validatorsRepo.findByIdentity(voteOrIdentity as IdentityPubkey);
-  }
-  return validator;
-}
-
 async function buildValidatorPayload(
   opts: McpRoutesDeps,
   voteOrIdentity: string,
@@ -825,7 +804,7 @@ async function buildValidatorPayload(
       items: ValidatorHistoryItem[];
     }
 > {
-  const validator = await resolveValidator(opts, voteOrIdentity);
+  const validator = await findValidatorByVoteOrIdentity(opts.validatorsRepo, voteOrIdentity);
   if (validator === null) {
     return { found: false, reason: `validator not found: ${voteOrIdentity}` };
   }
@@ -876,7 +855,7 @@ interface ValidatorHistoryItem {
 }
 
 function serializeHistoryItem(stats: EpochValidatorStats): ValidatorHistoryItem {
-  const skipRate = stats.slotsAssigned > 0 ? stats.slotsSkipped / stats.slotsAssigned : null;
+  const skipRate = computeSkipRate(stats.slotsSkipped, stats.slotsAssigned);
   return {
     epoch: stats.epoch,
     slotsAssigned: stats.slotsAssigned,
@@ -902,7 +881,7 @@ async function buildValidatorLeaderSlotsPayload(
   voteOrIdentity: string,
   epoch: number,
 ): Promise<ValidatorLeaderSlotsPayload | { found: false; reason: string }> {
-  const validator = await resolveValidator(opts, voteOrIdentity);
+  const validator = await findValidatorByVoteOrIdentity(opts.validatorsRepo, voteOrIdentity);
   if (validator === null) {
     return { found: false, reason: `validator not found: ${voteOrIdentity}` };
   }
@@ -970,7 +949,7 @@ async function buildValidatorTierPayload(
       };
     }
 > {
-  const validator = await resolveValidator(opts, voteOrIdentity);
+  const validator = await findValidatorByVoteOrIdentity(opts.validatorsRepo, voteOrIdentity);
   if (validator === null) {
     return { found: false, reason: `validator not found: ${voteOrIdentity}` };
   }
@@ -1039,7 +1018,7 @@ async function buildValidatorBadgesPayload(
       };
     }
 > {
-  const validator = await resolveValidator(opts, voteOrIdentity);
+  const validator = await findValidatorByVoteOrIdentity(opts.validatorsRepo, voteOrIdentity);
   if (validator === null) {
     return { found: false, reason: `validator not found: ${voteOrIdentity}` };
   }

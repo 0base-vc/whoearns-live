@@ -19,7 +19,7 @@
  * pin the backend values.
  */
 
-import type { NodeTier, NodeTierBody, NodeTierTrend } from './types.js';
+import type { ClientKind, NodeTier, NodeTierBody, NodeTierTrend } from './types.js';
 
 /**
  * Minimum leader slots in the window for the reliability half to be
@@ -304,12 +304,17 @@ export function nextTierGap(composite: number): TierGap | null {
 const TRUST_SEPARATOR = ' • ';
 
 /**
- * Display labels for `ClientKind`. Duplicated from `ClientBadge.svelte`
- * because a `.svelte` file cannot be imported from a `.ts` file —
- * keep the two in sync if a new client ships. Sentence-case is the
+ * Display labels for `ClientKind` — the single typed source for the
+ * client-kind → public label map. The `ClientBadge.svelte` pill and the
+ * `Leaderboard.svelte` "By client" bracket optgroup both render the same
+ * mapping; they read it from here rather than hand-copying it (a copy
+ * previously drifted, e.g. "Harmonic FD" vs "Harmonic Firedancer").
+ *
+ * Keyed by the full `ClientKind` union so the compiler flags a missing
+ * label the moment a new client ships. Sentence-case is the
  * public-surface convention; the lowercased enum stays on the wire.
  */
-export const TRUST_CLIENT_LABEL: Record<string, string> = {
+export const TRUST_CLIENT_LABEL: Record<ClientKind, string> = {
   // Original 7 — gossip-version-string classifier output
   agave: 'Agave',
   jito_solana: 'Jito-Solana',
@@ -319,19 +324,26 @@ export const TRUST_CLIENT_LABEL: Record<string, string> = {
   sig: 'Sig',
   // Canonical client variants from validators.app gossip-CRDS decode
   // (`solana-foundation/solana-validator-client-ids` registry).
-  // Trust-strip uses the shorter "Harmonic FD" instead of "Harmonic
-  // Firedancer" because the strip is space-constrained — the full
-  // name appears on the ClientBadge pill below.
   solana_labs: 'Solana Labs',
   agave_bam: 'Agave (BAM)',
   rakurai: 'Rakurai',
-  harmonic_firedancer: 'Harmonic FD',
+  harmonic_firedancer: 'Harmonic Firedancer',
   harmonic_agave: 'Harmonic Agave',
   harmonic_frankendancer: 'Harmonic Frankendancer',
   firebam: 'FireBAM',
   raiku: 'Raiku',
   unknown: 'Unknown client',
 };
+
+/**
+ * Look up a client kind's public label, falling back to the raw kind
+ * string for any value outside the known `ClientKind` union (e.g. an
+ * unrecognised kind arriving from the API). Lets callers holding a plain
+ * `string` read the exhaustive `TRUST_CLIENT_LABEL` map safely.
+ */
+export function labelForClientKind(kind: string): string {
+  return TRUST_CLIENT_LABEL[kind as ClientKind] ?? kind;
+}
 
 /**
  * Trim a build-metadata / pre-release suffix from a semver-ish version
@@ -428,7 +440,7 @@ export function trustSummary(parts: {
   incomeLast30dSol: string | null;
 }): string {
   const segments: string[] = [parts.tierLabel, parts.tenureBadge];
-  const clientKindLabel = TRUST_CLIENT_LABEL[parts.clientKind] ?? parts.clientKind;
+  const clientKindLabel = labelForClientKind(parts.clientKind);
   const trimmedVersion = parts.clientVersion ? trimClientVersion(parts.clientVersion) : null;
   const client = trimmedVersion ? `${clientKindLabel} ${trimmedVersion}` : clientKindLabel;
   segments.push(client);

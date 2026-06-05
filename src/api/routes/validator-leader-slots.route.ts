@@ -5,13 +5,13 @@ import type { ProcessedBlocksRepository } from '../../storage/repositories/proce
 import type { ProfilesRepository } from '../../storage/repositories/profiles.repo.js';
 import type { StatsRepository } from '../../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../../storage/repositories/validators.repo.js';
-import type { Validator, VotePubkey } from '../../types/domain.js';
 import { VoteOrIdentityAndEpochParamSchema } from '../schemas/requests.js';
 import {
   serializeValidatorEpochSlotStats,
   type ValidatorEpochSlotStatsResponse,
 } from '../serializers/leader-slots-response.js';
 import { unwrap } from '../zod-helpers.js';
+import { findValidatorByVoteOrIdentity } from '../validator-lookup.js';
 
 export interface ValidatorLeaderSlotsRoutesDeps {
   statsRepo: Pick<StatsRepository, 'findByVoteEpoch'>;
@@ -19,15 +19,6 @@ export interface ValidatorLeaderSlotsRoutesDeps {
   epochsRepo: Pick<EpochsRepository, 'findByEpoch'>;
   processedBlocksRepo: Pick<ProcessedBlocksRepository, 'getValidatorEpochSlotStats'>;
   profilesRepo: Pick<ProfilesRepository, 'findByVote'>;
-}
-
-async function findValidatorByVoteOrIdentity(
-  validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>,
-  idOrVote: VotePubkey,
-): Promise<Validator | null> {
-  const byVote = await validatorsRepo.findByVote(idOrVote);
-  if (byVote !== null) return byVote;
-  return validatorsRepo.findByIdentity(idOrVote);
 }
 
 const validatorLeaderSlotsRoutes: FastifyPluginAsync<ValidatorLeaderSlotsRoutesDeps> = async (
