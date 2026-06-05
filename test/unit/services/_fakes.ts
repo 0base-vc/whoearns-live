@@ -1048,7 +1048,7 @@ export class FakeStatsRepo {
     const epochs = [...candidateEpochs].sort((a, b) => b - a).slice(0, maxLookback);
     let rowsUpdated = 0;
     for (const epoch of epochs) {
-      rowsUpdated += await this.recomputeMedianFees(epoch, identities);
+      rowsUpdated += await this.recomputeMedians(epoch, identities);
     }
     return { epochsTouched: epochs.length, rowsUpdated };
   }

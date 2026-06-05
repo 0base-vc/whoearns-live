@@ -346,6 +346,16 @@ export function labelForClientKind(kind: string): string {
 }
 
 /**
+ * Shorter labels for the space-constrained hub trust strip, where the full
+ * `TRUST_CLIENT_LABEL` name (used by the wider ClientBadge pill + bracket
+ * dropdown) would crowd the line. Only the keys that differ are listed;
+ * everything else falls back to the canonical label.
+ */
+const TRUST_STRIP_LABEL_OVERRIDE: Partial<Record<ClientKind, string>> = {
+  harmonic_firedancer: 'Harmonic FD',
+};
+
+/**
  * Trim a build-metadata / pre-release suffix from a semver-ish version
  * string for the trust strip. `0.909.0-rc.40001` → `0.909.0`,
  * `2.1.0+build.42` → `2.1.0`. The fuller string is still surfaced on
@@ -440,7 +450,9 @@ export function trustSummary(parts: {
   incomeLast30dSol: string | null;
 }): string {
   const segments: string[] = [parts.tierLabel, parts.tenureBadge];
-  const clientKindLabel = labelForClientKind(parts.clientKind);
+  const clientKindLabel =
+    TRUST_STRIP_LABEL_OVERRIDE[parts.clientKind as ClientKind] ??
+    labelForClientKind(parts.clientKind);
   const trimmedVersion = parts.clientVersion ? trimClientVersion(parts.clientVersion) : null;
   const client = trimmedVersion ? `${clientKindLabel} ${trimmedVersion}` : clientKindLabel;
   segments.push(client);
