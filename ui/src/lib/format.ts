@@ -169,6 +169,38 @@ export function formatComputeUnits(value: number | null): string {
 }
 
 /**
+ * Compact compute-units formatter for space-constrained surfaces —
+ * leaderboard CU column, chart axis ticks/tooltips, and the income
+ * page's per-epoch history. CU values are stringified integers that
+ * run to the tens of millions, so a one-decimal "M" suffix (e.g.
+ * `33.4M`) keeps cells scannable; smaller magnitudes step down to a
+ * "K" suffix (`1.2K`) and integers below 1000 render thousands-
+ * separated. Uses `Intl.NumberFormat('en')` so the decimal/grouping
+ * formatting matches the rest of the app.
+ *
+ * Returns `opts.nullText` (default "—") for null/undefined inputs and
+ * non-finite parses so a bad payload surfaces as a placeholder rather
+ * than a misleading `0`. Callers that need a different placeholder
+ * (e.g. charts using "n/a") pass it via `opts.nullText`.
+ */
+export function formatCompactCu(
+  value: number | string | null | undefined,
+  opts?: { nullText?: string },
+): string {
+  const nullText = opts?.nullText ?? '—';
+  if (value === null || value === undefined) return nullText;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return nullText;
+  if (Math.abs(n) >= 1_000_000) {
+    return `${new Intl.NumberFormat('en', { maximumFractionDigits: 1 }).format(n / 1_000_000)}M`;
+  }
+  if (Math.abs(n) >= 1_000) {
+    return `${new Intl.NumberFormat('en', { maximumFractionDigits: 1 }).format(n / 1_000)}K`;
+  }
+  return new Intl.NumberFormat('en').format(n);
+}
+
+/**
  * Format a 0–1 fraction as a percentage with one decimal place. Used
  * by the EvidenceRow's Wilson-bound display + the percentile-rank
  * recap line. Returns "—" for null so callers don't have to branch

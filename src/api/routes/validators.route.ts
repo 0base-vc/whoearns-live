@@ -43,6 +43,12 @@ import {
 import { findEconomicCohortVotesCached, findEconomicPercentileCached } from '../tier-cache.js';
 import { narrowToDocumentedKind } from '../../services/client-kind.js';
 import { summariseTenure } from '../../services/tenure.js';
+import { findValidatorByVoteOrIdentity } from '../validator-lookup.js';
+
+// Re-exported so existing importers that pull `findValidatorByVoteOrIdentity`
+// from this route keep working; the canonical definition now lives in
+// `../validator-lookup.ts` (shared with `/scoring`).
+export { findValidatorByVoteOrIdentity };
 
 export interface ValidatorsRoutesDeps {
   statsRepo: Pick<
@@ -125,21 +131,6 @@ function epochInfoOrShim(epochInfo: EpochInfo | null, epoch: number): EpochInfo 
     observedAt: new Date(0),
     closedAt: null,
   };
-}
-
-/**
- * Resolve a validator from a vote-OR-identity pubkey: try the vote
- * index first, fall back to the identity index. Shared by every
- * `:idOrVote` route here AND by `/scoring` (scoring.route.ts) so the
- * "vote first, then identity" lookup lives in exactly one place.
- */
-export async function findValidatorByVoteOrIdentity(
-  validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>,
-  idOrVote: VotePubkey,
-): Promise<Validator | null> {
-  const byVote = await validatorsRepo.findByVote(idOrVote);
-  if (byVote !== null) return byVote;
-  return validatorsRepo.findByIdentity(idOrVote);
 }
 
 /**

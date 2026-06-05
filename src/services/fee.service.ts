@@ -759,14 +759,11 @@ export class FeeService {
     // `processed_blocks`; if a prior run populated the table but never
     // got to recompute (pod restarted mid-tick, or started up already
     // caught-up so `processed > 0` never triggered), this pass self-
-    // heals. Cost: five `percentile_cont` UPDATEs per tick — still
-    // cheap even for thousands of blocks per identity. No-op on empty
-    // identities or when no produced blocks match.
-    const medianFees = await this.statsRepo.recomputeMedianFees(epoch, identities);
-    const medianBase = await this.statsRepo.recomputeMedianBaseFees(epoch, identities);
-    const medianPriority = await this.statsRepo.recomputeMedianPriorityFees(epoch, identities);
-    const medianTips = await this.statsRepo.recomputeMedianTips(epoch, identities);
-    const medianTotals = await this.statsRepo.recomputeMedianTotals(epoch, identities);
+    // heals. Cost: ONE `percentile_cont` UPDATE per tick computing all
+    // five medians in a single scan — still cheap even for thousands of
+    // blocks per identity. No-op on empty identities or when no produced
+    // blocks match.
+    const medianRows = await this.statsRepo.recomputeMedians(epoch, identities);
 
     this.logger.info(
       {
@@ -775,11 +772,7 @@ export class FeeService {
         skipped,
         errors,
         pending: pending.length,
-        medianFees,
-        medianBase,
-        medianPriority,
-        medianTips,
-        medianTotals,
+        medianRows,
       },
       'fee.service: ingest complete',
     );

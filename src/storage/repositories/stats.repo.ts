@@ -211,6 +211,34 @@ const STATS_COLS = `epoch, vote_pubkey, identity_pubkey,
   median_base_fee_updated_at, median_priority_fee_updated_at,
   tips_updated_at, median_tip_updated_at, median_total_updated_at`;
 
+/**
+ * Economic-percentile cohort membership predicate, shared verbatim by
+ * `findEconomicPercentile` (the `per_validator_per_epoch` CTE) and
+ * `findEconomicCohortVotes` so the disclosed cohort is EXACTLY the
+ * population `PERCENT_RANK()` ranks against. A validator is in the
+ * cohort for the `$1..$2` epoch window when it has a non-zero
+ * `slots_assigned`, slot data ingested, BOTH fees + tips timestamps
+ * present (a single missing half would bias `(fees + tips)`), and is
+ * not opted out.
+ *
+ * Both call sites alias the table `evs` and bind `$1`/`$2` to
+ * `fromEpoch`/`toEpoch`, so this static fragment interpolates into
+ * either query unchanged. The two MUST stay identical — extracting it
+ * here makes that a single source of truth rather than a copy that can
+ * silently drift.
+ */
+const ECONOMIC_COHORT_MEMBERSHIP_PREDICATE = `evs.epoch BETWEEN $1::bigint AND $2::bigint
+          AND evs.slots_assigned > 0
+          AND evs.slots_updated_at IS NOT NULL
+          AND evs.fees_updated_at IS NOT NULL
+          AND evs.tips_updated_at IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+              FROM validator_profiles vp
+             WHERE vp.vote_pubkey = evs.vote_pubkey
+               AND vp.opted_out = TRUE
+          )`;
+
 const PEER_BENCHMARK_MIN_VALIDATORS = 3;
 
 /**
@@ -865,139 +893,69 @@ export class StatsRepository {
   }
 
   /**
-   * Recompute per-validator median fee from `processed_blocks` and write it
-   * back to every `epoch_validator_stats` row that matches one of the given
+   * Recompute ALL FIVE per-validator per-block medians from
+   * `processed_blocks` in a single pass, and write them back to every
+   * `epoch_validator_stats` row that matches one of the given
    * identities. Using `percentile_cont` keeps the math in Postgres (no
-   * streaming median needed in app code). Counts only `block_status='produced'`
-   * so skipped/missing slots don't skew the distribution.
+   * streaming median needed in app code). Counts only
+   * `block_status='produced'` so skipped/missing slots don't skew any
+   * distribution.
    *
-   * Called on each fee-ingester tick after new blocks are inserted. Safe to
-   * call with an empty identities list (no-op).
-   */
-  async recomputeMedianFees(epoch: Epoch, identities: IdentityPubkey[]): Promise<number> {
-    if (identities.length === 0) return 0;
-    const { rowCount } = await this.pool.query(
-      `UPDATE epoch_validator_stats AS evs
-          SET median_fee_lamports   = sub.median,
-              median_fee_updated_at = NOW()
-         FROM (
-           SELECT leader_identity AS identity,
-                  percentile_cont(0.5) WITHIN GROUP (ORDER BY fees_lamports) AS median
-             FROM processed_blocks
-            WHERE epoch = $1
-              AND block_status = 'produced'
-              AND leader_identity = ANY($2)
-            GROUP BY leader_identity
-         ) AS sub
-        WHERE evs.epoch = $1
-          AND evs.identity_pubkey = sub.identity`,
-      [epoch, identities],
-    );
-    return rowCount ?? 0;
-  }
-
-  /**
-   * Per-validator median of GROSS BASE fees per block (`5000 × sigs`
-   * summed per tx). Same pattern as `recomputeMedianFees` — separate
-   * method to keep SQL literal and grep-friendly.
-   */
-  async recomputeMedianBaseFees(epoch: Epoch, identities: IdentityPubkey[]): Promise<number> {
-    if (identities.length === 0) return 0;
-    const { rowCount } = await this.pool.query(
-      `UPDATE epoch_validator_stats AS evs
-          SET median_base_fee_lamports    = sub.median,
-              median_base_fee_updated_at  = NOW()
-         FROM (
-           SELECT leader_identity AS identity,
-                  percentile_cont(0.5) WITHIN GROUP (ORDER BY base_fees_lamports) AS median
-             FROM processed_blocks
-            WHERE epoch = $1
-              AND block_status = 'produced'
-              AND leader_identity = ANY($2)
-            GROUP BY leader_identity
-         ) AS sub
-        WHERE evs.epoch = $1
-          AND evs.identity_pubkey = sub.identity`,
-      [epoch, identities],
-    );
-    return rowCount ?? 0;
-  }
-
-  /** Per-validator median of GROSS PRIORITY fees per block. */
-  async recomputeMedianPriorityFees(epoch: Epoch, identities: IdentityPubkey[]): Promise<number> {
-    if (identities.length === 0) return 0;
-    const { rowCount } = await this.pool.query(
-      `UPDATE epoch_validator_stats AS evs
-          SET median_priority_fee_lamports    = sub.median,
-              median_priority_fee_updated_at  = NOW()
-         FROM (
-           SELECT leader_identity AS identity,
-                  percentile_cont(0.5) WITHIN GROUP (ORDER BY priority_fees_lamports) AS median
-             FROM processed_blocks
-            WHERE epoch = $1
-              AND block_status = 'produced'
-              AND leader_identity = ANY($2)
-            GROUP BY leader_identity
-         ) AS sub
-        WHERE evs.epoch = $1
-          AND evs.identity_pubkey = sub.identity`,
-      [epoch, identities],
-    );
-    return rowCount ?? 0;
-  }
-
-  /**
-   * Per-validator median of per-block Jito TIPS for this epoch.
+   * The five medians (and their `*_updated_at` stamps) were previously
+   * five separate UPDATEs, each re-scanning `processed_blocks`. They are
+   * the SAME skeleton differing only in the `ORDER BY` expression and
+   * target columns, so they collapse into ONE sub-SELECT (one scan) and
+   * ONE UPDATE that sets all five columns together — exactly the write
+   * the live path always produced, since the callers invoked all five
+   * back-to-back.
    *
-   * Same shape as `recomputeMedianFees` — only the column changes. Kept
-   * as a separate method (rather than parameterising the column) so the
-   * SQL stays literal and grep-friendly. The two medians compute in
-   * parallel logical senses but are independent measures: one blocks
-   * could have a high fee and zero tips, or vice versa.
-   */
-  async recomputeMedianTips(epoch: Epoch, identities: IdentityPubkey[]): Promise<number> {
-    if (identities.length === 0) return 0;
-    const { rowCount } = await this.pool.query(
-      `UPDATE epoch_validator_stats AS evs
-          SET median_tip_lamports   = sub.median,
-              median_tip_updated_at = NOW()
-         FROM (
-           SELECT leader_identity AS identity,
-                  percentile_cont(0.5) WITHIN GROUP (ORDER BY tips_lamports) AS median
-             FROM processed_blocks
-            WHERE epoch = $1
-              AND block_status = 'produced'
-              AND leader_identity = ANY($2)
-            GROUP BY leader_identity
-         ) AS sub
-        WHERE evs.epoch = $1
-          AND evs.identity_pubkey = sub.identity`,
-      [epoch, identities],
-    );
-    return rowCount ?? 0;
-  }
-
-  /**
-   * Per-validator median of per-block (fees + tips) for this epoch.
+   * The fixed internal map below pins each median to its source
+   * expression / median column / `*_updated_at` column. The SQL is a
+   * single static literal (no value interpolation), so there is no
+   * injection surface.
    *
-   * Computed as `median(fees_lamports + tips_lamports)` — taking the
-   * median of the paired sum, NOT the sum of the two medians. The
-   * distinction matters: a single lucky block with a massive MEV
-   * sandwich shows up in median(fees+tips) only if it shifts the
-   * middle-of-distribution, whereas median(fees)+median(tips) would
-   * just combine two independent middle values and potentially under-
-   * count the "typical block" total.
+   * - `median_fee_lamports`          ← median(`fees_lamports`)
+   * - `median_base_fee_lamports`     ← median(`base_fees_lamports`)
+   *     GROSS base fees per block (`5000 × sigs` summed per tx).
+   * - `median_priority_fee_lamports` ← median(`priority_fees_lamports`)
+   *     GROSS priority fees per block.
+   * - `median_tip_lamports`          ← median(`tips_lamports`)
+   *     Jito tips per block — independent of fees: a block can carry a
+   *     high fee and zero tips, or vice versa.
+   * - `median_total_lamports`        ← median(`fees_lamports + tips_lamports`)
+   *     The median of the paired per-block SUM, NOT the sum of the two
+   *     medians: a single lucky block with a massive MEV sandwich shifts
+   *     median(fees+tips) only if it moves the middle of the
+   *     distribution, whereas median(fees)+median(tips) would just
+   *     combine two independent middle values and potentially undercount
+   *     the "typical block" total.
+   *
+   * Called on each fee-ingester tick after new blocks are inserted. Safe
+   * to call with an empty identities list (no-op). Returns the number of
+   * `epoch_validator_stats` rows updated.
    */
-  async recomputeMedianTotals(epoch: Epoch, identities: IdentityPubkey[]): Promise<number> {
+  async recomputeMedians(epoch: Epoch, identities: IdentityPubkey[]): Promise<number> {
     if (identities.length === 0) return 0;
     const { rowCount } = await this.pool.query(
       `UPDATE epoch_validator_stats AS evs
-          SET median_total_lamports   = sub.median,
-              median_total_updated_at = NOW()
+          SET median_fee_lamports             = sub.median_fee,
+              median_fee_updated_at           = NOW(),
+              median_base_fee_lamports        = sub.median_base_fee,
+              median_base_fee_updated_at      = NOW(),
+              median_priority_fee_lamports    = sub.median_priority_fee,
+              median_priority_fee_updated_at  = NOW(),
+              median_tip_lamports             = sub.median_tip,
+              median_tip_updated_at           = NOW(),
+              median_total_lamports           = sub.median_total,
+              median_total_updated_at         = NOW()
          FROM (
            SELECT leader_identity AS identity,
+                  percentile_cont(0.5) WITHIN GROUP (ORDER BY fees_lamports)          AS median_fee,
+                  percentile_cont(0.5) WITHIN GROUP (ORDER BY base_fees_lamports)     AS median_base_fee,
+                  percentile_cont(0.5) WITHIN GROUP (ORDER BY priority_fees_lamports) AS median_priority_fee,
+                  percentile_cont(0.5) WITHIN GROUP (ORDER BY tips_lamports)          AS median_tip,
                   percentile_cont(0.5) WITHIN GROUP
-                    (ORDER BY (fees_lamports + tips_lamports)) AS median
+                    (ORDER BY (fees_lamports + tips_lamports))                        AS median_total
              FROM processed_blocks
             WHERE epoch = $1
               AND block_status = 'produced'
@@ -1051,7 +1009,13 @@ export class StatsRepository {
     const epochs = epochRows.map((r) => Number(r.epoch) satisfies Epoch as Epoch);
     let rowsUpdated = 0;
     for (const epoch of epochs) {
-      rowsUpdated += await this.recomputeMedianFees(epoch, identities);
+      // Rows selected above have `median_fee_lamports IS NULL`; the five
+      // medians are only ever written together by the live path, so such
+      // a row's sibling medians are NULL too. `recomputeMedians` writes
+      // the same `median_fee_lamports` the old single-column recompute
+      // did and fills the four siblings in the same scan — the matched-
+      // row count is unchanged.
+      rowsUpdated += await this.recomputeMedians(epoch, identities);
     }
     return { epochsTouched: epochs.length, rowsUpdated };
   }
@@ -1217,17 +1181,7 @@ export class StatsRepository {
             + evs.block_tips_total_lamports
           )::numeric / evs.slots_assigned::numeric AS income_per_slot
         FROM epoch_validator_stats evs
-        WHERE evs.epoch BETWEEN $1::bigint AND $2::bigint
-          AND evs.slots_assigned > 0
-          AND evs.slots_updated_at IS NOT NULL
-          AND evs.fees_updated_at IS NOT NULL
-          AND evs.tips_updated_at IS NOT NULL
-          AND NOT EXISTS (
-            SELECT 1
-              FROM validator_profiles vp
-             WHERE vp.vote_pubkey = evs.vote_pubkey
-               AND vp.opted_out = TRUE
-          )
+        WHERE ${ECONOMIC_COHORT_MEMBERSHIP_PREDICATE}
       ),
       median_per_validator AS (
         SELECT
@@ -1446,17 +1400,7 @@ export class StatsRepository {
     const { rows } = await this.pool.query<{ vote_pubkey: string }>(
       `SELECT DISTINCT evs.vote_pubkey
          FROM epoch_validator_stats evs
-        WHERE evs.epoch BETWEEN $1::bigint AND $2::bigint
-          AND evs.slots_assigned > 0
-          AND evs.slots_updated_at IS NOT NULL
-          AND evs.fees_updated_at IS NOT NULL
-          AND evs.tips_updated_at IS NOT NULL
-          AND NOT EXISTS (
-            SELECT 1
-              FROM validator_profiles vp
-             WHERE vp.vote_pubkey = evs.vote_pubkey
-               AND vp.opted_out = TRUE
-          )
+        WHERE ${ECONOMIC_COHORT_MEMBERSHIP_PREDICATE}
         ORDER BY evs.vote_pubkey`,
       [fromEpoch, toEpoch],
     );

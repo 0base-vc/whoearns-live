@@ -331,15 +331,8 @@ async function main(): Promise<number> {
       }
 
       if (identities.length > 0) {
-        const mFees = await statsRepo.recomputeMedianFees(epoch, identities);
-        const mBase = await statsRepo.recomputeMedianBaseFees(epoch, identities);
-        const mPrio = await statsRepo.recomputeMedianPriorityFees(epoch, identities);
-        const mTips = await statsRepo.recomputeMedianTips(epoch, identities);
-        const mTotal = await statsRepo.recomputeMedianTotals(epoch, identities);
-        log.info(
-          { epoch, mFees, mBase, mPrio, mTips, mTotal },
-          'refill-income: epoch-level medians recomputed',
-        );
+        const mRows = await statsRepo.recomputeMedians(epoch, identities);
+        log.info({ epoch, mRows }, 'refill-income: epoch-level medians recomputed');
       }
 
       log.info(
