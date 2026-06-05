@@ -342,7 +342,10 @@ export const TRUST_CLIENT_LABEL: Record<ClientKind, string> = {
  * `string` read the exhaustive `TRUST_CLIENT_LABEL` map safely.
  */
 export function labelForClientKind(kind: string): string {
-  return TRUST_CLIENT_LABEL[kind as ClientKind] ?? kind;
+  // `Object.hasOwn` guards against inherited keys — an unrecognised API
+  // value like "toString"/"constructor" would otherwise resolve to an
+  // `Object.prototype` member instead of falling back to the raw kind.
+  return Object.hasOwn(TRUST_CLIENT_LABEL, kind) ? TRUST_CLIENT_LABEL[kind as ClientKind] : kind;
 }
 
 /**
@@ -450,9 +453,10 @@ export function trustSummary(parts: {
   incomeLast30dSol: string | null;
 }): string {
   const segments: string[] = [parts.tierLabel, parts.tenureBadge];
-  const clientKindLabel =
-    TRUST_STRIP_LABEL_OVERRIDE[parts.clientKind as ClientKind] ??
-    labelForClientKind(parts.clientKind);
+  const stripLabel = Object.hasOwn(TRUST_STRIP_LABEL_OVERRIDE, parts.clientKind)
+    ? TRUST_STRIP_LABEL_OVERRIDE[parts.clientKind as ClientKind]
+    : undefined;
+  const clientKindLabel = stripLabel ?? labelForClientKind(parts.clientKind);
   const trimmedVersion = parts.clientVersion ? trimClientVersion(parts.clientVersion) : null;
   const client = trimmedVersion ? `${clientKindLabel} ${trimmedVersion}` : clientKindLabel;
   segments.push(client);
