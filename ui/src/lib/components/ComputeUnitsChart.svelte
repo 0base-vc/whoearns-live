@@ -386,27 +386,35 @@
         </svelte:fragment>
       </LineChart>
     </div>
-    <table class="sr-only">
-      <caption> Chart values for average compute units per produced block by epoch. </caption>
-      <thead>
-        <tr>
-          <th scope="col">Epoch</th>
-          <th scope="col">This validator compute units per block</th>
-          <th scope="col">Indexed average compute units per block</th>
-          <th scope="col">{sameClientSeriesLabel} compute units per block</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each chartData as point (point.epoch)}
+    <!--
+      Accessible data table wrapped in an `sr-only` DIV (not `sr-only` on the
+      <table>): a `table-layout:auto` table ignores `width:1px` and grows to its
+      `whitespace-nowrap` content, escaping the viewport and causing a large
+      horizontal scroll on mobile. The block div clips it via `overflow:hidden`.
+    -->
+    <div class="sr-only">
+      <table>
+        <caption> Chart values for average compute units per produced block by epoch. </caption>
+        <thead>
           <tr>
-            <th scope="row">{point.epoch}</th>
-            <td>{formatCuExact(point.validatorCu)}</td>
-            <td>{formatCuExact(point.serviceCu)}</td>
-            <td>{formatCuExact(point.sameClientCu)}</td>
+            <th scope="col">Epoch</th>
+            <th scope="col">This validator compute units per block</th>
+            <th scope="col">Indexed average compute units per block</th>
+            <th scope="col">{sameClientSeriesLabel} compute units per block</th>
           </tr>
-        {/each}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {#each chartData as point (point.epoch)}
+            <tr>
+              <th scope="row">{point.epoch}</th>
+              <td>{formatCuExact(point.validatorCu)}</td>
+              <td>{formatCuExact(point.serviceCu)}</td>
+              <td>{formatCuExact(point.sameClientCu)}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
     <ul class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[color:var(--color-text-muted)]">
       {#each legendItems as item (item.label)}
         <li class="flex items-center gap-2">
