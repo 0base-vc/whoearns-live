@@ -368,43 +368,53 @@
         </svelte:fragment>
       </LineChart>
     </div>
-    <table class="sr-only">
-      <caption> Chart values for income per leader slot by epoch. </caption>
-      <thead>
-        <tr>
-          <th scope="col">Epoch</th>
-          <th scope="col">This validator SOL per leader slot</th>
-          <th scope="col">Indexed average SOL per leader slot</th>
-          <th scope="col">Indexed validator sample size</th>
-          <th scope="col">{sameClientSeriesLabel} SOL per leader slot</th>
-          <th scope="col">Same-client sample size</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each chartData as point (point.epoch)}
+    <!--
+      Accessible data table. Wrapped in an `sr-only` DIV rather than putting
+      `sr-only` on the <table> itself: `width:1px` is ignored by a
+      `table-layout:auto` table (it grows to its `whitespace-nowrap` content,
+      ~1000px+), which then escapes the viewport and creates a huge horizontal
+      scroll on mobile. A normal block div honours `width:1px;overflow:hidden`
+      and clips the table.
+    -->
+    <div class="sr-only">
+      <table>
+        <caption> Chart values for income per leader slot by epoch. </caption>
+        <thead>
           <tr>
-            <th scope="row">{point.epoch}</th>
-            <td>
-              {point.validatorIncomePerSlot === null
-                ? 'not available'
-                : formatIncomePerSlot(point.validatorIncomePerSlot)}
-            </td>
-            <td>
-              {point.peerAvgIncomePerSlot === null
-                ? 'not available'
-                : formatIncomePerSlot(point.peerAvgIncomePerSlot)}
-            </td>
-            <td>{point.peerSampleValidators ?? 'not available'}</td>
-            <td>
-              {point.sameClientIncomePerSlot === null
-                ? 'not available'
-                : formatIncomePerSlot(point.sameClientIncomePerSlot)}
-            </td>
-            <td>{point.sameClientSampleValidators ?? 'not available'}</td>
+            <th scope="col">Epoch</th>
+            <th scope="col">This validator SOL per leader slot</th>
+            <th scope="col">Indexed average SOL per leader slot</th>
+            <th scope="col">Indexed validator sample size</th>
+            <th scope="col">{sameClientSeriesLabel} SOL per leader slot</th>
+            <th scope="col">Same-client sample size</th>
           </tr>
-        {/each}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {#each chartData as point (point.epoch)}
+            <tr>
+              <th scope="row">{point.epoch}</th>
+              <td>
+                {point.validatorIncomePerSlot === null
+                  ? 'not available'
+                  : formatIncomePerSlot(point.validatorIncomePerSlot)}
+              </td>
+              <td>
+                {point.peerAvgIncomePerSlot === null
+                  ? 'not available'
+                  : formatIncomePerSlot(point.peerAvgIncomePerSlot)}
+              </td>
+              <td>{point.peerSampleValidators ?? 'not available'}</td>
+              <td>
+                {point.sameClientIncomePerSlot === null
+                  ? 'not available'
+                  : formatIncomePerSlot(point.sameClientIncomePerSlot)}
+              </td>
+              <td>{point.sameClientSampleValidators ?? 'not available'}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
     <ul class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[color:var(--color-text-muted)]">
       {#each legendItems as item (item.label)}
         <li class="flex items-center gap-2">
