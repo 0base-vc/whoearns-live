@@ -184,17 +184,22 @@ failing every tick.
     here.
   - `/livez` — liveness. 503 only when the DB is unreachable OR the
     worker pipeline has frozen (epoch heartbeat `epochs.observed_at` stale
-    > 15 min); 200 otherwise (including a null heartbeat on cold start).
-    > The Helm `livenessProbe` points here so Kubernetes restarts a pod whose
-    > worker has silently died — `/healthz` returns 200 `degraded` when
-    > stale, so a liveness probe on it never would (the 2026-06 incident).
-- **Process supervision.** The container runs api.js + worker.js under
-  `pm2-runtime` (manifest: `deploy/docker/ecosystem.config.cjs`), which
-  restarts either process in place on crash or memory-ceiling breach.
-  `/livez` is the backstop for an alive-but-wedged worker that pm2 cannot
-  detect. The income-reconciler additionally self-heals a closed epoch
-  whose `epochs` metadata row is missing (worker down across the boundary)
-  by reconstructing it from the running epoch's boundaries.
+    beyond 15 min); 200 otherwise (including a null heartbeat on cold
+    start). The Helm `livenessProbe` points here so Kubernetes restarts a
+    pod whose worker has silently died — `/healthz` returns 200 `degraded`
+    when stale, so a liveness probe on it never would (the 2026-06
+    incident).
+- **Process supervision.** `entrypoint.sh` runs api.js + worker.js as
+  direct background children (they inherit the container's stdout, so pino
+  JSON reaches `kubectl logs`) and polls to restart either on exit and to
+  recycle either over its RSS ceiling (api 1 GiB / worker 4 GiB, tunable
+  via env). A stdout-capturing manager such as pm2 is deliberately avoided:
+  this app logs before it listens, and an undrained stdout pipe deadlocks
+  that first write so the API never binds its port. `/livez` is the backstop
+  for an alive-but-wedged worker no supervisor can detect. The
+  income-reconciler additionally self-heals a closed epoch whose `epochs`
+  metadata row is missing (worker down across the boundary) by
+  reconstructing it from the running epoch's boundaries.
 
 ## Cloudflare cache and purge
 

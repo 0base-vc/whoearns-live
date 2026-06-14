@@ -1,23 +1,30 @@
 #!/bin/sh
 #
 # All-in-one entrypoint: initialises a local PostgreSQL if needed, starts
-# it, runs migrations, then supervises API + Worker with pm2-runtime in
-# the same container.
+# it, runs migrations, then supervises API + Worker in the same container.
 #
-# Supervision: api.js and worker.js run under pm2-runtime — NOT a bare
-# `node ... & wait -n`. pm2 restarts either process IN PLACE if it crashes
-# or exceeds its memory ceiling. The 2026-06 incident was a worker that
-# died under memory pressure while `wait -n` failed to notice, freezing the
-# epoch pipeline for days while the API kept serving. PostgreSQL is started
-# and owned here (not by pm2): it has its own process model and a clean
-# shutdown via `pg_ctl`. See deploy/docker/ecosystem.config.cjs.
+# Supervision: api.js and worker.js run as direct background children of
+# this shell, so they INHERIT the container's stdout/stderr — their pino
+# JSON logs flow straight to `kubectl logs`. A poll loop restarts any child
+# that exits (the 2026-06 incident was a worker that died under memory
+# pressure while the old `wait -n` never noticed, freezing the epoch
+# pipeline while the API kept serving) and recycles a child that exceeds
+# its RSS ceiling (a graceful stand-in for the hard cgroup OOM-kill removed
+# from the Helm limits).
+#
+# Why not a stdout-capturing supervisor (e.g. pm2): this app logs BEFORE it
+# listens, and a process manager that pipes child stdout but doesn't drain
+# it fast enough deadlocks that first write — the API never binds its port.
+# Inheriting the container's (kubelet-drained) stdout, as below, avoids it.
+# The `/livez` freshness probe remains the backstop for a child that is
+# alive-but-wedged (which neither this loop nor pm2 can detect).
 #
 # The container is expected to run as the `postgres` user (uid/gid 70) so
 # that no su-exec or chown calls are needed. Kubernetes handles volume
 # ownership via `fsGroup: 70`; Docker named volumes inherit ownership
 # from the image-built `/var/lib/postgresql` directory.
 #
-# On SIGTERM: forwards to pm2 (which drains api + worker), then stops
+# On SIGTERM: forwards to both children, waits up to 25s, then stops
 # postgres with `pg_ctl stop -m fast` for a clean shutdown.
 
 set -eu
@@ -26,7 +33,21 @@ POSTGRES_USER="${POSTGRES_USER:-indexer}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-indexer}"
 POSTGRES_DB="${POSTGRES_DB:-indexer}"
 PGDATA="${PGDATA:-/var/lib/postgresql/data/pgdata}"
-ECOSYSTEM_CONFIG="${ECOSYSTEM_CONFIG:-/usr/local/bin/ecosystem.config.cjs}"
+
+# Supervision tunables. The memory ceilings are a graceful runaway-backstop,
+# NOT a tight budget: the node has ~125 GiB and normal RSS is well under
+# 1 GiB, so these sit far above the ~3 GiB historical leak peak. A child
+# over its ceiling is SIGTERM'd and restarted on the next poll — replacing
+# the removed hard 3 GiB cgroup OOM-kill (which never auto-recovered) with a
+# clean recycle.
+POLL_INTERVAL="${SUPERVISOR_POLL_INTERVAL:-10}"
+RESTART_DELAY="${CHILD_RESTART_DELAY:-3}"
+API_MAX_RSS_MB="${API_MAX_RSS_MB:-1024}"
+WORKER_MAX_RSS_MB="${WORKER_MAX_RSS_MB:-4096}"
+
+SHUTTING_DOWN=0
+API_PID=""
+WORKER_PID=""
 
 log() { echo "[entrypoint] $*"; }
 
@@ -86,20 +107,39 @@ stop_postgres() {
   fi
 }
 
+# Resident set size in MB of a pid; sets RSS_MB (0 when the pid is gone or
+# /proc is unavailable, so the ceiling check simply never fires there).
+rss_mb() {
+  RSS_MB=0
+  [ -n "${1:-}" ] || return 0
+  _kb=$(awk '/^VmRSS:/{print $2}' "/proc/$1/status" 2>/dev/null || true)
+  [ -n "${_kb:-}" ] && RSS_MB=$(( _kb / 1024 ))
+  return 0
+}
+
+start_api() {
+  node dist/entrypoints/api.js &
+  API_PID=$!
+  log "api started (pid $API_PID)"
+}
+
+start_worker() {
+  node dist/entrypoints/worker.js &
+  WORKER_PID=$!
+  log "worker started (pid $WORKER_PID)"
+}
+
 shutdown() {
-  log "received termination signal — stopping pm2 (drains api + worker)"
-  if [ -n "${PM2_PID:-}" ] && kill -0 "$PM2_PID" 2>/dev/null; then
-    # pm2-runtime forwards SIGTERM to its apps and waits each app's
-    # kill_timeout (see ecosystem.config.cjs) before SIGKILL. Give it 25s,
-    # comfortably under the pod's 30s terminationGracePeriodSeconds while
-    # still leaving room for the postgres stop below.
-    kill -TERM "$PM2_PID" 2>/dev/null || true
-    deadline=$(( $(date +%s) + 25 ))
-    while kill -0 "$PM2_PID" 2>/dev/null; do
-      [ "$(date +%s)" -ge "$deadline" ] && break
-      sleep 1
-    done
-  fi
+  SHUTTING_DOWN=1
+  log "received termination signal — stopping children"
+  [ -n "$WORKER_PID" ] && kill -TERM "$WORKER_PID" 2>/dev/null || true
+  [ -n "$API_PID" ] && kill -TERM "$API_PID" 2>/dev/null || true
+  deadline=$(( $(date +%s) + 25 ))
+  while { [ -n "$API_PID" ] && kill -0 "$API_PID" 2>/dev/null; } \
+     || { [ -n "$WORKER_PID" ] && kill -0 "$WORKER_PID" 2>/dev/null; }; do
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 1
+  done
   stop_postgres
   exit 0
 }
@@ -112,22 +152,45 @@ start_postgres
 log "running migrations"
 node dist/scripts/migrate.js up
 
-log "starting api + worker under pm2-runtime ($ECOSYSTEM_CONFIG)"
-# pm2-runtime is the foreground supervisor. `--raw` passes each app's
-# stdout through unmodified so the pino JSON log lines stay parseable
-# (no pm2 name/timestamp prefix) — log-based debugging relies on this.
-# Backgrounded + `wait`ed (rather than `exec`) so this shell keeps its
-# SIGTERM trap and can stop postgres after pm2 exits.
-pm2-runtime start "$ECOSYSTEM_CONFIG" --raw &
-PM2_PID=$!
+log "starting api + worker (supervised)"
+start_api
+start_worker
 
+# Supervision loop. `set +e` so a transient nonzero from kill/wait never
+# aborts it. Each tick: restart a child that exited, then recycle a child
+# over its RSS ceiling (the next tick restarts it).
 set +e
-wait "$PM2_PID"
-EXIT_CODE=$?
-# Reached only if pm2-runtime exits on its own (every app gave up past
-# max_restarts). Stop postgres and propagate the code so the container
-# exits and Kubernetes restarts the pod. A SIGTERM instead runs the
-# `shutdown` trap above, which exits 0.
-log "pm2-runtime exited with code $EXIT_CODE — stopping postgres"
-stop_postgres
-exit "$EXIT_CODE"
+while [ "$SHUTTING_DOWN" = 0 ]; do
+  sleep "$POLL_INTERVAL"
+  [ "$SHUTTING_DOWN" = 1 ] && break
+
+  if ! kill -0 "$API_PID" 2>/dev/null; then
+    wait "$API_PID" 2>/dev/null
+    code=$?
+    log "api exited (code $code) — restarting in ${RESTART_DELAY}s"
+    sleep "$RESTART_DELAY"
+    [ "$SHUTTING_DOWN" = 1 ] && break
+    start_api
+  fi
+
+  if ! kill -0 "$WORKER_PID" 2>/dev/null; then
+    wait "$WORKER_PID" 2>/dev/null
+    code=$?
+    log "worker exited (code $code) — restarting in ${RESTART_DELAY}s"
+    sleep "$RESTART_DELAY"
+    [ "$SHUTTING_DOWN" = 1 ] && break
+    start_worker
+  fi
+
+  rss_mb "$API_PID"
+  if [ "$RSS_MB" -gt "$API_MAX_RSS_MB" ]; then
+    log "api RSS ${RSS_MB}MB exceeds ${API_MAX_RSS_MB}MB ceiling — recycling"
+    kill -TERM "$API_PID" 2>/dev/null
+  fi
+
+  rss_mb "$WORKER_PID"
+  if [ "$RSS_MB" -gt "$WORKER_MAX_RSS_MB" ]; then
+    log "worker RSS ${RSS_MB}MB exceeds ${WORKER_MAX_RSS_MB}MB ceiling — recycling"
+    kill -TERM "$WORKER_PID" 2>/dev/null
+  fi
+done
