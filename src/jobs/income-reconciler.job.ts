@@ -7,13 +7,13 @@ import type { ValidatorService, WatchMode } from '../services/validator.service.
 import type { SolanaRpcClient } from '../clients/solana-rpc.js';
 import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import type { StatsRepository } from '../storage/repositories/stats.repo.js';
-import type { Epoch, IdentityPubkey, VotePubkey } from '../types/domain.js';
+import type { Epoch, EpochInfo, IdentityPubkey, VotePubkey } from '../types/domain.js';
 import { withRpcFallback } from './rpc-fallback.js';
 import type { Job } from './scheduler.js';
 
 export interface IncomeReconcilerJobDeps {
   epochService: EpochService;
-  epochsRepo: Pick<EpochsRepository, 'findByEpoch'>;
+  epochsRepo: Pick<EpochsRepository, 'findByEpoch' | 'upsert'>;
   validatorService: ValidatorService;
   feeService: FeeService;
   slotService: Pick<SlotService, 'ingestCurrentEpoch'>;
@@ -64,16 +64,67 @@ export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
   /**
    * Repair one closed epoch: fill any missing `processed_blocks` rows
    * for watched validators and rebuild `epoch_validator_stats` totals.
-   * `knownVotes` lets a caller that has already resolved the watched
-   * set for this epoch skip the lookup.
+   * `current` is the running epoch (used to reconstruct a missing
+   * metadata row — see below). `knownVotes` lets a caller that has
+   * already resolved the watched set for this epoch skip the lookup.
    */
-  async function repairEpoch(epoch: Epoch, knownVotes?: VotePubkey[]): Promise<void> {
-    const epochInfo = await deps.epochsRepo.findByEpoch(epoch);
-    if (epochInfo === null || !epochInfo.isClosed) {
-      deps.logger.debug(
-        { epoch, known: epochInfo !== null },
-        'income-reconciler: target epoch not closed, skipping',
+  async function repairEpoch(
+    epoch: Epoch,
+    current: EpochInfo,
+    knownVotes?: VotePubkey[],
+  ): Promise<void> {
+    let epochInfo = await deps.epochsRepo.findByEpoch(epoch);
+    if (epochInfo === null) {
+      // No metadata row for this epoch. This happens when the worker was
+      // down for the ENTIRE lifetime of `epoch` — a multi-day outage that
+      // straddles an epoch boundary — so the epoch-watcher never recorded
+      // it. Gap detection computes the tier window arithmetically (it does
+      // not read the `epochs` table), so it still flags `epoch` as
+      // missing-rows and routes it here; but repair needs the row's slot
+      // range to fetch the leader schedule, so this used to return at a
+      // `debug` log and skip FOREVER (invisible at prod `info` level, and
+      // a plain restart never fixed it). Reconstruct the row from the
+      // running epoch's authoritative boundaries — mainnet epochs are a
+      // constant `slotCount` long, so a past epoch's first slot is a fixed
+      // multiple back — then persist it so this tick (and every later one)
+      // repairs the hole instead of re-detecting it every interval.
+      if (epoch >= current.epoch) {
+        // Current/future epoch with no row yet — nothing to backfill.
+        // (repairTargets only ever holds closed epochs, so this is purely
+        // defensive against a future caller.)
+        deps.logger.debug(
+          { epoch, currentEpoch: current.epoch },
+          'income-reconciler: epoch has no row and is not in the past, skipping',
+        );
+        return;
+      }
+      const slotsPerEpoch = current.slotCount;
+      const firstSlot = current.firstSlot - (current.epoch - epoch) * slotsPerEpoch;
+      const lastSlot = firstSlot + slotsPerEpoch - 1;
+      await deps.epochsRepo.upsert({
+        epoch,
+        firstSlot,
+        lastSlot,
+        slotCount: slotsPerEpoch,
+        isClosed: true,
+        currentSlot: lastSlot,
+      });
+      deps.logger.info(
+        { epoch, firstSlot, lastSlot },
+        'income-reconciler: reconstructed missing epoch metadata row',
       );
+      epochInfo = {
+        epoch,
+        firstSlot,
+        lastSlot,
+        slotCount: slotsPerEpoch,
+        currentSlot: lastSlot,
+        isClosed: true,
+        observedAt: new Date(),
+        closedAt: null,
+      };
+    } else if (!epochInfo.isClosed) {
+      deps.logger.debug({ epoch }, 'income-reconciler: target epoch not closed, skipping');
       return;
     }
 
@@ -232,7 +283,7 @@ export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
       );
       for (const epoch of repairTargets) {
         try {
-          await repairEpoch(epoch, epoch === latestClosed ? latestVotes : undefined);
+          await repairEpoch(epoch, current, epoch === latestClosed ? latestVotes : undefined);
         } catch (err) {
           // Isolate per epoch: one epoch's repair failure (an RPC
           // timeout, a transient DB error) must not starve the other

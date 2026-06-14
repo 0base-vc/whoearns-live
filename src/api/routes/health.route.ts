@@ -18,10 +18,30 @@ const DB_PROBE_TIMEOUT_MS = 2_000;
  */
 const RPC_HEARTBEAT_STALE_AFTER_MS = 2 * 60 * 1000;
 
+/**
+ * How stale the epoch-watcher heartbeat may get before the LIVENESS probe
+ * (`/livez`) fails and Kubernetes restarts the pod. Far longer than the
+ * `/healthz` degraded window (2 min) because a liveness failure is
+ * DESTRUCTIVE — it must fire only on a genuine pipeline freeze (the worker
+ * died or wedged while the API kept serving), never on a transient RPC
+ * blip, a GC pause, or a slow tick. 15 min ≈ 30× the 30s watch interval; a
+ * real freeze still recovers well within a ~2-day epoch.
+ */
+const LIVENESS_STALE_AFTER_MS = 15 * 60 * 1000;
+
 type DbCheck = 'ok' | 'fail';
 
 interface HealthBody {
   status: 'ok' | 'degraded';
+  checks: {
+    db: DbCheck;
+    rpcLastSeenAt: string | null;
+    lastEpoch: number | null;
+  };
+}
+
+interface LiveBody {
+  status: 'ok' | 'dead';
   checks: {
     db: DbCheck;
     rpcLastSeenAt: string | null;
@@ -82,6 +102,45 @@ const healthRoutes: FastifyPluginAsync<HealthRoutesDeps> = async (
 
     const statusCode = db === 'fail' ? 503 : 200;
     return reply.code(statusCode).send(body);
+  });
+
+  /**
+   * `GET /livez` — Kubernetes LIVENESS probe. Distinct from `/healthz`
+   * (readiness): a 503 here RESTARTS the pod, so it signals only a fault
+   * that a restart can fix:
+   *   - 503 `dead` — the db probe failed, OR the epoch-watcher heartbeat
+   *     (`epochs.observed_at`) is stale beyond LIVENESS_STALE_AFTER_MS,
+   *     i.e. the worker pipeline froze while the API kept serving. This is
+   *     the 2026-06 silent-worker-death incident: `/healthz` returns 200
+   *     `degraded` when stale, so a liveness probe pointed at it NEVER
+   *     restarted the frozen pod and the epoch stuck for days.
+   *   - 200 `ok` — otherwise, INCLUDING a null heartbeat (cold start, the
+   *     worker hasn't ticked yet). The startupProbe + pm2 supervision own
+   *     the not-yet-started case; liveness must not restart-loop a booting
+   *     pod or one whose first tick is merely slow.
+   */
+  app.get('/livez', async (_request, reply) => {
+    const [db, epoch] = await Promise.all([
+      probeDb(opts.pool),
+      opts.epochsRepo.findCurrent().catch(() => null),
+    ]);
+
+    const observedAt = epoch?.observedAt ?? null;
+    const rpcLastSeenAt = observedAt === null ? null : observedAt.toISOString();
+    const heartbeatFrozen =
+      observedAt !== null && Date.now() - observedAt.getTime() >= LIVENESS_STALE_AFTER_MS;
+    const live = db === 'ok' && !heartbeatFrozen;
+
+    const body: LiveBody = {
+      status: live ? 'ok' : 'dead',
+      checks: {
+        db,
+        rpcLastSeenAt,
+        lastEpoch: epoch?.epoch ?? null,
+      },
+    };
+
+    return reply.code(live ? 200 : 503).send(body);
   });
 };
 

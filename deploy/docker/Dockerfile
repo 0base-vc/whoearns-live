@@ -6,7 +6,9 @@
 #   - Node 22 runtime with the compiled app (api + worker entrypoints).
 #   - PostgreSQL 16 (server + client), initialised on first boot.
 #   - entrypoint.sh: inits the data dir if needed, starts postgres, runs
-#     migrations, launches api + worker, and forwards SIGTERM.
+#     migrations, supervises api + worker via pm2-runtime, forwards SIGTERM.
+#   - pm2 (process supervisor) installed globally; manifest at
+#     deploy/docker/ecosystem.config.cjs.
 #
 # Runs as root so it can chown the mounted PVC to the `postgres` user on
 # first boot; the long-running processes (postgres, node) drop to the
@@ -129,6 +131,13 @@ RUN apk add --no-cache \
       bash \
       tzdata
 
+# pm2-runtime supervises api + worker (see deploy/docker/entrypoint.sh):
+# it restarts either process in place on crash or memory-ceiling breach —
+# the silent-worker-death failure mode a bare `wait -n` missed. Installed
+# globally (root, before the USER 70 drop) so the entrypoint can invoke
+# `pm2-runtime` directly. Pinned for reproducible builds.
+RUN npm install -g pm2@7.0.1 && npm cache clean --force
+
 # Pre-create the data dir parent and the unix-socket dir with postgres
 # ownership so the first-boot entrypoint (running as uid 70) can mkdir
 # the pgdata subdirectory and the postmaster can create its lock file.
@@ -147,14 +156,19 @@ COPY --from=build /app/src/storage/migrations/*.sql ./dist/storage/migrations/
 # it at `<repo>/ui/build/`, which after this COPY lands at `/app/ui/build/`.
 COPY --from=ui-build /app/ui/build ./ui/build
 
-# Entrypoint shell script that supervises postgres + api + worker.
+# Entrypoint shell script that supervises postgres + (api + worker via pm2).
 COPY deploy/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+# pm2 process manifest consumed by `pm2-runtime` in the entrypoint.
+COPY deploy/docker/ecosystem.config.cjs /usr/local/bin/ecosystem.config.cjs
 
+# PM2_HOME must be writable by uid 70; /tmp (tmpfs, 1777) holds pm2's
+# transient logs/pids and does not need to persist across restarts.
 ENV NODE_ENV=production \
     HTTP_PORT=8080 \
     HTTP_HOST=0.0.0.0 \
-    PGDATA=/var/lib/postgresql/data/pgdata
+    PGDATA=/var/lib/postgresql/data/pgdata \
+    PM2_HOME=/tmp/.pm2
 
 # Run as postgres (uid 70) so no capability escalation is needed at runtime.
 USER 70

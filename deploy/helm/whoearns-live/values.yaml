@@ -132,16 +132,37 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
-livenessProbe:
+# Startup gate. The all-in-one container must init PostgreSQL (first boot
+# can run initdb) and apply migrations before the liveness/readiness probes
+# are allowed to run — while startupProbe is failing, Kubernetes holds the
+# other two off, so a slow boot is never mistaken for a crash. Once it
+# passes once it never runs again. Budget: failureThreshold × periodSeconds
+# = 60 × 5s = 5 min.
+startupProbe:
   httpGet: { path: /healthz, port: http }
-  initialDelaySeconds: 30
-  periodSeconds: 20
-  timeoutSeconds: 5
-  failureThreshold: 3
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 60
 
+# Liveness RESTARTS the pod, so it targets /livez (NOT /healthz). /livez
+# returns 503 only when the DB is unreachable or the worker pipeline has
+# frozen (epoch heartbeat stale > 15 min) — the silent-worker-death failure
+# mode. /healthz returns 200 `degraded` while stale, so liveness pointed at
+# it would never restart a frozen pod (the 2026-06 incident). Generous
+# timing so a transient RPC blip or GC pause never triggers a destructive
+# restart: 4 × 30s = 2 min of sustained failure on top of the 15-min gate.
+# (No initialDelaySeconds — the startupProbe gates the first run.)
+livenessProbe:
+  httpGet: { path: /livez, port: http }
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 4
+
+# Readiness gates traffic only (never restarts). /healthz is 200 when the
+# DB is up — `degraded` stale data still serves, better than a blank page —
+# and 503 when the DB probe fails.
 readinessProbe:
   httpGet: { path: /healthz, port: http }
-  initialDelaySeconds: 10
   periodSeconds: 10
   timeoutSeconds: 3
   failureThreshold: 3

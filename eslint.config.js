@@ -19,6 +19,11 @@ export default [
       // can depend on operator-only assets; they are outside the OSS
       // backend lint target.
       'marketing/**',
+      // Deploy artifacts (Dockerfile, Helm chart, pm2 manifest) are not
+      // part of the TypeScript backend lint target — same posture as
+      // ui/ above. The pm2 ecosystem config is CommonJS + node globals,
+      // which the backend's TS-project ESLint config does not cover.
+      'deploy/**',
     ],
   },
   js.configs.recommended,
