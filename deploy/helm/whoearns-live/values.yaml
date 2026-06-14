@@ -48,24 +48,26 @@ containerSecurityContext:
 
 # Resources cover api + worker + postgres in the same container.
 #
-# Memory sizing history:
-#   - Original 2Gi was sized for `getBlock(accounts)` payloads (~2MB each)
-#     at batch size 50 + ~3 watched validators + modest Postgres state.
-#   - Migration 0010 upgraded to `getBlock(full)` (~3MB per block, +35%
-#     bandwidth) which bumps the in-flight batch memory from ~100MB to
-#     ~150MB pre-GC, ~300-500MB with Node JSON-parse overhead. Combined
-#     with a growing watched set (auto-track flow adds validators at
-#     runtime) and the first-time previous-epoch backfill for a new
-#     tracker (one-shot 400+ block fetch), 2Gi tips into OOMKilled —
-#     confirmed empirically via `kubectl describe pod` showing
-#     `Reason: OOMKilled, Exit Code: 137` with restart count > 0.
-#   - Bumped to 3Gi which leaves ~1-1.5Gi headroom at steady state. If
-#     OOMs return (e.g. after onboarding many more validators) either
-#     bump again OR lower `config.feeIngestBatchSize` to trade ingest
-#     throughput for lower peak memory.
+# Memory is intentionally UNCAPPED — there is no `limits.memory`.
+#
+# Why: the all-in-one pod's peak is spiky (getBlock(full) ~3MB/block
+# batches, the one-shot previous-epoch backfill fired when a new validator
+# is auto-tracked, plus Postgres). A hard cap (previously 2Gi, then 3Gi)
+# kept tripping OOMKilled. Worse, because the worker runs as a background
+# child of the entrypoint, a cgroup OOM could kill *just the worker* while
+# the API/Postgres stayed up — the container never restarted, so the epoch
+# pipeline silently froze while the API kept serving the stale epoch as
+# "live" (the 2026-06 incident). Dropping the cap lets the spiky peaks
+# ride on the node's spare memory (the node has ~130Gi allocatable);
+# `requests.memory` still reserves a scheduling floor.
+#
+# Trade-off: uncapped means a genuine leak would pressure the NODE rather
+# than be contained to (and restart) this pod. Pair this with the
+# worker-supervision / freshness-liveness hardening so a runaway or dead
+# worker is caught and restarted regardless of memory behaviour.
 resources:
   requests: { cpu: 300m, memory: 1Gi }
-  limits: { cpu: 1500m, memory: 3Gi }
+  limits: { cpu: 1500m }
 
 service:
   type: ClusterIP
