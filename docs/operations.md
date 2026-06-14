@@ -74,6 +74,28 @@ helm upgrade whoearns-live deploy/helm/whoearns-live \
 Migrations run inside the container on start before the API and worker boot.
 If startup fails, inspect `kubectl logs -n whoearns-live sts/whoearns-live`.
 
+**Forcing the new image.** The deploy uses a mutable `image.tag` (e.g.
+`latest`) with `pullPolicy: Always`. The pod template carries a
+`helm.sh/rollout-at` annotation set to render time, so every `helm upgrade`
+changes the pod-template hash and the StatefulSet rolls the pod (pulling the
+fresh image) even when nothing else changed.
+
+**Stuck rollout (crash-loop).** If a bad image leaves the pod not Ready, a
+rolling update can wedge — `helm upgrade` keeps bumping the release revision
+but the pod stays on the old one. The StatefulSet uses
+`podManagementPolicy: Parallel` so the controller replaces an unhealthy pod
+immediately; if a rollout is still stuck (e.g. a release from before this
+setting), force it: `kubectl delete pod <name>-0` (the data PVC is retained,
+so the DB survives). Verify with `kubectl get statefulset <name> -o
+jsonpath='{.status.currentRevision}{"\n"}{.status.updateRevision}'` — the
+two should match once healthy.
+
+**`podManagementPolicy` is immutable.** Switching it (e.g. the one-time move
+to `Parallel`) cannot be done by `helm upgrade` alone — recreate the
+StatefulSet object once: `kubectl delete statefulset <name>` (the
+`data-<name>-0` PVC is retained on delete) then `helm upgrade` to recreate
+it; the new pod re-binds the existing PVC.
+
 ## Backup and restore
 
 The indexer's data is derived from upstream Solana RPC, so in principle you
