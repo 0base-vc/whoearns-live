@@ -177,8 +177,24 @@ failing every tick.
 - **AI-agent surfaces.** `/llms.txt`, `/llms-full.txt`, OpenAPI, and MCP are
   public read surfaces. Treat them like docs: keep claims tied to closed
   epochs, Decade/window sample boundaries, and reproducible API fields.
-- **Health.** `/healthz` is appropriate for both liveness and
-  readiness.
+- **Health.** Two probe surfaces, by design:
+  - `/healthz` — readiness + startup. 200 when the DB is up (`degraded`
+    if the epoch heartbeat is stale > 2 min, but still serving), 503 when
+    the DB probe fails. The Helm `startupProbe` and `readinessProbe` point
+    here.
+  - `/livez` — liveness. 503 only when the DB is unreachable OR the
+    worker pipeline has frozen (epoch heartbeat `epochs.observed_at` stale
+    > 15 min); 200 otherwise (including a null heartbeat on cold start).
+    > The Helm `livenessProbe` points here so Kubernetes restarts a pod whose
+    > worker has silently died — `/healthz` returns 200 `degraded` when
+    > stale, so a liveness probe on it never would (the 2026-06 incident).
+- **Process supervision.** The container runs api.js + worker.js under
+  `pm2-runtime` (manifest: `deploy/docker/ecosystem.config.cjs`), which
+  restarts either process in place on crash or memory-ceiling breach.
+  `/livez` is the backstop for an alive-but-wedged worker that pm2 cannot
+  detect. The income-reconciler additionally self-heals a closed epoch
+  whose `epochs` metadata row is missing (worker down across the boundary)
+  by reconstructing it from the running epoch's boundaries.
 
 ## Cloudflare cache and purge
 

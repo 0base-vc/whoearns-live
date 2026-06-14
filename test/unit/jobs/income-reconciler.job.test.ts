@@ -46,7 +46,8 @@ function makeDeps() {
         observedAt: new Date(),
         closedAt: new Date(),
       })),
-    } as unknown as Pick<EpochsRepository, 'findByEpoch'>,
+      upsert: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Pick<EpochsRepository, 'findByEpoch' | 'upsert'>,
     validatorService: {
       getActiveVotePubkeys: vi.fn().mockResolvedValue([VOTE_A]),
       getIdentityMap: vi.fn().mockResolvedValue(new Map([[VOTE_A, IDENTITY_A]])),
@@ -220,6 +221,47 @@ describe('income-reconciler.job', () => {
     expect(deps.slotService.ingestCurrentEpoch).toHaveBeenCalledWith(
       expect.objectContaining({ epoch: 958 }),
     );
+  });
+
+  it('reconstructs a missing epoch metadata row, then repairs it (worker down across the boundary)', async () => {
+    const deps = makeDeps();
+    // The latest closed epoch (962) has NO `epochs` row at all — the worker
+    // was down for its entire lifetime, so epoch-watcher never recorded it.
+    // Gap detection still flags it (the window is arithmetic), but without
+    // reconstruction repair would skip it forever.
+    (deps.epochsRepo.findByEpoch as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    const job = createIncomeReconcilerJob({
+      ...deps,
+      watchMode: 'explicit',
+      explicitVotes: [VOTE_A],
+      intervalMs: 300_000,
+      batchSize: 25,
+      logger: silent,
+    });
+
+    await job.tick(new AbortController().signal);
+
+    // The row is reconstructed from the running epoch's boundaries
+    // (constant 432000-slot epochs: 962 firstSlot = 963 firstSlot − 432000)
+    // and persisted as closed.
+    expect(deps.epochsRepo.upsert).toHaveBeenCalledWith({
+      epoch: 962,
+      firstSlot: 415584000,
+      lastSlot: 416015999,
+      slotCount: 432000,
+      isClosed: true,
+      currentSlot: 416015999,
+    });
+    // Repair then proceeds normally on the reconstructed range instead of
+    // returning early — leader schedule fetched, income rebuilt.
+    expect(deps.rpc.getLeaderSchedule).toHaveBeenCalledWith(415584000);
+    const repaired = (
+      deps.feeService.backfillPreviousEpoch as ReturnType<typeof vi.fn>
+    ).mock.calls.map((call) => (call[0] as { epoch: number }).epoch);
+    expect(repaired).toContain(962);
+    expect(deps.statsRepo.rebuildIncomeTotalsFromProcessedBlocks).toHaveBeenCalledWith(962, [
+      IDENTITY_A,
+    ]);
   });
 
   it('isolates a failing epoch repair — the other targets still run', async () => {

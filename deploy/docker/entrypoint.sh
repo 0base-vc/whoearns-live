@@ -1,14 +1,23 @@
 #!/bin/sh
 #
 # All-in-one entrypoint: initialises a local PostgreSQL if needed, starts
-# it, runs migrations, then runs API and Worker in the same container.
+# it, runs migrations, then supervises API + Worker with pm2-runtime in
+# the same container.
+#
+# Supervision: api.js and worker.js run under pm2-runtime — NOT a bare
+# `node ... & wait -n`. pm2 restarts either process IN PLACE if it crashes
+# or exceeds its memory ceiling. The 2026-06 incident was a worker that
+# died under memory pressure while `wait -n` failed to notice, freezing the
+# epoch pipeline for days while the API kept serving. PostgreSQL is started
+# and owned here (not by pm2): it has its own process model and a clean
+# shutdown via `pg_ctl`. See deploy/docker/ecosystem.config.cjs.
 #
 # The container is expected to run as the `postgres` user (uid/gid 70) so
 # that no su-exec or chown calls are needed. Kubernetes handles volume
 # ownership via `fsGroup: 70`; Docker named volumes inherit ownership
 # from the image-built `/var/lib/postgresql` directory.
 #
-# On SIGTERM: forwards to all children, waits up to 20s, then stops
+# On SIGTERM: forwards to pm2 (which drains api + worker), then stops
 # postgres with `pg_ctl stop -m fast` for a clean shutdown.
 
 set -eu
@@ -17,6 +26,7 @@ POSTGRES_USER="${POSTGRES_USER:-indexer}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-indexer}"
 POSTGRES_DB="${POSTGRES_DB:-indexer}"
 PGDATA="${PGDATA:-/var/lib/postgresql/data/pgdata}"
+ECOSYSTEM_CONFIG="${ECOSYSTEM_CONFIG:-/usr/local/bin/ecosystem.config.cjs}"
 
 log() { echo "[entrypoint] $*"; }
 
@@ -77,15 +87,19 @@ stop_postgres() {
 }
 
 shutdown() {
-  log "received termination signal — stopping children"
-  [ -n "${WORKER_PID:-}" ] && kill -TERM "$WORKER_PID" 2>/dev/null || true
-  [ -n "${API_PID:-}" ] && kill -TERM "$API_PID" 2>/dev/null || true
-  deadline=$(( $(date +%s) + 20 ))
-  while { [ -n "${API_PID:-}" ] && kill -0 "$API_PID" 2>/dev/null; } \
-     || { [ -n "${WORKER_PID:-}" ] && kill -0 "$WORKER_PID" 2>/dev/null; }; do
-    [ "$(date +%s)" -ge "$deadline" ] && break
-    sleep 1
-  done
+  log "received termination signal — stopping pm2 (drains api + worker)"
+  if [ -n "${PM2_PID:-}" ] && kill -0 "$PM2_PID" 2>/dev/null; then
+    # pm2-runtime forwards SIGTERM to its apps and waits each app's
+    # kill_timeout (see ecosystem.config.cjs) before SIGKILL. Give it 25s,
+    # comfortably under the pod's 30s terminationGracePeriodSeconds while
+    # still leaving room for the postgres stop below.
+    kill -TERM "$PM2_PID" 2>/dev/null || true
+    deadline=$(( $(date +%s) + 25 ))
+    while kill -0 "$PM2_PID" 2>/dev/null; do
+      [ "$(date +%s)" -ge "$deadline" ] && break
+      sleep 1
+    done
+  fi
   stop_postgres
   exit 0
 }
@@ -98,16 +112,22 @@ start_postgres
 log "running migrations"
 node dist/scripts/migrate.js up
 
-log "starting api"
-node dist/entrypoints/api.js &
-API_PID=$!
-
-log "starting worker"
-node dist/entrypoints/worker.js &
-WORKER_PID=$!
+log "starting api + worker under pm2-runtime ($ECOSYSTEM_CONFIG)"
+# pm2-runtime is the foreground supervisor. `--raw` passes each app's
+# stdout through unmodified so the pino JSON log lines stay parseable
+# (no pm2 name/timestamp prefix) — log-based debugging relies on this.
+# Backgrounded + `wait`ed (rather than `exec`) so this shell keeps its
+# SIGTERM trap and can stop postgres after pm2 exits.
+pm2-runtime start "$ECOSYSTEM_CONFIG" --raw &
+PM2_PID=$!
 
 set +e
-wait -n "$API_PID" "$WORKER_PID"
+wait "$PM2_PID"
 EXIT_CODE=$?
-log "child exited with code $EXIT_CODE — shutting down the rest"
-shutdown
+# Reached only if pm2-runtime exits on its own (every app gave up past
+# max_restarts). Stop postgres and propagate the code so the container
+# exits and Kubernetes restarts the pod. A SIGTERM instead runs the
+# `shutdown` trap above, which exits 0.
+log "pm2-runtime exited with code $EXIT_CODE — stopping postgres"
+stop_postgres
+exit "$EXIT_CODE"

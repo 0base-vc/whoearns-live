@@ -110,3 +110,77 @@ describe('GET /healthz', () => {
     await app.close();
   });
 });
+
+interface LivezBody {
+  status: string;
+  checks: { db: string; rpcLastSeenAt: string | null; lastEpoch: number | null };
+}
+
+describe('GET /livez', () => {
+  it('returns ok + 200 when db ok and the heartbeat is fresh', async () => {
+    const pool = new FakePool('ok');
+    const repo = new FakeEpochsRepo();
+    repo.rows.set(600, makeEpochInfo(600, 0, 431_999, { observedAt: new Date() }));
+    const app = await buildApp(pool, repo);
+
+    const res = await app.inject({ method: 'GET', url: '/livez' });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as LivezBody).status).toBe('ok');
+    await app.close();
+  });
+
+  it('returns ok + 200 on a null heartbeat (cold start — startup/pm2 owns it, never restart-loop)', async () => {
+    const pool = new FakePool('ok');
+    const repo = new FakeEpochsRepo();
+    const app = await buildApp(pool, repo);
+
+    const res = await app.inject({ method: 'GET', url: '/livez' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as LivezBody;
+    expect(body.status).toBe('ok');
+    expect(body.checks.rpcLastSeenAt).toBeNull();
+    await app.close();
+  });
+
+  it('stays alive (200) while merely degraded — older than /healthz 2min but under the 15min liveness gate', async () => {
+    const pool = new FakePool('ok');
+    const repo = new FakeEpochsRepo();
+    // 10 min old: /healthz would report `degraded`, but liveness must NOT
+    // restart the pod here — that is the whole point of the wider gate.
+    const recentlyStale = new Date(Date.now() - 10 * 60 * 1000);
+    repo.rows.set(600, makeEpochInfo(600, 0, 431_999, { observedAt: recentlyStale }));
+    const app = await buildApp(pool, repo);
+
+    const res = await app.inject({ method: 'GET', url: '/livez' });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as LivezBody).status).toBe('ok');
+    await app.close();
+  });
+
+  it('returns dead + 503 when the heartbeat is frozen past the 15min liveness gate', async () => {
+    const pool = new FakePool('ok');
+    const repo = new FakeEpochsRepo();
+    const frozen = new Date(Date.now() - 20 * 60 * 1000);
+    repo.rows.set(600, makeEpochInfo(600, 0, 431_999, { observedAt: frozen }));
+    const app = await buildApp(pool, repo);
+
+    const res = await app.inject({ method: 'GET', url: '/livez' });
+    expect(res.statusCode).toBe(503);
+    const body = res.json() as LivezBody;
+    expect(body.status).toBe('dead');
+    expect(body.checks.lastEpoch).toBe(600);
+    await app.close();
+  });
+
+  it('returns dead + 503 when the db probe fails (even with a fresh heartbeat)', async () => {
+    const pool = new FakePool('fail');
+    const repo = new FakeEpochsRepo();
+    repo.rows.set(600, makeEpochInfo(600, 0, 431_999, { observedAt: new Date() }));
+    const app = await buildApp(pool, repo);
+
+    const res = await app.inject({ method: 'GET', url: '/livez' });
+    expect(res.statusCode).toBe(503);
+    expect((res.json() as LivezBody).status).toBe('dead');
+    await app.close();
+  });
+});
