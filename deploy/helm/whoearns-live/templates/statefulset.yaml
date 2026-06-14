@@ -8,7 +8,17 @@ metadata:
 spec:
   serviceName: {{ $fullName }}-headless
   replicas: 1
-  podManagementPolicy: OrderedReady
+  # Parallel, not OrderedReady. This is a single-replica StatefulSet, so
+  # there is no pod ordering to preserve — and OrderedReady DEADLOCKS a
+  # rolling update when the sole pod is crash-looping: the controller waits
+  # for the never-Ready pod to become Ready before it will recreate it, so a
+  # bad image wedges the rollout and `helm upgrade` bumps the release
+  # revision without ever replacing the pod. Parallel lets the controller
+  # replace an unhealthy pod immediately, so a bad deploy self-heals on the
+  # next upgrade. NB: this field is IMMUTABLE — changing it on an existing
+  # StatefulSet needs a one-time SS recreate (`kubectl delete statefulset
+  # <name>`; the data PVC is retained), see docs/operations.md.
+  podManagementPolicy: Parallel
   updateStrategy:
     type: RollingUpdate
   selector:
