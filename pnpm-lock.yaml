@@ -44,8 +44,8 @@ importers:
         specifier: ^2.6.2
         version: 2.6.2
       '@triton-one/yellowstone-grpc':
-        specifier: ^5.0.8
-        version: 5.0.8(typescript@5.9.3)
+        specifier: ^5.0.9
+        version: 5.0.9(typescript@5.9.3)
       bs58:
         specifier: ^6.0.0
         version: 6.0.0
@@ -531,8 +531,8 @@ packages:
     resolution: {integrity: sha512-VVPPgHyQ6ShqnrmDWuxjmUIsO9gWyOZFmuOfLd9LfBGQJwZfy0gvv9pbHSJuoFNIYC7ZDX9aoFwowjcdSC4E8w==}
     engines: {node: '>=18'}
 
-  '@napi-rs/wasm-runtime@1.1.4':
-    resolution: {integrity: sha512-3NQNNgA1YSlJb/kMH1ildASP9HW7/7kYnRI2szWJaofaS1hWmbGI4H+d3+22aGzXXN9IJ+n+GiFVcGipJP18ow==}
+  '@napi-rs/wasm-runtime@1.1.5':
+    resolution: {integrity: sha512-AWPoBRJ9tsnVhor4sjO7rkni+7p+2IAEFj6cx06UgP10jkQHqay/36uRV/bFkgrh18D9vb4cr8Q0Pthskgzy+Q==}
     peerDependencies:
       '@emnapi/core': ^1.7.1
       '@emnapi/runtime': ^1.7.1
@@ -899,28 +899,28 @@ packages:
   '@testcontainers/postgresql@11.14.0':
     resolution: {integrity: sha512-wYbJn8GRTj8qfqzfVubxioYWlHJU/ImIjuzPwyy9C5Qfo6g3GLduPZAj+BifvqTZjgT3gd4gFVLCPhBji7dc1w==}
 
-  '@triton-one/yellowstone-grpc-napi-darwin-arm64@0.0.13':
-    resolution: {integrity: sha512-oEDHWAvkylhFupttQiitmZjf07ZuKiXjWgW8HMvWR4DvZxNOGKeOrWHkyQDZN2IjaJPeLWB9ISlpcXY/i9WLBA==}
+  '@triton-one/yellowstone-grpc-napi-darwin-arm64@0.0.14':
+    resolution: {integrity: sha512-2xjtkwDiIHPX1dPNfu6+R/wTJoUzhK9Owm0SRiioOzqozE4p2NQp6p4BLEydsiEviX9TUjq32urS6UHEr2B3Iw==}
     cpu: [arm64]
     os: [darwin]
 
-  '@triton-one/yellowstone-grpc-napi-darwin-x64@0.0.13':
-    resolution: {integrity: sha512-KuJSmPylbUTUibUuFQThi2B1C9yQyWCSf8vxfD1nYj5MyT0+x+uIPKQEqAy+NH4wd0w/0Bdc0ewgp2qYypus3w==}
+  '@triton-one/yellowstone-grpc-napi-darwin-x64@0.0.14':
+    resolution: {integrity: sha512-KqPSp/f9s+9a1+X8VT6tRxwR5jHBrfJUwiQ33aQWRmo4/HNejGXqfI9suPzA3vS3RyYGwtAhKdUYiCiJPpfnYQ==}
     cpu: [x64]
     os: [darwin]
 
-  '@triton-one/yellowstone-grpc-napi-linux-x64-gnu@0.0.13':
-    resolution: {integrity: sha512-amdUEAOh0LxHQbGhh8DbZaDTv1IeLASZi9tB/VnBZZuhaqMcrINsMApJdonKYzKpBffEAvH3uGKKvAJoqjaL+Q==}
+  '@triton-one/yellowstone-grpc-napi-linux-x64-gnu@0.0.14':
+    resolution: {integrity: sha512-wkwmBXEJEaYrh95Le8ykaL1qrVjJom7t3eFIHGf7meLdaHtbOSx1j63pDKvKZ/3C7rWO5lsob7rI5vR8AcJ2lg==}
     cpu: [x64]
     os: [linux]
 
-  '@triton-one/yellowstone-grpc-napi-linux-x64-musl@0.0.13':
-    resolution: {integrity: sha512-qg5VAloVwpPu5zpEv5h2fq15H+LOVQZem8iQdtO9D/UvfXwgXTaOsMJ2MEU0HQzfpISnIJF0IwZhBSCSXIv3qw==}
+  '@triton-one/yellowstone-grpc-napi-linux-x64-musl@0.0.14':
+    resolution: {integrity: sha512-u8jlc6a72NA5sNgRMRgkAV9Mbmgzu0hAEfOmwFX0NPosoO8nsKLVH5XxekeL+7CUCSyGBkVcRAIJPaLfXDUFiw==}
     cpu: [x64]
     os: [linux]
 
-  '@triton-one/yellowstone-grpc@5.0.8':
-    resolution: {integrity: sha512-Y7Eb6UYX7XoVtB3loDrlXVilGn4zS6PufE/qP1T7KM5/KXHoViOU+Opmt4jZkxl87gld8/zQW1aS814h1Z3p1g==}
+  '@triton-one/yellowstone-grpc@5.0.9':
+    resolution: {integrity: sha512-CXEakmdo9kSjeiWFoJWGZ5gpwzTvzJ0pI8ZjlN8BEFqOVmd26uvQQ2dHv2C6ssXZmLna3XkvRx6RFy3DUUHItQ==}
     engines: {node: '>=20.18.0'}
 
   '@tybys/wasm-util@0.10.2':
@@ -3408,7 +3408,7 @@ snapshots:
       outvariant: 1.4.3
       strict-event-emitter: 0.5.1
 
-  '@napi-rs/wasm-runtime@1.1.4(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)':
+  '@napi-rs/wasm-runtime@1.1.5(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)':
     dependencies:
       '@emnapi/core': 1.9.2
       '@emnapi/runtime': 1.9.2
@@ -3551,7 +3551,7 @@ snapshots:
     dependencies:
       '@emnapi/core': 1.9.2
       '@emnapi/runtime': 1.9.2
-      '@napi-rs/wasm-runtime': 1.1.4(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)
+      '@napi-rs/wasm-runtime': 1.1.5(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)
     optional: true
 
   '@rolldown/binding-win32-arm64-msvc@1.0.0-rc.16':
@@ -3741,29 +3741,29 @@ snapshots:
       - react-native-b4a
       - supports-color
 
-  '@triton-one/yellowstone-grpc-napi-darwin-arm64@0.0.13':
+  '@triton-one/yellowstone-grpc-napi-darwin-arm64@0.0.14':
     optional: true
 
-  '@triton-one/yellowstone-grpc-napi-darwin-x64@0.0.13':
+  '@triton-one/yellowstone-grpc-napi-darwin-x64@0.0.14':
     optional: true
 
-  '@triton-one/yellowstone-grpc-napi-linux-x64-gnu@0.0.13':
+  '@triton-one/yellowstone-grpc-napi-linux-x64-gnu@0.0.14':
     optional: true
 
-  '@triton-one/yellowstone-grpc-napi-linux-x64-musl@0.0.13':
+  '@triton-one/yellowstone-grpc-napi-linux-x64-musl@0.0.14':
     optional: true
 
-  '@triton-one/yellowstone-grpc@5.0.8(typescript@5.9.3)':
+  '@triton-one/yellowstone-grpc@5.0.9(typescript@5.9.3)':
     dependencies:
       '@bufbuild/protobuf': 2.10.2
       '@solana/addresses': 5.1.0(typescript@5.9.3)
       '@solana/rpc-api': 5.1.0(typescript@5.9.3)
       '@solana/rpc-types': 5.1.0(typescript@5.9.3)
     optionalDependencies:
-      '@triton-one/yellowstone-grpc-napi-darwin-arm64': 0.0.13
-      '@triton-one/yellowstone-grpc-napi-darwin-x64': 0.0.13
-      '@triton-one/yellowstone-grpc-napi-linux-x64-gnu': 0.0.13
-      '@triton-one/yellowstone-grpc-napi-linux-x64-musl': 0.0.13
+      '@triton-one/yellowstone-grpc-napi-darwin-arm64': 0.0.14
+      '@triton-one/yellowstone-grpc-napi-darwin-x64': 0.0.14
+      '@triton-one/yellowstone-grpc-napi-linux-x64-gnu': 0.0.14
+      '@triton-one/yellowstone-grpc-napi-linux-x64-musl': 0.0.14
     transitivePeerDependencies:
       - fastestsmallesttextencoderdecoder
       - typescript
