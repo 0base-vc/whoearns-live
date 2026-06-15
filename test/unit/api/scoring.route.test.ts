@@ -91,6 +91,8 @@ function buildDeps(
     claimed?: boolean;
     /** When true, no validator row exists at all → 404. */
     unknownValidator?: boolean;
+    /** When true, the known validator has opted out of public scoring surfaces. */
+    optedOut?: boolean;
   } = {},
 ): ScoringRoutesDeps {
   const claimed = overrides.claimed ?? true;
@@ -149,7 +151,7 @@ function buildDeps(
       findByVote: async (v) => (claimed && v === VOTE_1 ? claim : null),
     },
     profilesRepo: {
-      findOptedOutVotes: async () => new Set<string>(),
+      findOptedOutVotes: async () => new Set<string>(overrides.optedOut ? [VOTE_1] : []),
     },
     validatorGithubRepo: {
       findActiveByVote: async () => makeGithubLink(),
@@ -345,8 +347,6 @@ describe('GET /v1/validators/:idOrVote/scoring', () => {
   });
 
   it('returns 404 for a validator pubkey unknown to the indexer', async () => {
-    // `/scoring` 404s ONLY on an unknown pubkey — the SAME 404 `/tier`
-    // returns today. The OAI gates never produce a 404 here.
     const app = await makeApp(buildDeps({ unknownValidator: true }));
     const res = await app.inject({
       method: 'GET',
@@ -358,7 +358,25 @@ describe('GET /v1/validators/:idOrVote/scoring', () => {
     await app.close();
   });
 
-  it('HEAD short-circuits with 200 and an empty body after the existence check', async () => {
+  it('returns 404 for opted-out validators before GET or HEAD disclose aggregate scoring', async () => {
+    const app = await makeApp(buildDeps({ optedOut: true }));
+
+    const get = await app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/scoring`,
+    });
+    expect(get.statusCode).toBe(404);
+
+    const head = await app.inject({
+      method: 'HEAD',
+      url: `/v1/validators/${VOTE_1}/scoring`,
+    });
+    expect(head.statusCode).toBe(404);
+    expect(head.body).toBe('');
+    await app.close();
+  });
+
+  it('HEAD short-circuits with 200 and an empty body after the existence and opt-out checks', async () => {
     const app = await makeApp(buildDeps({ claimed: true }));
     const res = await app.inject({
       method: 'HEAD',
@@ -366,8 +384,8 @@ describe('GET /v1/validators/:idOrVote/scoring', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.body).toBe('');
-    // The existence check still runs before the short-circuit, so a
-    // HEAD on an unknown pubkey 404s rather than 200ing.
+    // The existence + opt-out checks still run before the short-circuit,
+    // so a HEAD on an unknown pubkey 404s rather than 200ing.
     const unknown = await makeApp(buildDeps({ unknownValidator: true }));
     const missing = await unknown.inject({
       method: 'HEAD',

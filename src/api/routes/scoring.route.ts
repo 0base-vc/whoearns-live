@@ -72,9 +72,9 @@ export interface ScoringRoutesDeps {
  *   - `oai`    — the `/operator-activity-index` payload minus `vote`
  *                / `identity`, OR `null` when the validator is known
  *                but gated out of the OAI surface (unclaimed /
- *                opted-out / identity-drift). `null` means "OAI not
- *                available for this validator", distinct from a
- *                broken endpoint.
+ *                identity-drift). `null` means "OAI not available for
+ *                this validator", distinct from a broken endpoint.
+ *                Opted-out validators are hidden by a route-level 404.
  */
 interface ScoringResponse {
   vote: string;
@@ -102,16 +102,15 @@ interface ScoringResponse {
  * the profile-page case.
  *
  * Status codes:
- *   - 200 — validator is known. `tier` + `tenure` + `client` are
- *           always populated; `oai` is the OAI payload, OR `null`
- *           when the validator is known but unclaimed / opted-out /
- *           identity-drifted (the OAI route 404s those cases — here
- *           they collapse to `oai: null` so the rest of the body
- *           still renders).
+ *   - 200 — validator is known and has not opted out. `tier` +
+ *           `tenure` + `client` are always populated; `oai` is the
+ *           OAI payload, OR `null` when the validator is known but
+ *           unclaimed / identity-drifted (the OAI route 404s those
+ *           cases — here they collapse to `oai: null` so the rest of
+ *           the body still renders).
  *   - 400 — pubkey validation fails.
- *   - 404 — pubkey is unknown to the indexer (the SAME 404 `/tier`
- *           returns today — `/scoring` 404s ONLY on an unknown
- *           pubkey, never on the OAI gates).
+ *   - 404 — pubkey is unknown to the indexer OR the validator has
+ *           opted out of public scoring surfaces.
  */
 const scoringRoutes: FastifyPluginAsync<ScoringRoutesDeps> = async (
   app: FastifyInstance,
@@ -130,14 +129,16 @@ const scoringRoutes: FastifyPluginAsync<ScoringRoutesDeps> = async (
       const params = unwrap(VoteOrIdentityParamSchema.safeParse(request.params), 'path parameters');
       const validator = await findValidatorByVoteOrIdentity(validatorsRepo, params.idOrVote);
       if (validator === null) {
-        // 404 ONLY for an unknown pubkey — same as /tier. The OAI
-        // gates (unclaimed / opted-out / drift) do NOT 404 here;
-        // they surface below as `oai: null`.
+        throw new NotFoundError('validator', params.idOrVote);
+      }
+      const optedOutVotes = await opts.profilesRepo.findOptedOutVotes();
+      if (optedOutVotes.has(validator.votePubkey)) {
         throw new NotFoundError('validator', params.idOrVote);
       }
 
-      // HEAD short-circuit AFTER the existence check (so HEAD still
-      // returns the right 404 for unknown pubkeys) but BEFORE the
+      // HEAD short-circuit AFTER the existence + opt-out checks (so
+      // HEAD still returns the right 404 for unknown or opted-out
+      // pubkeys) but BEFORE the
       // tier history read + OAI repo fan-out a HEAD response would
       // throw away. The handler resolves `void` here — the
       // `Promise<ScoringResponse | void>` return type makes that
@@ -198,9 +199,8 @@ const scoringRoutes: FastifyPluginAsync<ScoringRoutesDeps> = async (
         tenure,
         client,
         // `null` when the validator is gated out of the OAI surface
-        // (unclaimed / opted-out / identity-drift) — see
-        // `resolveOaiForValidator`. The tier + tenure + client
-        // blocks above are still fully populated.
+        // (unclaimed / identity-drift) — see `resolveOaiForValidator`.
+        // Opted-out validators are hidden by the route-level 404 above.
         oai,
       };
     },

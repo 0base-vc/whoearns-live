@@ -431,12 +431,12 @@ GET /tier body (window + tier + composite + components); tenure and
 client are the GET /badges blocks; oai is the GET
 /operator-activity-index body, OR null. ADDITIVE — /tier, /badges,
 and /operator-activity-index all stay live and unchanged for
-consumers wanting one component with its own CDN cache. 404s ONLY
-when the validator pubkey is unknown; a known-but-unclaimed /
-opted-out / identity-drifted validator returns 200 with oai: null
+consumers wanting one component with its own CDN cache. 404s when
+the validator pubkey is unknown or opted out; a known, non-opted-out
+but unclaimed / identity-drifted validator returns 200 with oai: null
 (tier + tenure + client still populated). Accepts a vote OR identity
 pubkey; no query params. HEAD is supported and short-circuits after
-the existence check.
+the existence and opt-out checks.
 
 ### POST /v1/validators/current-epoch/batch
 Body: { "votes": ["Vote111...", ...] }. Bulk lookup; returns

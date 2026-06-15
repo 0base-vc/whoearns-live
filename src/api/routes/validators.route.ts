@@ -787,11 +787,15 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       if (validator === null) {
         throw new NotFoundError('validator', params.idOrVote);
       }
-      // HEAD short-circuit AFTER the existence check (so HEAD still
-      // returns the right 404 for unknown pubkeys) but BEFORE the
-      // history read + tier computation a HEAD response would throw
-      // away. The handler resolves `void` here — the
-      // `Promise<NodeTierResponse | void>` return type makes that
+      const optedOutVotes = await profilesRepo.findOptedOutVotes();
+      if (optedOutVotes.has(validator.votePubkey)) {
+        throw new NotFoundError('validator', params.idOrVote);
+      }
+      // HEAD short-circuit AFTER the existence + opt-out checks (so
+      // HEAD still returns the right 404 for unknown or opted-out
+      // pubkeys) but BEFORE the history read + tier computation a HEAD
+      // response would throw away. The handler resolves `void` here —
+      // the `Promise<NodeTierResponse | void>` return type makes that
       // honest without an `as unknown as NodeTierResponse` cast.
       if (request.method === 'HEAD') {
         void reply.code(200).header('cache-control', cacheControl('SCORING')).send('');
@@ -861,6 +865,10 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       if (validator === null) {
         throw new NotFoundError('validator', params.idOrVote);
       }
+      const optedOutVotes = await profilesRepo.findOptedOutVotes();
+      if (optedOutVotes.has(validator.votePubkey)) {
+        throw new NotFoundError('validator', params.idOrVote);
+      }
 
       const snapshots =
         tierSnapshotsRepo === undefined
@@ -912,6 +920,10 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
       if (validator === null) {
         throw new NotFoundError('validator', params.idOrVote);
       }
+      const optedOutVotes = await profilesRepo.findOptedOutVotes();
+      if (optedOutVotes.has(validator.votePubkey)) {
+        throw new NotFoundError('validator', params.idOrVote);
+      }
 
       // /badges also needs the current epoch for the tenure summary,
       // so fetch it alongside the shared tier resolution. The tier's
@@ -923,7 +935,7 @@ const validatorsRoutes: FastifyPluginAsync<ValidatorsRoutesDeps> = async (
         epochsRepo.findCurrent(),
       ]);
 
-      // HEAD short-circuit: after the existence check the route is
+      // HEAD short-circuit: after the existence + opt-out checks the route is
       // semantically valid, so return headers without paying the
       // serialisation cost a HEAD response will throw away. The
       // handler resolves `void` here (the reply is already sent) —
