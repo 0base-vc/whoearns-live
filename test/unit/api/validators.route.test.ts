@@ -879,6 +879,18 @@ describe('GET /v1/validators/:idOrVote/tier', () => {
     const res = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_2}/tier` });
     expect(res.statusCode).toBe(404);
   });
+
+  it('returns 404 for opted-out validators before GET or HEAD disclose tier data', async () => {
+    await seedForge(ctx, VOTE_1, IDENTITY_1);
+    ctx.optedOutVotes.add(VOTE_1);
+
+    const get = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/tier` });
+    expect(get.statusCode).toBe(404);
+
+    const head = await ctx.app.inject({ method: 'HEAD', url: `/v1/validators/${VOTE_1}/tier` });
+    expect(head.statusCode).toBe(404);
+    expect(head.body).toBe('');
+  });
 });
 
 /**
@@ -1038,6 +1050,18 @@ describe('GET /v1/validators/:idOrVote/tier/history', () => {
     expect(res.statusCode).toBe(404);
   });
 
+  it('returns 404 for opted-out validators without returning tier history', async () => {
+    await seedValidator(ctx, VOTE_1, IDENTITY_1);
+    ctx.snapshots.seed(VOTE_1, [snapshot(VOTE_1, 505, 90, 'forge')]);
+    ctx.optedOutVotes.add(VOTE_1);
+
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: `/v1/validators/${VOTE_1}/tier/history`,
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
   it('returns newest-first snapshots with component sub-scores', async () => {
     await seedValidator(ctx, VOTE_1, IDENTITY_1);
     ctx.snapshots.seed(VOTE_1, [
@@ -1164,5 +1188,24 @@ describe('GET /v1/validators/:idOrVote/badges', () => {
       url: `/v1/validators/${VOTE_2}/badges`,
     });
     expect(res.statusCode).toBe(404);
+  });
+
+  it('returns 404 for opted-out validators before GET or HEAD disclose badges', async () => {
+    await seedValidator(ctx, VOTE_1, IDENTITY_1, 100);
+    await ctx.epochs.upsert({
+      epoch: 1000,
+      firstSlot: 0,
+      lastSlot: 100,
+      slotCount: 100,
+      isClosed: false,
+    });
+    ctx.optedOutVotes.add(VOTE_1);
+
+    const get = await ctx.app.inject({ method: 'GET', url: `/v1/validators/${VOTE_1}/badges` });
+    expect(get.statusCode).toBe(404);
+
+    const head = await ctx.app.inject({ method: 'HEAD', url: `/v1/validators/${VOTE_1}/badges` });
+    expect(head.statusCode).toBe(404);
+    expect(head.body).toBe('');
   });
 });

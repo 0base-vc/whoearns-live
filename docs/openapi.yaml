@@ -499,12 +499,13 @@ paths:
         - `oai` — the `/operator-activity-index` payload minus
           `vote` / `identity`, OR `null`.
 
-        Gate handling — `/scoring` 404s ONLY when the validator
-        pubkey is unknown to the indexer (the same 404 `/tier`
-        returns). When the validator IS known but is unclaimed /
-        opted-out / identity-drifted — the cases the OAI route 404s
-        — `/scoring` returns `200` with `oai: null` (tier + tenure +
-        client still populated). `oai: null` means "OAI not
+        Gate handling — `/scoring` 404s when the validator pubkey is
+        unknown to the indexer or the validator has opted out of
+        public scoring surfaces (matching the granular public
+        validator endpoints). When the validator IS known and has not
+        opted out but is unclaimed / identity-drifted — the remaining
+        cases the OAI route 404s — `/scoring` returns `200` with
+        `oai: null` (tier + tenure + client still populated). `oai: null` means "OAI not
         available for this validator", distinct from a broken
         endpoint.
 
@@ -514,16 +515,16 @@ paths:
         aggregate pins to that tier. A consumer needing the
         longer-lived tier/badges caching should hit `/tier` or
         `/badges` directly. `HEAD` is supported and short-circuits
-        after the validator existence check.
+        after the validator existence and opt-out checks.
       parameters:
         - $ref: '#/components/parameters/IdOrVotePath'
       responses:
         '200':
           description: |
             Aggregate scoring bundle. `tier` + `tenure` + `client`
-            are always populated for a known validator; `oai` is the
-            OAI payload, or `null` when the validator is gated out
-            of the OAI surface (unclaimed / opted-out /
+            are always populated for a known, non-opted-out
+            validator; `oai` is the OAI payload, or `null` when the
+            validator is gated out of the OAI surface (unclaimed /
             identity-drift).
           content:
             application/json:
@@ -535,7 +536,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '404':
-          description: Validator pubkey unknown to the indexer.
+          description: Validator pubkey unknown to the indexer or opted out.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -3226,10 +3227,11 @@ components:
             - type: 'null'
           description: |
             The `/operator-activity-index` body (minus `vote` /
-            `identity`), OR `null` when the validator is known but
-            gated out of the OAI surface — unclaimed, opted out, or
-            its on-chain identity has drifted from the claimed
-            identity. `null` means "OAI not available for this
-            validator", distinct from a broken endpoint. `tier` /
-            `tenure` / `client` are still fully populated when `oai`
-            is `null`.
+            `identity`), OR `null` when the validator is known and
+            not opted out but gated out of the OAI surface —
+            unclaimed, or its on-chain identity has drifted from the
+            claimed identity. Opted-out validators receive the
+            route-level 404 instead. `null` means "OAI not available
+            for this validator", distinct from a broken endpoint.
+            `tier` / `tenure` / `client` are still fully populated
+            when `oai` is `null`.

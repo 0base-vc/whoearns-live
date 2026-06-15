@@ -1394,21 +1394,23 @@ duplication**:
   `identity`, **or `null`**.
 
 **404 vs `oai: null`.** `/scoring` returns `404` **only** when the
-validator pubkey is unknown to the indexer — the same 404 `/tier`
-returns today. When the validator **is** known but is unclaimed /
-opted-out / identity-drifted — the cases the OAI route 404s —
+validator pubkey is unknown to the indexer or the validator has
+opted out of public scoring surfaces — the same not-found behavior
+used by the granular public validator endpoints. When the validator
+**is** known and has not opted out but is unclaimed /
+identity-drifted — the remaining cases the OAI route 404s —
 `/scoring` returns `200` with `oai: null`; `tier` + `tenure` +
 `client` are still fully populated. `oai: null` means "OAI not
 available for this validator", distinct from a broken endpoint.
 
-| HTTP | `code`             | When                                        |
-| ---- | ------------------ | ------------------------------------------- |
-| 200  | —                  | Validator is known (`oai` may be `null`).   |
-| 400  | `validation_error` | Invalid pubkey.                             |
-| 404  | `not_found`        | Validator pubkey is unknown to the indexer. |
+| HTTP | `code`             | When                                      |
+| ---- | ------------------ | ----------------------------------------- |
+| 200  | —                  | Validator is known (`oai` may be `null`). |
+| 400  | `validation_error` | Invalid pubkey.                           |
+| 404  | `not_found`        | Validator pubkey is unknown or opted out. |
 
 `HEAD` is supported and short-circuits after the validator existence
-check, before the tier history read + OAI repo fan-out.
+and opt-out checks, before the tier history read + OAI repo fan-out.
 
 Cache-Control: `public, max-age=300, s-maxage=1800` (the shared
 `SCORING` tier). `/scoring` bundles the OAI — the shortest-lived of
