@@ -18,16 +18,16 @@
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.10",
-    "@sveltejs/kit": "^2.65.1",
+    "@sveltejs/kit": "^2.69.1",
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
-    "@tailwindcss/vite": "^4.3.1",
-    "prettier": "^3.8.4",
+    "@tailwindcss/vite": "^4.3.2",
+    "prettier": "^3.9.4",
     "prettier-plugin-svelte": "^3.5.2",
-    "svelte": "^5.56.3",
-    "svelte-check": "^4.6.0",
-    "tailwindcss": "^4.3.1",
+    "svelte": "^5.56.4",
+    "svelte-check": "^4.7.1",
+    "tailwindcss": "^4.3.2",
     "typescript": "^6.0.2",
-    "vite": "^8.0.16"
+    "vite": "^8.1.3"
   },
   "dependencies": {
     "@wallet-standard/app": "^1.1.1",
