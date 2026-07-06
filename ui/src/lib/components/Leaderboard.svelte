@@ -727,16 +727,16 @@
       {/each}
     </ol>
 
-    {#if data.items.length >= limit}
+    {#if data.items.length > 0}
       <footer
         class="border-t border-[color:var(--color-border-default)] px-5 py-3 text-xs text-[color:var(--color-text-subtle)]"
       >
-        Showing top {data.items.length}. The public API returns up to 500 rows at
-        <code class="break-all"
-          >/v1/leaderboard?window={window}&amp;limit=500&amp;sort={sort}{isFiltered
-            ? `&bracket=${bracket}`
-            : ''}</code
-        >.
+        {#if data.items.length >= limit}
+          Showing the top {data.items.length} validators (the server caps the list at
+          {limit}).
+        {:else}
+          Showing all {data.items.length} validators with rankable data this window.
+        {/if}
       </footer>
     {/if}
   {/if}

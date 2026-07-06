@@ -61,7 +61,7 @@
   <link rel="canonical" href={`${SITE_URL}/`} />
   <link
     rel="preload"
-    href="/v1/leaderboard?limit=25&sort=income_per_slot&window=live_trend"
+    href="/v1/leaderboard?limit=500&sort=income_per_slot&window=live_trend"
     as="fetch"
     type="application/json"
     crossorigin="anonymous"
@@ -188,7 +188,10 @@
 </section>
 
 <div class="mt-10">
-  <Leaderboard limit={25} />
+  <!-- 500 = the API/repo pool ceiling: show the ENTIRE rankable pool (all
+       validators with income data this window, ~27 today) rather than a top-N
+       slice. No pagination yet — the pool is small; revisit if it nears 500. -->
+  <Leaderboard limit={500} />
 </div>
 
 <section aria-labelledby="features-title" class="mt-16">
