@@ -1066,6 +1066,154 @@ describe('StatsRepository', () => {
       expect(byIncome.map((r) => r.votePubkey)).toEqual([]);
     });
 
+    it("prorates the running epoch's stake by elapsed exposure", async () => {
+      // Window = one closed epoch + one epoch that is 20% elapsed.
+      //
+      // "Mover" held 100k SOL in the closed epoch and dropped to 10k for
+      // the open one; "Held" sat at 50k throughout. Both drew exactly
+      // 10 slots per 10k SOL of exposure, so both must report 10.0.
+      //
+      // Counting the open epoch's stake in full would charge Mover a
+      // whole epoch of 10k SOL for a fifth of a draw and Held a whole
+      // 50k, producing different ratios for identical luck.
+      const epochs = [
+        { epoch: 800, isCurrent: false },
+        { epoch: 801, isCurrent: true },
+      ];
+      await repo.upsertSlotStats({
+        epoch: 800,
+        votePubkey: 'Mover',
+        identityPubkey: 'MoverId',
+        slotsAssigned: 100,
+        slotsProduced: 100,
+        slotsSkipped: 0,
+        activatedStakeLamports: 100_000n * SOL,
+      });
+      // Open epoch: 10 assigned for the full epoch, 2 elapsed (20%).
+      await repo.upsertSlotStats({
+        epoch: 801,
+        votePubkey: 'Mover',
+        identityPubkey: 'MoverId',
+        slotsAssigned: 10,
+        slotsElapsedAssigned: 2,
+        slotsProduced: 2,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 800,
+        votePubkey: 'Held',
+        identityPubkey: 'HeldId',
+        slotsAssigned: 50,
+        slotsProduced: 50,
+        slotsSkipped: 0,
+        activatedStakeLamports: 50_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 801,
+        votePubkey: 'Held',
+        identityPubkey: 'HeldId',
+        slotsAssigned: 50,
+        slotsElapsedAssigned: 10,
+        slotsProduced: 10,
+        slotsSkipped: 0,
+        activatedStakeLamports: 50_000n * SOL,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      const mover = rows.find((r) => r.votePubkey === 'Mover')!;
+      const held = rows.find((r) => r.votePubkey === 'Held')!;
+      // Mover: (100 + 2) slots / (100k + 10k×0.2) SOL = 102 / 102k.
+      expect(mover.slotsPer10kSol).toBeCloseTo(10, 6);
+      // Held: (50 + 10) / (50k + 50k×0.2) = 60 / 60k.
+      expect(held.slotsPer10kSol).toBeCloseTo(10, 6);
+    });
+
+    it('applies the slot floor to the stake-covered slots for this sort', async () => {
+      // 400 stake-less slots plus 4 stake-covered ones. A floor of 64
+      // tests the sample the ratio is built from, so this row is
+      // excluded — without that, four slots at tiny stake would rank at
+      // the top on the strength of slots the ratio never used.
+      const epochs = [
+        { epoch: 810, isCurrent: false },
+        { epoch: 811, isCurrent: false },
+      ];
+      await repo.upsertSlotStats({
+        epoch: 810,
+        votePubkey: 'ThinCoverage',
+        identityPubkey: 'ThinId',
+        slotsAssigned: 400,
+        slotsProduced: 400,
+        slotsSkipped: 0,
+      });
+      await repo.upsertSlotStats({
+        epoch: 811,
+        votePubkey: 'ThinCoverage',
+        identityPubkey: 'ThinId',
+        slotsAssigned: 4,
+        slotsProduced: 4,
+        slotsSkipped: 0,
+        activatedStakeLamports: 100n * SOL,
+      });
+
+      const ranked = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 64,
+      });
+      expect(ranked.map((r) => r.votePubkey)).toEqual([]);
+
+      // The same row clears the floor on an income sort, which measures
+      // the unrestricted window — proving the floor is sort-aware rather
+      // than globally stricter.
+      const byIncomeFloor = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 4,
+      });
+      expect(byIncomeFloor.map((r) => r.votePubkey)).toEqual(['ThinCoverage']);
+    });
+
+    it('flags rows whose income has not been ingested', async () => {
+      const epochs = [{ epoch: 820, isCurrent: false }];
+      await seed({
+        epoch: 820,
+        vote: 'SlotsOnly2',
+        identity: 'SlotsOnly2Id',
+        slots: 40,
+        stakeSol: 20_000n,
+      });
+      await seed({
+        epoch: 820,
+        vote: 'WithIncome',
+        identity: 'WithIncomeId',
+        slots: 40,
+        stakeSol: 20_000n,
+        fees: 5n,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      const slotsOnly = rows.find((r) => r.votePubkey === 'SlotsOnly2')!;
+      const withIncome = rows.find((r) => r.votePubkey === 'WithIncome')!;
+      // Both rank; only one has measured income. Callers use the flag to
+      // avoid rendering the other's default zeros as real earnings.
+      expect(slotsOnly.hasIncomeEvidence).toBe(false);
+      expect(withIncome.hasIncomeEvidence).toBe(true);
+      expect(slotsOnly.blockFeesTotalLamports).toBe(0n);
+    });
+
     it('sorts rows without any stake snapshot last, with a null ratio', async () => {
       const epochs = [{ epoch: 700, isCurrent: false }];
       await seed({

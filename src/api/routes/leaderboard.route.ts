@@ -211,6 +211,19 @@ interface LeaderboardRow {
    * Null when no epoch in the window carries a stake snapshot.
    */
   slotsPer10kSol: number | null;
+  /**
+   * False when the fee/tip pipeline has not covered any epoch in the
+   * window for this validator.
+   *
+   * Only reachable under `sort=slots_per_stake`, which deliberately
+   * admits slot-only rows so a fee-ingester lag cannot hide an otherwise
+   * perfectly measurable allocation. Those rows carry column-default
+   * zeros in every income field, so a client that renders them without
+   * checking this flag tells the user the validator earned nothing when
+   * the truth is that nothing has been measured yet. Always true for
+   * every other sort, whose rows are filtered on income evidence.
+   */
+  hasIncomeData: boolean;
   claimed: boolean;
   decadeEpochStart: number | null;
   decadeEpochEnd: number | null;
@@ -328,6 +341,7 @@ function toRow(
     activatedStakeSol: stake === null ? null : lamportsToSol(stake),
     incomePerStake,
     slotsPer10kSol: stats.slotsPer10kSol,
+    hasIncomeData: stats.hasIncomeEvidence,
     claimed,
     decadeEpochStart: decadeBadge?.epochStart ?? null,
     decadeEpochEnd: decadeBadge?.epochEnd ?? null,

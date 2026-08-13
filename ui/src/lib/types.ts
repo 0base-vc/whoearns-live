@@ -811,6 +811,16 @@ export interface LeaderboardItem {
    * Optional for backwards compat with older API responses.
    */
   slotsPer10kSol?: number | null;
+  /**
+   * False when no epoch in the window has fee/tip data for this
+   * validator — reachable only under `sort=slots_per_stake`, which admits
+   * slot-only rows. Their income fields are database defaults (zero), so
+   * rendering them as money would claim the validator earned nothing
+   * rather than that nothing has been measured. Absent on older API
+   * responses; treat `undefined` as `true` (the historical behaviour,
+   * where every row was income-filtered).
+   */
+  hasIncomeData?: boolean;
   /** APR-equivalent (income / stake). Null when stake data is missing
    * (pre-stake-snapshot-migration epoch). */
   incomePerStake: number | null;

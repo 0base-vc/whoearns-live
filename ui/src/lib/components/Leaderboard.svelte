@@ -244,23 +244,39 @@
     return `${(item.skipRate * 100).toFixed(2)}%`;
   }
 
+  /**
+   * True when the row's income columns are real measurements.
+   *
+   * Under `sort=slots_per_stake` the API admits validators whose slot
+   * data is ingested but whose fees/tips are not yet — their income
+   * fields are database defaults, i.e. zeros that mean "unknown". Every
+   * money cell has to route through this, or the table states that a
+   * validator earned ◎0.000 when nothing has been measured.
+   *
+   * `undefined` means an API predating the flag, where every row was
+   * income-filtered — so the historical answer is true.
+   */
+  function hasIncome(item: LeaderboardItem): boolean {
+    return item.hasIncomeData !== false;
+  }
+
   function incomePerSlotText(item: LeaderboardItem): string {
-    if (item.incomeSolPerSlot == null) return '-';
+    if (!hasIncome(item) || item.incomeSolPerSlot == null) return '-';
     return `◎${formatSolFixed(item.incomeSolPerSlot, DECIMALS_PER_SLOT)}`;
   }
 
   function totalIncomeText(item: LeaderboardItem): string {
-    if (item.windowIncomeSol == null) return '-';
+    if (!hasIncome(item) || item.windowIncomeSol == null) return '-';
     return `◎${formatSolFixed(item.windowIncomeSol, DECIMALS_TOTAL)}`;
   }
 
   function mevTipsText(item: LeaderboardItem): string {
-    if (item.blockTipsTotalSol == null) return '-';
+    if (!hasIncome(item) || item.blockTipsTotalSol == null) return '-';
     return `◎${formatSolFixed(item.blockTipsTotalSol, DECIMALS_TOTAL)}`;
   }
 
   function blockFeesText(item: LeaderboardItem): string {
-    if (item.blockFeesTotalSol == null) return '-';
+    if (!hasIncome(item) || item.blockFeesTotalSol == null) return '-';
     return `◎${formatSolFixed(item.blockFeesTotalSol, DECIMALS_TOTAL)}`;
   }
 

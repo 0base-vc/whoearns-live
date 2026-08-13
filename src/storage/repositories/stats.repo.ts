@@ -319,6 +319,7 @@ interface WindowedLeaderboardStatsRow {
   last_updated_at: Date | null;
   activated_stake_lamports: string | null;
   slots_per_10k_sol: string | null;
+  has_income_evidence: boolean | null;
 }
 
 export interface IndexedIncomePerSlotBenchmarkRequest {
@@ -509,6 +510,18 @@ export interface WindowedLeaderboardStats {
    * Null when no epoch in the window carries a stake snapshot.
    */
   slotsPer10kSol: number | null;
+  /**
+   * True when the fee/tip pipeline has covered at least one epoch in the
+   * window.
+   *
+   * Every sort except `slots_per_stake` requires this by construction —
+   * its rows are filtered on the same predicate. `slots_per_stake` admits
+   * slot-only rows so a fee-ingester lag can't hide a perfectly
+   * measurable allocation, which means callers must consult this flag
+   * before presenting the income columns: unmeasured income arrives as a
+   * column-default 0 and would otherwise read as "earned nothing".
+   */
+  hasIncomeEvidence: boolean;
 }
 
 function rowToWindowedStats(row: WindowedLeaderboardStatsRow): WindowedLeaderboardStats {
@@ -532,6 +545,7 @@ function rowToWindowedStats(row: WindowedLeaderboardStatsRow): WindowedLeaderboa
     activatedStakeLamports:
       row.activated_stake_lamports === null ? null : toLamports(row.activated_stake_lamports),
     slotsPer10kSol: row.slots_per_10k_sol === null ? null : Number(row.slots_per_10k_sol),
+    hasIncomeEvidence: row.has_income_evidence === true,
   };
 }
 
@@ -1895,6 +1909,15 @@ export class StatsRepository {
              )
            )`;
 
+    // `minWindowSlots` exists to suppress small-sample noise, so it has
+    // to bite on the sample the ranking actually uses. `slots_per_stake`
+    // is computed from the stake-covered slots only; testing the
+    // unrestricted `window_slots` would let a validator clear a 64-slot
+    // floor on stake-less slots while its ratio rests on four matched
+    // ones — precisely the extreme small-sample case the floor is for.
+    const slotFloorColumn =
+      sort === 'slots_per_stake' ? 'COALESCE(window_slots_with_stake, 0)' : 'window_slots';
+
     const { rows } = await this.pool.query<WindowedLeaderboardStatsRow>(
       `WITH included(epoch, is_current, priority) AS (
          VALUES ${values.join(', ')}
@@ -1966,9 +1989,42 @@ export class StatsRepository {
              ELSE evs.slots_assigned
            END) FILTER (WHERE evs.activated_stake_lamports IS NOT NULL)::numeric
              AS window_slots_with_stake,
-           SUM(evs.activated_stake_lamports)
-             FILTER (WHERE evs.activated_stake_lamports IS NOT NULL)::numeric
-             AS window_stake_lamports
+           -- The running epoch contributes only its ELAPSED slots to the
+           -- numerator, so its stake must contribute only the matching
+           -- fraction of exposure — otherwise a validator observed 10%
+           -- into an open epoch is charged a full epoch of stake for a
+           -- tenth of the draw, and two validators drawing exactly as
+           -- expected report different ratios purely from when their
+           -- delegation changed. Leader slots are spread evenly across an
+           -- epoch, so elapsed/assigned is the exposure fraction.
+           -- NULLIF guards a current-epoch row with no schedule at all;
+           -- its numerator contribution is 0 too, so dropping it from the
+           -- denominator keeps the two sides consistent.
+           SUM(CASE
+             WHEN included.is_current
+             THEN evs.activated_stake_lamports
+                  * COALESCE(evs.slots_elapsed_assigned, 0)::numeric
+                  / NULLIF(evs.slots_assigned, 0)
+             ELSE evs.activated_stake_lamports
+           END) FILTER (WHERE evs.activated_stake_lamports IS NOT NULL)::numeric
+             AS window_stake_lamports,
+           -- Whether the fee/tip pipeline has covered ANY epoch in this
+           -- window. slots_per_stake admits rows the income predicate
+           -- would exclude (see incomeEvidenceClause), and those rows
+           -- carry column-default zeros for fees and tips — which would
+           -- otherwise render as "earned nothing" rather than "not yet
+           -- measured".
+           BOOL_OR(
+             evs.fees_updated_at IS NOT NULL
+             OR evs.tips_updated_at IS NOT NULL
+             OR EXISTS (
+               SELECT 1
+                 FROM processed_blocks pb
+                WHERE pb.epoch = evs.epoch
+                  AND pb.leader_identity = evs.identity_pubkey
+                LIMIT 1
+             )
+           ) AS has_income_evidence
          FROM included
          JOIN epoch_validator_stats evs ON evs.epoch = included.epoch
          WHERE evs.slots_updated_at IS NOT NULL
@@ -1995,6 +2051,7 @@ export class StatsRepository {
          slot_window_updated_at,
          NULLIF(last_updated_at, '-infinity'::timestamptz) AS last_updated_at,
          activated_stake_lamports,
+         COALESCE(has_income_evidence, FALSE) AS has_income_evidence,
          -- Emitted rather than left to the client: the ORDER BY below
          -- divides these exact operands, so a client recomputing the
          -- number from other fields could disagree with the ranking it
@@ -2005,7 +2062,7 @@ export class StatsRepository {
            ELSE NULL
          END AS slots_per_10k_sol
         FROM windowed
-       WHERE window_slots >= $${minParam}
+       WHERE ${slotFloorColumn} >= $${minParam}
          ${maxStakeClause}
        ORDER BY ${order}
        LIMIT $${limitParam}`,
