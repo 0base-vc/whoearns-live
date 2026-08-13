@@ -219,6 +219,25 @@
     epochSortDirection = 'desc';
   }
 
+  /**
+   * Ordering clause for the table's screen-reader caption.
+   *
+   * The caption used to hard-code "newest epoch first", which was true
+   * when the order was fixed. Now that the headers sort, a stale claim
+   * here would contradict `aria-sort` and mislead exactly the users who
+   * can't see the sort arrow. The live-epoch-first note only holds for
+   * the default descending-epoch order, so it travels with that branch.
+   */
+  const sortDescription = $derived<string>(
+    epochSortKey === 'assigned'
+      ? epochSortDirection === 'desc'
+        ? 'ordered by assigned leader slots, most first'
+        : 'ordered by assigned leader slots, fewest first'
+      : epochSortDirection === 'desc'
+        ? 'newest epoch first; the live running epoch appears first when available'
+        : 'oldest epoch first',
+  );
+
   /** `aria-sort` value for a column header. */
   function ariaSortFor(key: EpochSortKey): 'ascending' | 'descending' | 'none' {
     if (epochSortKey !== key) return 'none';
@@ -1088,8 +1107,8 @@
     >
       <table class="min-w-full divide-y divide-[color:var(--color-border-default)] text-sm">
         <caption class="sr-only">
-          Epoch breakdown for validator {history.vote}, newest epoch first. The live running epoch
-          appears first when available. Income is decomposed into three revenue streams: base fees,
+          Epoch breakdown for validator {history.vote}, {sortDescription}. Sortable by epoch and by
+          assigned leader slots. Income is decomposed into three revenue streams: base fees,
           priority fees, and Jito MEV tips. The MEV column shows on-chain Jito tips derived from
           produced blocks. The CU column is the average compute units consumed per produced block.
         </caption>

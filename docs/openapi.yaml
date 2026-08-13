@@ -2320,7 +2320,13 @@ components:
 
     ValidatorHistory:
       type: object
-      required: [vote, identity, name, iconUrl, website, items, claimed]
+      # `leaderSlots` is required: the route emits it on every 200,
+      # including the tracking and opted-out branches (zeroed totals,
+      # null bounds), precisely so consumers never need a presence
+      # check. UI clients still type it optional — they deploy
+      # separately from the API and must tolerate a pre-`leaderSlots`
+      # deployment — but that is a rollout concern, not the contract.
+      required: [vote, identity, name, iconUrl, website, items, claimed, leaderSlots]
       properties:
         vote: { type: string }
         identity: { type: string }
