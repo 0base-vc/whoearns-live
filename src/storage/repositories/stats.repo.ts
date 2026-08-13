@@ -2106,7 +2106,7 @@ export class StatsRepository {
            SUM(CASE
              WHEN included.is_current
              THEN evs.activated_stake_lamports
-                  * COALESCE(
+                  * (CASE
                       -- Per-ROW watermark. slot_window_last_slot is the tip
                       -- THIS row's slots_elapsed_assigned was counted
                       -- through, and the ingester updates votes
@@ -2118,10 +2118,19 @@ export class StatsRepository {
                       -- TIME fraction, not a per-validator slot-progress
                       -- fraction, so it cannot be moved by where a
                       -- validator's assignments happen to sit.
-                      LEAST(1, GREATEST(0,
+                      --
+                      -- The NULL cases are spelled out rather than wrapped
+                      -- in COALESCE because GREATEST/LEAST in Postgres skip
+                      -- NULL arguments instead of propagating them: a
+                      -- missing watermark would silently become 0 (charging
+                      -- no stake at all) and the COALESCE would never fire.
+                      WHEN evs.slot_window_last_slot IS NULL
+                        OR included.slot_count <= 0
+                      THEN included.elapsed_fraction
+                      ELSE LEAST(1, GREATEST(0,
                         (evs.slot_window_last_slot - included.first_slot + 1)::numeric
-                          / NULLIF(included.slot_count, 0))),
-                      included.elapsed_fraction)
+                          / included.slot_count))
+                    END)
              ELSE evs.activated_stake_lamports
            END) FILTER (WHERE evs.activated_stake_lamports IS NOT NULL)::numeric
              AS window_stake_lamports,

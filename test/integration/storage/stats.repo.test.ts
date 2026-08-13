@@ -1258,6 +1258,45 @@ describe('StatsRepository', () => {
       expect(slotsOnly.blockFeesTotalLamports).toBe(0n);
     });
 
+    it('falls back to the epoch-wide fraction when a row has no watermark', async () => {
+      // Regression guard. The proration first used
+      // COALESCE(LEAST(1, GREATEST(0, ...)), elapsed_fraction), but
+      // Postgres GREATEST/LEAST SKIP null arguments rather than
+      // propagating them — so a missing watermark collapsed to 0, the
+      // COALESCE never fired, and the running epoch contributed no stake
+      // at all. That silently inflated every ratio in a live window.
+      await repo.upsertSlotStats({
+        epoch: 860,
+        votePubkey: 'NoWatermark',
+        identityPubkey: 'NoWatermarkId',
+        slotsAssigned: 40,
+        slotsElapsedAssigned: 10,
+        slotsProduced: 10,
+        slotsSkipped: 0,
+        // No slotWindowLastSlot — the ingester has not written one yet.
+        activatedStakeLamports: 10_000n * SOL,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs: [
+          {
+            epoch: 860,
+            isCurrent: true,
+            elapsedFraction: 0.5,
+            firstSlot: 0,
+            slotCount: 432_000,
+          },
+        ],
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      expect(rows).toHaveLength(1);
+      // 10 slots / (10k × 0.5) = 20 per 10k SOL. A dropped fallback would
+      // give a null ratio (zero denominator) instead.
+      expect(rows[0]!.slotsPer10kSol).toBeCloseTo(20, 6);
+    });
+
     it('prorates each row by its OWN slot-counter watermark', async () => {
       // The slot ingester updates vote rows sequentially, so mid-tick one
       // row's counters can reflect a later tip than another's. Both
