@@ -998,13 +998,18 @@ export class FakeStatsRepo {
         // Running epoch contributes stake in proportion to the EPOCH-WIDE
         // elapsed fraction, matching the SQL — its numerator is elapsed
         // slots. Per-validator slot progress is deliberately not used.
+        // Per-row watermark first (matching the SQL), epoch-wide fraction
+        // as the fallback when this row has no watermark yet.
+        const windowEpoch = args.epochs.find((e) => e.epoch === row.epoch);
+        const rowFraction =
+          row.slotWindowLastSlot !== null &&
+          windowEpoch?.firstSlot !== undefined &&
+          windowEpoch.slotCount !== undefined &&
+          windowEpoch.slotCount > 0
+            ? (row.slotWindowLastSlot - windowEpoch.firstSlot + 1) / windowEpoch.slotCount
+            : (windowEpoch?.elapsedFraction ?? 1);
         const fractionPercent = isCurrent
-          ? Math.round(
-              Math.min(
-                1,
-                Math.max(0, args.epochs.find((e) => e.epoch === row.epoch)?.elapsedFraction ?? 1),
-              ) * 1_000_000,
-            )
+          ? Math.round(Math.min(1, Math.max(0, rowFraction)) * 1_000_000)
           : 1_000_000;
         const exposedStake = (row.activatedStakeLamports * BigInt(fractionPercent)) / 1_000_000n;
         stakeSumByVote.set(
@@ -1029,8 +1034,17 @@ export class FakeStatsRepo {
       agg.windowSlotsWithStake = slotsWithStakeByVote.has(vote) ? slots : null;
     }
 
+    const sortKey = args.sort ?? 'income_per_slot';
     const rows = [...byVote.values()].filter((r) => {
-      if (r.windowSlots < minWindowSlots) return false;
+      // Mirrors the repo's sort-aware floor: `slots_per_stake` is judged
+      // on the stake-covered sample, except for rows with no stake at
+      // all, which fall back to the window count and stay in the null
+      // tail rather than being deleted.
+      const floorBasis =
+        sortKey === 'slots_per_stake' && r.slotsPer10kSol !== null
+          ? (r.windowSlotsWithStake ?? 0)
+          : r.windowSlots;
+      if (floorBasis < minWindowSlots) return false;
       if (r.closedEpochsIncluded < requiredClosedEpochs) return false;
       // Stake bracket: window-representative stake STRICTLY below the
       // ceiling; NULL stake excluded — matches the real repo's outer
@@ -1052,7 +1066,7 @@ export class FakeStatsRepo {
       const right = bNum * BigInt(aDen);
       return compareBigIntDesc(left, right);
     };
-    switch (args.sort ?? 'income_per_slot') {
+    switch (sortKey) {
       case 'total_income':
         rows.sort((a, b) => compareBigIntDesc(total(a), total(b)));
         break;

@@ -173,7 +173,17 @@ Query params:
 - `epoch` — optional closed epoch number. Only valid with `window=final_epoch`.
 - `limit` — 1-500, default 100.
 - `sort` — `income_per_slot` (default), `total_income`, `mev_tips`, `fees`,
-  or `skip_rate`.
+  `skip_rate`, `compute_units`, or `slots_per_stake`.
+
+  `slots_per_stake` ranks by leader slots per 10,000 SOL of activated
+  stake — the size-neutral view of the schedule draw, since raw slot
+  counts scale with delegation. It divides by stake summed across the
+  window (running epoch prorated by elapsed exposure), and differs from
+  the other sorts in two ways: it admits validators whose slot data is
+  ingested but whose fees are not, so check `hasIncomeData` before
+  rendering their money columns; and `minWindowSlots` is applied to the
+  stake-covered slots, reported as `windowSlotsWithStake`.
+
 - `minWindowSlots` — 1-500, default 4. Rows below this denominator are
   filtered.
 - `bracket` — `all` (default), `stake_lt_100k`, `stake_lt_500k`,

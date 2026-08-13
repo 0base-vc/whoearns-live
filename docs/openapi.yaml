@@ -262,6 +262,15 @@ paths:
           - `mev_tips`: on-chain Jito tips, DESC.
           - `fees`: base + priority block fees, DESC.
           - `skip_rate`: `slots_skipped / windowSlots`, ASC. Lower is better.
+          - `compute_units`: `SUM(compute_units) / SUM(slots_produced)`, DESC.
+          - `slots_per_stake`: leader slots won per 10,000 SOL of activated
+            stake, DESC. Size-neutral view of the schedule draw — raw slot
+            counts scale with delegation. Denominator is the stake summed
+            across the window, matched slot-for-slot with its numerator and
+            with the running epoch prorated by elapsed exposure. Unlike the
+            other sorts this one admits validators whose slot data is
+            ingested but whose fees are not (`hasIncomeData: false`), and
+            applies `minWindowSlots` to the stake-covered slots.
 
         Rows below `minWindowSlots` are filtered. Returned rows also include a
         `sampleStatus` hint (`low`, `medium`, `normal`) for clients that want

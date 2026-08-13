@@ -314,6 +314,10 @@ export interface LeaderboardWindowEpoch {
    * omitted, i.e. "treat the epoch as fully exposed".
    */
   elapsedFraction?: number;
+  /** First slot of the epoch; used to convert a watermark into a fraction. */
+  firstSlot?: Slot;
+  /** Total slots in the epoch; the denominator of that fraction. */
+  slotCount?: number;
 }
 
 interface WindowedLeaderboardStatsRow {
@@ -1916,9 +1920,10 @@ export class StatsRepository {
     const values: string[] = [];
     for (let i = 0; i < args.epochs.length; i += 1) {
       const epoch = args.epochs[i]!;
-      const base = i * 4;
+      const base = i * 6;
       values.push(
-        `($${base + 1}::bigint, $${base + 2}::boolean, $${base + 3}::int, $${base + 4}::numeric)`,
+        `($${base + 1}::bigint, $${base + 2}::boolean, $${base + 3}::int, $${base + 4}::numeric,
+          $${base + 5}::bigint, $${base + 6}::int)`,
       );
       // Clamped so a stale `currentSlot` (or one that briefly runs past
       // the epoch's last slot) can't produce a negative or >1 weight.
@@ -1926,7 +1931,14 @@ export class StatsRepository {
       const elapsedFraction = Number.isFinite(rawFraction)
         ? Math.min(1, Math.max(0, rawFraction))
         : 1;
-      params.push(epoch.epoch, epoch.isCurrent, epoch.isCurrent ? 2 : 1, elapsedFraction);
+      params.push(
+        epoch.epoch,
+        epoch.isCurrent,
+        epoch.isCurrent ? 2 : 1,
+        elapsedFraction,
+        epoch.firstSlot ?? 0,
+        epoch.slotCount ?? 0,
+      );
     }
     const minParam = params.length + 1;
     const requiredClosedParam = params.length + 2;
@@ -2008,7 +2020,7 @@ export class StatsRepository {
         : 'window_slots';
 
     const { rows } = await this.pool.query<WindowedLeaderboardStatsRow>(
-      `WITH included(epoch, is_current, priority, elapsed_fraction) AS (
+      `WITH included(epoch, is_current, priority, elapsed_fraction, first_slot, slot_count) AS (
          VALUES ${values.join(', ')}
        ),
        windowed AS (
@@ -2084,16 +2096,32 @@ export class StatsRepository {
            -- into an open epoch is charged a full epoch of stake for a
            -- tenth of the draw.
            --
-           -- The weight is the EPOCH-WIDE elapsed fraction supplied by
-           -- the caller, deliberately not this row's
-           -- slots_elapsed_assigned / slots_assigned. Assigned slots sit
-           -- at random positions in the epoch, so at one chain tip two
-           -- validators can have 70% and 30% of their assignments behind
-           -- them despite identical time exposure; weighting by that
-           -- would let slot placement alone reorder the leaderboard.
+           -- The weight is a TIME fraction — how much of the epoch had
+           -- elapsed when this row's slot counters were written —
+           -- deliberately not slots_elapsed_assigned / slots_assigned.
+           -- Assigned slots sit at random positions, so at one chain tip
+           -- two validators can have 70% and 30% of their assignments
+           -- behind them despite identical time exposure; weighting by
+           -- that would let slot placement alone reorder the board.
            SUM(CASE
              WHEN included.is_current
-             THEN evs.activated_stake_lamports * included.elapsed_fraction
+             THEN evs.activated_stake_lamports
+                  * COALESCE(
+                      -- Per-ROW watermark. slot_window_last_slot is the tip
+                      -- THIS row's slots_elapsed_assigned was counted
+                      -- through, and the ingester updates votes
+                      -- sequentially — so a shared maximum would overcharge
+                      -- every row the current tick has not reached yet, and
+                      -- a shared minimum would undercharge the rest. Reading
+                      -- each row's own watermark is the only value
+                      -- guaranteed to match its own numerator. This is a
+                      -- TIME fraction, not a per-validator slot-progress
+                      -- fraction, so it cannot be moved by where a
+                      -- validator's assignments happen to sit.
+                      LEAST(1, GREATEST(0,
+                        (evs.slot_window_last_slot - included.first_slot + 1)::numeric
+                          / NULLIF(included.slot_count, 0))),
+                      included.elapsed_fraction)
              ELSE evs.activated_stake_lamports
            END) FILTER (WHERE evs.activated_stake_lamports IS NOT NULL)::numeric
              AS window_stake_lamports,

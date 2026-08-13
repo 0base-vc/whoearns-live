@@ -522,11 +522,18 @@ async function resolveWindowEpochs(
     // Derived from the slot-ingester's watermark, which is the tip the
     // elapsed-slot numerator is counted through. Falls back to 1 (fully
     // exposed) only on a cold start, before either tip is known.
+    // `firstSlot` / `slotCount` let the repository derive each row's
+    // exposure from its OWN slot-counter watermark, which is the only
+    // value guaranteed to match that row's elapsed-slot numerator. The
+    // epoch-wide fraction below is the fallback for rows whose watermark
+    // has not been written yet.
     const watermark = await statsRepo.findEpochSlotWatermark(current.epoch);
     out.push({
       epoch: current.epoch,
       isCurrent: true,
       elapsedFraction: elapsedFractionOf(current, watermark),
+      firstSlot: current.firstSlot,
+      slotCount: current.slotCount,
     });
   }
   for (const row of closed) {

@@ -1258,6 +1258,60 @@ describe('StatsRepository', () => {
       expect(slotsOnly.blockFeesTotalLamports).toBe(0n);
     });
 
+    it('prorates each row by its OWN slot-counter watermark', async () => {
+      // The slot ingester updates vote rows sequentially, so mid-tick one
+      // row's counters can reflect a later tip than another's. Both
+      // validators below hold 10k SOL and drew 5 slots per unit of the
+      // exposure their own counters cover — "Ahead" through 50% of the
+      // epoch, "Behind" through 25%. A shared maximum watermark would
+      // charge Behind for exposure its numerator has not counted (halving
+      // its ratio); a shared minimum would overpay Ahead.
+      await repo.upsertSlotStats({
+        epoch: 850,
+        votePubkey: 'Ahead',
+        identityPubkey: 'AheadId',
+        slotsAssigned: 40,
+        slotsElapsedAssigned: 10,
+        slotsProduced: 10,
+        slotsSkipped: 0,
+        slotWindowLastSlot: 216_000, // 50% into a 432k-slot epoch at slot 0
+        activatedStakeLamports: 10_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 850,
+        votePubkey: 'Behind',
+        identityPubkey: 'BehindId',
+        slotsAssigned: 40,
+        slotsElapsedAssigned: 5,
+        slotsProduced: 5,
+        slotsSkipped: 0,
+        slotWindowLastSlot: 108_000, // 25%
+        activatedStakeLamports: 10_000n * SOL,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs: [
+          {
+            epoch: 850,
+            isCurrent: true,
+            elapsedFraction: 0.5,
+            firstSlot: 0,
+            slotCount: 432_000,
+          },
+        ],
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      const ahead = rows.find((r) => r.votePubkey === 'Ahead')!;
+      const behind = rows.find((r) => r.votePubkey === 'Behind')!;
+      // Ahead:  10 / (10k × 0.50) = 20 per 10k SOL.
+      // Behind:  5 / (10k × 0.25) = 20 per 10k SOL — identical, as it
+      // must be: they differ only in how far the ingester got.
+      expect(ahead.slotsPer10kSol).toBeCloseTo(20, 6);
+      expect(behind.slotsPer10kSol).toBeCloseTo(20, 6);
+    });
+
     it('requires EVERY window epoch to be covered before flagging income', async () => {
       // Income columns are window SUMS, so one uncovered epoch makes the
       // total partial. Flagging it as present would render a half-window
