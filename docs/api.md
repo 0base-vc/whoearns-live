@@ -339,9 +339,18 @@ average — scales with delegation: a validator holding ten times the stake
 draws roughly ten times the slots, so ranking on it ranks by size. The
 ratio divides that out and leaves the part that is the schedule lottery.
 
-It is aggregated as `SUM(slots) / SUM(stake)` over stake-bearing epochs,
-NOT as the mean of per-epoch ratios, so epochs where the validator held
-more stake weigh proportionally more. `epochsWithStake` and
+Each epoch's slots are divided by the stake from **two epochs earlier** —
+the snapshot Solana used to draw that schedule. Dividing by an epoch's own
+stake compares a count to a number that did not produce it: a validator
+whose delegation left mid-history had its old, large-stake allocations
+divided by its new, tiny stake. Observed in production on epoch 1013, one
+validator read 4,579 per 10k SOL that way; against the N-2 snapshot it is
+14.8. Across the indexed cohort the median moved 1.02 → 1.01 while the
+worst reading fell from 455x the baseline to 1.55x.
+
+It is aggregated as `SUM(slots) / SUM(stake)` over epochs that have such a
+snapshot, NOT as the mean of per-epoch ratios, so epochs backed by more
+stake weigh proportionally more. `epochsWithStake` and
 `assignedWithStake` describe that same subset — pairing the unrestricted
 `totalAssigned` with the ratio would not add up. The division happens in
 SQL over `NUMERIC` because the lamport sum passes
@@ -384,7 +393,9 @@ and is tracked separately.
 
 Each item in `items` also carries `activatedStakeLamports` /
 `activatedStakeSol` — that epoch's own snapshot — so the same ratio can be
-computed per epoch. That per-epoch series is where the swing shows: the
+computed per epoch by dividing epoch N's `slotsAssigned` by epoch N-2's
+stake. Epochs whose N-2 row is missing (the start of a history, or an
+ingestion gap) have no ratio. That per-epoch series is where the swing shows: the
 schedule is redrawn every epoch, so the ratio moves even at constant
 stake.
 

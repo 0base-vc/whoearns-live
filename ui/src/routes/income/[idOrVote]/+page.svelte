@@ -33,6 +33,7 @@
   import {
     slotsPer10kSol,
     sortEpochRows,
+    stakeSolByEpoch,
     summariseLeaderSlots,
     type EpochSortKey,
     type LeaderSlotSummary,
@@ -202,8 +203,14 @@
   let epochSortKey = $state<EpochSortKey>('epoch');
   let epochSortDirection = $state<SortDirection>('desc');
 
+  /**
+   * Stake indexed by epoch, so each row can divide by the snapshot that
+   * actually set its schedule (epoch N-2) rather than its own.
+   */
+  const stakeByEpoch = $derived<ReadonlyMap<number, number>>(stakeSolByEpoch(history.items));
+
   const sortedItems = $derived<ValidatorEpochRecord[]>(
-    sortEpochRows(history.items, epochSortKey, epochSortDirection),
+    sortEpochRows(history.items, epochSortKey, epochSortDirection, stakeByEpoch),
   );
 
   /**
@@ -1006,7 +1013,7 @@
               Number(row.blockTipsTotalSol)
             : null}
         {@const skipDenominator = skipRateDenominator(row)}
-        {@const rowPerStake = formatPerStake(slotsPer10kSol(row))}
+        {@const rowPerStake = formatPerStake(slotsPer10kSol(row, stakeByEpoch))}
         <li>
           <Card>
             <div class="flex items-baseline justify-between gap-3">
@@ -1066,7 +1073,7 @@
                   Slots / 10k SOL
                   <Tooltip
                     label="About slots per stake"
-                    content="Assigned slots divided by this epoch's stake, per 10,000 SOL. Size-neutral, so it's comparable across validators — and it swings epoch to epoch because the schedule is drawn at random."
+                    content="Assigned slots per 10,000 SOL, divided by the stake from two epochs earlier — the snapshot Solana used to draw this epoch's schedule. Size-neutral, so it's comparable across validators, and it swings epoch to epoch because the draw is random."
                   />
                 </dt>
                 <dd class="font-mono font-medium tabular-nums">
@@ -1318,7 +1325,7 @@
                   label="About slots per stake"
                   placement="bottom"
                   align="right"
-                  content="Assigned leader slots divided by this epoch's activated stake, per 10,000 SOL. Stake buys expected slots, but the schedule is drawn at random — so this swings epoch to epoch even at constant stake. Unlike the raw slot count it doesn't reward size, which makes it comparable across validators measured over the same period. It is not an absolute luck score: the cluster-wide baseline shifts over time, and very small validators read high because the schedule is drawn in 4-slot groups."
+                  content="Assigned leader slots per 10,000 SOL of stake. Divided by the stake from TWO EPOCHS EARLIER, because that snapshot is what Solana used to draw this epoch's schedule — dividing by the current stake would misread any validator whose delegation moved. Stake buys expected slots, but the draw is random, so this swings epoch to epoch even at constant stake. Unlike the raw slot count it doesn't reward size. Em-dash when the N-2 snapshot is missing (start of history). Not an absolute luck score: the cluster-wide baseline shifts over time, and very small validators read high because the schedule is drawn in 4-slot groups."
                 />
               </span>
             </th>
@@ -1328,7 +1335,7 @@
           {#each sortedItems as row (row.epoch)}
             {@const mev = unifiedMevFor(row)}
             {@const skipDenominator = skipRateDenominator(row)}
-            {@const perStake = formatPerStake(slotsPer10kSol(row))}
+            {@const perStake = formatPerStake(slotsPer10kSol(row, stakeByEpoch))}
             <tr
               class="bg-[color:var(--color-surface)] transition-colors hover:bg-[color:var(--color-surface-muted)]"
             >

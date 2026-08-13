@@ -287,39 +287,50 @@ describe('GET /v1/validators/:idOrVote/history', () => {
       expect(body.leaderSlots.firstEpoch).toBe(599);
     });
 
-    it("weights the slots-per-stake ratio by each epoch's own stake", async () => {
+    it('weights the ratio by stake, and by the SCHEDULE-SETTING epoch', async () => {
       await ctx.validators.upsert({
         votePubkey: VOTE_1,
         identityPubkey: IDENTITY_1,
-        firstSeenEpoch: 700,
+        firstSeenEpoch: 698,
         lastSeenEpoch: 701,
       });
-      // Epoch 700: 10 slots at 10k SOL  → 10.0 slots per 10k SOL
-      // Epoch 701: 40 slots at 100k SOL →  4.0 slots per 10k SOL
+      // Solana draws epoch N's schedule from the epoch N-2 snapshot, so
+      // the stake rows sit two epochs before the slots they explain:
+      //   epoch 700: 10 slots / epoch-698 stake  10k SOL -> 10.0 per 10k
+      //   epoch 701: 40 slots / epoch-699 stake 100k SOL ->  4.0 per 10k
       //
       // Mean of the per-epoch ratios would be 7.0. The correct figure is
-      // Σslots / Σstake = 50 / 110k SOL = 4.545…, because the epoch where
-      // the validator held ten times the stake must weigh ten times as
-      // much. This test is the guard against someone "simplifying" the
-      // SQL into an AVG() of per-row ratios.
-      await ctx.stats.upsertSlotStats({
-        epoch: 700,
-        votePubkey: VOTE_1,
-        identityPubkey: IDENTITY_1,
-        slotsAssigned: 10,
-        slotsProduced: 10,
-        slotsSkipped: 0,
-        activatedStakeLamports: 10_000n * 1_000_000_000n,
-      });
-      await ctx.stats.upsertSlotStats({
-        epoch: 701,
-        votePubkey: VOTE_1,
-        identityPubkey: IDENTITY_1,
-        slotsAssigned: 40,
-        slotsProduced: 40,
-        slotsSkipped: 0,
-        activatedStakeLamports: 100_000n * 1_000_000_000n,
-      });
+      // sum(slots)/sum(stake) = 50 / 110k = 4.545..., weighting the epoch
+      // backed by ten times the stake ten times as heavily. Guards against
+      // "simplifying" into an AVG() of per-row ratios, and against
+      // dividing by each row's OWN stake.
+      const stakeOnly = async (epoch: number, stakeSol: bigint): Promise<void> => {
+        await ctx.stats.upsertSlotStats({
+          epoch,
+          votePubkey: VOTE_1,
+          identityPubkey: IDENTITY_1,
+          slotsAssigned: 0,
+          slotsProduced: 0,
+          slotsSkipped: 0,
+          activatedStakeLamports: stakeSol * 1_000_000_000n,
+        });
+      };
+      await stakeOnly(698, 10_000n);
+      await stakeOnly(699, 100_000n);
+      const withSlots = async (epoch: number, slots: number): Promise<void> => {
+        await ctx.stats.upsertSlotStats({
+          epoch,
+          votePubkey: VOTE_1,
+          identityPubkey: IDENTITY_1,
+          slotsAssigned: slots,
+          slotsProduced: slots,
+          slotsSkipped: 0,
+          // Own stake is deliberately absurd: it must not be the divisor.
+          activatedStakeLamports: 999_999n * 1_000_000_000n,
+        });
+      };
+      await withSlots(700, 10);
+      await withSlots(701, 40);
 
       const res = await ctx.app.inject({
         method: 'GET',
@@ -329,20 +340,29 @@ describe('GET /v1/validators/:idOrVote/history', () => {
       expect(body.leaderSlots.epochsWithStake).toBe(2);
       expect(body.leaderSlots.assignedWithStake).toBe(50);
       expect(body.leaderSlots.stakeWeightedSlotsPer10kSol).toBeCloseTo(4.5455, 3);
-      // Explicitly NOT the unweighted mean.
       expect(body.leaderSlots.stakeWeightedSlotsPer10kSol).not.toBeCloseTo(7, 1);
     });
 
-    it('pairs the ratio numerator with the stake-bearing epochs only', async () => {
+    it('pairs the numerator with epochs that HAVE an N-2 snapshot', async () => {
       await ctx.validators.upsert({
         votePubkey: VOTE_1,
         identityPubkey: IDENTITY_1,
-        firstSeenEpoch: 800,
+        firstSeenEpoch: 798,
         lastSeenEpoch: 801,
       });
-      // One epoch with stake, one without. `totalAssigned` counts both;
-      // the ratio must use only the 20 slots it has a denominator for,
-      // otherwise the 30 unpaired slots inflate it by 2.5x.
+      // 798 carries stake, 799 does not — so epoch 800 (/798) is
+      // measurable and epoch 801 (/799) is not. `totalAssigned` counts
+      // both; the ratio must use only the 20 slots it has a denominator
+      // for, or the 30 unpaired slots inflate it 2.5x.
+      await ctx.stats.upsertSlotStats({
+        epoch: 798,
+        votePubkey: VOTE_1,
+        identityPubkey: IDENTITY_1,
+        slotsAssigned: 0,
+        slotsProduced: 0,
+        slotsSkipped: 0,
+        activatedStakeLamports: 20_000n * 1_000_000_000n,
+      });
       await ctx.stats.upsertSlotStats({
         epoch: 800,
         votePubkey: VOTE_1,
@@ -350,7 +370,6 @@ describe('GET /v1/validators/:idOrVote/history', () => {
         slotsAssigned: 20,
         slotsProduced: 20,
         slotsSkipped: 0,
-        activatedStakeLamports: 20_000n * 1_000_000_000n,
       });
       await ctx.stats.upsertSlotStats({
         epoch: 801,
@@ -367,10 +386,9 @@ describe('GET /v1/validators/:idOrVote/history', () => {
       });
       const body = res.json();
       expect(body.leaderSlots.totalAssigned).toBe(50);
-      expect(body.leaderSlots.epochsCovered).toBe(2);
+      expect(body.leaderSlots.epochsCovered).toBe(3);
       expect(body.leaderSlots.epochsWithStake).toBe(1);
       expect(body.leaderSlots.assignedWithStake).toBe(20);
-      // 20 slots / 20k SOL = 10.0 per 10k SOL.
       expect(body.leaderSlots.stakeWeightedSlotsPer10kSol).toBeCloseTo(10, 6);
     });
 

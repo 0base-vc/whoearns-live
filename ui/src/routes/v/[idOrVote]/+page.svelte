@@ -1733,7 +1733,8 @@
             <dd class="text-right tabular-nums">
               {leaderSlotSummary.slotsPer10kSol.toFixed(2)}
               <span class="block text-xs text-[color:var(--color-text-subtle)]">
-                over {leaderSlotSummary.epochsWithStake.toLocaleString()} epochs with stake data
+                over {leaderSlotSummary.epochsWithStake.toLocaleString()} epochs, vs the stake that set
+                each schedule
               </span>
             </dd>
           {/if}

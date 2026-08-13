@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   slotsPer10kSol,
   sortEpochRows,
+  stakeSolByEpoch,
   summariseLeaderSlots,
 } from '../../../ui/src/lib/leader-slots.js';
 import type { LeaderSlotTotals, ValidatorEpochRecord } from '../../../ui/src/lib/types.js';
@@ -144,35 +145,85 @@ describe('summariseLeaderSlots', () => {
 });
 
 describe('slotsPer10kSol', () => {
-  it("normalises the allocation by that epoch's own stake", () => {
-    // 20 slots on 20,000 SOL → 10 slots per 10k SOL.
-    expect(slotsPer10kSol(row(900, 20, '20000'))).toBeCloseTo(10, 9);
-    // Same ratio at ten times the size — the whole point of the metric.
-    expect(slotsPer10kSol(row(901, 200, '200000'))).toBeCloseTo(10, 9);
-    // Same stake, twice the slots → twice the ratio.
-    expect(slotsPer10kSol(row(902, 40, '20000'))).toBeCloseTo(20, 9);
+  /** Rows two epochs apart, so N's slots divide by N-2's stake. */
+  const withStakeAt = (
+    epoch: number,
+    slots: number,
+    stakeTwoEpochsEarlier: string | null,
+  ): { target: ValidatorEpochRecord; all: ValidatorEpochRecord[] } => {
+    const target = row(epoch, slots);
+    const source = row(epoch - 2, 0, stakeTwoEpochsEarlier);
+    return { target, all: [target, source] };
+  };
+
+  it('divides by the stake that set the schedule, two epochs earlier', () => {
+    const { target, all } = withStakeAt(900, 20, '20000');
+    expect(slotsPer10kSol(target, stakeSolByEpoch(all))).toBeCloseTo(10, 9);
   });
 
-  it('is null when either half is missing or unusable', () => {
-    expect(slotsPer10kSol(row(900, null, '20000'))).toBeNull();
-    expect(slotsPer10kSol(row(900, 20, null))).toBeNull();
-    // Zero stake would divide by zero; negative/NaN can only come from a
-    // malformed payload, and must not surface as Infinity in the table.
-    expect(slotsPer10kSol(row(900, 20, '0'))).toBeNull();
-    expect(slotsPer10kSol(row(900, 20, 'not-a-number'))).toBeNull();
+  it("ignores the row's own stake", () => {
+    // The regression this exists for: a validator whose delegation left.
+    // 80 slots were allocated against 54,000 SOL two epochs back; its own
+    // row now reads 175 SOL. Dividing by 175 gives ~4,571 — observed in
+    // production on epoch 1013 — instead of the correct ~14.8.
+    const target = row(1013, 80, '175');
+    const source = row(1011, 56, '54000');
+    const ratio = slotsPer10kSol(target, stakeSolByEpoch([target, source]));
+    expect(ratio).toBeCloseTo(14.81, 2);
+    expect(ratio).not.toBeCloseTo(4571, 0);
   });
 
-  it('sorts rows by ratio, not by raw slot count', () => {
-    // The 400-slot row is the biggest validator but the unluckiest draw;
-    // sorting by `perStake` must put the 30-slot row on top.
-    const rows = [row(900, 400, '500000'), row(901, 30, '20000'), row(902, 100, '200000')];
-    expect(sortEpochRows(rows, 'perStake', 'desc').map((r) => r.epoch)).toEqual([901, 900, 902]);
-    expect(sortEpochRows(rows, 'assigned', 'desc').map((r) => r.epoch)).toEqual([900, 902, 901]);
+  it('is size-neutral at equal luck', () => {
+    const small = withStakeAt(900, 20, '20000');
+    const large = withStakeAt(900, 200, '200000');
+    expect(slotsPer10kSol(small.target, stakeSolByEpoch(small.all))).toBeCloseTo(
+      slotsPer10kSol(large.target, stakeSolByEpoch(large.all))!,
+      9,
+    );
   });
 
-  it('sinks rows with no stake snapshot when sorting by ratio', () => {
-    const rows = [row(900, 20, '20000'), row(901, 999, null)];
-    expect(sortEpochRows(rows, 'perStake', 'asc').map((r) => r.epoch)).toEqual([900, 901]);
-    expect(sortEpochRows(rows, 'perStake', 'desc').map((r) => r.epoch)).toEqual([900, 901]);
+  it('is null when the N-2 snapshot is missing or unusable', () => {
+    // Start of history: nothing two epochs back.
+    expect(slotsPer10kSol(row(900, 20), stakeSolByEpoch([row(900, 20, '20000')]))).toBeNull();
+    // Present but zero or malformed.
+    const zero = withStakeAt(900, 20, '0');
+    expect(slotsPer10kSol(zero.target, stakeSolByEpoch(zero.all))).toBeNull();
+    const nan = withStakeAt(900, 20, 'not-a-number');
+    expect(slotsPer10kSol(nan.target, stakeSolByEpoch(nan.all))).toBeNull();
+    // No slot data.
+    const noSlots = withStakeAt(900, null as unknown as number, '20000');
+    expect(slotsPer10kSol(row(900, null), stakeSolByEpoch(noSlots.all))).toBeNull();
+  });
+
+  it('sorts by ratio, not by raw slot count', () => {
+    const rows = [
+      row(900, 400),
+      row(898, 0, '500000'),
+      row(901, 30),
+      row(899, 0, '20000'),
+      row(902, 100),
+      row(900, 0, '200000'),
+    ];
+    // 900 → 400/500k = 8; 901 → 30/20k = 15; 902 → 100/200k = 5.
+    const map = stakeSolByEpoch(rows);
+    const ranked = sortEpochRows(
+      rows.filter((r) => r.slotsAssigned! > 0),
+      'perStake',
+      'desc',
+      map,
+    );
+    expect(ranked.map((r) => r.epoch)).toEqual([901, 900, 902]);
+  });
+
+  it('sinks rows without an N-2 snapshot when sorting by ratio', () => {
+    const rows = [row(900, 20), row(898, 0, '20000'), row(901, 999)];
+    const map = stakeSolByEpoch(rows);
+    const measurable = rows.filter((r) => r.slotsAssigned! > 0);
+    expect(sortEpochRows(measurable, 'perStake', 'asc', map).map((r) => r.epoch)).toEqual([
+      900, 901,
+    ]);
+    expect(sortEpochRows(measurable, 'perStake', 'desc', map).map((r) => r.epoch)).toEqual([
+      900, 901,
+    ]);
   });
 });

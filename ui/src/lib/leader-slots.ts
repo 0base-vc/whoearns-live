@@ -21,25 +21,59 @@ import type { LeaderSlotTotals, ValidatorEpochRecord } from './types.js';
 const REPORTING_UNIT_SOL = 10_000;
 
 /**
+ * How many epochs earlier the stake snapshot that set a schedule was
+ * taken. Solana fixes epoch N's leader schedule from a snapshot about
+ * two epochs back, so epoch N's slots were allocated against epoch
+ * N-2's stake.
+ */
+const SCHEDULE_STAKE_LAG_EPOCHS = 2;
+
+/**
+ * Index a history payload by epoch, so a row can reach the stake that
+ * actually produced its leader slots.
+ */
+export function stakeSolByEpoch(rows: readonly ValidatorEpochRecord[]): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const row of rows) {
+    const raw = row.activatedStakeSol;
+    if (raw === null || raw === undefined) continue;
+    const stake = Number(raw);
+    if (!Number.isFinite(stake) || stake <= 0) continue;
+    out.set(row.epoch, stake);
+  }
+  return out;
+}
+
+/**
  * Leader slots per 10,000 SOL of activated stake for ONE epoch.
  *
- * This is the size-neutral view of the row. `slotsAssigned` on its own
- * tracks delegation — a validator with ten times the stake draws roughly
- * ten times the slots — so comparing raw counts across validators, or
- * even across a validator's own epochs while its stake moved, mostly
- * measures size. Dividing by that epoch's own stake snapshot leaves the
- * part that is the schedule lottery, which is what swings epoch to epoch.
+ * The divisor is the epoch N-2 snapshot, NOT this row's own stake,
+ * because that is the stake the schedule was drawn against. Dividing by
+ * the row's current stake compares a count to a number that did not
+ * produce it — a validator whose delegation left mid-history has its
+ * old, large-stake allocations divided by its new, tiny stake. Measured
+ * on epoch 1013 across the indexed cohort, the worst same-epoch reading
+ * was 455x the baseline; against the N-2 snapshot the same validator is
+ * 1.55x, while the cohort median barely moves (1.02 → 1.01).
  *
- * Null when the row has no slot data or no stake snapshot (rows predating
- * migration 0006, or an API too old to send the field). Null is rendered
+ * This is the size-neutral view of the row. `slotsAssigned` on its own
+ * tracks delegation, so comparing raw counts across validators — or
+ * across a validator's own epochs while its stake moved — mostly
+ * measures size. Dividing by stake leaves the schedule lottery, which is
+ * what swings epoch to epoch.
+ *
+ * Null when the row has no slot data, or when the N-2 snapshot is absent
+ * (the start of a validator's history, or an ingestion gap). Null renders
  * as an em-dash rather than 0 — "not measurable" is not "drew nothing".
  */
-export function slotsPer10kSol(row: ValidatorEpochRecord): number | null {
+export function slotsPer10kSol(
+  row: ValidatorEpochRecord,
+  stakeByEpoch: ReadonlyMap<number, number>,
+): number | null {
   const slots = row.slotsAssigned;
-  const stakeSol = row.activatedStakeSol;
-  if (slots === null || stakeSol === null || stakeSol === undefined) return null;
-  const stake = Number(stakeSol);
-  if (!Number.isFinite(stake) || stake <= 0) return null;
+  if (slots === null) return null;
+  const stake = stakeByEpoch.get(row.epoch - SCHEDULE_STAKE_LAG_EPOCHS);
+  if (stake === undefined || stake <= 0) return null;
   return (slots / stake) * REPORTING_UNIT_SOL;
 }
 
@@ -69,10 +103,11 @@ export function sortEpochRows(
   rows: readonly ValidatorEpochRecord[],
   key: EpochSortKey,
   direction: SortDirection,
+  stakeByEpoch: ReadonlyMap<number, number> = new Map(),
 ): ValidatorEpochRecord[] {
   const sign = direction === 'asc' ? 1 : -1;
   const valueOf = (row: ValidatorEpochRecord): number | null =>
-    key === 'perStake' ? slotsPer10kSol(row) : row.slotsAssigned;
+    key === 'perStake' ? slotsPer10kSol(row, stakeByEpoch) : row.slotsAssigned;
   return [...rows].sort((a, b) => {
     if (key !== 'epoch') {
       const av = valueOf(a);
