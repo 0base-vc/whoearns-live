@@ -1217,21 +1217,21 @@ export class StatsRepository {
       assigned_with_stake: string;
       stake_weighted_slots_per_10k_sol: string | null;
     }>(
-      `SELECT COUNT(*)                        AS epochs_covered,
-              COALESCE(SUM(slots_assigned), 0) AS total_assigned,
-              COALESCE(SUM(slots_produced), 0) AS total_produced,
-              COALESCE(SUM(slots_skipped), 0)  AS total_skipped,
-              MIN(epoch)                       AS first_epoch,
-              MAX(epoch)                       AS last_epoch,
+      `SELECT COUNT(*)                          AS epochs_covered,
+              COALESCE(SUM(e.slots_assigned), 0) AS total_assigned,
+              COALESCE(SUM(e.slots_produced), 0) AS total_produced,
+              COALESCE(SUM(e.slots_skipped), 0)  AS total_skipped,
+              MIN(e.epoch)                       AS first_epoch,
+              MAX(e.epoch)                       AS last_epoch,
               -- Strictly positive, not merely non-null: ValidatorService
               -- returns 0n when the RPC reports zero activated stake, and
               -- SlotService still writes that epoch's schedule. Counting
               -- such a row adds slots to the numerator and nothing to the
               -- denominator, inflating the ratio.
-              COUNT(*) FILTER (WHERE activated_stake_lamports > 0)
+              COUNT(*) FILTER (WHERE src.activated_stake_lamports > 0)
                 AS epochs_with_stake,
               COALESCE(
-                SUM(slots_assigned) FILTER (WHERE activated_stake_lamports > 0), 0)
+                SUM(e.slots_assigned) FILTER (WHERE src.activated_stake_lamports > 0), 0)
                 AS assigned_with_stake,
               -- Σ slots / Σ stake, scaled to "per 10,000 SOL":
               --   1e9  lamports per SOL
@@ -1241,17 +1241,42 @@ export class StatsRepository {
               -- hundred epochs on a large validator, while the RESULT is
               -- a small number that survives the Number() cast intact.
               CASE
-                WHEN COALESCE(SUM(activated_stake_lamports), 0) > 0
+                WHEN COALESCE(SUM(src.activated_stake_lamports), 0) > 0
                 THEN (COALESCE(
-                        SUM(slots_assigned)
-                          FILTER (WHERE activated_stake_lamports > 0), 0)::numeric
+                        SUM(e.slots_assigned)
+                          FILTER (WHERE src.activated_stake_lamports > 0), 0)::numeric
                       * 1e13)
-                     / SUM(activated_stake_lamports)
+                     / SUM(src.activated_stake_lamports)
                 ELSE NULL
               END AS stake_weighted_slots_per_10k_sol
-         FROM epoch_validator_stats
-        WHERE vote_pubkey = $1
-          AND slots_updated_at IS NOT NULL`,
+         FROM epoch_validator_stats e
+         -- Solana fixes epoch N's leader schedule from a stake snapshot
+         -- taken about two epochs earlier, so the slots in row e were
+         -- allocated against the stake in row src. Dividing by e's OWN
+         -- stake compares a count to a number that did not produce it: a
+         -- validator whose delegation left mid-history had its old,
+         -- large-stake allocations divided by its new, tiny stake.
+         -- Measured on epoch 1013, the worst same-epoch ratio was 455x
+         -- the cohort baseline and the same row is 1.55x under this join.
+         --
+         -- LEFT JOIN, then the > 0 filters drop the unmatched rows: an
+         -- epoch whose N-2 snapshot is missing (start of history, or a
+         -- gap) contributes to totalAssigned but not to the ratio, the
+         -- same treatment stake-less epochs already get.
+         --
+         -- KNOWN LIMITATION: the join is by vote_pubkey, so a validator
+         -- that rotated vote accounts between N-2 and N finds no source
+         -- row even though the identity-level stake exists. Its ratio
+         -- goes null and it sorts behind measured rows. That understates
+         -- rather than distorts, and resolving it needs a per-epoch
+         -- vote/identity rotation mapping — the same missing piece behind
+         -- the identity fan-out noted on the leaderboard sort. Tracked
+         -- separately rather than half-built here.
+         LEFT JOIN epoch_validator_stats src
+                ON src.vote_pubkey = e.vote_pubkey
+               AND src.epoch = e.epoch - 2
+        WHERE e.vote_pubkey = $1
+          AND e.slots_updated_at IS NOT NULL`,
       [vote],
     );
     // Aggregate-only SELECT with no GROUP BY always yields exactly one
@@ -2092,7 +2117,7 @@ export class StatsRepository {
            SUM(CASE
              WHEN included.is_current THEN COALESCE(evs.slots_elapsed_assigned, 0)
              ELSE evs.slots_assigned
-           END) FILTER (WHERE evs.activated_stake_lamports > 0)::numeric
+           END) FILTER (WHERE stake_src.activated_stake_lamports > 0)::numeric
              AS window_slots_with_stake,
            -- The running epoch contributes only its ELAPSED slots to the
            -- numerator, so its stake must contribute only the matching
@@ -2109,7 +2134,7 @@ export class StatsRepository {
            -- that would let slot placement alone reorder the board.
            SUM(CASE
              WHEN included.is_current
-             THEN evs.activated_stake_lamports
+             THEN stake_src.activated_stake_lamports
                   * (CASE
                       -- Per-ROW watermark. slot_window_last_slot is the tip
                       -- THIS row's slots_elapsed_assigned was counted
@@ -2135,8 +2160,8 @@ export class StatsRepository {
                         (evs.slot_window_last_slot - included.first_slot + 1)::numeric
                           / included.slot_count))
                     END)
-             ELSE evs.activated_stake_lamports
-           END) FILTER (WHERE evs.activated_stake_lamports > 0)::numeric
+             ELSE stake_src.activated_stake_lamports
+           END) FILTER (WHERE stake_src.activated_stake_lamports > 0)::numeric
              AS window_stake_lamports,
            -- Whether income for this window is COMPLETE — every epoch,
            -- and both streams within each epoch.
@@ -2165,6 +2190,21 @@ export class StatsRepository {
            ) AS has_income_evidence
          FROM included
          JOIN epoch_validator_stats evs ON evs.epoch = included.epoch
+         -- Stake that actually set this epoch's leader schedule. Solana
+         -- fixes epoch N's schedule from a snapshot about two epochs
+         -- earlier, so evs's own stake is not the number that produced
+         -- its slots: a validator whose delegation left mid-window had
+         -- large-stake allocations divided by a tiny current stake,
+         -- reading hundreds of times the cohort baseline.
+         --
+         -- Joined by vote_pubkey, so a vote rotation between N-2 and N
+         -- leaves the epoch without a divisor: it drops out of
+         -- window_slots_with_stake and the row's ratio goes null. An
+         -- understatement, not a distortion; see the matching note on
+         -- sumLeaderSlotsByVote.
+         LEFT JOIN epoch_validator_stats stake_src
+                ON stake_src.vote_pubkey = evs.vote_pubkey
+               AND stake_src.epoch = evs.epoch - 2
          WHERE evs.slots_updated_at IS NOT NULL
            AND NOT (evs.vote_pubkey = ANY($${excludedVotesParam}::text[]))
            ${candidateVotesClause}

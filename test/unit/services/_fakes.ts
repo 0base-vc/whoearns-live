@@ -995,9 +995,14 @@ export class FakeStatsRepo {
       if (row.feesUpdatedAt === null || row.tipsUpdatedAt === null) {
         next.hasIncomeEvidence = false;
       }
-      // Strictly positive, mirroring the SQL: a 0n snapshot would add
-      // slots to the numerator and nothing to the denominator.
-      if (row.activatedStakeLamports !== null && row.activatedStakeLamports > 0n) {
+      // Stake that set THIS epoch's schedule: the N-2 snapshot, matching
+      // the repo's LEFT JOIN. Strictly positive, so a 0n snapshot does
+      // not add slots to the numerator while contributing nothing to the
+      // denominator.
+      const scheduleStake = this.rows.get(
+        this.key(row.epoch - 2, row.votePubkey),
+      )?.activatedStakeLamports;
+      if (scheduleStake !== null && scheduleStake !== undefined && scheduleStake > 0n) {
         // Running epoch contributes stake in proportion to the EPOCH-WIDE
         // elapsed fraction, matching the SQL — its numerator is elapsed
         // slots. Per-validator slot progress is deliberately not used.
@@ -1018,20 +1023,19 @@ export class FakeStatsRepo {
           windowEpoch.slotCount > 0;
         let exposedStake: bigint;
         if (!isCurrent) {
-          exposedStake = row.activatedStakeLamports;
+          exposedStake = scheduleStake;
         } else if (hasWatermarkBasis) {
           // Inclusive slot count, matching (watermark - firstSlot + 1).
           const elapsedSlots = row.slotWindowLastSlot! - windowEpoch!.firstSlot! + 1;
           const clamped = Math.min(windowEpoch!.slotCount!, Math.max(0, elapsedSlots));
-          exposedStake =
-            (row.activatedStakeLamports * BigInt(clamped)) / BigInt(windowEpoch!.slotCount!);
+          exposedStake = (scheduleStake * BigInt(clamped)) / BigInt(windowEpoch!.slotCount!);
         } else {
           // Float fallback: scale by 1e12 so even a first-slot fraction
           // keeps far more precision than the value can meaningfully
           // carry.
           const fraction = Math.min(1, Math.max(0, windowEpoch?.elapsedFraction ?? 1));
           const SCALE = 1_000_000_000_000n;
-          exposedStake = (row.activatedStakeLamports * BigInt(Math.round(fraction * 1e12))) / SCALE;
+          exposedStake = (scheduleStake * BigInt(Math.round(fraction * 1e12))) / SCALE;
         }
         stakeSumByVote.set(
           row.votePubkey,
@@ -1217,13 +1221,20 @@ export class FakeStatsRepo {
     // Stake-bearing subset, mirroring the SQL's FILTER clauses. Σslots
     // and Σstake are accumulated over the SAME rows so the ratio's
     // numerator and denominator cover one population.
-    // Strictly positive, mirroring the SQL: a 0n snapshot (the RPC
-    // reporting zero activated stake) would add slots to the numerator
-    // and nothing to the denominator.
-    const staked = rows.filter(
-      (r) => r.activatedStakeLamports !== null && r.activatedStakeLamports > 0n,
-    );
-    const stakeSum = staked.reduce((sum, r) => sum + (r.activatedStakeLamports ?? 0n), 0n);
+    // Each epoch's slots are divided by the stake from two epochs
+    // earlier — the snapshot Solana used to draw that schedule — matching
+    // the repo's LEFT JOIN. Strictly positive, so a 0n snapshot (the RPC
+    // reporting zero activated stake) does not add slots to the numerator
+    // while contributing nothing to the denominator.
+    const stakeByEpoch = new Map<Epoch, bigint>();
+    for (const r of this.rows.values()) {
+      if (r.votePubkey !== vote) continue;
+      if (r.activatedStakeLamports !== null && r.activatedStakeLamports > 0n) {
+        stakeByEpoch.set(r.epoch, r.activatedStakeLamports);
+      }
+    }
+    const staked = rows.filter((r) => stakeByEpoch.has(r.epoch - 2));
+    const stakeSum = staked.reduce((sum, r) => sum + (stakeByEpoch.get(r.epoch - 2) ?? 0n), 0n);
     const assignedWithStake = staked.reduce((sum, r) => sum + r.slotsAssigned, 0);
     return {
       epochsCovered: rows.length,

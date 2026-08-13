@@ -131,7 +131,7 @@
       key: 'slots_per_stake',
       label: 'Slots / 10k SOL',
       tooltip:
-        'Leader slots won per 10,000 SOL of activated stake in the selected window. Stake buys expected slots, but the schedule is drawn at random each epoch — so this is the size-neutral view of who actually drew well. Values are scoped to the selected window, so compare rows within one window rather than across windows. Small validators swing hard: the schedule is drawn in 4-slot groups, so a sub-slot expectation pays out either nothing (a ratio of 0) or at least four. Longer windows sum the draws — decade epoch is the fairest comparison for small operators.',
+        'Leader slots won per 10,000 SOL of activated stake in the selected window. The divisor is the stake from two epochs before each epoch — the snapshot Solana used to draw that schedule — so a validator whose delegation moved mid-window is not misread. Stake buys expected slots, but the draw is random, so this is the size-neutral view of who actually drew well. Values are scoped to the selected window, so compare rows within one window rather than across windows. Small validators swing hard: the schedule is drawn in 4-slot groups, so a sub-slot expectation pays out either nothing (a ratio of 0) or at least four. Longer windows sum the draws — decade epoch is the fairest comparison for small operators.',
       alignRight: true,
     },
     {

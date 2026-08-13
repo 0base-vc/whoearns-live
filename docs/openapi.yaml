@@ -265,9 +265,9 @@ paths:
           - `compute_units`: `SUM(compute_units) / SUM(slots_produced)`, DESC.
           - `slots_per_stake`: leader slots won per 10,000 SOL of activated
             stake, DESC. Size-neutral view of the schedule draw — raw slot
-            counts scale with delegation. Denominator is the stake summed
-            across the window, matched slot-for-slot with its numerator and
-            with the running epoch prorated by elapsed exposure. Unlike the
+            counts scale with delegation. Denominator is the schedule-setting stake
+            (epoch N-2) summed across the window, matched slot-for-slot with
+            its numerator and with the running epoch prorated by elapsed exposure. Unlike the
             other sorts this one admits validators whose slot data is
             ingested but whose fees are not (`hasIncomeData: false`), and
             IGNORES `minWindowSlots` (see that parameter).
@@ -2463,7 +2463,9 @@ components:
           type: [number, 'null']
           description: >
             Leader slots per 10,000 SOL of activated stake, aggregated as
-            SUM(slots) / SUM(stake) across stake-bearing epochs — not the
+            SUM(slots) / SUM(stake), where each epoch's slots divide by the
+            stake from TWO EPOCHS EARLIER — the snapshot Solana used to draw
+            that schedule — across epochs that have one — not the
             mean of per-epoch ratios, so epochs where the validator held
             more stake weigh proportionally more.
 
@@ -2920,8 +2922,9 @@ components:
             Leader slots won per 10,000 SOL of activated stake over the
             selected window — the size-neutral view of the schedule draw.
             Computed server-side as SUM(window slots with stake) /
-            SUM(stake), with the running epoch's stake prorated by elapsed
-            exposure, and ordered by that same expression under
+            SUM(stake), where each epoch divides by the stake from two epochs
+            earlier (the snapshot that set its schedule), with the running
+            epoch prorated by elapsed exposure, and ordered by that same expression under
             `sort=slots_per_stake`. Do NOT recompute it from `windowSlots`
             and `activatedStakeLamports` — the latter is the window's
             newest snapshot rather than a sum, so the two disagree for any

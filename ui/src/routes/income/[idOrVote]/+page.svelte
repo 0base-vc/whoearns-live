@@ -29,10 +29,12 @@
 -->
 <script lang="ts">
   import type { PageData } from './$types';
+  import { HISTORY_TABLE_EPOCHS } from '$lib/history-window';
   import type { NodeTier, ValidatorEpochRecord } from '$lib/types';
   import {
     slotsPer10kSol,
     sortEpochRows,
+    stakeSolByEpoch,
     summariseLeaderSlots,
     type EpochSortKey,
     type LeaderSlotSummary,
@@ -202,8 +204,25 @@
   let epochSortKey = $state<EpochSortKey>('epoch');
   let epochSortDirection = $state<SortDirection>('desc');
 
+  /**
+   * Stake indexed by epoch, so each row can divide by the snapshot that
+   * actually set its schedule (epoch N-2) rather than its own.
+   */
+  const stakeByEpoch = $derived<ReadonlyMap<number, number>>(stakeSolByEpoch(history.items));
+
+  /**
+   * Rows the table renders. The loader over-fetches by
+   * `SCHEDULE_STAKE_LAG` so the oldest displayed epochs can still reach
+   * their N-2 stake; those extra epochs are divisors only, never rows —
+   * otherwise the page would silently grow by two whenever a validator
+   * has a long enough history.
+   */
+  const visibleItems = $derived<ValidatorEpochRecord[]>(
+    history.items.slice(0, HISTORY_TABLE_EPOCHS),
+  );
+
   const sortedItems = $derived<ValidatorEpochRecord[]>(
-    sortEpochRows(history.items, epochSortKey, epochSortDirection),
+    sortEpochRows(visibleItems, epochSortKey, epochSortDirection, stakeByEpoch),
   );
 
   /**
@@ -353,7 +372,7 @@
           {
             '@type': 'PropertyValue',
             name: 'epochCount',
-            value: history.items.length,
+            value: visibleItems.length,
             description: 'Number of epochs indexed for this validator',
           },
           ...(latestClosedRow !== null
@@ -869,14 +888,16 @@
   income chart and the compute-units chart sit side by side, each
   roughly half width; below 768px the grid collapses to a single
   column so each chart gets the full content width on phones. Both
-  charts read the same `history.items` array — one source of truth.
+  charts read the same `visibleItems` array — one source of truth, and
+  the same epoch range the table shows (the loader's two extra rows are
+  divisors for the per-stake ratio, not content).
   Each chart's inner LineChart is `w-full`, so it reflows to whatever
   width its grid cell resolves to at any viewport size.
 -->
 {#if hasAnyHistory}
   <div class="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
-    <IncomeChartLoader history={history.items} />
-    <ComputeUnitsChartLoader history={history.items} />
+    <IncomeChartLoader history={visibleItems} />
+    <ComputeUnitsChartLoader history={visibleItems} />
   </div>
 {/if}
 
@@ -1006,7 +1027,7 @@
               Number(row.blockTipsTotalSol)
             : null}
         {@const skipDenominator = skipRateDenominator(row)}
-        {@const rowPerStake = formatPerStake(slotsPer10kSol(row))}
+        {@const rowPerStake = formatPerStake(slotsPer10kSol(row, stakeByEpoch))}
         <li>
           <Card>
             <div class="flex items-baseline justify-between gap-3">
@@ -1066,7 +1087,7 @@
                   Slots / 10k SOL
                   <Tooltip
                     label="About slots per stake"
-                    content="Assigned slots divided by this epoch's stake, per 10,000 SOL. Size-neutral, so it's comparable across validators — and it swings epoch to epoch because the schedule is drawn at random."
+                    content="Assigned slots per 10,000 SOL, divided by the stake from two epochs earlier — the snapshot Solana used to draw this epoch's schedule. Size-neutral, so it's comparable across validators, and it swings epoch to epoch because the draw is random."
                   />
                 </dt>
                 <dd class="font-mono font-medium tabular-nums">
@@ -1318,7 +1339,7 @@
                   label="About slots per stake"
                   placement="bottom"
                   align="right"
-                  content="Assigned leader slots divided by this epoch's activated stake, per 10,000 SOL. Stake buys expected slots, but the schedule is drawn at random — so this swings epoch to epoch even at constant stake. Unlike the raw slot count it doesn't reward size, which makes it comparable across validators measured over the same period. It is not an absolute luck score: the cluster-wide baseline shifts over time, and very small validators read high because the schedule is drawn in 4-slot groups."
+                  content="Assigned leader slots per 10,000 SOL of stake. Divided by the stake from TWO EPOCHS EARLIER, because that snapshot is what Solana used to draw this epoch's schedule — dividing by the current stake would misread any validator whose delegation moved. Stake buys expected slots, but the draw is random, so this swings epoch to epoch even at constant stake. Unlike the raw slot count it doesn't reward size. Em-dash when the N-2 snapshot is missing (start of history). Not an absolute luck score: the cluster-wide baseline shifts over time, and very small validators read high because the schedule is drawn in 4-slot groups."
                 />
               </span>
             </th>
@@ -1328,7 +1349,7 @@
           {#each sortedItems as row (row.epoch)}
             {@const mev = unifiedMevFor(row)}
             {@const skipDenominator = skipRateDenominator(row)}
-            {@const perStake = formatPerStake(slotsPer10kSol(row))}
+            {@const perStake = formatPerStake(slotsPer10kSol(row, stakeByEpoch))}
             <tr
               class="bg-[color:var(--color-surface)] transition-colors hover:bg-[color:var(--color-surface-muted)]"
             >

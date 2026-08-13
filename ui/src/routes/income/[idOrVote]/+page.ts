@@ -1,5 +1,6 @@
 import { error } from '@sveltejs/kit';
 import { fetchCurrentEpoch, fetchScoring, fetchValidatorHistory, ApiError } from '$lib/api';
+import { HISTORY_FETCH_EPOCHS } from '$lib/history-window';
 import type { PageLoad } from './$types';
 
 export const load: PageLoad = async ({ params, fetch: fetchFn }) => {
@@ -13,7 +14,9 @@ export const load: PageLoad = async ({ params, fetch: fetchFn }) => {
     // page renders as a "no tier yet" pill. The income page renders
     // fine without it.
     const [history, currentEpoch, scoring] = await Promise.all([
-      fetchValidatorHistory(idOrVote, 50, fetchFn),
+      // Overshoots the table by the schedule-stake lag so the oldest
+      // visible rows still have an N-2 divisor; see `$lib/history-window`.
+      fetchValidatorHistory(idOrVote, HISTORY_FETCH_EPOCHS, fetchFn),
       fetchCurrentEpoch(fetchFn).catch(() => null),
       fetchScoring(idOrVote, fetchFn).catch(() => null),
     ]);
