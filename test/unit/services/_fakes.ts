@@ -960,7 +960,7 @@ export class FakeStatsRepo {
         lastUpdatedAt: null,
         activatedStakeLamports: row.activatedStakeLamports,
         slotsPer10kSol: null,
-        hasIncomeEvidence: false,
+        hasIncomeEvidence: true,
       };
       next.identityPubkey = isCurrent ? row.identityPubkey : next.identityPubkey;
       next.windowSlots += denominator;
@@ -987,19 +987,25 @@ export class FakeStatsRepo {
       if (isCurrent && row.activatedStakeLamports !== null) {
         next.activatedStakeLamports = row.activatedStakeLamports;
       }
-      if (row.feesUpdatedAt !== null || row.tipsUpdatedAt !== null) {
-        next.hasIncomeEvidence = true;
+      // BOOL_AND semantics: every included epoch must be covered, since
+      // the income columns are window sums. Starts true (see the
+      // initialiser) and is cleared by the first uncovered epoch.
+      if (row.feesUpdatedAt === null && row.tipsUpdatedAt === null) {
+        next.hasIncomeEvidence = false;
       }
       if (row.activatedStakeLamports !== null) {
-        // Running epoch contributes stake in proportion to elapsed
-        // exposure, matching the SQL — its numerator is elapsed slots.
-        const exposedStake =
-          isCurrent && row.slotsAssigned > 0
-            ? (row.activatedStakeLamports * BigInt(row.slotsElapsedAssigned)) /
-              BigInt(row.slotsAssigned)
-            : isCurrent
-              ? 0n
-              : row.activatedStakeLamports;
+        // Running epoch contributes stake in proportion to the EPOCH-WIDE
+        // elapsed fraction, matching the SQL — its numerator is elapsed
+        // slots. Per-validator slot progress is deliberately not used.
+        const fractionPercent = isCurrent
+          ? Math.round(
+              Math.min(
+                1,
+                Math.max(0, args.epochs.find((e) => e.epoch === row.epoch)?.elapsedFraction ?? 1),
+              ) * 1_000_000,
+            )
+          : 1_000_000;
+        const exposedStake = (row.activatedStakeLamports * BigInt(fractionPercent)) / 1_000_000n;
         stakeSumByVote.set(
           row.votePubkey,
           (stakeSumByVote.get(row.votePubkey) ?? 0n) + exposedStake,

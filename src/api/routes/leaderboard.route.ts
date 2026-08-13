@@ -23,6 +23,19 @@ import type { EpochInfo, IdentityPubkey } from '../../types/domain.js';
 import { setClientReadCache } from '../cache-headers.js';
 import { unwrap } from '../zod-helpers.js';
 
+/**
+ * Fraction of an epoch elapsed at the last observed chain tip, in
+ * [0, 1]. Returns 1 when the tip or the slot count is unknown, which
+ * treats the epoch as fully exposed — the conservative choice, since it
+ * never inflates a stake-normalised ratio.
+ */
+function elapsedFractionOf(epoch: EpochInfo): number {
+  if (epoch.currentSlot === null || epoch.slotCount <= 0) return 1;
+  const elapsed = epoch.currentSlot - epoch.firstSlot + 1;
+  if (!Number.isFinite(elapsed)) return 1;
+  return Math.min(1, Math.max(0, elapsed / epoch.slotCount));
+}
+
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 const DEFAULT_MIN_WINDOW_SLOTS = 4;
@@ -476,7 +489,18 @@ async function resolveWindowEpochs(
 
   const out: LeaderboardWindowEpoch[] = [];
   if (window !== 'final_epoch' && current !== null && !current.isClosed) {
-    out.push({ epoch: current.epoch, isCurrent: true });
+    // Epoch-wide elapsed fraction, used to prorate the running epoch's
+    // stake in the `slots_per_stake` ranking so its denominator covers
+    // the same period as its elapsed-slot numerator. Must be epoch-wide:
+    // a per-validator fraction would let leader-slot placement move ranks.
+    // Falls back to 1 (fully exposed) when the chain tip hasn't been
+    // observed yet — the epoch-watcher fills `currentSlot` on its first
+    // tick, so this is a cold-start window only.
+    out.push({
+      epoch: current.epoch,
+      isCurrent: true,
+      elapsedFraction: elapsedFractionOf(current),
+    });
   }
   for (const row of closed) {
     out.push({ epoch: row.epoch, isCurrent: false });

@@ -2740,8 +2740,9 @@ components:
         schedule draw, since raw slot counts scale with delegation. The
         divisor is the stake SUMMED across the window and matched
         slot-for-slot with its numerator, with the running epoch's snapshot
-        prorated by elapsed exposure — so a validator whose delegation
-        moved mid-window is not misranked. Magnitudes remain window-scoped:
+        prorated by the EPOCH-WIDE elapsed fraction — so neither a
+        mid-window delegation change nor the position of a validator's
+        assigned slots can misrank it. Magnitudes remain window-scoped:
         compare rows within one window, not across windows of different
         lengths. Rows without a stake snapshot sort last.
 
@@ -2749,8 +2750,11 @@ components:
         whose fees/tips are not, since allocation is measurable without
         them. Check `hasIncomeData` before presenting income fields on such
         rows — they carry zeros meaning "unmeasured", not "earned nothing".
-        The `minWindowSlots` floor is applied to the stake-covered slots
-        here, so it constrains the sample the ratio is built from.
+        The `minWindowSlots` floor is applied to the
+            stake-covered slots here, so it constrains the sample the ratio
+            is actually built from. Rows with no stake anywhere in the
+            window are exempt — they have no ratio to be noisy and are
+            kept, with a null ratio, in the NULLS LAST tail.
 
     LeaderboardBracket:
       type: string
@@ -2899,13 +2903,18 @@ components:
         hasIncomeData:
           type: boolean
           description: >
-            False when the fee/tip pipeline has not covered any epoch in
-            the window for this validator. Only reachable under
-            `sort=slots_per_stake`, which admits slot-only rows so an
-            ingestion lag cannot hide a measurable allocation. Such rows
-            carry column-default zeros in every income field; render them
-            as unavailable rather than as zero income. Always true for
-            other sorts, whose rows are filtered on income evidence.
+            False unless the fee/tip pipeline has covered EVERY epoch in
+            the window for this validator. The income fields are window
+            sums, so a single uncovered epoch makes them a partial total
+            that would otherwise read as the full window's earnings.
+
+
+            Only reachable under `sort=slots_per_stake`, which admits
+            slot-only rows so an ingestion lag cannot hide a measurable
+            allocation. Such rows carry column-default zeros in every
+            income field; render them as unavailable rather than as zero
+            income. Always true for other sorts, whose rows are filtered
+            on income evidence.
         claimed: { type: boolean }
         decadeEpochStart:
           type: [integer, 'null']

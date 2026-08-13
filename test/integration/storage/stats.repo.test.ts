@@ -1076,10 +1076,6 @@ describe('StatsRepository', () => {
       // Counting the open epoch's stake in full would charge Mover a
       // whole epoch of 10k SOL for a fifth of a draw and Held a whole
       // 50k, producing different ratios for identical luck.
-      const epochs = [
-        { epoch: 800, isCurrent: false },
-        { epoch: 801, isCurrent: true },
-      ];
       await repo.upsertSlotStats({
         epoch: 800,
         votePubkey: 'Mover',
@@ -1121,7 +1117,13 @@ describe('StatsRepository', () => {
       });
 
       const rows = await repo.findTopNByWindow({
-        epochs,
+        // The open epoch is 20% elapsed cluster-wide. Both validators are
+        // weighted by that same 0.2, regardless of how much of their own
+        // schedule happens to have passed.
+        epochs: [
+          { epoch: 800, isCurrent: false },
+          { epoch: 801, isCurrent: true, elapsedFraction: 0.2 },
+        ],
         limit: 10,
         sort: 'slots_per_stake',
         minWindowSlots: 1,
@@ -1132,6 +1134,48 @@ describe('StatsRepository', () => {
       expect(mover.slotsPer10kSol).toBeCloseTo(10, 6);
       // Held: (50 + 10) / (50k + 50k×0.2) = 60 / 60k.
       expect(held.slotsPer10kSol).toBeCloseTo(10, 6);
+    });
+
+    it('weights the open epoch by cluster progress, not per-validator slot placement', async () => {
+      // Both hold 10k SOL and have drawn 5 elapsed slots at the same
+      // chain tip, so their ratios must be identical. They differ only in
+      // where their remaining assignments sit: "Front" has most of its
+      // schedule behind it (5 of 10 elapsed), "Back" almost none
+      // (5 of 100). Weighting by each validator's own elapsed/assigned
+      // would charge Front 0.5 of its stake and Back 0.05, handing Back a
+      // 10x ratio for nothing but slot placement.
+      await repo.upsertSlotStats({
+        epoch: 830,
+        votePubkey: 'Front',
+        identityPubkey: 'FrontId',
+        slotsAssigned: 10,
+        slotsElapsedAssigned: 5,
+        slotsProduced: 5,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 830,
+        votePubkey: 'Back',
+        identityPubkey: 'BackId',
+        slotsAssigned: 100,
+        slotsElapsedAssigned: 5,
+        slotsProduced: 5,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs: [{ epoch: 830, isCurrent: true, elapsedFraction: 0.5 }],
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      const front = rows.find((r) => r.votePubkey === 'Front')!;
+      const back = rows.find((r) => r.votePubkey === 'Back')!;
+      // 5 slots / (10k × 0.5) SOL = 10 per 10k SOL, for both.
+      expect(front.slotsPer10kSol).toBeCloseTo(10, 6);
+      expect(back.slotsPer10kSol).toBeCloseTo(10, 6);
     });
 
     it('applies the slot floor to the stake-covered slots for this sort', async () => {
@@ -1214,6 +1258,40 @@ describe('StatsRepository', () => {
       expect(slotsOnly.blockFeesTotalLamports).toBe(0n);
     });
 
+    it('requires EVERY window epoch to be covered before flagging income', async () => {
+      // Income columns are window SUMS, so one uncovered epoch makes the
+      // total partial. Flagging it as present would render a half-window
+      // sum as the full window's earnings.
+      const epochs = [
+        { epoch: 840, isCurrent: false },
+        { epoch: 841, isCurrent: false },
+      ];
+      await seed({
+        epoch: 840,
+        vote: 'PartialCoverage',
+        identity: 'PartialId',
+        slots: 20,
+        stakeSol: 10_000n,
+        fees: 7n,
+      });
+      await seed({
+        epoch: 841,
+        vote: 'PartialCoverage',
+        identity: 'PartialId',
+        slots: 20,
+        stakeSol: 10_000n,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.hasIncomeEvidence).toBe(false);
+    });
+
     it('sorts rows without any stake snapshot last, with a null ratio', async () => {
       const epochs = [{ epoch: 700, isCurrent: false }];
       await seed({
@@ -1237,6 +1315,10 @@ describe('StatsRepository', () => {
         sort: 'slots_per_stake',
         minWindowSlots: 1,
       });
+      // A row with no stake anywhere in the window has no ratio to be
+      // noisy, so the stake-covered floor must not delete it — it falls
+      // back to the ordinary window-slots floor and lands in the
+      // documented NULLS LAST tail.
       expect(rows.map((r) => r.votePubkey)).toEqual(['HasStake', 'NoStake']);
       expect(rows[1]!.slotsPer10kSol).toBeNull();
     });

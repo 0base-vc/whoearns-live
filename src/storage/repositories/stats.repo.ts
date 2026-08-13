@@ -299,6 +299,21 @@ export type LeaderboardWindowSort =
 export interface LeaderboardWindowEpoch {
   epoch: Epoch;
   isCurrent: boolean;
+  /**
+   * Fraction of the epoch elapsed at the chain tip, in [0, 1]. Only
+   * meaningful — and only read — when `isCurrent` is true.
+   *
+   * Used to prorate the running epoch's stake in `slots_per_stake`, so
+   * the denominator covers the same observation period as the numerator
+   * (which counts elapsed leader slots only).
+   *
+   * It must be the EPOCH-WIDE fraction, not a per-validator one. Assigned
+   * slots sit at random positions, so at a given tip one validator may
+   * have 70% of its assignments behind it and another 30% — weighting by
+   * that would let slot placement alone move ranks. Defaults to 1 when
+   * omitted, i.e. "treat the epoch as fully exposed".
+   */
+  elapsedFraction?: number;
 }
 
 interface WindowedLeaderboardStatsRow {
@@ -1849,9 +1864,17 @@ export class StatsRepository {
     const values: string[] = [];
     for (let i = 0; i < args.epochs.length; i += 1) {
       const epoch = args.epochs[i]!;
-      const base = i * 3;
-      values.push(`($${base + 1}::bigint, $${base + 2}::boolean, $${base + 3}::int)`);
-      params.push(epoch.epoch, epoch.isCurrent, epoch.isCurrent ? 2 : 1);
+      const base = i * 4;
+      values.push(
+        `($${base + 1}::bigint, $${base + 2}::boolean, $${base + 3}::int, $${base + 4}::numeric)`,
+      );
+      // Clamped so a stale `currentSlot` (or one that briefly runs past
+      // the epoch's last slot) can't produce a negative or >1 weight.
+      const rawFraction = epoch.elapsedFraction ?? 1;
+      const elapsedFraction = Number.isFinite(rawFraction)
+        ? Math.min(1, Math.max(0, rawFraction))
+        : 1;
+      params.push(epoch.epoch, epoch.isCurrent, epoch.isCurrent ? 2 : 1, elapsedFraction);
     }
     const minParam = params.length + 1;
     const requiredClosedParam = params.length + 2;
@@ -1915,11 +1938,25 @@ export class StatsRepository {
     // unrestricted `window_slots` would let a validator clear a 64-slot
     // floor on stake-less slots while its ratio rests on four matched
     // ones — precisely the extreme small-sample case the floor is for.
-    const slotFloorColumn =
-      sort === 'slots_per_stake' ? 'COALESCE(window_slots_with_stake, 0)' : 'window_slots';
+    //
+    // Rows with NO stake anywhere in the window are a separate case: they
+    // have no ratio to be noisy, and the endpoint contract puts them in
+    // the NULLS LAST tail rather than hiding them. Applying the
+    // stake-covered floor to them would delete them entirely (their
+    // covered count is 0, and the floor is at least 1), so they fall back
+    // to the ordinary window-slots floor.
+    const slotFloorPredicate =
+      sort === 'slots_per_stake'
+        ? `(
+             CASE
+               WHEN window_stake_lamports IS NULL THEN window_slots
+               ELSE COALESCE(window_slots_with_stake, 0)
+             END
+           )`
+        : 'window_slots';
 
     const { rows } = await this.pool.query<WindowedLeaderboardStatsRow>(
-      `WITH included(epoch, is_current, priority) AS (
+      `WITH included(epoch, is_current, priority, elapsed_fraction) AS (
          VALUES ${values.join(', ')}
        ),
        windowed AS (
@@ -1993,28 +2030,31 @@ export class StatsRepository {
            -- numerator, so its stake must contribute only the matching
            -- fraction of exposure — otherwise a validator observed 10%
            -- into an open epoch is charged a full epoch of stake for a
-           -- tenth of the draw, and two validators drawing exactly as
-           -- expected report different ratios purely from when their
-           -- delegation changed. Leader slots are spread evenly across an
-           -- epoch, so elapsed/assigned is the exposure fraction.
-           -- NULLIF guards a current-epoch row with no schedule at all;
-           -- its numerator contribution is 0 too, so dropping it from the
-           -- denominator keeps the two sides consistent.
+           -- tenth of the draw.
+           --
+           -- The weight is the EPOCH-WIDE elapsed fraction supplied by
+           -- the caller, deliberately not this row's
+           -- slots_elapsed_assigned / slots_assigned. Assigned slots sit
+           -- at random positions in the epoch, so at one chain tip two
+           -- validators can have 70% and 30% of their assignments behind
+           -- them despite identical time exposure; weighting by that
+           -- would let slot placement alone reorder the leaderboard.
            SUM(CASE
              WHEN included.is_current
-             THEN evs.activated_stake_lamports
-                  * COALESCE(evs.slots_elapsed_assigned, 0)::numeric
-                  / NULLIF(evs.slots_assigned, 0)
+             THEN evs.activated_stake_lamports * included.elapsed_fraction
              ELSE evs.activated_stake_lamports
            END) FILTER (WHERE evs.activated_stake_lamports IS NOT NULL)::numeric
              AS window_stake_lamports,
-           -- Whether the fee/tip pipeline has covered ANY epoch in this
-           -- window. slots_per_stake admits rows the income predicate
+           -- Whether the fee/tip pipeline has covered EVERY epoch in this
+           -- window. BOOL_AND, not BOOL_OR: the income columns below are
+           -- window SUMS, so one uncovered epoch makes them a partial
+           -- total that would render as if it were the whole window's
+           -- earnings. slots_per_stake admits rows the income predicate
            -- would exclude (see incomeEvidenceClause), and those rows
            -- carry column-default zeros for fees and tips — which would
            -- otherwise render as "earned nothing" rather than "not yet
            -- measured".
-           BOOL_OR(
+           BOOL_AND(
              evs.fees_updated_at IS NOT NULL
              OR evs.tips_updated_at IS NOT NULL
              OR EXISTS (
@@ -2062,7 +2102,7 @@ export class StatsRepository {
            ELSE NULL
          END AS slots_per_10k_sol
         FROM windowed
-       WHERE ${slotFloorColumn} >= $${minParam}
+       WHERE ${slotFloorPredicate} >= $${minParam}
          ${maxStakeClause}
        ORDER BY ${order}
        LIMIT $${limitParam}`,
