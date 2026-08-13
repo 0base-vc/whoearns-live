@@ -29,7 +29,7 @@
 -->
 <script lang="ts">
   import type { PageData } from './$types';
-  import { HISTORY_TABLE_EPOCHS } from './+page';
+  import { HISTORY_TABLE_EPOCHS } from '$lib/history-window';
   import type { NodeTier, ValidatorEpochRecord } from '$lib/types';
   import {
     slotsPer10kSol,

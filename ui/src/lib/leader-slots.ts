@@ -26,7 +26,7 @@ const REPORTING_UNIT_SOL = 10_000;
  * two epochs back, so epoch N's slots were allocated against epoch
  * N-2's stake.
  */
-const SCHEDULE_STAKE_LAG_EPOCHS = 2;
+export const SCHEDULE_STAKE_LAG_EPOCHS = 2;
 
 /**
  * Index a history payload by epoch, so a row can reach the stake that
