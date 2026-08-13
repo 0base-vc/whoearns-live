@@ -1178,51 +1178,83 @@ describe('StatsRepository', () => {
       expect(back.slotsPer10kSol).toBeCloseTo(10, 6);
     });
 
-    it('applies the slot floor to the stake-covered slots for this sort', async () => {
-      // 400 stake-less slots plus 4 stake-covered ones. A floor of 64
-      // tests the sample the ratio is built from, so this row is
-      // excluded — without that, four slots at tiny stake would rank at
-      // the top on the strength of slots the ratio never used.
+    it('ignores minWindowSlots entirely for this sort', async () => {
+      // The floor guards averages with thin denominators; allocation is
+      // not an average. A validator that drew four slots really drew
+      // four, and one that drew none really drew none — both belong on
+      // the board. Dropping them would hide exactly the small operators
+      // this metric exists to make comparable.
       const epochs = [
         { epoch: 810, isCurrent: false },
         { epoch: 811, isCurrent: false },
       ];
       await repo.upsertSlotStats({
         epoch: 810,
-        votePubkey: 'ThinCoverage',
-        identityPubkey: 'ThinId',
-        slotsAssigned: 400,
-        slotsProduced: 400,
-        slotsSkipped: 0,
-      });
-      await repo.upsertSlotStats({
-        epoch: 811,
-        votePubkey: 'ThinCoverage',
-        identityPubkey: 'ThinId',
+        votePubkey: 'FourSlots',
+        identityPubkey: 'FourId',
         slotsAssigned: 4,
         slotsProduced: 4,
         slotsSkipped: 0,
-        activatedStakeLamports: 100n * SOL,
+        activatedStakeLamports: 1_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 811,
+        votePubkey: 'NoSlots',
+        identityPubkey: 'NoSlotsId',
+        slotsAssigned: 0,
+        slotsProduced: 0,
+        slotsSkipped: 0,
+        activatedStakeLamports: 50_000n * SOL,
       });
 
-      const ranked = await repo.findTopNByWindow({
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        // Far above either validator's slot count — and ignored.
+        minWindowSlots: 64,
+      });
+      expect(rows.map((r) => r.votePubkey).sort()).toEqual(['FourSlots', 'NoSlots']);
+
+      const four = rows.find((r) => r.votePubkey === 'FourSlots')!;
+      const none = rows.find((r) => r.votePubkey === 'NoSlots')!;
+      // 4 slots on 1k SOL = 40 per 10k SOL — a high reading the 4-slot
+      // sampling granularity explains, disclosed rather than filtered.
+      expect(four.slotsPer10kSol).toBeCloseTo(40, 6);
+      // Drew nothing: zero, not null and not absent.
+      expect(none.slotsPer10kSol).toBe(0);
+      // Ordering follows the ratio, so the zero sits last.
+      expect(rows[rows.length - 1]!.votePubkey).toBe('NoSlots');
+    });
+
+    it('still applies minWindowSlots to the other sorts', async () => {
+      // The opt-out is scoped to this sort; income rankings keep the
+      // floor they have always had.
+      const epochs = [{ epoch: 815, isCurrent: false }];
+      await seed({
+        epoch: 815,
+        vote: 'ThinIncome',
+        identity: 'ThinIncomeId',
+        slots: 4,
+        stakeSol: 1_000n,
+        fees: 5n,
+      });
+
+      const bySlots = await repo.findTopNByWindow({
         epochs,
         limit: 10,
         sort: 'slots_per_stake',
         minWindowSlots: 64,
       });
-      expect(ranked.map((r) => r.votePubkey)).toEqual([]);
+      expect(bySlots.map((r) => r.votePubkey)).toEqual(['ThinIncome']);
 
-      // The same row clears the floor on an income sort, which measures
-      // the unrestricted window — proving the floor is sort-aware rather
-      // than globally stricter.
-      const byIncomeFloor = await repo.findTopNByWindow({
+      const byIncome = await repo.findTopNByWindow({
         epochs,
         limit: 10,
-        sort: 'slots_per_stake',
-        minWindowSlots: 4,
+        sort: 'total_income',
+        minWindowSlots: 64,
       });
-      expect(byIncomeFloor.map((r) => r.votePubkey)).toEqual(['ThinCoverage']);
+      expect(byIncome.map((r) => r.votePubkey)).toEqual([]);
     });
 
     it('flags rows whose income has not been ingested', async () => {

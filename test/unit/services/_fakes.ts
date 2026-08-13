@@ -1057,15 +1057,11 @@ export class FakeStatsRepo {
 
     const sortKey = args.sort ?? 'income_per_slot';
     const rows = [...byVote.values()].filter((r) => {
-      // Mirrors the repo's sort-aware floor: `slots_per_stake` is judged
-      // on the stake-covered sample, except for rows with no stake at
-      // all, which fall back to the window count and stay in the null
-      // tail rather than being deleted.
-      const floorBasis =
-        sortKey === 'slots_per_stake' && r.slotsPer10kSol !== null
-          ? (r.windowSlotsWithStake ?? 0)
-          : r.windowSlots;
-      if (floorBasis < minWindowSlots) return false;
+      // `slots_per_stake` opts out of the floor entirely, mirroring the
+      // repo: drawing no leader slots is a real zero, not a reason to
+      // drop the validator off the board.
+      const floor = sortKey === 'slots_per_stake' ? 0 : minWindowSlots;
+      if (r.windowSlots < floor) return false;
       if (r.closedEpochsIncluded < requiredClosedEpochs) return false;
       // Stake bracket: window-representative stake STRICTLY below the
       // ceiling; NULL stake excluded — matches the real repo's outer

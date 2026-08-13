@@ -182,8 +182,11 @@ Query params:
   the other sorts in two ways: it admits validators whose slot data is
   ingested but whose fees are not, so check `hasIncomeData` before
   rendering their money columns (it is false unless every epoch in the
-  window has BOTH fee and tip data); and `minWindowSlots` is applied to the
-  stake-covered slots, reported as `windowSlotsWithStake`.
+  window has BOTH fee and tip data); and `minWindowSlots` does NOT apply — the
+  floor guards thin-denominator averages, while allocation is a count, so
+  a validator that drew four slots or none is reported as it stands. Zero
+  slots reads as `0` and sorts last. `windowSlotsWithStake` reports the
+  sample the ratio rests on.
 
 - `minWindowSlots` — 1-500, default 4. Rows below this denominator are
   filtered.
@@ -357,7 +360,11 @@ A second caveat matters for small validators: the leader schedule is
 sampled in **4-slot groups**, so a validator whose expected allocation is
 a fraction of a slot receives either 0 or at least 4. Observed in
 production: 175 SOL drawing 4 slots reported ~23x the cohort baseline.
-Any ranking on this metric needs a minimum-slots floor.
+This is disclosed rather than filtered: no minimum-slots floor is
+applied, since dropping those rows would hide exactly the small operators
+the metric exists to make comparable. Multi-epoch windows sum the draws —
+over `decade_epoch` (10 epochs) even small validators accumulate enough
+slots for the ratio to mean something.
 
 A third caveat is structural: leaderboard rows are grouped by vote
 account, while the leader schedule is an identity-level fact. During a

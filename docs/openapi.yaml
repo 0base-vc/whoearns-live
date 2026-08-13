@@ -2762,11 +2762,14 @@ components:
         whose fees/tips are not, since allocation is measurable without
         them. Check `hasIncomeData` before presenting income fields on such
         rows — they carry zeros meaning "unmeasured", not "earned nothing".
-        The `minWindowSlots` floor is applied to the
-            stake-covered slots here, so it constrains the sample the ratio
-            is actually built from. Rows with no stake anywhere in the
-            window are exempt — they have no ratio to be noisy and are
-            kept, with a null ratio, in the NULLS LAST tail.
+        `minWindowSlots` does NOT apply to this sort. The
+            floor guards averages with thin denominators; allocation is
+            not an average, so a validator that drew four slots — or none
+            — is reported as it stands rather than dropped. Zero slots
+            reads as a ratio of 0, which sorts last. Small validators can
+            read high because the schedule is sampled in 4-slot groups;
+            multi-epoch windows (decade_epoch especially) sum the draws
+            and make them comparable.
 
     LeaderboardBracket:
       type: string
