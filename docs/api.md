@@ -310,10 +310,33 @@ epoch the indexer holds slot data for**, independent of `limit`:
     "totalProduced": 10402,
     "totalSkipped": 62,
     "firstEpoch": 829,
-    "lastEpoch": 956
+    "lastEpoch": 956,
+    "epochsWithStake": 120,
+    "assignedWithStake": 9932,
+    "stakeWeightedSlotsPer10kSol": 9.83
   }
 }
 ```
+
+`stakeWeightedSlotsPer10kSol` is the figure to compare validators on.
+`totalAssigned` — like any raw slot count, and like a slots-per-epoch
+average — scales with delegation: a validator holding ten times the stake
+draws roughly ten times the slots, so ranking on it ranks by size. The
+ratio divides that out and leaves the part that is the schedule lottery.
+
+It is aggregated as `SUM(slots) / SUM(stake)` over stake-bearing epochs,
+NOT as the mean of per-epoch ratios, so epochs where the validator held
+more stake weigh proportionally more. `epochsWithStake` and
+`assignedWithStake` describe that same subset — pairing the unrestricted
+`totalAssigned` with the ratio would not add up. The division happens in
+SQL over `NUMERIC` because the lamport sum passes
+`Number.MAX_SAFE_INTEGER` after a few hundred epochs on a large validator.
+
+Each item in `items` also carries `activatedStakeLamports` /
+`activatedStakeSol` — that epoch's own snapshot — so the same ratio can be
+computed per epoch. That per-epoch series is where the swing shows: the
+schedule is redrawn every epoch, so the ratio moves even at constant
+stake.
 
 Do not reconstruct these by reducing over `items` — `items` is truncated by
 `limit`, so a client-side sum silently becomes a function of page size.

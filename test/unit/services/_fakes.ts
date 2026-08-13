@@ -1104,9 +1104,18 @@ export class FakeStatsRepo {
         totalSkipped: 0,
         firstEpoch: null,
         lastEpoch: null,
+        epochsWithStake: 0,
+        assignedWithStake: 0,
+        stakeWeightedSlotsPer10kSol: null,
       };
     }
     const epochs = rows.map((r) => r.epoch);
+    // Stake-bearing subset, mirroring the SQL's FILTER clauses. Σslots
+    // and Σstake are accumulated over the SAME rows so the ratio's
+    // numerator and denominator cover one population.
+    const staked = rows.filter((r) => r.activatedStakeLamports !== null);
+    const stakeSum = staked.reduce((sum, r) => sum + (r.activatedStakeLamports ?? 0n), 0n);
+    const assignedWithStake = staked.reduce((sum, r) => sum + r.slotsAssigned, 0);
     return {
       epochsCovered: rows.length,
       totalAssigned: rows.reduce((sum, r) => sum + r.slotsAssigned, 0),
@@ -1114,6 +1123,11 @@ export class FakeStatsRepo {
       totalSkipped: rows.reduce((sum, r) => sum + r.slotsSkipped, 0),
       firstEpoch: Math.min(...epochs),
       lastEpoch: Math.max(...epochs),
+      epochsWithStake: staked.length,
+      assignedWithStake,
+      // 1e13 = 1e9 lamports/SOL × 1e4 SOL per reporting unit.
+      stakeWeightedSlotsPer10kSol:
+        stakeSum > 0n ? (assignedWithStake * 1e13) / Number(stakeSum) : null,
     };
   }
 

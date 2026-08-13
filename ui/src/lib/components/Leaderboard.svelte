@@ -128,6 +128,13 @@
       alignRight: true,
     },
     {
+      key: 'slots_per_stake',
+      label: 'Slots / 10k SOL',
+      tooltip:
+        'Leader slots won per 10,000 SOL of activated stake in the selected window. Stake buys expected slots, but the schedule is drawn at random each epoch — so this is the size-neutral view of who actually drew well. Values are scoped to the selected window: a longer window accumulates more slots against the same stake snapshot, so compare rows within one window, not across windows.',
+      alignRight: true,
+    },
+    {
       key: 'compute_units',
       label: 'CU',
       tooltip:
@@ -269,6 +276,25 @@
     return formatCompactCu(item.windowedCu, { nullText: '—' });
   }
 
+  /**
+   * Leader slots won per 10,000 SOL of activated stake, over the
+   * selected window.
+   *
+   * Computed client-side from two fields the row already carries, so no
+   * new API surface: `windowSlots` is the window's slot total and
+   * `activatedStakeSol` is its representative stake snapshot — which is
+   * also exactly what the server's `slots_per_stake` ORDER BY divides,
+   * so the displayed number and the ranking cannot disagree.
+   *
+   * Em-dash (not 0) when stake is missing or non-positive: a row without
+   * a stake snapshot is unmeasurable, not unlucky.
+   */
+  function slotsPerStakeText(item: LeaderboardItem): string {
+    const stake = item.activatedStakeSol === null ? null : Number(item.activatedStakeSol);
+    if (stake === null || !Number.isFinite(stake) || stake <= 0) return '-';
+    return ((item.windowSlots / stake) * 10_000).toFixed(2);
+  }
+
   function cellText(item: LeaderboardItem, key: LeaderboardSort): string {
     switch (key) {
       case 'income_per_slot':
@@ -283,6 +309,8 @@
         return windowedCuText(item);
       case 'skip_rate':
         return skipRateText(item);
+      case 'slots_per_stake':
+        return slotsPerStakeText(item);
       default:
         return '-';
     }

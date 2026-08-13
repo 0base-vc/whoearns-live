@@ -847,4 +847,94 @@ describe('StatsRepository', () => {
     });
     expect(byIncome.map((r) => r.votePubkey)).toEqual(['LoCuVote', 'HiCuVote']);
   });
+
+  describe('sumLeaderSlotsByVote', () => {
+    const VOTE = 'LifetimeVote';
+    const IDENTITY = 'LifetimeIdentity';
+    const SOL = 1_000_000_000n;
+
+    async function seedEpoch(args: {
+      epoch: number;
+      slotsAssigned: number;
+      stakeSol?: bigint;
+    }): Promise<void> {
+      await repo.upsertSlotStats({
+        epoch: args.epoch,
+        votePubkey: VOTE,
+        identityPubkey: IDENTITY,
+        slotsAssigned: args.slotsAssigned,
+        slotsProduced: args.slotsAssigned,
+        slotsSkipped: 0,
+        ...(args.stakeSol === undefined ? {} : { activatedStakeLamports: args.stakeSol * SOL }),
+      });
+    }
+
+    it("weights the ratio by each epoch's own stake, not by epoch count", async () => {
+      // 10 slots at 10k SOL (=10.0 per 10k) and 40 at 100k (=4.0 per 10k).
+      // An AVG() of per-row ratios would give 7.0; Σslots/Σstake gives
+      // 50 / 110k · 10k = 4.545…, correctly weighting the epoch where the
+      // validator held ten times the stake ten times as heavily.
+      await seedEpoch({ epoch: 700, slotsAssigned: 10, stakeSol: 10_000n });
+      await seedEpoch({ epoch: 701, slotsAssigned: 40, stakeSol: 100_000n });
+
+      const totals = await repo.sumLeaderSlotsByVote(VOTE);
+      expect(totals.epochsCovered).toBe(2);
+      expect(totals.epochsWithStake).toBe(2);
+      expect(totals.assignedWithStake).toBe(50);
+      expect(totals.stakeWeightedSlotsPer10kSol).toBeCloseTo(4.5455, 3);
+    });
+
+    it('excludes stake-less epochs from the ratio but not from the totals', async () => {
+      // Exercises the SQL FILTER clauses: `total_assigned` counts both
+      // rows, while numerator and denominator cover only the row that
+      // has a stake snapshot. Without the FILTER on the numerator the
+      // ratio would come out 2.5x too high.
+      await seedEpoch({ epoch: 800, slotsAssigned: 20, stakeSol: 20_000n });
+      await seedEpoch({ epoch: 801, slotsAssigned: 30 });
+
+      const totals = await repo.sumLeaderSlotsByVote(VOTE);
+      expect(totals.totalAssigned).toBe(50);
+      expect(totals.epochsCovered).toBe(2);
+      expect(totals.epochsWithStake).toBe(1);
+      expect(totals.assignedWithStake).toBe(20);
+      expect(totals.stakeWeightedSlotsPer10kSol).toBeCloseTo(10, 6);
+    });
+
+    it('keeps precision when the lamport sum exceeds Number.MAX_SAFE_INTEGER', async () => {
+      // 20 epochs × 5M SOL = 1e17 lamports, well past 2^53 (~9.007e15).
+      // This is why the division happens in SQL over NUMERIC: doing it in
+      // JS would round the denominator before dividing. Expected ratio is
+      // exactly 4 slots per 10k SOL (2,000 slots per 5M SOL).
+      for (let i = 0; i < 20; i += 1) {
+        await seedEpoch({ epoch: 900 + i, slotsAssigned: 2_000, stakeSol: 5_000_000n });
+      }
+      const totals = await repo.sumLeaderSlotsByVote(VOTE);
+      expect(totals.epochsWithStake).toBe(20);
+      expect(totals.assignedWithStake).toBe(40_000);
+      expect(totals.stakeWeightedSlotsPer10kSol).toBeCloseTo(4, 9);
+    });
+
+    it('returns a null ratio — not zero or NaN — when no epoch has stake', async () => {
+      await seedEpoch({ epoch: 950, slotsAssigned: 12 });
+      const totals = await repo.sumLeaderSlotsByVote(VOTE);
+      expect(totals.totalAssigned).toBe(12);
+      expect(totals.epochsWithStake).toBe(0);
+      expect(totals.stakeWeightedSlotsPer10kSol).toBeNull();
+    });
+
+    it('returns zeroed totals for an unknown vote', async () => {
+      const totals = await repo.sumLeaderSlotsByVote('NoSuchVote');
+      expect(totals).toEqual({
+        epochsCovered: 0,
+        totalAssigned: 0,
+        totalProduced: 0,
+        totalSkipped: 0,
+        firstEpoch: null,
+        lastEpoch: null,
+        epochsWithStake: 0,
+        assignedWithStake: 0,
+        stakeWeightedSlotsPer10kSol: null,
+      });
+    });
+  });
 });

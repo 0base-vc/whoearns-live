@@ -293,7 +293,8 @@ export type LeaderboardWindowSort =
   | 'mev_tips'
   | 'fees'
   | 'skip_rate'
-  | 'compute_units';
+  | 'compute_units'
+  | 'slots_per_stake';
 
 export interface LeaderboardWindowEpoch {
   epoch: Epoch;
@@ -1149,13 +1150,37 @@ export class StatsRepository {
       total_skipped: string;
       first_epoch: string | null;
       last_epoch: string | null;
+      epochs_with_stake: string;
+      assigned_with_stake: string;
+      stake_weighted_slots_per_10k_sol: string | null;
     }>(
       `SELECT COUNT(*)                        AS epochs_covered,
               COALESCE(SUM(slots_assigned), 0) AS total_assigned,
               COALESCE(SUM(slots_produced), 0) AS total_produced,
               COALESCE(SUM(slots_skipped), 0)  AS total_skipped,
               MIN(epoch)                       AS first_epoch,
-              MAX(epoch)                       AS last_epoch
+              MAX(epoch)                       AS last_epoch,
+              COUNT(*) FILTER (WHERE activated_stake_lamports IS NOT NULL)
+                AS epochs_with_stake,
+              COALESCE(
+                SUM(slots_assigned) FILTER (WHERE activated_stake_lamports IS NOT NULL), 0)
+                AS assigned_with_stake,
+              -- Σ slots / Σ stake, scaled to "per 10,000 SOL":
+              --   1e9  lamports per SOL
+              --   1e4  SOL per reporting unit
+              -- so the numerator carries 1e13. Kept in SQL because the
+              -- lamport sum passes Number.MAX_SAFE_INTEGER after a few
+              -- hundred epochs on a large validator, while the RESULT is
+              -- a small number that survives the Number() cast intact.
+              CASE
+                WHEN COALESCE(SUM(activated_stake_lamports), 0) > 0
+                THEN (COALESCE(
+                        SUM(slots_assigned)
+                          FILTER (WHERE activated_stake_lamports IS NOT NULL), 0)::numeric
+                      * 1e13)
+                     / SUM(activated_stake_lamports)
+                ELSE NULL
+              END AS stake_weighted_slots_per_10k_sol
          FROM epoch_validator_stats
         WHERE vote_pubkey = $1
           AND slots_updated_at IS NOT NULL`,
@@ -1173,6 +1198,9 @@ export class StatsRepository {
         totalSkipped: 0,
         firstEpoch: null,
         lastEpoch: null,
+        epochsWithStake: 0,
+        assignedWithStake: 0,
+        stakeWeightedSlotsPer10kSol: null,
       };
     }
     return {
@@ -1182,6 +1210,12 @@ export class StatsRepository {
       totalSkipped: Number(row.total_skipped),
       firstEpoch: row.first_epoch === null ? null : Number(row.first_epoch),
       lastEpoch: row.last_epoch === null ? null : Number(row.last_epoch),
+      epochsWithStake: Number(row.epochs_with_stake),
+      assignedWithStake: Number(row.assigned_with_stake),
+      stakeWeightedSlotsPer10kSol:
+        row.stake_weighted_slots_per_10k_sol === null
+          ? null
+          : Number(row.stake_weighted_slots_per_10k_sol),
     };
   }
 
@@ -1757,6 +1791,27 @@ export class StatsRepository {
           // blocks in the window (NULLs sort last). Income breaks ties.
           return `(compute_units_total / NULLIF(slots_produced, 0)) DESC NULLS LAST,
                   window_income_lamports DESC`;
+        case 'slots_per_stake':
+          // Leader slots won per unit of stake — the size-neutral view of
+          // the schedule draw. Raw slot counts scale with delegation, so
+          // ranking on them ranks by size; this divides that out and
+          // leaves the part that is chance.
+          //
+          // `activated_stake_lamports` here is the window's
+          // REPRESENTATIVE snapshot (one epoch's value, picked by the
+          // ARRAY_AGG below), not a sum across the window. That is fine
+          // for ordering — every row in a given response spans the same
+          // window, so the shared epoch-count factor cancels out of the
+          // comparison — but it means the magnitude is only meaningful
+          // relative to the selected window, which is why the UI labels
+          // it as window-scoped.
+          //
+          // 1e13 = 1e9 lamports/SOL × 1e4 SOL, matching the units the API
+          // reports elsewhere. NULLIF keeps stake-less rows out of the
+          // division; they sort last rather than as an infinite ratio.
+          return `(window_slots::numeric * 1e13 / NULLIF(activated_stake_lamports, 0))
+                    DESC NULLS LAST,
+                  window_slots DESC`;
         case 'income_per_slot':
         default:
           return `(window_income_lamports::numeric / NULLIF(window_slots, 0)) DESC NULLS LAST,

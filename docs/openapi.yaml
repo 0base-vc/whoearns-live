@@ -1929,6 +1929,8 @@ components:
         - slotsElapsedAssigned
         - slotsProduced
         - slotsSkipped
+        - activatedStakeLamports
+        - activatedStakeSol
         - blockFeesTotalLamports
         - blockFeesTotalSol
         - blockTipsTotalLamports
@@ -1984,6 +1986,18 @@ components:
             no block was produced. null when hasSlots=false.
             Invariant: slotsAssigned >= slotsProduced + slotsSkipped.
 
+        activatedStakeLamports:
+          type: [string, 'null']
+          description: >
+            Activated stake snapshot for THIS epoch, in lamports. Per-epoch
+            rather than current, so a validator whose delegation grew over
+            time is measured against what it actually held in each epoch.
+            Null on rows predating the snapshot column (migration 0006).
+            Divide `slotsAssigned` by it for the size-neutral allocation —
+            the raw count tracks delegation, not the schedule draw.
+        activatedStakeSol:
+          type: [string, 'null']
+          description: Same value in SOL.
         blockFeesTotalLamports:
           type: [string, 'null']
           description: Leader fee reward as decimal lamports. null when hasIncome=false.
@@ -2368,10 +2382,23 @@ components:
         Note on interpretation: leader schedules are sampled
         stake-weighted at random in 4-slot groups, so a single epoch's
         `slotsAssigned` carries substantial variance. `totalAssigned`
-        over many epochs is the comparable figure; divide by
-        `epochsCovered` to normalise for how long the validator has
-        been indexed.
-      required: [epochsCovered, totalAssigned, totalProduced, totalSkipped, firstEpoch, lastEpoch]
+        over many epochs is more stable than any single epoch — but it
+        still scales with delegation, so use
+        `stakeWeightedSlotsPer10kSol` when comparing validators to each
+        other. `totalAssigned` answers "how many slots did this validator
+        get"; the ratio answers "how did its draw compare".
+      required:
+        [
+          epochsCovered,
+          totalAssigned,
+          totalProduced,
+          totalSkipped,
+          firstEpoch,
+          lastEpoch,
+          epochsWithStake,
+          assignedWithStake,
+          stakeWeightedSlotsPer10kSol,
+        ]
       properties:
         epochsCovered:
           type: integer
@@ -2395,6 +2422,35 @@ components:
         lastEpoch:
           type: [integer, 'null']
           description: Newest counted epoch; null when `epochsCovered` is 0.
+        epochsWithStake:
+          type: integer
+          minimum: 0
+          description: >
+            Epochs that also carry a stake snapshot — the population the
+            stake-normalised ratio is computed over. Lower than
+            `epochsCovered` when older rows predate the snapshot column.
+        assignedWithStake:
+          type: integer
+          minimum: 0
+          description: >
+            Sum of assigned slots restricted to stake-bearing epochs; the
+            numerator of `stakeWeightedSlotsPer10kSol`. Quoted separately
+            because pairing the unrestricted `totalAssigned` with a ratio
+            computed over a subset would not add up.
+        stakeWeightedSlotsPer10kSol:
+          type: [number, 'null']
+          description: >
+            Leader slots per 10,000 SOL of activated stake, aggregated as
+            SUM(slots) / SUM(stake) across stake-bearing epochs — not the
+            mean of per-epoch ratios, so epochs where the validator held
+            more stake weigh proportionally more.
+
+
+            This is the size-neutral figure. Raw slot counts (and
+            slots-per-epoch averages) scale with delegation, so ranking on
+            them ranks validators by size; dividing by stake leaves the
+            part that is the schedule lottery. Null when no epoch carries
+            a stake snapshot.
 
     BatchRequest:
       type: object
@@ -2658,11 +2714,20 @@ components:
 
     LeaderboardSort:
       type: string
-      enum: [income_per_slot, total_income, mev_tips, fees, skip_rate]
+      enum:
+        [income_per_slot, total_income, mev_tips, fees, skip_rate, compute_units, slots_per_stake]
       default: income_per_slot
       description: |
         Ranking mode for `/v1/leaderboard`. See endpoint doc for semantics.
         `income_per_slot` (default) is the stake-neutral live trend metric.
+
+        `slots_per_stake` ranks by leader slots won per unit of activated
+        stake in the selected window — the size-neutral view of the
+        schedule draw, since raw slot counts scale with delegation. The
+        divisor is the window's REPRESENTATIVE stake snapshot, not a sum
+        across it, so magnitudes are comparable within one window but not
+        across windows of different lengths. Rows without a stake snapshot
+        sort last.
 
     LeaderboardBracket:
       type: string

@@ -389,6 +389,25 @@ export interface ValidatorCurrentEpochResponse {
   slotsElapsedAssigned: number | null;
   slotsProduced: number | null;
   slotsSkipped: number | null;
+  /**
+   * Activated stake snapshot for THIS epoch, in lamports (decimal
+   * string, matching every other lamport field on this response).
+   *
+   * Per-epoch rather than current: a validator whose delegation grew
+   * over time must be measured against what it actually had in each
+   * epoch, or its older epochs look luckier than they were. Null for
+   * rows written before the stake snapshot existed (migration 0006) and
+   * for epochs the stake refresh never covered.
+   *
+   * Exists so consumers can normalise `slotsAssigned` by stake. Raw
+   * leader-slot counts scale with delegation, so they rank validators
+   * by size; dividing by stake is what makes the allocation comparable
+   * across validators — and what exposes the epoch-to-epoch swing of
+   * the schedule lottery.
+   */
+  activatedStakeLamports: string | null;
+  /** Same value in SOL, pre-divided for display. */
+  activatedStakeSol: string | null;
 
   /**
    * Leader's post-burn receipt of base + priority fees combined
@@ -555,4 +574,32 @@ export interface ValidatorLeaderSlotTotals {
   firstEpoch: Epoch | null;
   /** Newest counted epoch, or null when `epochsCovered === 0`. */
   lastEpoch: Epoch | null;
+  /**
+   * Epochs that ALSO carry a stake snapshot — the subset the
+   * stake-normalised figures below are computed over. Lower than
+   * `epochsCovered` when older rows predate the snapshot column.
+   */
+  epochsWithStake: number;
+  /**
+   * Σ `slots_assigned` restricted to stake-bearing epochs. Pairs with
+   * `stakeWeightedSlotsPer10kSol` as its numerator — quoting the
+   * unrestricted `totalAssigned` next to a ratio computed over a
+   * subset would not add up.
+   */
+  assignedWithStake: number;
+  /**
+   * Leader slots per 10,000 SOL of activated stake, aggregated as
+   * `Σ slots / Σ stake` across stake-bearing epochs — NOT the mean of
+   * per-epoch ratios, so epochs where the validator held more stake
+   * weigh proportionally more.
+   *
+   * This is the comparable figure. A raw slot count (or slots-per-
+   * epoch) scales with delegation and therefore ranks validators by
+   * size; dividing by stake removes size and leaves the part that is
+   * actually the schedule lottery. Computed in SQL because the
+   * lamport sums exceed `Number.MAX_SAFE_INTEGER` for long histories.
+   *
+   * Null when no epoch carries a stake snapshot, or the sum is zero.
+   */
+  stakeWeightedSlotsPer10kSol: number | null;
 }

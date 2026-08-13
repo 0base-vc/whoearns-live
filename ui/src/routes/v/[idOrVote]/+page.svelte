@@ -1715,10 +1715,28 @@
           <dd class="text-right tabular-nums">
             {leaderSlotSummary.totalAssigned.toLocaleString()}
             <span class="block text-xs text-[color:var(--color-text-subtle)]">
-              {leaderSlotSummary.epochsCovered.toLocaleString()} epochs{#if leaderSlotSummary.avgAssignedPerEpoch !== null}
-                · {leaderSlotSummary.avgAssignedPerEpoch.toFixed(1)}/epoch{/if}
+              {leaderSlotSummary.epochsCovered.toLocaleString()} epochs
             </span>
           </dd>
+
+          <!--
+            The size-neutral counterpart. A slots-per-EPOCH average was
+            shown here first and was actively misleading: it scales with
+            delegation, so every large validator looked "lucky". Dividing
+            by stake removes size and leaves the schedule draw, which is
+            the only part worth comparing between validators.
+          -->
+          {#if leaderSlotSummary.slotsPer10kSol !== null}
+            <dt class="text-xs uppercase tracking-wider text-[color:var(--color-text-subtle)]">
+              Slots per 10k SOL
+            </dt>
+            <dd class="text-right tabular-nums">
+              {leaderSlotSummary.slotsPer10kSol.toFixed(2)}
+              <span class="block text-xs text-[color:var(--color-text-subtle)]">
+                over {leaderSlotSummary.epochsWithStake.toLocaleString()} epochs with stake data
+              </span>
+            </dd>
+          {/if}
         {/if}
 
         <!--

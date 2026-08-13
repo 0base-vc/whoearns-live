@@ -72,7 +72,15 @@ const SortEnumSchema = z.preprocess(
     }
   },
   z
-    .enum(['income_per_slot', 'total_income', 'mev_tips', 'fees', 'skip_rate', 'compute_units'])
+    .enum([
+      'income_per_slot',
+      'total_income',
+      'mev_tips',
+      'fees',
+      'skip_rate',
+      'compute_units',
+      'slots_per_stake',
+    ])
     .default('income_per_slot'),
 );
 

@@ -17,6 +17,14 @@ export interface ValidatorEpochRecord {
   slotsElapsedAssigned: number | null;
   slotsProduced: number | null;
   slotsSkipped: number | null;
+  /**
+   * Activated stake for THIS epoch (decimal-string lamports), so slot
+   * allocation can be normalised against what the validator actually
+   * held at the time. Null on rows predating the snapshot column.
+   * Optional for backwards compat with older API responses.
+   */
+  activatedStakeLamports?: string | null;
+  activatedStakeSol?: string | null;
 
   /** Leader's post-burn receipt of base + priority combined (legacy lump). */
   blockFeesTotalLamports: string | null;
@@ -184,6 +192,16 @@ export interface LeaderSlotTotals {
   firstEpoch: number | null;
   /** Newest counted epoch; null when `epochsCovered === 0`. */
   lastEpoch: number | null;
+  /** Epochs that also carry a stake snapshot — the ratio's population. */
+  epochsWithStake?: number;
+  /** Σ assigned slots over stake-bearing epochs (the ratio's numerator). */
+  assignedWithStake?: number;
+  /**
+   * Leader slots per 10,000 SOL of stake, aggregated as Σslots / Σstake
+   * so higher-stake epochs weigh more. The size-neutral figure: raw slot
+   * counts rank validators by delegation, this one doesn't.
+   */
+  stakeWeightedSlotsPer10kSol?: number | null;
 }
 
 /**
@@ -721,7 +739,8 @@ export type LeaderboardSort =
   | 'mev_tips'
   | 'fees'
   | 'compute_units'
-  | 'skip_rate';
+  | 'skip_rate'
+  | 'slots_per_stake';
 
 /**
  * Leaderboard bracket filter (I). Mirrors the server-accepted
