@@ -2435,9 +2435,12 @@ components:
           type: integer
           minimum: 0
           description: >
-            Epochs that also carry a stake snapshot — the population the
+            Epochs carrying a POSITIVE stake snapshot — the population the
             stake-normalised ratio is computed over. Lower than
-            `epochsCovered` when older rows predate the snapshot column.
+            `epochsCovered` when older rows predate the snapshot column,
+            or when an epoch recorded zero activated stake (which is
+            excluded: it would add slots to the numerator and nothing to
+            the denominator).
         assignedWithStake:
           type: integer
           minimum: 0

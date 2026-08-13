@@ -1388,6 +1388,79 @@ describe('StatsRepository', () => {
       expect(rows[0]!.hasIncomeEvidence).toBe(false);
     });
 
+    it('treats a zero-stake snapshot as uncovered, not as free slots', async () => {
+      // ValidatorService returns 0n when the RPC reports zero activated
+      // stake, and SlotService still records that epoch's schedule. A
+      // NULL-only filter accepts the row, adding its slots to the
+      // numerator while contributing nothing to the denominator — which
+      // inflates the ratio without bound.
+      const epochs = [
+        { epoch: 880, isCurrent: false },
+        { epoch: 881, isCurrent: false },
+      ];
+      await repo.upsertSlotStats({
+        epoch: 880,
+        votePubkey: 'ZeroStake',
+        identityPubkey: 'ZeroStakeId',
+        slotsAssigned: 20,
+        slotsProduced: 20,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 881,
+        votePubkey: 'ZeroStake',
+        identityPubkey: 'ZeroStakeId',
+        slotsAssigned: 200,
+        slotsProduced: 200,
+        slotsSkipped: 0,
+        activatedStakeLamports: 0n,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      expect(rows).toHaveLength(1);
+      // Only the 20 slots backed by 10k SOL count: 20 per 10k SOL. Were
+      // the zero-stake epoch included, the numerator would be 220 and the
+      // ratio 220 — an eleven-fold overstatement.
+      expect(rows[0]!.windowSlotsWithStake).toBe(20);
+      expect(rows[0]!.slotsPer10kSol).toBeCloseTo(20, 6);
+    });
+
+    it('excludes zero-stake epochs from the lifetime ratio too', async () => {
+      await repo.upsertSlotStats({
+        epoch: 890,
+        votePubkey: 'ZeroLifetime',
+        identityPubkey: 'ZeroLifetimeId',
+        slotsAssigned: 20,
+        slotsProduced: 20,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 891,
+        votePubkey: 'ZeroLifetime',
+        identityPubkey: 'ZeroLifetimeId',
+        slotsAssigned: 200,
+        slotsProduced: 200,
+        slotsSkipped: 0,
+        activatedStakeLamports: 0n,
+      });
+
+      const totals = await repo.sumLeaderSlotsByVote('ZeroLifetime');
+      // Both epochs have slot data...
+      expect(totals.epochsCovered).toBe(2);
+      expect(totals.totalAssigned).toBe(220);
+      // ...but only one has usable stake.
+      expect(totals.epochsWithStake).toBe(1);
+      expect(totals.assignedWithStake).toBe(20);
+      expect(totals.stakeWeightedSlotsPer10kSol).toBeCloseTo(20, 6);
+    });
+
     it('requires BOTH income streams per epoch, not just one', async () => {
       // `seed` writes fees and tips together via addIncomeDelta, so the
       // one-sided case is built directly: fees ingested, tips never. That

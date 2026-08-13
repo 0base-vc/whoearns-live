@@ -995,7 +995,9 @@ export class FakeStatsRepo {
       if (row.feesUpdatedAt === null || row.tipsUpdatedAt === null) {
         next.hasIncomeEvidence = false;
       }
-      if (row.activatedStakeLamports !== null) {
+      // Strictly positive, mirroring the SQL: a 0n snapshot would add
+      // slots to the numerator and nothing to the denominator.
+      if (row.activatedStakeLamports !== null && row.activatedStakeLamports > 0n) {
         // Running epoch contributes stake in proportion to the EPOCH-WIDE
         // elapsed fraction, matching the SQL — its numerator is elapsed
         // slots. Per-validator slot progress is deliberately not used.
@@ -1219,7 +1221,12 @@ export class FakeStatsRepo {
     // Stake-bearing subset, mirroring the SQL's FILTER clauses. Σslots
     // and Σstake are accumulated over the SAME rows so the ratio's
     // numerator and denominator cover one population.
-    const staked = rows.filter((r) => r.activatedStakeLamports !== null);
+    // Strictly positive, mirroring the SQL: a 0n snapshot (the RPC
+    // reporting zero activated stake) would add slots to the numerator
+    // and nothing to the denominator.
+    const staked = rows.filter(
+      (r) => r.activatedStakeLamports !== null && r.activatedStakeLamports > 0n,
+    );
     const stakeSum = staked.reduce((sum, r) => sum + (r.activatedStakeLamports ?? 0n), 0n);
     const assignedWithStake = staked.reduce((sum, r) => sum + r.slotsAssigned, 0);
     return {

@@ -1223,10 +1223,15 @@ export class StatsRepository {
               COALESCE(SUM(slots_skipped), 0)  AS total_skipped,
               MIN(epoch)                       AS first_epoch,
               MAX(epoch)                       AS last_epoch,
-              COUNT(*) FILTER (WHERE activated_stake_lamports IS NOT NULL)
+              -- Strictly positive, not merely non-null: ValidatorService
+              -- returns 0n when the RPC reports zero activated stake, and
+              -- SlotService still writes that epoch's schedule. Counting
+              -- such a row adds slots to the numerator and nothing to the
+              -- denominator, inflating the ratio.
+              COUNT(*) FILTER (WHERE activated_stake_lamports > 0)
                 AS epochs_with_stake,
               COALESCE(
-                SUM(slots_assigned) FILTER (WHERE activated_stake_lamports IS NOT NULL), 0)
+                SUM(slots_assigned) FILTER (WHERE activated_stake_lamports > 0), 0)
                 AS assigned_with_stake,
               -- Σ slots / Σ stake, scaled to "per 10,000 SOL":
               --   1e9  lamports per SOL
@@ -1239,7 +1244,7 @@ export class StatsRepository {
                 WHEN COALESCE(SUM(activated_stake_lamports), 0) > 0
                 THEN (COALESCE(
                         SUM(slots_assigned)
-                          FILTER (WHERE activated_stake_lamports IS NOT NULL), 0)::numeric
+                          FILTER (WHERE activated_stake_lamports > 0), 0)::numeric
                       * 1e13)
                      / SUM(activated_stake_lamports)
                 ELSE NULL
@@ -2088,7 +2093,7 @@ export class StatsRepository {
            SUM(CASE
              WHEN included.is_current THEN COALESCE(evs.slots_elapsed_assigned, 0)
              ELSE evs.slots_assigned
-           END) FILTER (WHERE evs.activated_stake_lamports IS NOT NULL)::numeric
+           END) FILTER (WHERE evs.activated_stake_lamports > 0)::numeric
              AS window_slots_with_stake,
            -- The running epoch contributes only its ELAPSED slots to the
            -- numerator, so its stake must contribute only the matching
@@ -2132,7 +2137,7 @@ export class StatsRepository {
                           / included.slot_count))
                     END)
              ELSE evs.activated_stake_lamports
-           END) FILTER (WHERE evs.activated_stake_lamports IS NOT NULL)::numeric
+           END) FILTER (WHERE evs.activated_stake_lamports > 0)::numeric
              AS window_stake_lamports,
            -- Whether income for this window is COMPLETE — every epoch,
            -- and both streams within each epoch.
