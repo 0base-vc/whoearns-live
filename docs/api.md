@@ -362,9 +362,17 @@ a fraction of a slot receives either 0 or at least 4. Observed in
 production: 175 SOL drawing 4 slots reported ~23x the cohort baseline.
 This is disclosed rather than filtered: no minimum-slots floor is
 applied, since dropping those rows would hide exactly the small operators
-the metric exists to make comparable. Multi-epoch windows sum the draws —
-over `decade_epoch` (10 epochs) even small validators accumulate enough
-slots for the ratio to mean something.
+the metric exists to make comparable.
+
+Longer windows REDUCE this variance but do not guarantee an adequate
+sample. `decade_epoch` sums ten epochs, so a validator drawing hundreds
+of slots per epoch gets a ratio worth trusting — measured on production
+data, the smallest such validator (53,966 SOL) accumulates 452 slots over
+the window. But the 175-SOL case above expects ~0.17 slots per epoch,
+i.e. ~1.7 over ten — still under a single 4-slot group, so it will
+usually read either 0 or one highly volatile group no matter how long the
+window. Read the ratio alongside `windowSlotsWithStake`: that count, not
+the window length, is what tells you how much the number is worth.
 
 A third caveat is structural: leaderboard rows are grouped by vote
 account, while the leader schedule is an identity-level fact. During a

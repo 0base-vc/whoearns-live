@@ -270,7 +270,7 @@ paths:
             with the running epoch prorated by elapsed exposure. Unlike the
             other sorts this one admits validators whose slot data is
             ingested but whose fees are not (`hasIncomeData: false`), and
-            applies `minWindowSlots` to the stake-covered slots.
+            IGNORES `minWindowSlots` (see that parameter).
 
         Rows below `minWindowSlots` are filtered. Returned rows also include a
         `sampleStatus` hint (`low`, `medium`, `normal`) for clients that want
@@ -323,7 +323,17 @@ paths:
             minimum: 1
             maximum: 500
             default: 4
-          description: Minimum denominator slots required for a row.
+          description: >
+            Minimum denominator slots required for a row.
+
+
+            NOT applied when `sort=slots_per_stake`. That ranking is a
+            count, not an average, so a validator that drew four leader
+            slots — or none — is reported as it stands rather than
+            filtered out; zero slots reads as a ratio of 0 and sorts last.
+            A request combining the two therefore returns rows below the
+            supplied value by design. Use `windowSlotsWithStake` on each
+            row to judge how large a sample its ratio rests on.
         - name: sort
           in: query
           required: false
