@@ -29,6 +29,7 @@
 -->
 <script lang="ts">
   import type { PageData } from './$types';
+  import { HISTORY_TABLE_EPOCHS } from './+page';
   import type { NodeTier, ValidatorEpochRecord } from '$lib/types';
   import {
     slotsPer10kSol,
@@ -209,8 +210,19 @@
    */
   const stakeByEpoch = $derived<ReadonlyMap<number, number>>(stakeSolByEpoch(history.items));
 
+  /**
+   * Rows the table renders. The loader over-fetches by
+   * `SCHEDULE_STAKE_LAG` so the oldest displayed epochs can still reach
+   * their N-2 stake; those extra epochs are divisors only, never rows —
+   * otherwise the page would silently grow by two whenever a validator
+   * has a long enough history.
+   */
+  const visibleItems = $derived<ValidatorEpochRecord[]>(
+    history.items.slice(0, HISTORY_TABLE_EPOCHS),
+  );
+
   const sortedItems = $derived<ValidatorEpochRecord[]>(
-    sortEpochRows(history.items, epochSortKey, epochSortDirection, stakeByEpoch),
+    sortEpochRows(visibleItems, epochSortKey, epochSortDirection, stakeByEpoch),
   );
 
   /**
@@ -360,7 +372,7 @@
           {
             '@type': 'PropertyValue',
             name: 'epochCount',
-            value: history.items.length,
+            value: visibleItems.length,
             description: 'Number of epochs indexed for this validator',
           },
           ...(latestClosedRow !== null
@@ -876,14 +888,16 @@
   income chart and the compute-units chart sit side by side, each
   roughly half width; below 768px the grid collapses to a single
   column so each chart gets the full content width on phones. Both
-  charts read the same `history.items` array — one source of truth.
+  charts read the same `visibleItems` array — one source of truth, and
+  the same epoch range the table shows (the loader's two extra rows are
+  divisors for the per-stake ratio, not content).
   Each chart's inner LineChart is `w-full`, so it reflows to whatever
   width its grid cell resolves to at any viewport size.
 -->
 {#if hasAnyHistory}
   <div class="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
-    <IncomeChartLoader history={history.items} />
-    <ComputeUnitsChartLoader history={history.items} />
+    <IncomeChartLoader history={visibleItems} />
+    <ComputeUnitsChartLoader history={visibleItems} />
   </div>
 {/if}
 

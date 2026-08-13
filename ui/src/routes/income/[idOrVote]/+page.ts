@@ -2,6 +2,15 @@ import { error } from '@sveltejs/kit';
 import { fetchCurrentEpoch, fetchScoring, fetchValidatorHistory, ApiError } from '$lib/api';
 import type { PageLoad } from './$types';
 
+/** Epochs rendered in the income page's breakdown table. */
+export const HISTORY_TABLE_EPOCHS = 50;
+
+/**
+ * Epochs between a leader schedule and the stake snapshot that set it.
+ * Solana fixes epoch N's schedule roughly two epochs in advance.
+ */
+export const SCHEDULE_STAKE_LAG = 2;
+
 export const load: PageLoad = async ({ params, fetch: fetchFn }) => {
   const { idOrVote } = params;
   try {
@@ -13,7 +22,14 @@ export const load: PageLoad = async ({ params, fetch: fetchFn }) => {
     // page renders as a "no tier yet" pill. The income page renders
     // fine without it.
     const [history, currentEpoch, scoring] = await Promise.all([
-      fetchValidatorHistory(idOrVote, 50, fetchFn),
+      // Two epochs beyond what the table shows. The per-epoch
+      // slots-per-stake ratio divides epoch N's slots by the epoch N-2
+      // snapshot (that is the stake Solana drew the schedule against), so
+      // without the overshoot the two OLDEST visible rows would have no
+      // divisor and render as em-dashes — and sort as unmeasurable —
+      // purely because of where the page size happened to fall. The page
+      // still displays `HISTORY_TABLE_EPOCHS` rows; see `visibleItems`.
+      fetchValidatorHistory(idOrVote, HISTORY_TABLE_EPOCHS + SCHEDULE_STAKE_LAG, fetchFn),
       fetchCurrentEpoch(fetchFn).catch(() => null),
       fetchScoring(idOrVote, fetchFn).catch(() => null),
     ]);
