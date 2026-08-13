@@ -335,6 +335,7 @@ interface WindowedLeaderboardStatsRow {
   activated_stake_lamports: string | null;
   slots_per_10k_sol: string | null;
   has_income_evidence: boolean | null;
+  window_slots_with_stake: string | null;
 }
 
 export interface IndexedIncomePerSlotBenchmarkRequest {
@@ -537,6 +538,17 @@ export interface WindowedLeaderboardStats {
    * column-default 0 and would otherwise read as "earned nothing".
    */
   hasIncomeEvidence: boolean;
+  /**
+   * Slots the stake-normalised ratio was actually computed from — the
+   * subset of `windowSlots` whose epochs carry a stake snapshot.
+   *
+   * This, not `windowSlots`, is the sample size behind `slotsPer10kSol`.
+   * A ratio resting on four covered slots inside a window of hundreds
+   * carries four slots' worth of variance, so any confidence signal
+   * attached to the ratio has to be derived from this count. Null when
+   * no epoch in the window carries a stake snapshot.
+   */
+  windowSlotsWithStake: number | null;
 }
 
 function rowToWindowedStats(row: WindowedLeaderboardStatsRow): WindowedLeaderboardStats {
@@ -561,6 +573,8 @@ function rowToWindowedStats(row: WindowedLeaderboardStatsRow): WindowedLeaderboa
       row.activated_stake_lamports === null ? null : toLamports(row.activated_stake_lamports),
     slotsPer10kSol: row.slots_per_10k_sol === null ? null : Number(row.slots_per_10k_sol),
     hasIncomeEvidence: row.has_income_evidence === true,
+    windowSlotsWithStake:
+      row.window_slots_with_stake === null ? null : Number(row.window_slots_with_stake),
   };
 }
 
@@ -1776,6 +1790,32 @@ export class StatsRepository {
     return rows.map(rowToStats);
   }
 
+  /**
+   * Highest slot the slot-ingester has counted for an epoch, across all
+   * tracked validators.
+   *
+   * This is the watermark `slots_elapsed_assigned` is measured through —
+   * the finalized tip minus the ingester's finality buffer, refreshed on
+   * its own cadence. It runs BEHIND `epochs.current_slot`, which the
+   * epoch-watcher writes from the confirmed tip on a different schedule.
+   *
+   * Callers prorating a running epoch must use this rather than
+   * `current_slot`: the numerator of `slots_per_stake` only counts slots
+   * up to this watermark, so a fraction derived from the confirmed tip
+   * would charge stake for exposure whose assignments have not been
+   * counted yet. Null when no row for the epoch carries a watermark.
+   */
+  async findEpochSlotWatermark(epoch: Epoch): Promise<Slot | null> {
+    const { rows } = await this.pool.query<{ watermark: string | null }>(
+      `SELECT MAX(slot_window_last_slot) AS watermark
+         FROM epoch_validator_stats
+        WHERE epoch = $1`,
+      [epoch],
+    );
+    const raw = rows[0]?.watermark ?? null;
+    return raw === null ? null : Number(raw);
+  }
+
   async findTopNByWindow(args: {
     epochs: LeaderboardWindowEpoch[];
     limit: number;
@@ -1841,6 +1881,18 @@ export class StatsRepository {
           // the schedule draw. Raw slot counts scale with delegation, so
           // ranking on them ranks by size; this divides that out and
           // leaves the part that is chance.
+          //
+          // KNOWN LIMITATION: rows are grouped by vote_pubkey, but the
+          // leader schedule is an IDENTITY-level fact. During a vote
+          // rotation two vote accounts can share one identity, and
+          // SlotService writes that identity's full schedule onto each
+          // vote row while recording only that vote's own stake. Both
+          // rows then divide the same slots by a fraction of the stake,
+          // and both read high. This predates the sort — window_slots is
+          // inflated the same way for income_per_slot — and fixing it
+          // means consolidating same-identity rows before aggregation,
+          // which moves every existing ranking. Tracked separately
+          // rather than smuggled into this change.
           //
           // Denominator is the window-SUMMED stake, matched slot-for-slot
           // with its numerator (see the CTE). Dividing the window's slot
@@ -2092,6 +2144,7 @@ export class StatsRepository {
          NULLIF(last_updated_at, '-infinity'::timestamptz) AS last_updated_at,
          activated_stake_lamports,
          COALESCE(has_income_evidence, FALSE) AS has_income_evidence,
+         window_slots_with_stake,
          -- Emitted rather than left to the client: the ORDER BY below
          -- divides these exact operands, so a client recomputing the
          -- number from other fields could disagree with the ranking it

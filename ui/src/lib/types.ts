@@ -821,6 +821,12 @@ export interface LeaderboardItem {
    * where every row was income-filtered).
    */
   hasIncomeData?: boolean;
+  /**
+   * Slots the `slotsPer10kSol` ratio rests on — the stake-covered subset
+   * of `windowSlots`. Under `sort=slots_per_stake` this is what
+   * `sampleStatus` describes. Absent on older API responses.
+   */
+  windowSlotsWithStake?: number | null;
   /** APR-equivalent (income / stake). Null when stake data is missing
    * (pre-stake-snapshot-migration epoch). */
   incomePerStake: number | null;

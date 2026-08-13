@@ -29,9 +29,17 @@ import { unwrap } from '../zod-helpers.js';
  * treats the epoch as fully exposed — the conservative choice, since it
  * never inflates a stake-normalised ratio.
  */
-function elapsedFractionOf(epoch: EpochInfo): number {
-  if (epoch.currentSlot === null || epoch.slotCount <= 0) return 1;
-  const elapsed = epoch.currentSlot - epoch.firstSlot + 1;
+function elapsedFractionOf(epoch: EpochInfo, slotWatermark: number | null): number {
+  // Prefer the slot-ingester's watermark over `currentSlot`. The
+  // numerator this fraction pairs with (`slots_elapsed_assigned`) is
+  // counted only through that watermark — the finalized tip minus the
+  // ingester's finality buffer — whereas `currentSlot` tracks the
+  // confirmed tip on a faster cadence. Using the confirmed tip would
+  // charge stake for exposure whose assignments have not been counted,
+  // which shifts mixed-window ordering for validators whose stake moved.
+  const tip = slotWatermark ?? epoch.currentSlot;
+  if (tip === null || epoch.slotCount <= 0) return 1;
+  const elapsed = tip - epoch.firstSlot + 1;
   if (!Number.isFinite(elapsed)) return 1;
   return Math.min(1, Math.max(0, elapsed / epoch.slotCount));
 }
@@ -141,7 +149,7 @@ const LeaderboardQuerySchema = z
   }));
 
 export interface LeaderboardRoutesDeps {
-  statsRepo: Pick<StatsRepository, 'findTopNByWindow'>;
+  statsRepo: Pick<StatsRepository, 'findTopNByWindow' | 'findEpochSlotWatermark'>;
   epochsRepo: Pick<
     EpochsRepository,
     'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs' | 'findLatestCompleteClosedEpochBlock'
@@ -224,6 +232,13 @@ interface LeaderboardRow {
    * Null when no epoch in the window carries a stake snapshot.
    */
   slotsPer10kSol: number | null;
+  /**
+   * Slots the `slotsPer10kSol` ratio was computed from — the subset of
+   * `windowSlots` whose epochs carry a stake snapshot. Under
+   * `sort=slots_per_stake` this is also what `sampleStatus` describes.
+   * Null when no epoch in the window carries a stake snapshot.
+   */
+  windowSlotsWithStake: number | null;
   /**
    * False when the fee/tip pipeline has not covered any epoch in the
    * window for this validator.
@@ -309,6 +324,7 @@ function toRow(
   claimed: boolean,
   decadeBadge: DecadeBadge | undefined,
   windowedCu: bigint | null,
+  sort: LeaderboardWindowSort,
 ): LeaderboardRow {
   const total = stats.blockFeesTotalLamports + stats.blockTipsTotalLamports;
   const perSlot = stats.windowSlots > 0 ? total / BigInt(stats.windowSlots) : null;
@@ -345,7 +361,15 @@ function toRow(
     currentIncomeLamports: stats.currentIncomeLamports.toString(),
     currentIncomeSol: lamportsToSol(stats.currentIncomeLamports),
     closedEpochsIncluded: stats.closedEpochsIncluded,
-    sampleStatus: sampleStatus(stats.windowSlots),
+    // Confidence has to describe the sample the RANKED metric rests on.
+    // `slots_per_stake` is computed from the stake-covered subset, so a
+    // ratio built on four covered slots inside a 400-slot window carries
+    // four slots' worth of variance — reporting `normal` from the
+    // unrestricted count would hide exactly what these tiers exist to
+    // communicate. Every other sort uses the full window, as before.
+    sampleStatus: sampleStatus(
+      sort === 'slots_per_stake' ? (stats.windowSlotsWithStake ?? 0) : stats.windowSlots,
+    ),
     slotWindowLastSlot: stats.slotWindowLastSlot,
     slotWindowUpdatedAt:
       stats.slotWindowUpdatedAt === null ? null : stats.slotWindowUpdatedAt.toISOString(),
@@ -354,6 +378,7 @@ function toRow(
     activatedStakeSol: stake === null ? null : lamportsToSol(stake),
     incomePerStake,
     slotsPer10kSol: stats.slotsPer10kSol,
+    windowSlotsWithStake: stats.windowSlotsWithStake,
     hasIncomeData: stats.hasIncomeEvidence,
     claimed,
     decadeEpochStart: decadeBadge?.epochStart ?? null,
@@ -437,6 +462,7 @@ async function resolveWindowEpochs(
     EpochsRepository,
     'findCurrent' | 'findByEpoch' | 'findLatestClosedEpochs' | 'findLatestCompleteClosedEpochBlock'
   >,
+  statsRepo: Pick<StatsRepository, 'findEpochSlotWatermark'>,
 ): Promise<{
   epochs: LeaderboardWindowEpoch[];
   current: EpochInfo | null;
@@ -493,13 +519,14 @@ async function resolveWindowEpochs(
     // stake in the `slots_per_stake` ranking so its denominator covers
     // the same period as its elapsed-slot numerator. Must be epoch-wide:
     // a per-validator fraction would let leader-slot placement move ranks.
-    // Falls back to 1 (fully exposed) when the chain tip hasn't been
-    // observed yet — the epoch-watcher fills `currentSlot` on its first
-    // tick, so this is a cold-start window only.
+    // Derived from the slot-ingester's watermark, which is the tip the
+    // elapsed-slot numerator is counted through. Falls back to 1 (fully
+    // exposed) only on a cold start, before either tip is known.
+    const watermark = await statsRepo.findEpochSlotWatermark(current.epoch);
     out.push({
       epoch: current.epoch,
       isCurrent: true,
-      elapsedFraction: elapsedFractionOf(current),
+      elapsedFraction: elapsedFractionOf(current, watermark),
     });
   }
   for (const row of closed) {
@@ -593,7 +620,7 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
       return cached;
     }
 
-    const resolved = await resolveWindowEpochs(query.window, query.epoch, epochsRepo);
+    const resolved = await resolveWindowEpochs(query.window, query.epoch, epochsRepo, statsRepo);
 
     if (resolved.epochs.length === 0) {
       const body: LeaderboardResponse = {
@@ -701,6 +728,7 @@ const leaderboardRoutes: FastifyPluginAsync<LeaderboardRoutesDeps> = async (
         claimedVotes.has(row.votePubkey),
         decadeRanks.get(row.votePubkey),
         windowedCuByVote.get(row.votePubkey) ?? null,
+        query.sort,
       ),
     );
 

@@ -961,6 +961,7 @@ export class FakeStatsRepo {
         activatedStakeLamports: row.activatedStakeLamports,
         slotsPer10kSol: null,
         hasIncomeEvidence: true,
+        windowSlotsWithStake: null,
       };
       next.identityPubkey = isCurrent ? row.identityPubkey : next.identityPubkey;
       next.windowSlots += denominator;
@@ -1025,6 +1026,7 @@ export class FakeStatsRepo {
       const stakeSum = stakeSumByVote.get(vote) ?? 0n;
       const slots = slotsWithStakeByVote.get(vote) ?? 0;
       agg.slotsPer10kSol = stakeSum > 0n ? (slots * 1e13) / Number(stakeSum) : null;
+      agg.windowSlotsWithStake = slotsWithStakeByVote.has(vote) ? slots : null;
     }
 
     const rows = [...byVote.values()].filter((r) => {
@@ -1148,6 +1150,21 @@ export class FakeStatsRepo {
    * with `slotsUpdatedAt !== null`, matching the SQL predicate — a row
    * created by `addFeeDelta` alone must not contribute a 0-slot epoch.
    */
+  /**
+   * Mirror of `StatsRepository.findEpochSlotWatermark` — the highest
+   * slot the ingester has counted for an epoch, which is the tip
+   * `slotsElapsedAssigned` is measured through.
+   */
+  async findEpochSlotWatermark(epoch: Epoch): Promise<Slot | null> {
+    let max: number | null = null;
+    for (const row of this.rows.values()) {
+      if (row.epoch !== epoch) continue;
+      if (row.slotWindowLastSlot === null) continue;
+      if (max === null || row.slotWindowLastSlot > max) max = row.slotWindowLastSlot;
+    }
+    return max;
+  }
+
   async sumLeaderSlotsByVote(vote: VotePubkey): Promise<ValidatorLeaderSlotTotals> {
     const rows = [...this.rows.values()].filter(
       (r) => r.votePubkey === vote && r.slotsUpdatedAt !== null,
