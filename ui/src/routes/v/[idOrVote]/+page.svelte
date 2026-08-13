@@ -42,6 +42,7 @@
 -->
 <script lang="ts">
   import { page } from '$app/state';
+  import { summariseLeaderSlots, type LeaderSlotSummary } from '$lib/leader-slots';
   import { onDestroy, onMount } from 'svelte';
   import { afterNavigate } from '$app/navigation';
 
@@ -100,6 +101,21 @@
 
   const scoring = $derived(data.scoring);
   const history = $derived(data.history);
+
+  /**
+   * Lifetime leader-slot allocation, straight off the history payload's
+   * DB-side aggregate. Distinct from `tierWindow.slotsAssigned` further
+   * down, which is the SCORING WINDOW's count (the last N epochs the
+   * tier is computed over) — this one spans every indexed epoch.
+   *
+   * Null when history is absent (brand-new validator) or when the API
+   * predates the `leaderSlots` field; the key-facts row is skipped
+   * entirely rather than rendering a zero that reads as "never got a
+   * leader slot".
+   */
+  const leaderSlotSummary = $derived<LeaderSlotSummary | null>(
+    history?.leaderSlots === undefined ? null : summariseLeaderSlots(history.leaderSlots),
+  );
 
   // Operator narrative — short note authored by the validator's
   // operator (claim flow stores it on `profile.narrativeOverride`).
@@ -1680,6 +1696,30 @@
             <span class="text-[color:var(--color-text-muted)]">—</span>
           {/if}
         </dd>
+
+        <!--
+          Lifetime leader slots. Stake buys EXPECTED slots; the schedule
+          itself is drawn stake-weighted at random each epoch, so what a
+          validator actually got is only visible as an accumulated
+          count. Sits directly under Active stake because the two read
+          together — stake is the input, this is the realised output.
+          Deliberately a raw count with its epoch coverage, not a
+          "lucky / unlucky" verdict: the ratio that would justify such a
+          label needs cluster-wide total stake, which this service
+          doesn't index.
+        -->
+        {#if leaderSlotSummary !== null && leaderSlotSummary.epochsCovered > 0}
+          <dt class="text-xs uppercase tracking-wider text-[color:var(--color-text-subtle)]">
+            Leader slots · lifetime
+          </dt>
+          <dd class="text-right tabular-nums">
+            {leaderSlotSummary.totalAssigned.toLocaleString()}
+            <span class="block text-xs text-[color:var(--color-text-subtle)]">
+              {leaderSlotSummary.epochsCovered.toLocaleString()} epochs{#if leaderSlotSummary.avgAssignedPerEpoch !== null}
+                · {leaderSlotSummary.avgAssignedPerEpoch.toFixed(1)}/epoch{/if}
+            </span>
+          </dd>
+        {/if}
 
         <!--
           Vote credits across the scoring window. Source is

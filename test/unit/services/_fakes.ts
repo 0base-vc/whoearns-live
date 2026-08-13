@@ -38,6 +38,7 @@ import type {
   Validator,
   ValidatorUpsertInput,
   ValidatorEpochSlotStats,
+  ValidatorLeaderSlotTotals,
   VotePubkey,
   WalletDailyActivity,
 } from '../../../src/types/domain.js';
@@ -1084,6 +1085,36 @@ export class FakeStatsRepo {
     const rows = [...this.rows.values()].filter((r) => r.votePubkey === vote);
     rows.sort((a, b) => b.epoch - a.epoch);
     return rows.slice(0, safeLimit);
+  }
+
+  /**
+   * Mirror of `StatsRepository.sumLeaderSlotsByVote`. Counts only rows
+   * with `slotsUpdatedAt !== null`, matching the SQL predicate — a row
+   * created by `addFeeDelta` alone must not contribute a 0-slot epoch.
+   */
+  async sumLeaderSlotsByVote(vote: VotePubkey): Promise<ValidatorLeaderSlotTotals> {
+    const rows = [...this.rows.values()].filter(
+      (r) => r.votePubkey === vote && r.slotsUpdatedAt !== null,
+    );
+    if (rows.length === 0) {
+      return {
+        epochsCovered: 0,
+        totalAssigned: 0,
+        totalProduced: 0,
+        totalSkipped: 0,
+        firstEpoch: null,
+        lastEpoch: null,
+      };
+    }
+    const epochs = rows.map((r) => r.epoch);
+    return {
+      epochsCovered: rows.length,
+      totalAssigned: rows.reduce((sum, r) => sum + r.slotsAssigned, 0),
+      totalProduced: rows.reduce((sum, r) => sum + r.slotsProduced, 0),
+      totalSkipped: rows.reduce((sum, r) => sum + r.slotsSkipped, 0),
+      firstEpoch: Math.min(...epochs),
+      lastEpoch: Math.max(...epochs),
+    };
   }
 
   putPeerBenchmark(benchmark: EpochPeerBenchmark): void {

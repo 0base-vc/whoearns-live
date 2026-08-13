@@ -522,3 +522,37 @@ export interface ValidatorCurrentEpochResponse {
    */
   sameClientAverageCu: string | null;
 }
+
+/**
+ * Lifetime leader-slot allocation for one validator, summed across
+ * EVERY epoch the indexer has slot data for — not the `limit`-bounded
+ * window `/v1/validators/:idOrVote/history` returns.
+ *
+ * The distinction matters: leader-slot allocation is a stake-weighted
+ * lottery drawn fresh each epoch (the schedule is sampled in 4-slot
+ * groups), so a single epoch's count is mostly noise. Summing over the
+ * validator's whole indexed lifetime is what turns it into a stable
+ * figure worth ranking on. Deriving the sum client-side from the
+ * history window would silently make the number a function of
+ * `?limit=`, which is why this is a separate DB-side aggregate.
+ *
+ * Only epochs with `slots_updated_at IS NOT NULL` are counted — the
+ * same "has slot data" predicate the response serializer uses for
+ * `hasSlots`. A row that exists solely because the fee-ingester wrote
+ * income would otherwise contribute a spurious 0-slot epoch and drag
+ * `avgAssignedPerEpoch` down.
+ */
+export interface ValidatorLeaderSlotTotals {
+  /** Epochs with ingested slot data. Denominator for the averages. */
+  epochsCovered: number;
+  /** Σ `slots_assigned` — the headline "slots won" figure. */
+  totalAssigned: number;
+  /** Σ `slots_produced`. */
+  totalProduced: number;
+  /** Σ `slots_skipped`. */
+  totalSkipped: number;
+  /** Oldest counted epoch, or null when `epochsCovered === 0`. */
+  firstEpoch: Epoch | null;
+  /** Newest counted epoch, or null when `epochsCovered === 0`. */
+  lastEpoch: Epoch | null;
+}

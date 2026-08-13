@@ -2339,6 +2339,56 @@ components:
             - $ref: '#/components/schemas/ValidatorProfile'
             - type: 'null'
         claimed: { type: boolean }
+        leaderSlots: { $ref: '#/components/schemas/LeaderSlotTotals' }
+
+    LeaderSlotTotals:
+      type: object
+      description: |
+        Lifetime leader-slot counters for the validator, summed by the
+        indexer across EVERY epoch it holds slot data for.
+
+        This is deliberately not a sum of `items`, which the `limit`
+        query parameter truncates — summing the visible window would
+        make the figure change with page size. Clients ranking or
+        comparing validators should use these fields, not a client-side
+        reduction over `items`.
+
+        Only epochs with ingested slot data are counted, so an epoch
+        that exists solely because block income was recorded does not
+        contribute a spurious zero. All-zero with null bounds for a
+        just-tracked validator, and for one whose operator has opted
+        out (the response withholds `items` in that case too).
+
+        Note on interpretation: leader schedules are sampled
+        stake-weighted at random in 4-slot groups, so a single epoch's
+        `slotsAssigned` carries substantial variance. `totalAssigned`
+        over many epochs is the comparable figure; divide by
+        `epochsCovered` to normalise for how long the validator has
+        been indexed.
+      required: [epochsCovered, totalAssigned, totalProduced, totalSkipped, firstEpoch, lastEpoch]
+      properties:
+        epochsCovered:
+          type: integer
+          minimum: 0
+          description: Number of epochs with ingested slot data.
+        totalAssigned:
+          type: integer
+          minimum: 0
+          description: Sum of leader slots the schedule assigned.
+        totalProduced:
+          type: integer
+          minimum: 0
+          description: Sum of slots the validator produced a block for.
+        totalSkipped:
+          type: integer
+          minimum: 0
+          description: Sum of slots confirmed skipped.
+        firstEpoch:
+          type: [integer, 'null']
+          description: Oldest counted epoch; null when `epochsCovered` is 0.
+        lastEpoch:
+          type: [integer, 'null']
+          description: Newest counted epoch; null when `epochsCovered` is 0.
 
     BatchRequest:
       type: object

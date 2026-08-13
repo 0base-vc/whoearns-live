@@ -150,6 +150,40 @@ export interface ValidatorHistory {
    * `undefined` as `false`.
    */
   claimed?: boolean;
+  /**
+   * Lifetime leader-slot allocation, summed by the indexer across every
+   * epoch it has slot data for — NOT a sum of `items`, which is capped
+   * by the `limit` query parameter.
+   *
+   * Optional for backwards compat with API responses predating this
+   * field; treat `undefined` as "totals unavailable" and fall back to
+   * per-epoch rendering only.
+   */
+  leaderSlots?: LeaderSlotTotals;
+}
+
+/**
+ * Lifetime leader-slot counters. Leader-slot allocation is a stake-
+ * weighted lottery re-drawn every epoch, so a single epoch's count is
+ * mostly noise — these lifetime sums are what make it comparable.
+ *
+ * `epochsCovered` is the denominator any per-epoch normalisation needs:
+ * `totalAssigned` alone rewards longevity (more indexed epochs = a
+ * bigger sum) as much as it does stake.
+ */
+export interface LeaderSlotTotals {
+  /** Epochs with ingested slot data. Denominator for the averages. */
+  epochsCovered: number;
+  /** Σ slots the leader schedule handed this validator. */
+  totalAssigned: number;
+  /** Σ slots it actually produced a block for. */
+  totalProduced: number;
+  /** Σ slots confirmed skipped. */
+  totalSkipped: number;
+  /** Oldest counted epoch; null when `epochsCovered === 0`. */
+  firstEpoch: number | null;
+  /** Newest counted epoch; null when `epochsCovered === 0`. */
+  lastEpoch: number | null;
 }
 
 /**

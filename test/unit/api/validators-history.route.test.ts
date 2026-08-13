@@ -204,6 +204,108 @@ describe('GET /v1/validators/:idOrVote/history', () => {
     ctx = await makeCtx();
   });
 
+  describe('leaderSlots lifetime totals', () => {
+    /** Seed `count` consecutive slot-bearing epochs ending at `lastEpoch`. */
+    async function seedEpochs(
+      lastEpoch: number,
+      count: number,
+      slotsAssignedPerEpoch: number,
+    ): Promise<void> {
+      await ctx.validators.upsert({
+        votePubkey: VOTE_1,
+        identityPubkey: IDENTITY_1,
+        firstSeenEpoch: lastEpoch - count + 1,
+        lastSeenEpoch: lastEpoch,
+      });
+      for (let i = 0; i < count; i += 1) {
+        await ctx.stats.upsertSlotStats({
+          epoch: lastEpoch - i,
+          votePubkey: VOTE_1,
+          identityPubkey: IDENTITY_1,
+          slotsAssigned: slotsAssignedPerEpoch,
+          slotsProduced: slotsAssignedPerEpoch - 1,
+          slotsSkipped: 1,
+        });
+      }
+    }
+
+    it('sums every indexed epoch regardless of the ?limit= window', async () => {
+      await seedEpochs(600, 10, 8);
+
+      // The window is deliberately narrower than the seeded history.
+      const res = await ctx.app.inject({
+        method: 'GET',
+        url: `/v1/validators/${VOTE_1}/history?limit=3`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+
+      // Window is honoured...
+      expect(body.items).toHaveLength(3);
+      // ...but the lifetime totals are NOT a sum of `items`. This is the
+      // whole reason the aggregate lives in SQL: a client paging with a
+      // small limit must still see the same "slots won" figure.
+      expect(body.leaderSlots).toEqual({
+        epochsCovered: 10,
+        totalAssigned: 80,
+        totalProduced: 70,
+        totalSkipped: 10,
+        firstEpoch: 591,
+        lastEpoch: 600,
+      });
+    });
+
+    it('excludes epochs that have income but no ingested slot data', async () => {
+      await seedEpochs(600, 2, 5);
+      // An income-only row: the fee-ingester wrote fees for an epoch the
+      // slot-ingester never covered, leaving `slotsUpdatedAt` null and
+      // `slotsAssigned` at its column default of 0. Counting it would
+      // dilute any per-epoch average the UI derives. Written straight
+      // into the fake's store because no public write path produces
+      // this shape — `addFeeDelta` only mutates rows that already exist.
+      ctx.stats.rows.set(
+        `598:${VOTE_1}`,
+        makeStats(598, VOTE_1, IDENTITY_1, {
+          slotsUpdatedAt: null,
+          feesUpdatedAt: new Date(),
+          blockFeesTotalLamports: 1_000n,
+        }),
+      );
+
+      const res = await ctx.app.inject({
+        method: 'GET',
+        url: `/v1/validators/${VOTE_1}/history`,
+      });
+      const body = res.json();
+      expect(body.leaderSlots.epochsCovered).toBe(2);
+      expect(body.leaderSlots.totalAssigned).toBe(10);
+      expect(body.leaderSlots.firstEpoch).toBe(599);
+    });
+
+    it('returns zeroed totals for a validator with no epochs at all', async () => {
+      await ctx.validators.upsert({
+        votePubkey: VOTE_1,
+        identityPubkey: IDENTITY_1,
+        firstSeenEpoch: 500,
+        lastSeenEpoch: 500,
+      });
+
+      const res = await ctx.app.inject({
+        method: 'GET',
+        url: `/v1/validators/${VOTE_1}/history`,
+      });
+      const body = res.json();
+      expect(body.leaderSlots).toEqual({
+        epochsCovered: 0,
+        totalAssigned: 0,
+        totalProduced: 0,
+        totalSkipped: 0,
+        firstEpoch: null,
+        lastEpoch: null,
+      });
+    });
+  });
+
   it('returns the full history for a known vote pubkey', async () => {
     // Seed a known validator with one stats row.
     await ctx.validators.upsert({

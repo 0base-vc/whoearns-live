@@ -297,6 +297,41 @@ The CU chart adds a matching `sameClientAverageCu` alongside `serviceAverageCu`.
 These are populated on the history endpoint; single-epoch endpoints that reuse
 `ValidatorEpochRecord` may return `peerBenchmark: null`.
 
+### `leaderSlots` — lifetime leader-slot totals
+
+The response also carries a `leaderSlots` block summed **DB-side across every
+epoch the indexer holds slot data for**, independent of `limit`:
+
+```json
+{
+  "leaderSlots": {
+    "epochsCovered": 128,
+    "totalAssigned": 10464,
+    "totalProduced": 10402,
+    "totalSkipped": 62,
+    "firstEpoch": 829,
+    "lastEpoch": 956
+  }
+}
+```
+
+Do not reconstruct these by reducing over `items` — `items` is truncated by
+`limit`, so a client-side sum silently becomes a function of page size.
+
+Why the lifetime view matters: Solana samples each epoch's leader schedule
+stake-weighted at random, in 4-slot groups. A single epoch's `slotsAssigned` is
+therefore a draw, and two validators with identical stake routinely land 10-15%
+apart over one epoch. Variance falls with the square root of the epoch count, so
+`totalAssigned` over a long `epochsCovered` reflects stake rather than chance.
+
+`epochsCovered` counts only epochs with ingested slot data — a row that exists
+solely because block income was recorded contributes neither an epoch nor a
+zero. Use it as the denominator when normalising: `totalAssigned` alone rewards
+longevity (more indexed epochs = a bigger sum) as much as it does stake.
+
+All-zero with null bounds for a just-tracked validator, and for one whose
+operator has opted out (which withholds `items` for the same reason).
+
 ## `GET /v1/validators/:idOrVote/current-epoch`
 
 Returns the record for a validator at the current epoch. `idOrVote` accepts

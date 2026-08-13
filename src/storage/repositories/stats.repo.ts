@@ -7,6 +7,7 @@ import type {
   IdentityPubkey,
   PeerBenchmarkBasis,
   Slot,
+  ValidatorLeaderSlotTotals,
   VotePubkey,
 } from '../../types/domain.js';
 
@@ -1117,6 +1118,71 @@ export class StatsRepository {
       [vote, safe],
     );
     return rows.map(rowToStats);
+  }
+
+  /**
+   * Lifetime leader-slot totals for one vote, in a single indexed
+   * aggregate.
+   *
+   * Ranged over `(vote_pubkey, epoch DESC)` — `idx_evs_vote_epoch` from
+   * migration 0001 — so this is an index-only-ish scan bounded by the
+   * validator's own epoch count (hundreds of rows), not a table scan.
+   *
+   * `slots_updated_at IS NOT NULL` mirrors the `hasSlots` predicate in
+   * `serializeValidator`: rows the fee-ingester created before the
+   * slot-ingester ever ran carry `slots_assigned = 0` by column default,
+   * and counting them would understate `avgAssignedPerEpoch` on the
+   * caller side. `COUNT(*)` is therefore the count of *slot-bearing*
+   * epochs, and MIN/MAX(epoch) are the bounds of that same set — so the
+   * range the API reports and the range the sums cover never disagree.
+   *
+   * SUM over INTEGER widens to NUMERIC/bigint in Postgres and arrives as
+   * a string; `Number()` is safe here because the theoretical ceiling is
+   * 432,000 slots/epoch × the epoch count, orders of magnitude below
+   * `Number.MAX_SAFE_INTEGER`.
+   */
+  async sumLeaderSlotsByVote(vote: VotePubkey): Promise<ValidatorLeaderSlotTotals> {
+    const { rows } = await this.pool.query<{
+      epochs_covered: string;
+      total_assigned: string;
+      total_produced: string;
+      total_skipped: string;
+      first_epoch: string | null;
+      last_epoch: string | null;
+    }>(
+      `SELECT COUNT(*)                        AS epochs_covered,
+              COALESCE(SUM(slots_assigned), 0) AS total_assigned,
+              COALESCE(SUM(slots_produced), 0) AS total_produced,
+              COALESCE(SUM(slots_skipped), 0)  AS total_skipped,
+              MIN(epoch)                       AS first_epoch,
+              MAX(epoch)                       AS last_epoch
+         FROM epoch_validator_stats
+        WHERE vote_pubkey = $1
+          AND slots_updated_at IS NOT NULL`,
+      [vote],
+    );
+    // Aggregate-only SELECT with no GROUP BY always yields exactly one
+    // row, even for an unknown vote (all-zero / all-NULL). The fallback
+    // exists to satisfy `noUncheckedIndexedAccess`, not a real case.
+    const row = rows[0];
+    if (row === undefined) {
+      return {
+        epochsCovered: 0,
+        totalAssigned: 0,
+        totalProduced: 0,
+        totalSkipped: 0,
+        firstEpoch: null,
+        lastEpoch: null,
+      };
+    }
+    return {
+      epochsCovered: Number(row.epochs_covered),
+      totalAssigned: Number(row.total_assigned),
+      totalProduced: Number(row.total_produced),
+      totalSkipped: Number(row.total_skipped),
+      firstEpoch: row.first_epoch === null ? null : Number(row.first_epoch),
+      lastEpoch: row.last_epoch === null ? null : Number(row.last_epoch),
+    };
   }
 
   /**
