@@ -1313,7 +1313,10 @@ describe('StatsRepository', () => {
         slotsElapsedAssigned: 10,
         slotsProduced: 10,
         slotsSkipped: 0,
-        slotWindowLastSlot: 216_000, // 50% into a 432k-slot epoch at slot 0
+        // The fraction counts slots INCLUSIVELY (watermark - firstSlot + 1),
+        // so the 50% mark of a 432k-slot epoch starting at slot 0 is
+        // slot 215_999, not 216_000.
+        slotWindowLastSlot: 215_999,
         activatedStakeLamports: 10_000n * SOL,
       });
       await repo.upsertSlotStats({
@@ -1324,7 +1327,7 @@ describe('StatsRepository', () => {
         slotsElapsedAssigned: 5,
         slotsProduced: 5,
         slotsSkipped: 0,
-        slotWindowLastSlot: 108_000, // 25%
+        slotWindowLastSlot: 107_999, // 25%, same inclusive convention
         activatedStakeLamports: 10_000n * SOL,
       });
 
