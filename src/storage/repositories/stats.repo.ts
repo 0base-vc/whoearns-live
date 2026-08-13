@@ -2134,25 +2134,27 @@ export class StatsRepository {
              ELSE evs.activated_stake_lamports
            END) FILTER (WHERE evs.activated_stake_lamports IS NOT NULL)::numeric
              AS window_stake_lamports,
-           -- Whether the fee/tip pipeline has covered EVERY epoch in this
-           -- window. BOOL_AND, not BOOL_OR: the income columns below are
-           -- window SUMS, so one uncovered epoch makes them a partial
-           -- total that would render as if it were the whole window's
-           -- earnings. slots_per_stake admits rows the income predicate
+           -- Whether income for this window is COMPLETE — every epoch,
+           -- and both streams within each epoch.
+           --
+           -- BOOL_AND across epochs because the income columns are window
+           -- SUMS: one uncovered epoch makes them a partial total that
+           -- would render as the whole window's earnings.
+           --
+           -- Both timestamps within an epoch for the same reason at a
+           -- smaller scale, and matching the completeness rule
+           -- findEconomicPercentile already applies: a row with only
+           -- fees_updated_at set undercounts (fees + tips) by exactly
+           -- the missing half. Deliberately stricter than
+           -- incomeEvidenceClause, which admits a row on ANY evidence —
+           -- that clause decides whether a validator is RANKABLE, this
+           -- flag decides whether its money columns are safe to show. slots_per_stake admits rows the income predicate
            -- would exclude (see incomeEvidenceClause), and those rows
            -- carry column-default zeros for fees and tips — which would
            -- otherwise render as "earned nothing" rather than "not yet
            -- measured".
            BOOL_AND(
-             evs.fees_updated_at IS NOT NULL
-             OR evs.tips_updated_at IS NOT NULL
-             OR EXISTS (
-               SELECT 1
-                 FROM processed_blocks pb
-                WHERE pb.epoch = evs.epoch
-                  AND pb.leader_identity = evs.identity_pubkey
-                LIMIT 1
-             )
+             evs.fees_updated_at IS NOT NULL AND evs.tips_updated_at IS NOT NULL
            ) AS has_income_evidence
          FROM included
          JOIN epoch_validator_stats evs ON evs.epoch = included.epoch

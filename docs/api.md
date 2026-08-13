@@ -181,7 +181,8 @@ Query params:
   window (running epoch prorated by elapsed exposure), and differs from
   the other sorts in two ways: it admits validators whose slot data is
   ingested but whose fees are not, so check `hasIncomeData` before
-  rendering their money columns; and `minWindowSlots` is applied to the
+  rendering their money columns (it is false unless every epoch in the
+  window has BOTH fee and tip data); and `minWindowSlots` is applied to the
   stake-covered slots, reported as `windowSlotsWithStake`.
 
 - `minWindowSlots` — 1-500, default 4. Rows below this denominator are

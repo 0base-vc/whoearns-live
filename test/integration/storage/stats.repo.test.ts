@@ -1388,6 +1388,40 @@ describe('StatsRepository', () => {
       expect(rows[0]!.hasIncomeEvidence).toBe(false);
     });
 
+    it('requires BOTH income streams per epoch, not just one', async () => {
+      // `seed` writes fees and tips together via addIncomeDelta, so the
+      // one-sided case is built directly: fees ingested, tips never. That
+      // undercounts (fees + tips) by exactly the missing half, which is
+      // the same completeness rule findEconomicPercentile applies.
+      const epochs = [{ epoch: 870, isCurrent: false }];
+      await repo.upsertSlotStats({
+        epoch: 870,
+        votePubkey: 'FeesOnly',
+        identityPubkey: 'FeesOnlyId',
+        slotsAssigned: 20,
+        slotsProduced: 20,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+      await repo.addFeeDelta({
+        epoch: 870,
+        identityPubkey: 'FeesOnlyId',
+        deltaLamports: 9n,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      expect(rows).toHaveLength(1);
+      // Ranks fine — allocation is fully measured — but its money columns
+      // are a half-total and must not be presented as complete.
+      expect(rows[0]!.slotsPer10kSol).toBeCloseTo(20, 6);
+      expect(rows[0]!.hasIncomeEvidence).toBe(false);
+    });
+
     it('sorts rows without any stake snapshot last, with a null ratio', async () => {
       const epochs = [{ epoch: 700, isCurrent: false }];
       await seed({

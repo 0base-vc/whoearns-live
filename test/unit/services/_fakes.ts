@@ -988,30 +988,49 @@ export class FakeStatsRepo {
       if (isCurrent && row.activatedStakeLamports !== null) {
         next.activatedStakeLamports = row.activatedStakeLamports;
       }
-      // BOOL_AND semantics: every included epoch must be covered, since
-      // the income columns are window sums. Starts true (see the
-      // initialiser) and is cleared by the first uncovered epoch.
-      if (row.feesUpdatedAt === null && row.tipsUpdatedAt === null) {
+      // BOOL_AND semantics: every included epoch must be covered, and
+      // BOTH streams within each — a single timestamp means partial
+      // ingest, undercounting (fees + tips) by the missing half. Starts
+      // true (see the initialiser); the first incomplete epoch clears it.
+      if (row.feesUpdatedAt === null || row.tipsUpdatedAt === null) {
         next.hasIncomeEvidence = false;
       }
       if (row.activatedStakeLamports !== null) {
         // Running epoch contributes stake in proportion to the EPOCH-WIDE
         // elapsed fraction, matching the SQL — its numerator is elapsed
         // slots. Per-validator slot progress is deliberately not used.
+        // Exposure is applied as an exact integer ratio, never a rounded
+        // float. At the very start of an epoch the fraction is tiny
+        // (1 / 432000 ≈ 0.0000023); rounding it to six decimals charges
+        // ~14% too little stake and inflates the ratio ~16%, which is
+        // enough for a route test to validate an ordering production
+        // would not return.
+        //
         // Per-row watermark first (matching the SQL), epoch-wide fraction
         // as the fallback when this row has no watermark yet.
         const windowEpoch = args.epochs.find((e) => e.epoch === row.epoch);
-        const rowFraction =
+        const hasWatermarkBasis =
           row.slotWindowLastSlot !== null &&
           windowEpoch?.firstSlot !== undefined &&
           windowEpoch.slotCount !== undefined &&
-          windowEpoch.slotCount > 0
-            ? (row.slotWindowLastSlot - windowEpoch.firstSlot + 1) / windowEpoch.slotCount
-            : (windowEpoch?.elapsedFraction ?? 1);
-        const fractionPercent = isCurrent
-          ? Math.round(Math.min(1, Math.max(0, rowFraction)) * 1_000_000)
-          : 1_000_000;
-        const exposedStake = (row.activatedStakeLamports * BigInt(fractionPercent)) / 1_000_000n;
+          windowEpoch.slotCount > 0;
+        let exposedStake: bigint;
+        if (!isCurrent) {
+          exposedStake = row.activatedStakeLamports;
+        } else if (hasWatermarkBasis) {
+          // Inclusive slot count, matching (watermark - firstSlot + 1).
+          const elapsedSlots = row.slotWindowLastSlot! - windowEpoch!.firstSlot! + 1;
+          const clamped = Math.min(windowEpoch!.slotCount!, Math.max(0, elapsedSlots));
+          exposedStake =
+            (row.activatedStakeLamports * BigInt(clamped)) / BigInt(windowEpoch!.slotCount!);
+        } else {
+          // Float fallback: scale by 1e12 so even a first-slot fraction
+          // keeps far more precision than the value can meaningfully
+          // carry.
+          const fraction = Math.min(1, Math.max(0, windowEpoch?.elapsedFraction ?? 1));
+          const SCALE = 1_000_000_000_000n;
+          exposedStake = (row.activatedStakeLamports * BigInt(Math.round(fraction * 1e12))) / SCALE;
+        }
         stakeSumByVote.set(
           row.votePubkey,
           (stakeSumByVote.get(row.votePubkey) ?? 0n) + exposedStake,

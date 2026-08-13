@@ -2925,9 +2925,10 @@ components:
         hasIncomeData:
           type: boolean
           description: >
-            False unless the fee/tip pipeline has covered EVERY epoch in
-            the window for this validator. The income fields are window
-            sums, so a single uncovered epoch makes them a partial total
+            False unless income for the window is COMPLETE: every epoch,
+            and both the fee and tip streams within each. The income
+            fields are window sums, so one uncovered epoch — or one epoch
+            with fees ingested but not tips — makes them a partial total
             that would otherwise read as the full window's earnings.
 
 
