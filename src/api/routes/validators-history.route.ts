@@ -35,7 +35,10 @@ const DEFAULT_CLUSTER_TOP_N = 100;
 const DYNAMIC_WATCH_MIN_ACTIVATED_STAKE_LAMPORTS = LAMPORTS_PER_SOL;
 
 export interface ValidatorsHistoryRoutesDeps {
-  statsRepo: Pick<StatsRepository, 'findHistoryByVote' | 'findIndexedIncomePerSlotBenchmarks'>;
+  statsRepo: Pick<
+    StatsRepository,
+    'findHistoryByVote' | 'findIndexedIncomePerSlotBenchmarks' | 'sumLeaderSlotsByVote'
+  >;
   validatorsRepo: Pick<ValidatorsRepository, 'findByVote' | 'findByIdentity'>;
   epochsRepo: Pick<EpochsRepository, 'findByEpoch' | 'findCurrent'>;
   aggregatesRepo: Pick<AggregatesRepository, 'findManyByEpochsTopN'>;
@@ -90,6 +93,29 @@ interface ProfileBlock {
   narrativeOverride: string | null;
 }
 
+/**
+ * Serialized form of `ValidatorLeaderSlotTotals`. Structurally
+ * identical — epoch bounds and counts are all plain JSON numbers, so
+ * no lamport-style string widening is needed.
+ */
+interface LeaderSlotTotalsBlock {
+  epochsCovered: number;
+  totalAssigned: number;
+  totalProduced: number;
+  totalSkipped: number;
+  firstEpoch: number | null;
+  lastEpoch: number | null;
+}
+
+const EMPTY_LEADER_SLOT_TOTALS: LeaderSlotTotalsBlock = {
+  epochsCovered: 0,
+  totalAssigned: 0,
+  totalProduced: 0,
+  totalSkipped: 0,
+  firstEpoch: null,
+  lastEpoch: null,
+};
+
 interface HistoryResponse {
   vote: string;
   identity: string;
@@ -123,6 +149,18 @@ interface HistoryResponse {
    * Used by the UI to render the "verified" badge.
    */
   claimed: boolean;
+  /**
+   * Lifetime leader-slot allocation, summed DB-side across every epoch
+   * with slot data — deliberately NOT a sum of `items`, which is capped
+   * by `?limit=` and would make the figure move when the caller changes
+   * page size. `epochsCovered` is the denominator callers need to
+   * normalise `totalAssigned` (a validator indexed for 200 epochs
+   * out-accumulates one indexed for 20 regardless of stake).
+   *
+   * All-zero with null bounds for a just-tracked or opted-out
+   * validator, so consumers never need a presence check.
+   */
+  leaderSlots: LeaderSlotTotalsBlock;
 }
 
 function synthEpochInfo(epoch: number): EpochInfo {
@@ -200,6 +238,10 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
           : 'Already tracking — data is accumulating. Refresh in a few minutes.',
         // Just-tracked validators are by definition unclaimed.
         claimed: false,
+        // No epoch rows exist yet — the slot-ingester hasn't run for
+        // this vote. Zeroes, not a missing key, so the UI renders "0
+        // slots" rather than branching on undefined.
+        leaderSlots: EMPTY_LEADER_SLOT_TOTALS,
       };
     }
 
@@ -338,10 +380,15 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
         ? Promise.resolve(null)
         : claimsRepo.findByVote(validator.votePubkey);
 
-    const [rows, profile, claim] = await Promise.all([
+    // `sumLeaderSlotsByVote` is a second, independent aggregate over the
+    // same table — issued in the same round-trip batch as the window
+    // query so lifetime totals cost latency-wise nothing beyond the
+    // widest leg of this Promise.all.
+    const [rows, profile, claim, leaderSlotTotals] = await Promise.all([
       statsRepo.findHistoryByVote(validator.votePubkey, query.limit),
       profilePromise,
       claimPromise,
+      statsRepo.sumLeaderSlotsByVote(validator.votePubkey),
     ]);
     const claimed = claim !== null;
 
@@ -371,6 +418,9 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
         // to claim before you can edit a profile, and `optedOut`
         // is a profile field).
         claimed: true,
+        // Opt-out strips `items`; the lifetime totals are the same
+        // class of data and are withheld for the same reason.
+        leaderSlots: EMPTY_LEADER_SLOT_TOTALS,
       };
     }
 
@@ -457,6 +507,7 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
       website: normaliseHttpUrlOrNull(validator.website),
       items,
       claimed,
+      leaderSlots: leaderSlotTotals,
       ...(profile !== null
         ? {
             profile: {

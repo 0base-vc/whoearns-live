@@ -31,6 +31,13 @@
   import type { PageData } from './$types';
   import type { NodeTier, ValidatorEpochRecord } from '$lib/types';
   import {
+    sortEpochRows,
+    summariseLeaderSlots,
+    type EpochSortKey,
+    type LeaderSlotSummary,
+    type SortDirection,
+  } from '$lib/leader-slots';
+  import {
     formatCompactCu,
     formatNumberOrDash,
     formatSkipRate,
@@ -179,6 +186,72 @@
 
   const latestClosedRow = $derived<ValidatorEpochRecord | null>(
     history.items.find((r) => r.isFinal) ?? null,
+  );
+
+  /**
+   * Epoch-table ordering. Defaults to newest-epoch-first, the reading
+   * order this table has always had; switching to `assigned` turns it
+   * into a "which epochs did the leader schedule favour me in" view.
+   *
+   * Deliberately scoped to the table + mobile card list. The two charts
+   * below keep consuming `history.items` in its original API order —
+   * a chart plotted along a leader-slot-sorted x-axis would be
+   * nonsense.
+   */
+  let epochSortKey = $state<EpochSortKey>('epoch');
+  let epochSortDirection = $state<SortDirection>('desc');
+
+  const sortedItems = $derived<ValidatorEpochRecord[]>(
+    sortEpochRows(history.items, epochSortKey, epochSortDirection),
+  );
+
+  /**
+   * Clicking the active column flips direction; clicking a new column
+   * adopts it at `desc` — for both epoch and slot counts, "biggest
+   * first" is the answer people are looking for on the first click.
+   */
+  function toggleEpochSort(key: EpochSortKey): void {
+    if (epochSortKey === key) {
+      epochSortDirection = epochSortDirection === 'desc' ? 'asc' : 'desc';
+      return;
+    }
+    epochSortKey = key;
+    epochSortDirection = 'desc';
+  }
+
+  /**
+   * Ordering clause for the table's screen-reader caption.
+   *
+   * The caption used to hard-code "newest epoch first", which was true
+   * when the order was fixed. Now that the headers sort, a stale claim
+   * here would contradict `aria-sort` and mislead exactly the users who
+   * can't see the sort arrow. The live-epoch-first note only holds for
+   * the default descending-epoch order, so it travels with that branch.
+   */
+  const sortDescription = $derived<string>(
+    epochSortKey === 'assigned'
+      ? epochSortDirection === 'desc'
+        ? 'ordered by assigned leader slots, most first'
+        : 'ordered by assigned leader slots, fewest first'
+      : epochSortDirection === 'desc'
+        ? 'newest epoch first; the live running epoch appears first when available'
+        : 'oldest epoch first',
+  );
+
+  /** `aria-sort` value for a column header. */
+  function ariaSortFor(key: EpochSortKey): 'ascending' | 'descending' | 'none' {
+    if (epochSortKey !== key) return 'none';
+    return epochSortDirection === 'asc' ? 'ascending' : 'descending';
+  }
+
+  /**
+   * Lifetime leader-slot totals. Null when the API predates the
+   * `leaderSlots` field (see `ValidatorHistory.leaderSlots`) — the
+   * table footer and hub summary simply don't render in that case
+   * rather than showing a misleading sum of the visible window.
+   */
+  const leaderSlotSummary = $derived<LeaderSlotSummary | null>(
+    history.leaderSlots === undefined ? null : summariseLeaderSlots(history.leaderSlots),
   );
 
   const operatorNarrative = $derived.by<string | null>(() => {
@@ -824,12 +897,68 @@
         the 6-column-clip problem the old `overflow-x-auto` table
         had on 375px phones.
 
-      Both views read from the same `history.items` array —
+      Both views read from the same `sortedItems` array —
       single source of truth, no drift between responsive modes.
     -->
+    <!--
+      Mobile sort control. The desktop table sorts from its column
+      headers; the card list has none, so the same two orderings are
+      exposed here. Both write the same `epochSortKey` state, so
+      switching breakpoints mid-session keeps the chosen order.
+    -->
+    <div class="mb-3 flex items-center gap-2 md:hidden">
+      <span class="text-xs text-[color:var(--color-text-muted)]">Sort</span>
+      <div
+        class="inline-flex overflow-hidden rounded-lg border border-[color:var(--color-border-default)]"
+        role="group"
+        aria-label="Sort epoch breakdown"
+      >
+        <button
+          type="button"
+          onclick={() => toggleEpochSort('epoch')}
+          aria-pressed={epochSortKey === 'epoch'}
+          class="px-3 py-1.5 text-xs font-medium transition-colors"
+          class:bg-[color:var(--color-brand-500)]={epochSortKey === 'epoch'}
+          class:text-white={epochSortKey === 'epoch'}
+          class:text-[color:var(--color-text-muted)]={epochSortKey !== 'epoch'}
+        >
+          Epoch {epochSortKey === 'epoch' ? (epochSortDirection === 'desc' ? '↓' : '↑') : ''}
+        </button>
+        <button
+          type="button"
+          onclick={() => toggleEpochSort('assigned')}
+          aria-pressed={epochSortKey === 'assigned'}
+          class="border-l border-[color:var(--color-border-default)] px-3 py-1.5 text-xs font-medium transition-colors"
+          class:bg-[color:var(--color-brand-500)]={epochSortKey === 'assigned'}
+          class:text-white={epochSortKey === 'assigned'}
+          class:text-[color:var(--color-text-muted)]={epochSortKey !== 'assigned'}
+        >
+          Assigned {epochSortKey === 'assigned' ? (epochSortDirection === 'desc' ? '↓' : '↑') : ''}
+        </button>
+      </div>
+    </div>
+
+    {#if leaderSlotSummary !== null && leaderSlotSummary.epochsCovered > 0}
+      <!-- Mobile counterpart of the desktop table's <tfoot>. -->
+      <div
+        class="mb-3 rounded-xl border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] px-4 py-3 md:hidden"
+      >
+        <p class="text-[10px] uppercase tracking-wide text-[color:var(--color-text-muted)]">
+          Lifetime leader slots
+        </p>
+        <p class="font-mono text-2xl font-semibold tabular-nums">
+          {leaderSlotSummary.totalAssigned.toLocaleString()}
+        </p>
+        <p class="text-xs text-[color:var(--color-text-muted)]">
+          across {leaderSlotSummary.epochsCovered.toLocaleString()} epochs{#if leaderSlotSummary.avgAssignedPerEpoch !== null}
+            · {leaderSlotSummary.avgAssignedPerEpoch.toFixed(1)} per epoch{/if}
+        </p>
+      </div>
+    {/if}
+
     <!-- Mobile: stacked cards -->
     <ul class="space-y-3 md:hidden">
-      {#each history.items as row (row.epoch)}
+      {#each sortedItems as row (row.epoch)}
         {@const mev = unifiedMevFor(row)}
         {@const total =
           row.blockBaseFeesTotalSol !== null &&
@@ -872,14 +1001,26 @@
             >
               <div>
                 <dt class="inline-flex items-center text-[color:var(--color-text-muted)]">
-                  Slots
+                  Assigned
                   <Tooltip
-                    label="About slots"
-                    content="Blocks produced versus the number scheduled. Solana picks ~4 leader slots per validator per rotation."
+                    label="About assigned slots"
+                    content="Leader slots drawn in this epoch's schedule. Sampled stake-weighted at random in 4-slot groups, so the count swings epoch to epoch even at constant stake."
+                  />
+                </dt>
+                <dd class="font-mono font-medium tabular-nums">
+                  {formatNumberOrDash(row.slotsAssigned)}
+                </dd>
+              </div>
+              <div>
+                <dt class="inline-flex items-center text-[color:var(--color-text-muted)]">
+                  Produced
+                  <Tooltip
+                    label="About produced slots"
+                    content="Blocks the validator actually produced out of the slots it was assigned."
                   />
                 </dt>
                 <dd class="font-mono tabular-nums">
-                  {formatNumberOrDash(row.slotsProduced)} / {formatNumberOrDash(row.slotsAssigned)}
+                  {formatNumberOrDash(row.slotsProduced)}
                 </dd>
               </div>
               <div>
@@ -966,8 +1107,8 @@
     >
       <table class="min-w-full divide-y divide-[color:var(--color-border-default)] text-sm">
         <caption class="sr-only">
-          Epoch breakdown for validator {history.vote}, newest epoch first. The live running epoch
-          appears first when available. Income is decomposed into three revenue streams: base fees,
+          Epoch breakdown for validator {history.vote}, {sortDescription}. Sortable by epoch and by
+          assigned leader slots. Income is decomposed into three revenue streams: base fees,
           priority fees, and Jito MEV tips. The MEV column shows on-chain Jito tips derived from
           produced blocks. The CU column is the average compute units consumed per produced block.
         </caption>
@@ -975,14 +1116,64 @@
           class="bg-[color:var(--color-surface-muted)] text-xs uppercase tracking-wide text-[color:var(--color-text-muted)]"
         >
           <tr>
-            <th scope="col" class="px-4 py-3 text-left">Epoch</th>
+            <th scope="col" aria-sort={ariaSortFor('epoch')} class="px-4 py-3 text-left">
+              <button
+                type="button"
+                onclick={() => toggleEpochSort('epoch')}
+                class="inline-flex items-center gap-1 font-semibold uppercase tracking-wide transition-colors"
+                class:text-[color:var(--color-brand-500)]={epochSortKey === 'epoch'}
+                class:hover:text-[color:var(--color-text-default)]={epochSortKey !== 'epoch'}
+              >
+                Epoch
+                {#if epochSortKey === 'epoch'}
+                  <svg
+                    aria-hidden="true"
+                    class="h-3 w-3"
+                    class:rotate-180={epochSortDirection === 'asc'}
+                    viewBox="0 0 12 12"
+                    fill="currentColor"
+                  >
+                    <path d="M6 9.5 L2 4.5 L10 4.5 Z" />
+                  </svg>
+                {/if}
+              </button>
+            </th>
+            <th scope="col" aria-sort={ariaSortFor('assigned')} class="px-4 py-3 text-right">
+              <span class="inline-flex items-center justify-end gap-1">
+                <button
+                  type="button"
+                  onclick={() => toggleEpochSort('assigned')}
+                  class="inline-flex items-center gap-1 font-semibold uppercase tracking-wide transition-colors"
+                  class:text-[color:var(--color-brand-500)]={epochSortKey === 'assigned'}
+                  class:hover:text-[color:var(--color-text-default)]={epochSortKey !== 'assigned'}
+                >
+                  Assigned
+                  {#if epochSortKey === 'assigned'}
+                    <svg
+                      aria-hidden="true"
+                      class="h-3 w-3"
+                      class:rotate-180={epochSortDirection === 'asc'}
+                      viewBox="0 0 12 12"
+                      fill="currentColor"
+                    >
+                      <path d="M6 9.5 L2 4.5 L10 4.5 Z" />
+                    </svg>
+                  {/if}
+                </button>
+                <Tooltip
+                  label="About assigned slots"
+                  placement="bottom"
+                  content="Leader slots this validator drew in the epoch's schedule. Solana samples the schedule stake-weighted at random, so the count swings epoch to epoch even at constant stake — the lifetime total in the last row is the stable figure."
+                />
+              </span>
+            </th>
             <th scope="col" class="px-4 py-3 text-right">
               <span class="inline-flex items-center justify-end">
-                Slots
+                Produced
                 <Tooltip
-                  label="About slots"
+                  label="About produced slots"
                   placement="bottom"
-                  content="Blocks the validator produced versus the number it was scheduled to lead this epoch."
+                  content="Blocks the validator actually produced out of the slots it was assigned."
                 />
               </span>
             </th>
@@ -1050,7 +1241,7 @@
           </tr>
         </thead>
         <tbody class="divide-y divide-[color:var(--color-border-default)]">
-          {#each history.items as row (row.epoch)}
+          {#each sortedItems as row (row.epoch)}
             {@const mev = unifiedMevFor(row)}
             {@const skipDenominator = skipRateDenominator(row)}
             <tr
@@ -1068,8 +1259,11 @@
                   {/if}
                 </span>
               </th>
+              <td class="px-4 py-3 text-right font-medium tabular-nums">
+                {formatNumberOrDash(row.slotsAssigned)}
+              </td>
               <td class="px-4 py-3 text-right tabular-nums">
-                {formatNumberOrDash(row.slotsProduced)} / {formatNumberOrDash(row.slotsAssigned)}
+                {formatNumberOrDash(row.slotsProduced)}
               </td>
               <td class="px-4 py-3 text-right tabular-nums">
                 {formatSkipRate(row.slotsSkipped, skipDenominator)}
@@ -1123,6 +1317,49 @@
             </tr>
           {/each}
         </tbody>
+        {#if leaderSlotSummary !== null && leaderSlotSummary.epochsCovered > 0}
+          <!--
+            Lifetime leader-slot totals. These come from the API's
+            DB-side aggregate over every indexed epoch — NOT a sum of
+            the rows above, which are capped by the history `limit`.
+            The blank cells are intentional: fee/MEV columns have no
+            lifetime equivalent on this payload, and inventing one by
+            summing the visible window would be the exact mistake the
+            slot columns avoid.
+          -->
+          <tfoot
+            class="border-t-2 border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)] text-xs"
+          >
+            <tr>
+              <th scope="row" class="px-4 py-3 text-left font-semibold uppercase tracking-wide">
+                <span class="inline-flex items-center gap-1">
+                  Lifetime
+                  <Tooltip
+                    label="About lifetime totals"
+                    placement="top"
+                    content="Summed across every epoch this indexer has slot data for — not just the epochs shown above."
+                  />
+                </span>
+              </th>
+              <td class="px-4 py-3 text-right font-mono text-sm font-semibold tabular-nums">
+                {leaderSlotSummary.totalAssigned.toLocaleString()}
+              </td>
+              <td class="px-4 py-3 text-right font-mono text-sm tabular-nums">
+                {history.leaderSlots?.totalProduced.toLocaleString() ?? '—'}
+              </td>
+              <!-- Spans skip-rate + the four money columns + CU (9 columns total). -->
+              <td colspan="6" class="px-4 py-3 text-left text-[color:var(--color-text-muted)]">
+                {leaderSlotSummary.epochsCovered.toLocaleString()} epochs
+                {#if leaderSlotSummary.range !== null}
+                  (epoch {leaderSlotSummary.range.from.toLocaleString()}–{leaderSlotSummary.range.to.toLocaleString()})
+                {/if}
+                {#if leaderSlotSummary.avgAssignedPerEpoch !== null}
+                  · {leaderSlotSummary.avgAssignedPerEpoch.toFixed(1)} slots/epoch
+                {/if}
+              </td>
+            </tr>
+          </tfoot>
+        {/if}
       </table>
     </div>
   {/if}
