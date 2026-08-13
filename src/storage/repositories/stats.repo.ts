@@ -1921,6 +1921,28 @@ export class StatsRepository {
       }
     })();
 
+    // `slots_per_stake` opts out of `minWindowSlots` entirely.
+    //
+    // The floor exists to hide small denominators from income-per-slot
+    // style metrics, where a thin sample produces a meaningless average.
+    // Allocation is different: a validator that drew no leader slots
+    // genuinely scored zero for the window, and that zero is the honest
+    // answer — not a reason to remove the row from the board. Filtering
+    // it out would also quietly hide the very validators the metric is
+    // most interesting for.
+    //
+    // The tiny-sample caveat does not disappear: the schedule is sampled
+    // in 4-slot groups, so a validator whose expectation is a fraction of
+    // a slot reads either 0 or very high. That is disclosed in the column
+    // tooltip and the API docs rather than enforced by dropping rows.
+    // Multi-epoch windows (decade_epoch especially) sum the draws, which
+    // is where small validators become meaningfully comparable.
+    //
+    // Zeroing the bound keeps the parameter list and placeholder
+    // numbering identical for every sort; `window_slots` is a SUM over
+    // existing rows, so `>= 0` is always true.
+    const effectiveMinWindowSlots = sort === 'slots_per_stake' ? 0 : minWindowSlots;
+
     const params: unknown[] = [];
     const values: string[] = [];
     for (let i = 0; i < args.epochs.length; i += 1) {
@@ -1949,7 +1971,7 @@ export class StatsRepository {
     const requiredClosedParam = params.length + 2;
     const excludedVotesParam = params.length + 3;
     const limitParam = params.length + 4;
-    params.push(minWindowSlots, requiredClosedEpochs, args.excludedVotes ?? [], safeLimit);
+    params.push(effectiveMinWindowSlots, requiredClosedEpochs, args.excludedVotes ?? [], safeLimit);
 
     // Optional bracket params, appended after the fixed four so the
     // base placeholder numbering above is untouched. Each contributes
@@ -2000,29 +2022,6 @@ export class StatsRepository {
                 LIMIT 1
              )
            )`;
-
-    // `minWindowSlots` exists to suppress small-sample noise, so it has
-    // to bite on the sample the ranking actually uses. `slots_per_stake`
-    // is computed from the stake-covered slots only; testing the
-    // unrestricted `window_slots` would let a validator clear a 64-slot
-    // floor on stake-less slots while its ratio rests on four matched
-    // ones — precisely the extreme small-sample case the floor is for.
-    //
-    // Rows with NO stake anywhere in the window are a separate case: they
-    // have no ratio to be noisy, and the endpoint contract puts them in
-    // the NULLS LAST tail rather than hiding them. Applying the
-    // stake-covered floor to them would delete them entirely (their
-    // covered count is 0, and the floor is at least 1), so they fall back
-    // to the ordinary window-slots floor.
-    const slotFloorPredicate =
-      sort === 'slots_per_stake'
-        ? `(
-             CASE
-               WHEN window_stake_lamports IS NULL THEN window_slots
-               ELSE COALESCE(window_slots_with_stake, 0)
-             END
-           )`
-        : 'window_slots';
 
     const { rows } = await this.pool.query<WindowedLeaderboardStatsRow>(
       `WITH included(epoch, is_current, priority, elapsed_fraction, first_slot, slot_count) AS (
@@ -2202,7 +2201,7 @@ export class StatsRepository {
            ELSE NULL
          END AS slots_per_10k_sol
         FROM windowed
-       WHERE ${slotFloorPredicate} >= $${minParam}
+       WHERE window_slots >= $${minParam}
          ${maxStakeClause}
        ORDER BY ${order}
        LIMIT $${limitParam}`,
