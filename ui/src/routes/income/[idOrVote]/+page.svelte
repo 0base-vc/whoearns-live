@@ -31,6 +31,7 @@
   import type { PageData } from './$types';
   import type { NodeTier, ValidatorEpochRecord } from '$lib/types';
   import {
+    slotsPer10kSol,
     sortEpochRows,
     summariseLeaderSlots,
     type EpochSortKey,
@@ -233,10 +234,20 @@
       ? epochSortDirection === 'desc'
         ? 'ordered by assigned leader slots, most first'
         : 'ordered by assigned leader slots, fewest first'
-      : epochSortDirection === 'desc'
-        ? 'newest epoch first; the live running epoch appears first when available'
-        : 'oldest epoch first',
+      : epochSortKey === 'perStake'
+        ? epochSortDirection === 'desc'
+          ? 'ordered by leader slots per 10,000 SOL of stake, most first'
+          : 'ordered by leader slots per 10,000 SOL of stake, fewest first'
+        : epochSortDirection === 'desc'
+          ? 'newest epoch first; the live running epoch appears first when available'
+          : 'oldest epoch first',
   );
+
+  /** Two decimals: the epoch-to-epoch swing lives in the tenths. */
+  function formatPerStake(value: number | null): string | null {
+    if (value === null) return null;
+    return value.toFixed(2);
+  }
 
   /** `aria-sort` value for a column header. */
   function ariaSortFor(key: EpochSortKey): 'ascending' | 'descending' | 'none' {
@@ -935,6 +946,17 @@
         >
           Assigned {epochSortKey === 'assigned' ? (epochSortDirection === 'desc' ? '↓' : '↑') : ''}
         </button>
+        <button
+          type="button"
+          onclick={() => toggleEpochSort('perStake')}
+          aria-pressed={epochSortKey === 'perStake'}
+          class="border-l border-[color:var(--color-border-default)] px-3 py-1.5 text-xs font-medium transition-colors"
+          class:bg-[color:var(--color-brand-500)]={epochSortKey === 'perStake'}
+          class:text-white={epochSortKey === 'perStake'}
+          class:text-[color:var(--color-text-muted)]={epochSortKey !== 'perStake'}
+        >
+          / 10k SOL {epochSortKey === 'perStake' ? (epochSortDirection === 'desc' ? '↓' : '↑') : ''}
+        </button>
       </div>
     </div>
 
@@ -950,9 +972,24 @@
           {leaderSlotSummary.totalAssigned.toLocaleString()}
         </p>
         <p class="text-xs text-[color:var(--color-text-muted)]">
-          across {leaderSlotSummary.epochsCovered.toLocaleString()} epochs{#if leaderSlotSummary.avgAssignedPerEpoch !== null}
-            · {leaderSlotSummary.avgAssignedPerEpoch.toFixed(1)} per epoch{/if}
+          across {leaderSlotSummary.epochsCovered.toLocaleString()} epochs
         </p>
+        {#if leaderSlotSummary.slotsPer10kSol !== null}
+          <!--
+            The size-neutral figure. Shown as the secondary number
+            because the lifetime count above answers "how much did I
+            get" while this one answers "how did my draw compare" —
+            the second question is the one that survives a stake change.
+          -->
+          <p class="mt-2 border-t border-[color:var(--color-border-default)] pt-2">
+            <span class="text-[10px] uppercase tracking-wide text-[color:var(--color-text-muted)]">
+              Per 10k SOL of stake
+            </span>
+            <span class="ml-2 font-mono text-base font-semibold tabular-nums">
+              {leaderSlotSummary.slotsPer10kSol.toFixed(2)}
+            </span>
+          </p>
+        {/if}
       </div>
     {/if}
 
@@ -969,6 +1006,7 @@
               Number(row.blockTipsTotalSol)
             : null}
         {@const skipDenominator = skipRateDenominator(row)}
+        {@const rowPerStake = formatPerStake(slotsPer10kSol(row))}
         <li>
           <Card>
             <div class="flex items-baseline justify-between gap-3">
@@ -1021,6 +1059,22 @@
                 </dt>
                 <dd class="font-mono tabular-nums">
                   {formatNumberOrDash(row.slotsProduced)}
+                </dd>
+              </div>
+              <div>
+                <dt class="inline-flex items-center text-[color:var(--color-text-muted)]">
+                  Slots / 10k SOL
+                  <Tooltip
+                    label="About slots per stake"
+                    content="Assigned slots divided by this epoch's stake, per 10,000 SOL. Size-neutral, so it's comparable across validators — and it swings epoch to epoch because the schedule is drawn at random."
+                  />
+                </dt>
+                <dd class="font-mono font-medium tabular-nums">
+                  {#if rowPerStake !== null}
+                    {rowPerStake}
+                  {:else}
+                    <span class="text-[color:var(--color-text-subtle)]">—</span>
+                  {/if}
                 </dd>
               </div>
               <div>
@@ -1238,12 +1292,43 @@
                 />
               </span>
             </th>
+            <th scope="col" aria-sort={ariaSortFor('perStake')} class="px-4 py-3 text-right">
+              <span class="inline-flex items-center justify-end gap-1">
+                <button
+                  type="button"
+                  onclick={() => toggleEpochSort('perStake')}
+                  class="inline-flex items-center gap-1 font-semibold uppercase tracking-wide transition-colors"
+                  class:text-[color:var(--color-brand-500)]={epochSortKey === 'perStake'}
+                  class:hover:text-[color:var(--color-text-default)]={epochSortKey !== 'perStake'}
+                >
+                  Slots / 10k SOL
+                  {#if epochSortKey === 'perStake'}
+                    <svg
+                      aria-hidden="true"
+                      class="h-3 w-3"
+                      class:rotate-180={epochSortDirection === 'asc'}
+                      viewBox="0 0 12 12"
+                      fill="currentColor"
+                    >
+                      <path d="M6 9.5 L2 4.5 L10 4.5 Z" />
+                    </svg>
+                  {/if}
+                </button>
+                <Tooltip
+                  label="About slots per stake"
+                  placement="bottom"
+                  align="right"
+                  content="Assigned leader slots divided by this epoch's activated stake, per 10,000 SOL. Stake buys expected slots, but the schedule is drawn at random — so this swings epoch to epoch even at constant stake. Unlike the raw slot count it doesn't reward size, which makes it comparable across validators measured over the same period. It is not an absolute luck score: the cluster-wide baseline shifts over time, and very small validators read high because the schedule is drawn in 4-slot groups."
+                />
+              </span>
+            </th>
           </tr>
         </thead>
         <tbody class="divide-y divide-[color:var(--color-border-default)]">
           {#each sortedItems as row (row.epoch)}
             {@const mev = unifiedMevFor(row)}
             {@const skipDenominator = skipRateDenominator(row)}
+            {@const perStake = formatPerStake(slotsPer10kSol(row))}
             <tr
               class="bg-[color:var(--color-surface)] transition-colors hover:bg-[color:var(--color-surface-muted)]"
             >
@@ -1314,6 +1399,13 @@
                   <span class="text-[color:var(--color-text-subtle)]" aria-label="no data">—</span>
                 {/if}
               </td>
+              <td class="px-4 py-3 text-right font-medium tabular-nums">
+                {#if perStake !== null}
+                  {perStake}
+                {:else}
+                  <span class="text-[color:var(--color-text-subtle)]" aria-label="no data">—</span>
+                {/if}
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -1347,14 +1439,22 @@
               <td class="px-4 py-3 text-right font-mono text-sm tabular-nums">
                 {history.leaderSlots?.totalProduced.toLocaleString() ?? '—'}
               </td>
-              <!-- Spans skip-rate + the four money columns + CU (9 columns total). -->
+              <!-- Spans skip-rate + the four money columns + CU; the
+                   per-stake ratio gets its own cell under its column. -->
               <td colspan="6" class="px-4 py-3 text-left text-[color:var(--color-text-muted)]">
                 {leaderSlotSummary.epochsCovered.toLocaleString()} epochs
                 {#if leaderSlotSummary.range !== null}
                   (epoch {leaderSlotSummary.range.from.toLocaleString()}–{leaderSlotSummary.range.to.toLocaleString()})
                 {/if}
-                {#if leaderSlotSummary.avgAssignedPerEpoch !== null}
-                  · {leaderSlotSummary.avgAssignedPerEpoch.toFixed(1)} slots/epoch
+                {#if leaderSlotSummary.slotsPer10kSol !== null && leaderSlotSummary.epochsWithStake < leaderSlotSummary.epochsCovered}
+                  · ratio from {leaderSlotSummary.epochsWithStake.toLocaleString()} with stake data
+                {/if}
+              </td>
+              <td class="px-4 py-3 text-right font-mono text-sm font-semibold tabular-nums">
+                {#if leaderSlotSummary.slotsPer10kSol !== null}
+                  {leaderSlotSummary.slotsPer10kSol.toFixed(2)}
+                {:else}
+                  <span class="text-[color:var(--color-text-subtle)]" aria-label="no data">—</span>
                 {/if}
               </td>
             </tr>

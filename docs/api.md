@@ -173,7 +173,18 @@ Query params:
 - `epoch` — optional closed epoch number. Only valid with `window=final_epoch`.
 - `limit` — 1-500, default 100.
 - `sort` — `income_per_slot` (default), `total_income`, `mev_tips`, `fees`,
-  or `skip_rate`.
+  `skip_rate`, `compute_units`, or `slots_per_stake`.
+
+  `slots_per_stake` ranks by leader slots per 10,000 SOL of activated
+  stake — the size-neutral view of the schedule draw, since raw slot
+  counts scale with delegation. It divides by stake summed across the
+  window (running epoch prorated by elapsed exposure), and differs from
+  the other sorts in two ways: it admits validators whose slot data is
+  ingested but whose fees are not, so check `hasIncomeData` before
+  rendering their money columns (it is false unless every epoch in the
+  window has BOTH fee and tip data); and `minWindowSlots` is applied to the
+  stake-covered slots, reported as `windowSlotsWithStake`.
+
 - `minWindowSlots` — 1-500, default 4. Rows below this denominator are
   filtered.
 - `bracket` — `all` (default), `stake_lt_100k`, `stake_lt_500k`,
@@ -310,10 +321,57 @@ epoch the indexer holds slot data for**, independent of `limit`:
     "totalProduced": 10402,
     "totalSkipped": 62,
     "firstEpoch": 829,
-    "lastEpoch": 956
+    "lastEpoch": 956,
+    "epochsWithStake": 120,
+    "assignedWithStake": 9932,
+    "stakeWeightedSlotsPer10kSol": 9.83
   }
 }
 ```
+
+`stakeWeightedSlotsPer10kSol` is the figure to compare validators on,
+within the limits noted below.
+`totalAssigned` — like any raw slot count, and like a slots-per-epoch
+average — scales with delegation: a validator holding ten times the stake
+draws roughly ten times the slots, so ranking on it ranks by size. The
+ratio divides that out and leaves the part that is the schedule lottery.
+
+It is aggregated as `SUM(slots) / SUM(stake)` over stake-bearing epochs,
+NOT as the mean of per-epoch ratios, so epochs where the validator held
+more stake weigh proportionally more. `epochsWithStake` and
+`assignedWithStake` describe that same subset — pairing the unrestricted
+`totalAssigned` with the ratio would not add up. The division happens in
+SQL over `NUMERIC` because the lamport sum passes
+`Number.MAX_SAFE_INTEGER` after a few hundred epochs on a large validator.
+
+**It is not a normalised luck score.** Expected slots per unit of stake
+also depend on the epoch's TOTAL cluster stake, which this service does
+not index, so the baseline drifts as the cluster grows. Two validators
+that each drew exactly their expected allocation can report different
+lifetime ratios when their indexed histories cover different eras. Treat
+it as sound for validators measured over the same span — and for one
+validator's own epoch-to-epoch variation, where the baseline is
+effectively constant — and approximate across widely different spans.
+
+A second caveat matters for small validators: the leader schedule is
+sampled in **4-slot groups**, so a validator whose expected allocation is
+a fraction of a slot receives either 0 or at least 4. Observed in
+production: 175 SOL drawing 4 slots reported ~23x the cohort baseline.
+Any ranking on this metric needs a minimum-slots floor.
+
+A third caveat is structural: leaderboard rows are grouped by vote
+account, while the leader schedule is an identity-level fact. During a
+vote rotation two vote accounts can share one identity, and each row then
+carries the identity's full schedule against only its own share of the
+stake — so both read high. This predates the stake-normalised sort (the
+same inflation reaches `windowSlots`, and therefore `income_per_slot`)
+and is tracked separately.
+
+Each item in `items` also carries `activatedStakeLamports` /
+`activatedStakeSol` — that epoch's own snapshot — so the same ratio can be
+computed per epoch. That per-epoch series is where the swing shows: the
+schedule is redrawn every epoch, so the ratio moves even at constant
+stake.
 
 Do not reconstruct these by reducing over `items` — `items` is truncated by
 `limit`, so a client-side sum silently becomes a function of page size.

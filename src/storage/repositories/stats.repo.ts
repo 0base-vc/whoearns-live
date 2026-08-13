@@ -293,11 +293,31 @@ export type LeaderboardWindowSort =
   | 'mev_tips'
   | 'fees'
   | 'skip_rate'
-  | 'compute_units';
+  | 'compute_units'
+  | 'slots_per_stake';
 
 export interface LeaderboardWindowEpoch {
   epoch: Epoch;
   isCurrent: boolean;
+  /**
+   * Fraction of the epoch elapsed at the chain tip, in [0, 1]. Only
+   * meaningful — and only read — when `isCurrent` is true.
+   *
+   * Used to prorate the running epoch's stake in `slots_per_stake`, so
+   * the denominator covers the same observation period as the numerator
+   * (which counts elapsed leader slots only).
+   *
+   * It must be the EPOCH-WIDE fraction, not a per-validator one. Assigned
+   * slots sit at random positions, so at a given tip one validator may
+   * have 70% of its assignments behind it and another 30% — weighting by
+   * that would let slot placement alone move ranks. Defaults to 1 when
+   * omitted, i.e. "treat the epoch as fully exposed".
+   */
+  elapsedFraction?: number;
+  /** First slot of the epoch; used to convert a watermark into a fraction. */
+  firstSlot?: Slot;
+  /** Total slots in the epoch; the denominator of that fraction. */
+  slotCount?: number;
 }
 
 interface WindowedLeaderboardStatsRow {
@@ -317,6 +337,9 @@ interface WindowedLeaderboardStatsRow {
   slot_window_updated_at: Date | null;
   last_updated_at: Date | null;
   activated_stake_lamports: string | null;
+  slots_per_10k_sol: string | null;
+  has_income_evidence: boolean | null;
+  window_slots_with_stake: string | null;
 }
 
 export interface IndexedIncomePerSlotBenchmarkRequest {
@@ -493,6 +516,43 @@ export interface WindowedLeaderboardStats {
   slotWindowUpdatedAt: Date | null;
   lastUpdatedAt: Date | null;
   activatedStakeLamports: bigint | null;
+  /**
+   * Leader slots per 10,000 SOL of stake over the selected window,
+   * computed SQL-side as (Σ window slots with stake) / (Σ stake) so the
+   * denominator matches its numerator epoch for epoch.
+   *
+   * Emitted rather than derived by callers: the `slots_per_stake` sort
+   * divides these same operands, so a caller recomputing the figure from
+   * `windowSlots` and the representative `activatedStakeLamports` could
+   * disagree with the ordering it is labelling — visibly so for any
+   * validator whose stake moved mid-window.
+   *
+   * Null when no epoch in the window carries a stake snapshot.
+   */
+  slotsPer10kSol: number | null;
+  /**
+   * True when the fee/tip pipeline has covered at least one epoch in the
+   * window.
+   *
+   * Every sort except `slots_per_stake` requires this by construction —
+   * its rows are filtered on the same predicate. `slots_per_stake` admits
+   * slot-only rows so a fee-ingester lag can't hide a perfectly
+   * measurable allocation, which means callers must consult this flag
+   * before presenting the income columns: unmeasured income arrives as a
+   * column-default 0 and would otherwise read as "earned nothing".
+   */
+  hasIncomeEvidence: boolean;
+  /**
+   * Slots the stake-normalised ratio was actually computed from — the
+   * subset of `windowSlots` whose epochs carry a stake snapshot.
+   *
+   * This, not `windowSlots`, is the sample size behind `slotsPer10kSol`.
+   * A ratio resting on four covered slots inside a window of hundreds
+   * carries four slots' worth of variance, so any confidence signal
+   * attached to the ratio has to be derived from this count. Null when
+   * no epoch in the window carries a stake snapshot.
+   */
+  windowSlotsWithStake: number | null;
 }
 
 function rowToWindowedStats(row: WindowedLeaderboardStatsRow): WindowedLeaderboardStats {
@@ -515,6 +575,10 @@ function rowToWindowedStats(row: WindowedLeaderboardStatsRow): WindowedLeaderboa
     lastUpdatedAt: row.last_updated_at,
     activatedStakeLamports:
       row.activated_stake_lamports === null ? null : toLamports(row.activated_stake_lamports),
+    slotsPer10kSol: row.slots_per_10k_sol === null ? null : Number(row.slots_per_10k_sol),
+    hasIncomeEvidence: row.has_income_evidence === true,
+    windowSlotsWithStake:
+      row.window_slots_with_stake === null ? null : Number(row.window_slots_with_stake),
   };
 }
 
@@ -1149,13 +1213,42 @@ export class StatsRepository {
       total_skipped: string;
       first_epoch: string | null;
       last_epoch: string | null;
+      epochs_with_stake: string;
+      assigned_with_stake: string;
+      stake_weighted_slots_per_10k_sol: string | null;
     }>(
       `SELECT COUNT(*)                        AS epochs_covered,
               COALESCE(SUM(slots_assigned), 0) AS total_assigned,
               COALESCE(SUM(slots_produced), 0) AS total_produced,
               COALESCE(SUM(slots_skipped), 0)  AS total_skipped,
               MIN(epoch)                       AS first_epoch,
-              MAX(epoch)                       AS last_epoch
+              MAX(epoch)                       AS last_epoch,
+              -- Strictly positive, not merely non-null: ValidatorService
+              -- returns 0n when the RPC reports zero activated stake, and
+              -- SlotService still writes that epoch's schedule. Counting
+              -- such a row adds slots to the numerator and nothing to the
+              -- denominator, inflating the ratio.
+              COUNT(*) FILTER (WHERE activated_stake_lamports > 0)
+                AS epochs_with_stake,
+              COALESCE(
+                SUM(slots_assigned) FILTER (WHERE activated_stake_lamports > 0), 0)
+                AS assigned_with_stake,
+              -- Σ slots / Σ stake, scaled to "per 10,000 SOL":
+              --   1e9  lamports per SOL
+              --   1e4  SOL per reporting unit
+              -- so the numerator carries 1e13. Kept in SQL because the
+              -- lamport sum passes Number.MAX_SAFE_INTEGER after a few
+              -- hundred epochs on a large validator, while the RESULT is
+              -- a small number that survives the Number() cast intact.
+              CASE
+                WHEN COALESCE(SUM(activated_stake_lamports), 0) > 0
+                THEN (COALESCE(
+                        SUM(slots_assigned)
+                          FILTER (WHERE activated_stake_lamports > 0), 0)::numeric
+                      * 1e13)
+                     / SUM(activated_stake_lamports)
+                ELSE NULL
+              END AS stake_weighted_slots_per_10k_sol
          FROM epoch_validator_stats
         WHERE vote_pubkey = $1
           AND slots_updated_at IS NOT NULL`,
@@ -1173,6 +1266,9 @@ export class StatsRepository {
         totalSkipped: 0,
         firstEpoch: null,
         lastEpoch: null,
+        epochsWithStake: 0,
+        assignedWithStake: 0,
+        stakeWeightedSlotsPer10kSol: null,
       };
     }
     return {
@@ -1182,6 +1278,12 @@ export class StatsRepository {
       totalSkipped: Number(row.total_skipped),
       firstEpoch: row.first_epoch === null ? null : Number(row.first_epoch),
       lastEpoch: row.last_epoch === null ? null : Number(row.last_epoch),
+      epochsWithStake: Number(row.epochs_with_stake),
+      assignedWithStake: Number(row.assigned_with_stake),
+      stakeWeightedSlotsPer10kSol:
+        row.stake_weighted_slots_per_10k_sol === null
+          ? null
+          : Number(row.stake_weighted_slots_per_10k_sol),
     };
   }
 
@@ -1697,6 +1799,32 @@ export class StatsRepository {
     return rows.map(rowToStats);
   }
 
+  /**
+   * Highest slot the slot-ingester has counted for an epoch, across all
+   * tracked validators.
+   *
+   * This is the watermark `slots_elapsed_assigned` is measured through —
+   * the finalized tip minus the ingester's finality buffer, refreshed on
+   * its own cadence. It runs BEHIND `epochs.current_slot`, which the
+   * epoch-watcher writes from the confirmed tip on a different schedule.
+   *
+   * Callers prorating a running epoch must use this rather than
+   * `current_slot`: the numerator of `slots_per_stake` only counts slots
+   * up to this watermark, so a fraction derived from the confirmed tip
+   * would charge stake for exposure whose assignments have not been
+   * counted yet. Null when no row for the epoch carries a watermark.
+   */
+  async findEpochSlotWatermark(epoch: Epoch): Promise<Slot | null> {
+    const { rows } = await this.pool.query<{ watermark: string | null }>(
+      `SELECT MAX(slot_window_last_slot) AS watermark
+         FROM epoch_validator_stats
+        WHERE epoch = $1`,
+      [epoch],
+    );
+    const raw = rows[0]?.watermark ?? null;
+    return raw === null ? null : Number(raw);
+  }
+
   async findTopNByWindow(args: {
     epochs: LeaderboardWindowEpoch[];
     limit: number;
@@ -1757,6 +1885,35 @@ export class StatsRepository {
           // blocks in the window (NULLs sort last). Income breaks ties.
           return `(compute_units_total / NULLIF(slots_produced, 0)) DESC NULLS LAST,
                   window_income_lamports DESC`;
+        case 'slots_per_stake':
+          // Leader slots won per unit of stake — the size-neutral view of
+          // the schedule draw. Raw slot counts scale with delegation, so
+          // ranking on them ranks by size; this divides that out and
+          // leaves the part that is chance.
+          //
+          // KNOWN LIMITATION: rows are grouped by vote_pubkey, but the
+          // leader schedule is an IDENTITY-level fact. During a vote
+          // rotation two vote accounts can share one identity, and
+          // SlotService writes that identity's full schedule onto each
+          // vote row while recording only that vote's own stake. Both
+          // rows then divide the same slots by a fraction of the stake,
+          // and both read high. This predates the sort — window_slots is
+          // inflated the same way for income_per_slot — and fixing it
+          // means consolidating same-identity rows before aggregation,
+          // which moves every existing ranking. Tracked separately
+          // rather than smuggled into this change.
+          //
+          // Denominator is the window-SUMMED stake, matched slot-for-slot
+          // with its numerator (see the CTE). Dividing the window's slot
+          // total by a single representative snapshot would misrank any
+          // validator whose stake moved during the window.
+          //
+          // 1e13 = 1e9 lamports/SOL × 1e4 SOL, matching the units the API
+          // reports elsewhere. NULLIF keeps stake-less rows out of the
+          // division; they sort last rather than as an infinite ratio.
+          return `(window_slots_with_stake * 1e13 / NULLIF(window_stake_lamports, 0))
+                    DESC NULLS LAST,
+                  window_slots DESC`;
         case 'income_per_slot':
         default:
           return `(window_income_lamports::numeric / NULLIF(window_slots, 0)) DESC NULLS LAST,
@@ -1768,9 +1925,25 @@ export class StatsRepository {
     const values: string[] = [];
     for (let i = 0; i < args.epochs.length; i += 1) {
       const epoch = args.epochs[i]!;
-      const base = i * 3;
-      values.push(`($${base + 1}::bigint, $${base + 2}::boolean, $${base + 3}::int)`);
-      params.push(epoch.epoch, epoch.isCurrent, epoch.isCurrent ? 2 : 1);
+      const base = i * 6;
+      values.push(
+        `($${base + 1}::bigint, $${base + 2}::boolean, $${base + 3}::int, $${base + 4}::numeric,
+          $${base + 5}::bigint, $${base + 6}::int)`,
+      );
+      // Clamped so a stale `currentSlot` (or one that briefly runs past
+      // the epoch's last slot) can't produce a negative or >1 weight.
+      const rawFraction = epoch.elapsedFraction ?? 1;
+      const elapsedFraction = Number.isFinite(rawFraction)
+        ? Math.min(1, Math.max(0, rawFraction))
+        : 1;
+      params.push(
+        epoch.epoch,
+        epoch.isCurrent,
+        epoch.isCurrent ? 2 : 1,
+        elapsedFraction,
+        epoch.firstSlot ?? 0,
+        epoch.slotCount ?? 0,
+      );
     }
     const minParam = params.length + 1;
     const requiredClosedParam = params.length + 2;
@@ -1802,8 +1975,57 @@ export class StatsRepository {
       params.push(args.maxActivatedStakeLamports.toString());
     }
 
+    // Every income-ranked sort requires evidence that the fee/tip
+    // pipeline actually covered the epoch — otherwise a validator whose
+    // income has not been ingested yet would rank as if it earned zero.
+    //
+    // `slots_per_stake` ranks slot ALLOCATION, which the slot-ingester
+    // writes independently of fees and tips. Holding it to the income
+    // predicate would silently drop otherwise fully-measured validators
+    // whenever the fee-ingester lags or fails — exactly the validators
+    // whose allocation we can still measure perfectly. The row's own
+    // `slots_updated_at IS NOT NULL` guard (above) remains the
+    // requirement that matters for this sort.
+    const incomeEvidenceClause =
+      sort === 'slots_per_stake'
+        ? ''
+        : `AND (
+             evs.fees_updated_at IS NOT NULL
+             OR evs.tips_updated_at IS NOT NULL
+             OR EXISTS (
+               SELECT 1
+                 FROM processed_blocks pb
+                WHERE pb.epoch = evs.epoch
+                  AND pb.leader_identity = evs.identity_pubkey
+                LIMIT 1
+             )
+           )`;
+
+    // `minWindowSlots` exists to suppress small-sample noise, so it has
+    // to bite on the sample the ranking actually uses. `slots_per_stake`
+    // is computed from the stake-covered slots only; testing the
+    // unrestricted `window_slots` would let a validator clear a 64-slot
+    // floor on stake-less slots while its ratio rests on four matched
+    // ones — precisely the extreme small-sample case the floor is for.
+    //
+    // Rows with NO stake anywhere in the window are a separate case: they
+    // have no ratio to be noisy, and the endpoint contract puts them in
+    // the NULLS LAST tail rather than hiding them. Applying the
+    // stake-covered floor to them would delete them entirely (their
+    // covered count is 0, and the floor is at least 1), so they fall back
+    // to the ordinary window-slots floor.
+    const slotFloorPredicate =
+      sort === 'slots_per_stake'
+        ? `(
+             CASE
+               WHEN window_stake_lamports IS NULL THEN window_slots
+               ELSE COALESCE(window_slots_with_stake, 0)
+             END
+           )`
+        : 'window_slots';
+
     const { rows } = await this.pool.query<WindowedLeaderboardStatsRow>(
-      `WITH included(epoch, is_current, priority) AS (
+      `WITH included(epoch, is_current, priority, elapsed_fraction, first_slot, slot_count) AS (
          VALUES ${values.join(', ')}
        ),
        windowed AS (
@@ -1856,23 +2078,98 @@ export class StatsRepository {
            )) AS last_updated_at,
           (ARRAY_AGG(evs.activated_stake_lamports ORDER BY included.priority DESC, evs.epoch DESC)
              FILTER (WHERE evs.activated_stake_lamports IS NOT NULL))[1]
-             AS activated_stake_lamports
+             AS activated_stake_lamports,
+           -- Stake SUMMED across the window, and the slots that sum
+           -- actually covers. The representative snapshot above is the
+           -- newest epoch's value, which is the right thing to DISPLAY as
+           -- "current stake" but the wrong denominator for a multi-epoch
+           -- slot total: a validator that fell from 100k to 10k SOL would
+           -- have its 100k-era slots divided by 10k, inflating the ratio
+           -- ~11x and corrupting the ranking. Numerator and denominator
+           -- are filtered on the same predicate so they always describe
+           -- one population; the numerator repeats the window_slots CASE
+           -- so the running epoch contributes elapsed slots, not its full
+           -- schedule.
+           SUM(CASE
+             WHEN included.is_current THEN COALESCE(evs.slots_elapsed_assigned, 0)
+             ELSE evs.slots_assigned
+           END) FILTER (WHERE evs.activated_stake_lamports > 0)::numeric
+             AS window_slots_with_stake,
+           -- The running epoch contributes only its ELAPSED slots to the
+           -- numerator, so its stake must contribute only the matching
+           -- fraction of exposure — otherwise a validator observed 10%
+           -- into an open epoch is charged a full epoch of stake for a
+           -- tenth of the draw.
+           --
+           -- The weight is a TIME fraction — how much of the epoch had
+           -- elapsed when this row's slot counters were written —
+           -- deliberately not slots_elapsed_assigned / slots_assigned.
+           -- Assigned slots sit at random positions, so at one chain tip
+           -- two validators can have 70% and 30% of their assignments
+           -- behind them despite identical time exposure; weighting by
+           -- that would let slot placement alone reorder the board.
+           SUM(CASE
+             WHEN included.is_current
+             THEN evs.activated_stake_lamports
+                  * (CASE
+                      -- Per-ROW watermark. slot_window_last_slot is the tip
+                      -- THIS row's slots_elapsed_assigned was counted
+                      -- through, and the ingester updates votes
+                      -- sequentially — so a shared maximum would overcharge
+                      -- every row the current tick has not reached yet, and
+                      -- a shared minimum would undercharge the rest. Reading
+                      -- each row's own watermark is the only value
+                      -- guaranteed to match its own numerator. This is a
+                      -- TIME fraction, not a per-validator slot-progress
+                      -- fraction, so it cannot be moved by where a
+                      -- validator's assignments happen to sit.
+                      --
+                      -- The NULL cases are spelled out rather than wrapped
+                      -- in COALESCE because GREATEST/LEAST in Postgres skip
+                      -- NULL arguments instead of propagating them: a
+                      -- missing watermark would silently become 0 (charging
+                      -- no stake at all) and the COALESCE would never fire.
+                      WHEN evs.slot_window_last_slot IS NULL
+                        OR included.slot_count <= 0
+                      THEN included.elapsed_fraction
+                      ELSE LEAST(1, GREATEST(0,
+                        (evs.slot_window_last_slot - included.first_slot + 1)::numeric
+                          / included.slot_count))
+                    END)
+             ELSE evs.activated_stake_lamports
+           END) FILTER (WHERE evs.activated_stake_lamports > 0)::numeric
+             AS window_stake_lamports,
+           -- Whether income for this window is COMPLETE — every epoch,
+           -- and both streams within each epoch.
+           --
+           -- BOOL_AND across epochs because the income columns are window
+           -- SUMS: one uncovered epoch makes them a partial total that
+           -- would render as the whole window's earnings.
+           --
+           -- Both timestamps within an epoch for the same reason at a
+           -- smaller scale, and matching the completeness rule
+           -- findEconomicPercentile already applies: a row with only
+           -- fees_updated_at set undercounts (fees + tips) by exactly
+           -- the missing half. Deliberately stricter than
+           -- incomeEvidenceClause, which admits a row on ANY evidence —
+           -- that clause decides whether a validator is RANKABLE, this
+           -- flag reports whether its income figures are COMPLETE.
+           --
+           -- Consumers must only use it to withhold values that do not
+           -- also drive the ranking. Under slots_per_stake the money
+           -- columns are incidental, so hiding a partial total is right;
+           -- under an income sort the same value IS the rank, and hiding
+           -- it while ranking by it would be incoherent. See the flag's
+           -- docs on the API response.
+           BOOL_AND(
+             evs.fees_updated_at IS NOT NULL AND evs.tips_updated_at IS NOT NULL
+           ) AS has_income_evidence
          FROM included
          JOIN epoch_validator_stats evs ON evs.epoch = included.epoch
          WHERE evs.slots_updated_at IS NOT NULL
            AND NOT (evs.vote_pubkey = ANY($${excludedVotesParam}::text[]))
            ${candidateVotesClause}
-           AND (
-             evs.fees_updated_at IS NOT NULL
-             OR evs.tips_updated_at IS NOT NULL
-             OR EXISTS (
-               SELECT 1
-                 FROM processed_blocks pb
-                WHERE pb.epoch = evs.epoch
-                  AND pb.leader_identity = evs.identity_pubkey
-                LIMIT 1
-             )
-           )
+           ${incomeEvidenceClause}
          GROUP BY evs.vote_pubkey
         HAVING COUNT(*) FILTER (WHERE included.is_current IS FALSE) >= $${requiredClosedParam}
        )
@@ -1892,9 +2189,20 @@ export class StatsRepository {
          slot_window_last_slot,
          slot_window_updated_at,
          NULLIF(last_updated_at, '-infinity'::timestamptz) AS last_updated_at,
-         activated_stake_lamports
+         activated_stake_lamports,
+         COALESCE(has_income_evidence, FALSE) AS has_income_evidence,
+         window_slots_with_stake,
+         -- Emitted rather than left to the client: the ORDER BY below
+         -- divides these exact operands, so a client recomputing the
+         -- number from other fields could disagree with the ranking it
+         -- is labelling. 1e13 = 1e9 lamports/SOL × 1e4 SOL per unit.
+         CASE
+           WHEN COALESCE(window_stake_lamports, 0) > 0
+           THEN window_slots_with_stake * 1e13 / window_stake_lamports
+           ELSE NULL
+         END AS slots_per_10k_sol
         FROM windowed
-       WHERE window_slots >= $${minParam}
+       WHERE ${slotFloorPredicate} >= $${minParam}
          ${maxStakeClause}
        ORDER BY ${order}
        LIMIT $${limitParam}`,

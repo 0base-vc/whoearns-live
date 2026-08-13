@@ -17,6 +17,14 @@ export interface ValidatorEpochRecord {
   slotsElapsedAssigned: number | null;
   slotsProduced: number | null;
   slotsSkipped: number | null;
+  /**
+   * Activated stake for THIS epoch (decimal-string lamports), so slot
+   * allocation can be normalised against what the validator actually
+   * held at the time. Null on rows predating the snapshot column.
+   * Optional for backwards compat with older API responses.
+   */
+  activatedStakeLamports?: string | null;
+  activatedStakeSol?: string | null;
 
   /** Leader's post-burn receipt of base + priority combined (legacy lump). */
   blockFeesTotalLamports: string | null;
@@ -184,6 +192,16 @@ export interface LeaderSlotTotals {
   firstEpoch: number | null;
   /** Newest counted epoch; null when `epochsCovered === 0`. */
   lastEpoch: number | null;
+  /** Epochs that also carry a stake snapshot — the ratio's population. */
+  epochsWithStake?: number;
+  /** Σ assigned slots over stake-bearing epochs (the ratio's numerator). */
+  assignedWithStake?: number;
+  /**
+   * Leader slots per 10,000 SOL of stake, aggregated as Σslots / Σstake
+   * so higher-stake epochs weigh more. The size-neutral figure: raw slot
+   * counts rank validators by delegation, this one doesn't.
+   */
+  stakeWeightedSlotsPer10kSol?: number | null;
 }
 
 /**
@@ -721,7 +739,8 @@ export type LeaderboardSort =
   | 'mev_tips'
   | 'fees'
   | 'compute_units'
-  | 'skip_rate';
+  | 'skip_rate'
+  | 'slots_per_stake';
 
 /**
  * Leaderboard bracket filter (I). Mirrors the server-accepted
@@ -781,6 +800,33 @@ export interface LeaderboardItem {
   lastUpdatedAt: string | null;
   activatedStakeLamports: string | null;
   activatedStakeSol: string | null;
+  /**
+   * Leader slots per 10,000 SOL of stake over the selected window,
+   * computed server-side as Σslots / Σstake so it matches the
+   * `slots_per_stake` ordering exactly. Do NOT recompute from
+   * `windowSlots / activatedStakeSol` — that stake is the window's
+   * newest snapshot rather than a sum, so the two diverge for any
+   * validator whose stake moved mid-window.
+   *
+   * Optional for backwards compat with older API responses.
+   */
+  slotsPer10kSol?: number | null;
+  /**
+   * False when no epoch in the window has fee/tip data for this
+   * validator — reachable only under `sort=slots_per_stake`, which admits
+   * slot-only rows. Their income fields are database defaults (zero), so
+   * rendering them as money would claim the validator earned nothing
+   * rather than that nothing has been measured. Absent on older API
+   * responses; treat `undefined` as `true` (the historical behaviour,
+   * where every row was income-filtered).
+   */
+  hasIncomeData?: boolean;
+  /**
+   * Slots the `slotsPer10kSol` ratio rests on — the stake-covered subset
+   * of `windowSlots`. Under `sort=slots_per_stake` this is what
+   * `sampleStatus` describes. Absent on older API responses.
+   */
+  windowSlotsWithStake?: number | null;
   /** APR-equivalent (income / stake). Null when stake data is missing
    * (pre-stake-snapshot-migration epoch). */
   incomePerStake: number | null;

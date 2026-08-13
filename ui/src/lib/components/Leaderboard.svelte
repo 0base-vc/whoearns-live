@@ -128,6 +128,13 @@
       alignRight: true,
     },
     {
+      key: 'slots_per_stake',
+      label: 'Slots / 10k SOL',
+      tooltip:
+        'Leader slots won per 10,000 SOL of activated stake in the selected window. Stake buys expected slots, but the schedule is drawn at random each epoch — so this is the size-neutral view of who actually drew well. Values are scoped to the selected window, so compare rows within one window rather than across windows. Small validators read high: the schedule is drawn in 4-slot groups, so a sub-slot expectation pays out either nothing or at least four.',
+      alignRight: true,
+    },
+    {
       key: 'compute_units',
       label: 'CU',
       tooltip:
@@ -237,23 +244,49 @@
     return `${(item.skipRate * 100).toFixed(2)}%`;
   }
 
+  /**
+   * True when the row's income columns are real measurements.
+   *
+   * Under `sort=slots_per_stake` the API admits validators whose slot
+   * data is ingested but whose fees/tips are not yet — their income
+   * fields are database defaults, i.e. zeros that mean "unknown". Every
+   * money cell has to route through this, or the table states that a
+   * validator earned ◎0.000 when nothing has been measured.
+   *
+   * `undefined` means an API predating the flag, where every row was
+   * income-filtered — so the historical answer is true.
+   */
+  function hasIncome(item: LeaderboardItem): boolean {
+    // Only withhold a value the current ranking does not depend on.
+    //
+    // `slots_per_stake` admits rows whose fees/tips have not been
+    // ingested; their money columns are database defaults and rendering
+    // them would claim the validator earned nothing. Under an income
+    // sort, though, that same value IS the rank — showing a validator at
+    // position 3 by fees while printing "-" for its fees would be
+    // incoherent, so completeness is surfaced by the sort's own
+    // eligibility rules rather than by blanking the cell.
+    if (sort !== 'slots_per_stake') return true;
+    return item.hasIncomeData !== false;
+  }
+
   function incomePerSlotText(item: LeaderboardItem): string {
-    if (item.incomeSolPerSlot == null) return '-';
+    if (!hasIncome(item) || item.incomeSolPerSlot == null) return '-';
     return `◎${formatSolFixed(item.incomeSolPerSlot, DECIMALS_PER_SLOT)}`;
   }
 
   function totalIncomeText(item: LeaderboardItem): string {
-    if (item.windowIncomeSol == null) return '-';
+    if (!hasIncome(item) || item.windowIncomeSol == null) return '-';
     return `◎${formatSolFixed(item.windowIncomeSol, DECIMALS_TOTAL)}`;
   }
 
   function mevTipsText(item: LeaderboardItem): string {
-    if (item.blockTipsTotalSol == null) return '-';
+    if (!hasIncome(item) || item.blockTipsTotalSol == null) return '-';
     return `◎${formatSolFixed(item.blockTipsTotalSol, DECIMALS_TOTAL)}`;
   }
 
   function blockFeesText(item: LeaderboardItem): string {
-    if (item.blockFeesTotalSol == null) return '-';
+    if (!hasIncome(item) || item.blockFeesTotalSol == null) return '-';
     return `◎${formatSolFixed(item.blockFeesTotalSol, DECIMALS_TOTAL)}`;
   }
 
@@ -267,6 +300,26 @@
    */
   function windowedCuText(item: LeaderboardItem): string {
     return formatCompactCu(item.windowedCu, { nullText: '—' });
+  }
+
+  /**
+   * Leader slots won per 10,000 SOL of activated stake, over the
+   * selected window.
+   *
+   * Read straight off the row rather than derived here. The server
+   * computes it as Σslots / Σstake across the window and orders by that
+   * same expression; deriving it client-side from `windowSlots` and
+   * `activatedStakeSol` would divide a multi-epoch slot total by a
+   * single-epoch stake snapshot, so any validator whose stake moved
+   * mid-window would show a number that contradicts its own rank.
+   *
+   * Em-dash when absent: no stake snapshot in the window means
+   * unmeasurable, not unlucky.
+   */
+  function slotsPerStakeText(item: LeaderboardItem): string {
+    const value = item.slotsPer10kSol;
+    if (value === null || value === undefined || !Number.isFinite(value)) return '-';
+    return value.toFixed(2);
   }
 
   function cellText(item: LeaderboardItem, key: LeaderboardSort): string {
@@ -283,6 +336,8 @@
         return windowedCuText(item);
       case 'skip_rate':
         return skipRateText(item);
+      case 'slots_per_stake':
+        return slotsPerStakeText(item);
       default:
         return '-';
     }

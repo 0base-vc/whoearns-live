@@ -105,6 +105,9 @@ interface LeaderSlotTotalsBlock {
   totalSkipped: number;
   firstEpoch: number | null;
   lastEpoch: number | null;
+  epochsWithStake: number;
+  assignedWithStake: number;
+  stakeWeightedSlotsPer10kSol: number | null;
 }
 
 const EMPTY_LEADER_SLOT_TOTALS: LeaderSlotTotalsBlock = {
@@ -114,6 +117,9 @@ const EMPTY_LEADER_SLOT_TOTALS: LeaderSlotTotalsBlock = {
   totalSkipped: 0,
   firstEpoch: null,
   lastEpoch: null,
+  epochsWithStake: 0,
+  assignedWithStake: 0,
+  stakeWeightedSlotsPer10kSol: null,
 };
 
 interface HistoryResponse {

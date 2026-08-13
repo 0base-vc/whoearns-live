@@ -262,6 +262,15 @@ paths:
           - `mev_tips`: on-chain Jito tips, DESC.
           - `fees`: base + priority block fees, DESC.
           - `skip_rate`: `slots_skipped / windowSlots`, ASC. Lower is better.
+          - `compute_units`: `SUM(compute_units) / SUM(slots_produced)`, DESC.
+          - `slots_per_stake`: leader slots won per 10,000 SOL of activated
+            stake, DESC. Size-neutral view of the schedule draw — raw slot
+            counts scale with delegation. Denominator is the stake summed
+            across the window, matched slot-for-slot with its numerator and
+            with the running epoch prorated by elapsed exposure. Unlike the
+            other sorts this one admits validators whose slot data is
+            ingested but whose fees are not (`hasIncomeData: false`), and
+            applies `minWindowSlots` to the stake-covered slots.
 
         Rows below `minWindowSlots` are filtered. Returned rows also include a
         `sampleStatus` hint (`low`, `medium`, `normal`) for clients that want
@@ -1929,6 +1938,8 @@ components:
         - slotsElapsedAssigned
         - slotsProduced
         - slotsSkipped
+        - activatedStakeLamports
+        - activatedStakeSol
         - blockFeesTotalLamports
         - blockFeesTotalSol
         - blockTipsTotalLamports
@@ -1984,6 +1995,18 @@ components:
             no block was produced. null when hasSlots=false.
             Invariant: slotsAssigned >= slotsProduced + slotsSkipped.
 
+        activatedStakeLamports:
+          type: [string, 'null']
+          description: >
+            Activated stake snapshot for THIS epoch, in lamports. Per-epoch
+            rather than current, so a validator whose delegation grew over
+            time is measured against what it actually held in each epoch.
+            Null on rows predating the snapshot column (migration 0006).
+            Divide `slotsAssigned` by it for the size-neutral allocation —
+            the raw count tracks delegation, not the schedule draw.
+        activatedStakeSol:
+          type: [string, 'null']
+          description: Same value in SOL.
         blockFeesTotalLamports:
           type: [string, 'null']
           description: Leader fee reward as decimal lamports. null when hasIncome=false.
@@ -2368,10 +2391,23 @@ components:
         Note on interpretation: leader schedules are sampled
         stake-weighted at random in 4-slot groups, so a single epoch's
         `slotsAssigned` carries substantial variance. `totalAssigned`
-        over many epochs is the comparable figure; divide by
-        `epochsCovered` to normalise for how long the validator has
-        been indexed.
-      required: [epochsCovered, totalAssigned, totalProduced, totalSkipped, firstEpoch, lastEpoch]
+        over many epochs is more stable than any single epoch — but it
+        still scales with delegation, so use
+        `stakeWeightedSlotsPer10kSol` when comparing validators to each
+        other. `totalAssigned` answers "how many slots did this validator
+        get"; the ratio answers "how did its draw compare".
+      required:
+        [
+          epochsCovered,
+          totalAssigned,
+          totalProduced,
+          totalSkipped,
+          firstEpoch,
+          lastEpoch,
+          epochsWithStake,
+          assignedWithStake,
+          stakeWeightedSlotsPer10kSol,
+        ]
       properties:
         epochsCovered:
           type: integer
@@ -2395,6 +2431,52 @@ components:
         lastEpoch:
           type: [integer, 'null']
           description: Newest counted epoch; null when `epochsCovered` is 0.
+        epochsWithStake:
+          type: integer
+          minimum: 0
+          description: >
+            Epochs carrying a POSITIVE stake snapshot — the population the
+            stake-normalised ratio is computed over. Lower than
+            `epochsCovered` when older rows predate the snapshot column,
+            or when an epoch recorded zero activated stake (which is
+            excluded: it would add slots to the numerator and nothing to
+            the denominator).
+        assignedWithStake:
+          type: integer
+          minimum: 0
+          description: >
+            Sum of assigned slots restricted to stake-bearing epochs; the
+            numerator of `stakeWeightedSlotsPer10kSol`. Quoted separately
+            because pairing the unrestricted `totalAssigned` with a ratio
+            computed over a subset would not add up.
+        stakeWeightedSlotsPer10kSol:
+          type: [number, 'null']
+          description: >
+            Leader slots per 10,000 SOL of activated stake, aggregated as
+            SUM(slots) / SUM(stake) across stake-bearing epochs — not the
+            mean of per-epoch ratios, so epochs where the validator held
+            more stake weigh proportionally more.
+
+
+            The size-neutral figure: raw slot counts (and slots-per-epoch
+            averages) scale with delegation, so ranking on them ranks
+            validators by size; dividing by stake leaves the part that is
+            the schedule lottery.
+
+
+            NOT a normalised luck score. Expected slots per unit of stake
+            also depend on the epoch's total cluster stake, which this
+            service does not index, so the baseline drifts as the cluster
+            grows — two validators that each drew exactly their expected
+            allocation can differ here if their histories cover different
+            eras. Sound within a shared span and for one validator's own
+            epoch-to-epoch variation; approximate across widely different
+            spans. Also degenerate for very small validators: the schedule
+            is sampled in 4-slot groups, so a sub-slot expectation pays out
+            0 or at least 4.
+
+
+            Null when no epoch carries a stake snapshot.
 
     BatchRequest:
       type: object
@@ -2658,11 +2740,33 @@ components:
 
     LeaderboardSort:
       type: string
-      enum: [income_per_slot, total_income, mev_tips, fees, skip_rate]
+      enum:
+        [income_per_slot, total_income, mev_tips, fees, skip_rate, compute_units, slots_per_stake]
       default: income_per_slot
       description: |
         Ranking mode for `/v1/leaderboard`. See endpoint doc for semantics.
         `income_per_slot` (default) is the stake-neutral live trend metric.
+
+        `slots_per_stake` ranks by leader slots won per unit of activated
+        stake in the selected window — the size-neutral view of the
+        schedule draw, since raw slot counts scale with delegation. The
+        divisor is the stake SUMMED across the window and matched
+        slot-for-slot with its numerator, with the running epoch's snapshot
+        prorated by the EPOCH-WIDE elapsed fraction — so neither a
+        mid-window delegation change nor the position of a validator's
+        assigned slots can misrank it. Magnitudes remain window-scoped:
+        compare rows within one window, not across windows of different
+        lengths. Rows without a stake snapshot sort last.
+
+        This sort also admits validators whose slot data is ingested but
+        whose fees/tips are not, since allocation is measurable without
+        them. Check `hasIncomeData` before presenting income fields on such
+        rows — they carry zeros meaning "unmeasured", not "earned nothing".
+        The `minWindowSlots` floor is applied to the
+            stake-covered slots here, so it constrains the sample the ratio
+            is actually built from. Rows with no stake anywhere in the
+            window are exempt — they have no ratio to be noisy and are
+            kept, with a null ratio, in the NULLS LAST tail.
 
     LeaderboardBracket:
       type: string
@@ -2723,6 +2827,9 @@ components:
         - decadeEpochStart
         - decadeEpochEnd
         - decadeRank
+        - slotsPer10kSol
+        - windowSlotsWithStake
+        - hasIncomeData
       properties:
         rank: { type: integer, minimum: 1 }
         vote: { type: string }
@@ -2794,6 +2901,54 @@ components:
             totalIncome / activatedStake as a dimensionless ratio per
             epoch. Multiply by 100 for percentage; null when stake
             data is unavailable.
+        slotsPer10kSol:
+          type: [number, 'null']
+          description: >
+            Leader slots won per 10,000 SOL of activated stake over the
+            selected window — the size-neutral view of the schedule draw.
+            Computed server-side as SUM(window slots with stake) /
+            SUM(stake), with the running epoch's stake prorated by elapsed
+            exposure, and ordered by that same expression under
+            `sort=slots_per_stake`. Do NOT recompute it from `windowSlots`
+            and `activatedStakeLamports` — the latter is the window's
+            newest snapshot rather than a sum, so the two disagree for any
+            validator whose stake moved mid-window, and the ranking follows
+            this field. Null when no epoch in the window carries a stake
+            snapshot.
+        windowSlotsWithStake:
+          type: [integer, 'null']
+          description: >
+            Slots the `slotsPer10kSol` ratio was computed from — the
+            subset of `windowSlots` whose epochs carry a stake snapshot.
+            Under `sort=slots_per_stake` this is also the count
+            `sampleStatus` describes, since a ratio built on four covered
+            slots inside a 400-slot window carries four slots' worth of
+            variance. Null when no epoch in the window carries a stake
+            snapshot.
+        hasIncomeData:
+          type: boolean
+          description: >
+            False unless income for the window is COMPLETE: every epoch,
+            and both the fee and tip streams within each. The income
+            fields are window sums, so one uncovered epoch — or one epoch
+            with fees ingested but not tips — leaves them short by that
+            missing part.
+
+
+            Use it to withhold values the active ranking does not depend
+            on. Under `sort=slots_per_stake` the money columns are
+            incidental and a partial total should be shown as
+            unavailable. Under an income sort that same value drives the
+            rank, so blanking it would contradict the ordering — those
+            sorts apply their own eligibility predicate instead.
+
+
+            Only reachable under `sort=slots_per_stake`, which admits
+            slot-only rows so an ingestion lag cannot hide a measurable
+            allocation. Such rows carry column-default zeros in every
+            income field; render them as unavailable rather than as zero
+            income. Always true for other sorts, whose rows are filtered
+            on income evidence.
         claimed: { type: boolean }
         decadeEpochStart:
           type: [integer, 'null']

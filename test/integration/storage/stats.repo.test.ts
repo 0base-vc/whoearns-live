@@ -847,4 +847,683 @@ describe('StatsRepository', () => {
     });
     expect(byIncome.map((r) => r.votePubkey)).toEqual(['LoCuVote', 'HiCuVote']);
   });
+
+  describe('sumLeaderSlotsByVote', () => {
+    const VOTE = 'LifetimeVote';
+    const IDENTITY = 'LifetimeIdentity';
+    const SOL = 1_000_000_000n;
+
+    async function seedEpoch(args: {
+      epoch: number;
+      slotsAssigned: number;
+      stakeSol?: bigint;
+    }): Promise<void> {
+      await repo.upsertSlotStats({
+        epoch: args.epoch,
+        votePubkey: VOTE,
+        identityPubkey: IDENTITY,
+        slotsAssigned: args.slotsAssigned,
+        slotsProduced: args.slotsAssigned,
+        slotsSkipped: 0,
+        ...(args.stakeSol === undefined ? {} : { activatedStakeLamports: args.stakeSol * SOL }),
+      });
+    }
+
+    it("weights the ratio by each epoch's own stake, not by epoch count", async () => {
+      // 10 slots at 10k SOL (=10.0 per 10k) and 40 at 100k (=4.0 per 10k).
+      // An AVG() of per-row ratios would give 7.0; Σslots/Σstake gives
+      // 50 / 110k · 10k = 4.545…, correctly weighting the epoch where the
+      // validator held ten times the stake ten times as heavily.
+      await seedEpoch({ epoch: 700, slotsAssigned: 10, stakeSol: 10_000n });
+      await seedEpoch({ epoch: 701, slotsAssigned: 40, stakeSol: 100_000n });
+
+      const totals = await repo.sumLeaderSlotsByVote(VOTE);
+      expect(totals.epochsCovered).toBe(2);
+      expect(totals.epochsWithStake).toBe(2);
+      expect(totals.assignedWithStake).toBe(50);
+      expect(totals.stakeWeightedSlotsPer10kSol).toBeCloseTo(4.5455, 3);
+    });
+
+    it('excludes stake-less epochs from the ratio but not from the totals', async () => {
+      // Exercises the SQL FILTER clauses: `total_assigned` counts both
+      // rows, while numerator and denominator cover only the row that
+      // has a stake snapshot. Without the FILTER on the numerator the
+      // ratio would come out 2.5x too high.
+      await seedEpoch({ epoch: 800, slotsAssigned: 20, stakeSol: 20_000n });
+      await seedEpoch({ epoch: 801, slotsAssigned: 30 });
+
+      const totals = await repo.sumLeaderSlotsByVote(VOTE);
+      expect(totals.totalAssigned).toBe(50);
+      expect(totals.epochsCovered).toBe(2);
+      expect(totals.epochsWithStake).toBe(1);
+      expect(totals.assignedWithStake).toBe(20);
+      expect(totals.stakeWeightedSlotsPer10kSol).toBeCloseTo(10, 6);
+    });
+
+    it('keeps precision when the lamport sum exceeds Number.MAX_SAFE_INTEGER', async () => {
+      // 20 epochs × 5M SOL = 1e17 lamports, well past 2^53 (~9.007e15).
+      // This is why the division happens in SQL over NUMERIC: doing it in
+      // JS would round the denominator before dividing. Expected ratio is
+      // exactly 4 slots per 10k SOL (2,000 slots per 5M SOL).
+      for (let i = 0; i < 20; i += 1) {
+        await seedEpoch({ epoch: 900 + i, slotsAssigned: 2_000, stakeSol: 5_000_000n });
+      }
+      const totals = await repo.sumLeaderSlotsByVote(VOTE);
+      expect(totals.epochsWithStake).toBe(20);
+      expect(totals.assignedWithStake).toBe(40_000);
+      expect(totals.stakeWeightedSlotsPer10kSol).toBeCloseTo(4, 9);
+    });
+
+    it('returns a null ratio — not zero or NaN — when no epoch has stake', async () => {
+      await seedEpoch({ epoch: 950, slotsAssigned: 12 });
+      const totals = await repo.sumLeaderSlotsByVote(VOTE);
+      expect(totals.totalAssigned).toBe(12);
+      expect(totals.epochsWithStake).toBe(0);
+      expect(totals.stakeWeightedSlotsPer10kSol).toBeNull();
+    });
+
+    it('returns zeroed totals for an unknown vote', async () => {
+      const totals = await repo.sumLeaderSlotsByVote('NoSuchVote');
+      expect(totals).toEqual({
+        epochsCovered: 0,
+        totalAssigned: 0,
+        totalProduced: 0,
+        totalSkipped: 0,
+        firstEpoch: null,
+        lastEpoch: null,
+        epochsWithStake: 0,
+        assignedWithStake: 0,
+        stakeWeightedSlotsPer10kSol: null,
+      });
+    });
+  });
+
+  describe('findTopNByWindow: slots_per_stake', () => {
+    const SOL = 1_000_000_000n;
+
+    async function seed(args: {
+      epoch: number;
+      vote: string;
+      identity: string;
+      slots: number;
+      stakeSol: bigint | null;
+      fees?: bigint;
+    }): Promise<void> {
+      await repo.upsertSlotStats({
+        epoch: args.epoch,
+        votePubkey: args.vote,
+        identityPubkey: args.identity,
+        slotsAssigned: args.slots,
+        slotsProduced: args.slots,
+        slotsSkipped: 0,
+        ...(args.stakeSol === null ? {} : { activatedStakeLamports: args.stakeSol * SOL }),
+      });
+      if (args.fees !== undefined) {
+        await repo.addIncomeDelta({
+          epoch: args.epoch,
+          identityPubkey: args.identity,
+          leaderFeeDeltaLamports: args.fees,
+          baseFeeDeltaLamports: 0n,
+          priorityFeeDeltaLamports: args.fees,
+          tipDeltaLamports: 0n,
+          computeUnitsDelta: 0n,
+        });
+      }
+    }
+
+    it('divides by stake summed across the window, not the newest snapshot', async () => {
+      const epochs = [
+        { epoch: 500, isCurrent: false },
+        { epoch: 501, isCurrent: false },
+      ];
+      // "Shrunk" held 100k SOL then fell to 10k, drawing slots in
+      // proportion each epoch — exactly its expected share throughout.
+      // Dividing its 110 window slots by the NEWEST snapshot (10k) yields
+      // 110 per 10k SOL and would rank it far above everyone; the correct
+      // Σslots/Σstake is 110 / 110k = 10.0.
+      await seed({
+        epoch: 500,
+        vote: 'Shrunk',
+        identity: 'ShrunkId',
+        slots: 100,
+        stakeSol: 100_000n,
+        fees: 1n,
+      });
+      await seed({
+        epoch: 501,
+        vote: 'Shrunk',
+        identity: 'ShrunkId',
+        slots: 10,
+        stakeSol: 10_000n,
+        fees: 1n,
+      });
+      // "Steady" held 50k SOL across both epochs and drew slightly better
+      // than expected: 120 slots on 100k SOL-epochs = 12.0 per 10k.
+      await seed({
+        epoch: 500,
+        vote: 'Steady',
+        identity: 'SteadyId',
+        slots: 60,
+        stakeSol: 50_000n,
+        fees: 1n,
+      });
+      await seed({
+        epoch: 501,
+        vote: 'Steady',
+        identity: 'SteadyId',
+        slots: 60,
+        stakeSol: 50_000n,
+        fees: 1n,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+
+      const shrunk = rows.find((r) => r.votePubkey === 'Shrunk')!;
+      const steady = rows.find((r) => r.votePubkey === 'Steady')!;
+      expect(shrunk.slotsPer10kSol).toBeCloseTo(10, 6);
+      expect(steady.slotsPer10kSol).toBeCloseTo(12, 6);
+      // Steady genuinely drew better per unit of stake, so it ranks first.
+      // With the newest-snapshot denominator Shrunk would have won on a
+      // ratio 11x its real one.
+      expect(rows.map((r) => r.votePubkey)).toEqual(['Steady', 'Shrunk']);
+    });
+
+    it('ranks validators with slot data but no income yet', async () => {
+      // The income-evidence predicate that every other sort requires
+      // would drop this validator entirely: the slot ingester has run,
+      // the fee ingester has not. Its allocation is fully measurable.
+      const epochs = [{ epoch: 600, isCurrent: false }];
+      await seed({
+        epoch: 600,
+        vote: 'SlotsOnly',
+        identity: 'SlotsOnlyId',
+        slots: 40,
+        stakeSol: 20_000n,
+      });
+
+      const bySlots = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      expect(bySlots.map((r) => r.votePubkey)).toEqual(['SlotsOnly']);
+      expect(bySlots[0]!.slotsPer10kSol).toBeCloseTo(20, 6);
+
+      // An income sort still excludes it — that predicate is correct
+      // there, since ranking it on income would read as "earned zero".
+      const byIncome = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'total_income',
+        minWindowSlots: 1,
+      });
+      expect(byIncome.map((r) => r.votePubkey)).toEqual([]);
+    });
+
+    it("prorates the running epoch's stake by elapsed exposure", async () => {
+      // Window = one closed epoch + one epoch that is 20% elapsed.
+      //
+      // "Mover" held 100k SOL in the closed epoch and dropped to 10k for
+      // the open one; "Held" sat at 50k throughout. Both drew exactly
+      // 10 slots per 10k SOL of exposure, so both must report 10.0.
+      //
+      // Counting the open epoch's stake in full would charge Mover a
+      // whole epoch of 10k SOL for a fifth of a draw and Held a whole
+      // 50k, producing different ratios for identical luck.
+      await repo.upsertSlotStats({
+        epoch: 800,
+        votePubkey: 'Mover',
+        identityPubkey: 'MoverId',
+        slotsAssigned: 100,
+        slotsProduced: 100,
+        slotsSkipped: 0,
+        activatedStakeLamports: 100_000n * SOL,
+      });
+      // Open epoch: 10 assigned for the full epoch, 2 elapsed (20%).
+      await repo.upsertSlotStats({
+        epoch: 801,
+        votePubkey: 'Mover',
+        identityPubkey: 'MoverId',
+        slotsAssigned: 10,
+        slotsElapsedAssigned: 2,
+        slotsProduced: 2,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 800,
+        votePubkey: 'Held',
+        identityPubkey: 'HeldId',
+        slotsAssigned: 50,
+        slotsProduced: 50,
+        slotsSkipped: 0,
+        activatedStakeLamports: 50_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 801,
+        votePubkey: 'Held',
+        identityPubkey: 'HeldId',
+        slotsAssigned: 50,
+        slotsElapsedAssigned: 10,
+        slotsProduced: 10,
+        slotsSkipped: 0,
+        activatedStakeLamports: 50_000n * SOL,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        // The open epoch is 20% elapsed cluster-wide. Both validators are
+        // weighted by that same 0.2, regardless of how much of their own
+        // schedule happens to have passed.
+        epochs: [
+          { epoch: 800, isCurrent: false },
+          { epoch: 801, isCurrent: true, elapsedFraction: 0.2 },
+        ],
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      const mover = rows.find((r) => r.votePubkey === 'Mover')!;
+      const held = rows.find((r) => r.votePubkey === 'Held')!;
+      // Mover: (100 + 2) slots / (100k + 10k×0.2) SOL = 102 / 102k.
+      expect(mover.slotsPer10kSol).toBeCloseTo(10, 6);
+      // Held: (50 + 10) / (50k + 50k×0.2) = 60 / 60k.
+      expect(held.slotsPer10kSol).toBeCloseTo(10, 6);
+    });
+
+    it('weights the open epoch by cluster progress, not per-validator slot placement', async () => {
+      // Both hold 10k SOL and have drawn 5 elapsed slots at the same
+      // chain tip, so their ratios must be identical. They differ only in
+      // where their remaining assignments sit: "Front" has most of its
+      // schedule behind it (5 of 10 elapsed), "Back" almost none
+      // (5 of 100). Weighting by each validator's own elapsed/assigned
+      // would charge Front 0.5 of its stake and Back 0.05, handing Back a
+      // 10x ratio for nothing but slot placement.
+      await repo.upsertSlotStats({
+        epoch: 830,
+        votePubkey: 'Front',
+        identityPubkey: 'FrontId',
+        slotsAssigned: 10,
+        slotsElapsedAssigned: 5,
+        slotsProduced: 5,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 830,
+        votePubkey: 'Back',
+        identityPubkey: 'BackId',
+        slotsAssigned: 100,
+        slotsElapsedAssigned: 5,
+        slotsProduced: 5,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs: [{ epoch: 830, isCurrent: true, elapsedFraction: 0.5 }],
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      const front = rows.find((r) => r.votePubkey === 'Front')!;
+      const back = rows.find((r) => r.votePubkey === 'Back')!;
+      // 5 slots / (10k × 0.5) SOL = 10 per 10k SOL, for both.
+      expect(front.slotsPer10kSol).toBeCloseTo(10, 6);
+      expect(back.slotsPer10kSol).toBeCloseTo(10, 6);
+    });
+
+    it('applies the slot floor to the stake-covered slots for this sort', async () => {
+      // 400 stake-less slots plus 4 stake-covered ones. A floor of 64
+      // tests the sample the ratio is built from, so this row is
+      // excluded — without that, four slots at tiny stake would rank at
+      // the top on the strength of slots the ratio never used.
+      const epochs = [
+        { epoch: 810, isCurrent: false },
+        { epoch: 811, isCurrent: false },
+      ];
+      await repo.upsertSlotStats({
+        epoch: 810,
+        votePubkey: 'ThinCoverage',
+        identityPubkey: 'ThinId',
+        slotsAssigned: 400,
+        slotsProduced: 400,
+        slotsSkipped: 0,
+      });
+      await repo.upsertSlotStats({
+        epoch: 811,
+        votePubkey: 'ThinCoverage',
+        identityPubkey: 'ThinId',
+        slotsAssigned: 4,
+        slotsProduced: 4,
+        slotsSkipped: 0,
+        activatedStakeLamports: 100n * SOL,
+      });
+
+      const ranked = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 64,
+      });
+      expect(ranked.map((r) => r.votePubkey)).toEqual([]);
+
+      // The same row clears the floor on an income sort, which measures
+      // the unrestricted window — proving the floor is sort-aware rather
+      // than globally stricter.
+      const byIncomeFloor = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 4,
+      });
+      expect(byIncomeFloor.map((r) => r.votePubkey)).toEqual(['ThinCoverage']);
+    });
+
+    it('flags rows whose income has not been ingested', async () => {
+      const epochs = [{ epoch: 820, isCurrent: false }];
+      await seed({
+        epoch: 820,
+        vote: 'SlotsOnly2',
+        identity: 'SlotsOnly2Id',
+        slots: 40,
+        stakeSol: 20_000n,
+      });
+      await seed({
+        epoch: 820,
+        vote: 'WithIncome',
+        identity: 'WithIncomeId',
+        slots: 40,
+        stakeSol: 20_000n,
+        fees: 5n,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      const slotsOnly = rows.find((r) => r.votePubkey === 'SlotsOnly2')!;
+      const withIncome = rows.find((r) => r.votePubkey === 'WithIncome')!;
+      // Both rank; only one has measured income. Callers use the flag to
+      // avoid rendering the other's default zeros as real earnings.
+      expect(slotsOnly.hasIncomeEvidence).toBe(false);
+      expect(withIncome.hasIncomeEvidence).toBe(true);
+      expect(slotsOnly.blockFeesTotalLamports).toBe(0n);
+    });
+
+    it('falls back to the epoch-wide fraction when a row has no watermark', async () => {
+      // Regression guard. The proration first used
+      // COALESCE(LEAST(1, GREATEST(0, ...)), elapsed_fraction), but
+      // Postgres GREATEST/LEAST SKIP null arguments rather than
+      // propagating them — so a missing watermark collapsed to 0, the
+      // COALESCE never fired, and the running epoch contributed no stake
+      // at all. That silently inflated every ratio in a live window.
+      await repo.upsertSlotStats({
+        epoch: 860,
+        votePubkey: 'NoWatermark',
+        identityPubkey: 'NoWatermarkId',
+        slotsAssigned: 40,
+        slotsElapsedAssigned: 10,
+        slotsProduced: 10,
+        slotsSkipped: 0,
+        // No slotWindowLastSlot — the ingester has not written one yet.
+        activatedStakeLamports: 10_000n * SOL,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs: [
+          {
+            epoch: 860,
+            isCurrent: true,
+            elapsedFraction: 0.5,
+            firstSlot: 0,
+            slotCount: 432_000,
+          },
+        ],
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      expect(rows).toHaveLength(1);
+      // 10 slots / (10k × 0.5) = 20 per 10k SOL. A dropped fallback would
+      // give a null ratio (zero denominator) instead.
+      expect(rows[0]!.slotsPer10kSol).toBeCloseTo(20, 6);
+    });
+
+    it('prorates each row by its OWN slot-counter watermark', async () => {
+      // The slot ingester updates vote rows sequentially, so mid-tick one
+      // row's counters can reflect a later tip than another's. Both
+      // validators below hold 10k SOL and drew 5 slots per unit of the
+      // exposure their own counters cover — "Ahead" through 50% of the
+      // epoch, "Behind" through 25%. A shared maximum watermark would
+      // charge Behind for exposure its numerator has not counted (halving
+      // its ratio); a shared minimum would overpay Ahead.
+      await repo.upsertSlotStats({
+        epoch: 850,
+        votePubkey: 'Ahead',
+        identityPubkey: 'AheadId',
+        slotsAssigned: 40,
+        slotsElapsedAssigned: 10,
+        slotsProduced: 10,
+        slotsSkipped: 0,
+        // The fraction counts slots INCLUSIVELY (watermark - firstSlot + 1),
+        // so the 50% mark of a 432k-slot epoch starting at slot 0 is
+        // slot 215_999, not 216_000.
+        slotWindowLastSlot: 215_999,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 850,
+        votePubkey: 'Behind',
+        identityPubkey: 'BehindId',
+        slotsAssigned: 40,
+        slotsElapsedAssigned: 5,
+        slotsProduced: 5,
+        slotsSkipped: 0,
+        slotWindowLastSlot: 107_999, // 25%, same inclusive convention
+        activatedStakeLamports: 10_000n * SOL,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs: [
+          {
+            epoch: 850,
+            isCurrent: true,
+            elapsedFraction: 0.5,
+            firstSlot: 0,
+            slotCount: 432_000,
+          },
+        ],
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      const ahead = rows.find((r) => r.votePubkey === 'Ahead')!;
+      const behind = rows.find((r) => r.votePubkey === 'Behind')!;
+      // Ahead:  10 / (10k × 0.50) = 20 per 10k SOL.
+      // Behind:  5 / (10k × 0.25) = 20 per 10k SOL — identical, as it
+      // must be: they differ only in how far the ingester got.
+      expect(ahead.slotsPer10kSol).toBeCloseTo(20, 6);
+      expect(behind.slotsPer10kSol).toBeCloseTo(20, 6);
+    });
+
+    it('requires EVERY window epoch to be covered before flagging income', async () => {
+      // Income columns are window SUMS, so one uncovered epoch makes the
+      // total partial. Flagging it as present would render a half-window
+      // sum as the full window's earnings.
+      const epochs = [
+        { epoch: 840, isCurrent: false },
+        { epoch: 841, isCurrent: false },
+      ];
+      await seed({
+        epoch: 840,
+        vote: 'PartialCoverage',
+        identity: 'PartialId',
+        slots: 20,
+        stakeSol: 10_000n,
+        fees: 7n,
+      });
+      await seed({
+        epoch: 841,
+        vote: 'PartialCoverage',
+        identity: 'PartialId',
+        slots: 20,
+        stakeSol: 10_000n,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.hasIncomeEvidence).toBe(false);
+    });
+
+    it('treats a zero-stake snapshot as uncovered, not as free slots', async () => {
+      // ValidatorService returns 0n when the RPC reports zero activated
+      // stake, and SlotService still records that epoch's schedule. A
+      // NULL-only filter accepts the row, adding its slots to the
+      // numerator while contributing nothing to the denominator — which
+      // inflates the ratio without bound.
+      const epochs = [
+        { epoch: 880, isCurrent: false },
+        { epoch: 881, isCurrent: false },
+      ];
+      await repo.upsertSlotStats({
+        epoch: 880,
+        votePubkey: 'ZeroStake',
+        identityPubkey: 'ZeroStakeId',
+        slotsAssigned: 20,
+        slotsProduced: 20,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 881,
+        votePubkey: 'ZeroStake',
+        identityPubkey: 'ZeroStakeId',
+        slotsAssigned: 200,
+        slotsProduced: 200,
+        slotsSkipped: 0,
+        activatedStakeLamports: 0n,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      expect(rows).toHaveLength(1);
+      // Only the 20 slots backed by 10k SOL count: 20 per 10k SOL. Were
+      // the zero-stake epoch included, the numerator would be 220 and the
+      // ratio 220 — an eleven-fold overstatement.
+      expect(rows[0]!.windowSlotsWithStake).toBe(20);
+      expect(rows[0]!.slotsPer10kSol).toBeCloseTo(20, 6);
+    });
+
+    it('excludes zero-stake epochs from the lifetime ratio too', async () => {
+      await repo.upsertSlotStats({
+        epoch: 890,
+        votePubkey: 'ZeroLifetime',
+        identityPubkey: 'ZeroLifetimeId',
+        slotsAssigned: 20,
+        slotsProduced: 20,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+      await repo.upsertSlotStats({
+        epoch: 891,
+        votePubkey: 'ZeroLifetime',
+        identityPubkey: 'ZeroLifetimeId',
+        slotsAssigned: 200,
+        slotsProduced: 200,
+        slotsSkipped: 0,
+        activatedStakeLamports: 0n,
+      });
+
+      const totals = await repo.sumLeaderSlotsByVote('ZeroLifetime');
+      // Both epochs have slot data...
+      expect(totals.epochsCovered).toBe(2);
+      expect(totals.totalAssigned).toBe(220);
+      // ...but only one has usable stake.
+      expect(totals.epochsWithStake).toBe(1);
+      expect(totals.assignedWithStake).toBe(20);
+      expect(totals.stakeWeightedSlotsPer10kSol).toBeCloseTo(20, 6);
+    });
+
+    it('requires BOTH income streams per epoch, not just one', async () => {
+      // `seed` writes fees and tips together via addIncomeDelta, so the
+      // one-sided case is built directly: fees ingested, tips never. That
+      // undercounts (fees + tips) by exactly the missing half, which is
+      // the same completeness rule findEconomicPercentile applies.
+      const epochs = [{ epoch: 870, isCurrent: false }];
+      await repo.upsertSlotStats({
+        epoch: 870,
+        votePubkey: 'FeesOnly',
+        identityPubkey: 'FeesOnlyId',
+        slotsAssigned: 20,
+        slotsProduced: 20,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * SOL,
+      });
+      await repo.addFeeDelta({
+        epoch: 870,
+        identityPubkey: 'FeesOnlyId',
+        deltaLamports: 9n,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      expect(rows).toHaveLength(1);
+      // Ranks fine — allocation is fully measured — but its money columns
+      // are a half-total and must not be presented as complete.
+      expect(rows[0]!.slotsPer10kSol).toBeCloseTo(20, 6);
+      expect(rows[0]!.hasIncomeEvidence).toBe(false);
+    });
+
+    it('sorts rows without any stake snapshot last, with a null ratio', async () => {
+      const epochs = [{ epoch: 700, isCurrent: false }];
+      await seed({
+        epoch: 700,
+        vote: 'HasStake',
+        identity: 'HasStakeId',
+        slots: 10,
+        stakeSol: 50_000n,
+      });
+      await seed({
+        epoch: 700,
+        vote: 'NoStake',
+        identity: 'NoStakeId',
+        slots: 400,
+        stakeSol: null,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      // A row with no stake anywhere in the window has no ratio to be
+      // noisy, so the stake-covered floor must not delete it — it falls
+      // back to the ordinary window-slots floor and lands in the
+      // documented NULLS LAST tail.
+      expect(rows.map((r) => r.votePubkey)).toEqual(['HasStake', 'NoStake']);
+      expect(rows[1]!.slotsPer10kSol).toBeNull();
+    });
+  });
 });

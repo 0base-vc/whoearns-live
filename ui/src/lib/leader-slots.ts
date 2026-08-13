@@ -17,6 +17,32 @@
 
 import type { LeaderSlotTotals, ValidatorEpochRecord } from './types.js';
 
+/** Lamports per SOL, and the reporting unit the ratio is quoted in. */
+const REPORTING_UNIT_SOL = 10_000;
+
+/**
+ * Leader slots per 10,000 SOL of activated stake for ONE epoch.
+ *
+ * This is the size-neutral view of the row. `slotsAssigned` on its own
+ * tracks delegation — a validator with ten times the stake draws roughly
+ * ten times the slots — so comparing raw counts across validators, or
+ * even across a validator's own epochs while its stake moved, mostly
+ * measures size. Dividing by that epoch's own stake snapshot leaves the
+ * part that is the schedule lottery, which is what swings epoch to epoch.
+ *
+ * Null when the row has no slot data or no stake snapshot (rows predating
+ * migration 0006, or an API too old to send the field). Null is rendered
+ * as an em-dash rather than 0 — "not measurable" is not "drew nothing".
+ */
+export function slotsPer10kSol(row: ValidatorEpochRecord): number | null {
+  const slots = row.slotsAssigned;
+  const stakeSol = row.activatedStakeSol;
+  if (slots === null || stakeSol === null || stakeSol === undefined) return null;
+  const stake = Number(stakeSol);
+  if (!Number.isFinite(stake) || stake <= 0) return null;
+  return (slots / stake) * REPORTING_UNIT_SOL;
+}
+
 /** Sort direction for the epoch table's sortable columns. */
 export type SortDirection = 'asc' | 'desc';
 
@@ -24,7 +50,7 @@ export type SortDirection = 'asc' | 'desc';
  * Column the epoch table is currently ordered by. `epoch` is the
  * default and preserves the historical newest-first reading order.
  */
-export type EpochSortKey = 'epoch' | 'assigned';
+export type EpochSortKey = 'epoch' | 'assigned' | 'perStake';
 
 /**
  * Order history rows for display.
@@ -45,10 +71,12 @@ export function sortEpochRows(
   direction: SortDirection,
 ): ValidatorEpochRecord[] {
   const sign = direction === 'asc' ? 1 : -1;
+  const valueOf = (row: ValidatorEpochRecord): number | null =>
+    key === 'perStake' ? slotsPer10kSol(row) : row.slotsAssigned;
   return [...rows].sort((a, b) => {
-    if (key === 'assigned') {
-      const av = a.slotsAssigned;
-      const bv = b.slotsAssigned;
+    if (key !== 'epoch') {
+      const av = valueOf(a);
+      const bv = valueOf(b);
       if (av === null && bv === null) return b.epoch - a.epoch;
       if (av === null) return 1;
       if (bv === null) return -1;
@@ -69,42 +97,41 @@ export interface LeaderSlotSummary {
   totalAssigned: number;
   /** Epochs the sum covers. Context for how much to trust it. */
   epochsCovered: number;
-  /**
-   * Allocation normalised by measured lifetime, or null when no epochs
-   * are covered. See `summariseLeaderSlots` for the choice of
-   * denominator.
-   */
-  avgAssignedPerEpoch: number | null;
   /** Inclusive epoch range the totals cover; null when nothing is covered. */
   range: { from: number; to: number } | null;
+  /**
+   * Lifetime leader slots per 10,000 SOL, straight from the API's
+   * stake-weighted aggregate. The headline comparison number — unlike
+   * `totalAssigned`, it does not reward delegation size or longevity.
+   * Null when no epoch carries a stake snapshot.
+   */
+  slotsPer10kSol: number | null;
+  /** Epochs the ratio is computed over; ≤ `epochsCovered`. */
+  epochsWithStake: number;
 }
 
 /**
  * Derive the display summary from the API's lifetime totals.
  *
- * `avgAssignedPerEpoch` divides by `totals.epochsCovered` — epochs the
- * indexer actually has slot data for — rather than by the calendar span
- * `lastEpoch - firstEpoch + 1`.
+ * Note what is deliberately absent: a slots-per-EPOCH average. That
+ * figure scales with delegation — a validator holding ten times the
+ * stake draws roughly ten times the slots every epoch — so ranking on
+ * it just ranks by size. `slotsPer10kSol` is the comparable number,
+ * and the API computes it as Σslots / Σstake across stake-bearing
+ * epochs so that epochs where the validator held more stake weigh
+ * proportionally more.
  *
- * The two disagree whenever coverage is patchy, and the calendar span
- * would count every uncovered epoch inside the range as a genuine zero.
- * For this service that penalty lands on the wrong thing: validators are
- * routinely picked up mid-history (on-demand tracking, the bulk info
- * ingester), so the uncovered epochs are usually "we weren't watching",
- * not "it drew no slots". Dividing by the measured sample keeps the
- * number an honest statement about what was measured.
- *
- * The trade-off it accepts: two validators can have averages over
- * different-length windows, so the figure is not by itself a fair
- * cross-validator ranking. Every caller renders `epochsCovered` next to
- * it for exactly that reason.
+ * `epochsCovered` and `epochsWithStake` are both surfaced because they
+ * can differ: rows predating the stake snapshot (migration 0006) count
+ * toward the former only, and a ratio drawn from far fewer epochs than
+ * the history shows deserves to be read with that in mind.
  */
 export function summariseLeaderSlots(totals: LeaderSlotTotals): LeaderSlotSummary {
   return {
     totalAssigned: totals.totalAssigned,
     epochsCovered: totals.epochsCovered,
-    avgAssignedPerEpoch:
-      totals.epochsCovered > 0 ? totals.totalAssigned / totals.epochsCovered : null,
+    slotsPer10kSol: totals.stakeWeightedSlotsPer10kSol ?? null,
+    epochsWithStake: totals.epochsWithStake ?? 0,
     range:
       totals.firstEpoch === null || totals.lastEpoch === null
         ? null

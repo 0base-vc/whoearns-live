@@ -130,6 +130,15 @@ export function serializeValidator(
     slotsProduced: hasSlots ? stats.slotsProduced : null,
     slotsSkipped: hasSlots ? stats.slotsSkipped : null,
 
+    // Per-epoch stake snapshot. NOT gated on `hasSlots`: the stake
+    // column is written by the slot-ingester but also survives on rows
+    // whose slot counters were never filled, and a caller normalising
+    // by stake wants whatever snapshot exists.
+    activatedStakeLamports:
+      stats.activatedStakeLamports === null ? null : lamportsToString(stats.activatedStakeLamports),
+    activatedStakeSol:
+      stats.activatedStakeLamports === null ? null : lamportsToSol(stats.activatedStakeLamports),
+
     blockFeesTotalLamports: hasIncome ? lamportsToString(stats.blockFeesTotalLamports) : null,
     blockFeesTotalSol: hasIncome ? lamportsToSol(stats.blockFeesTotalLamports) : null,
     medianBlockFeeLamports: medianHasData ? lamportsToString(stats.medianFeeLamports) : null,
@@ -239,6 +248,8 @@ export function serializeValidatorPlaceholder(args: {
     slotsElapsedAssigned: null,
     slotsProduced: null,
     slotsSkipped: null,
+    activatedStakeLamports: null,
+    activatedStakeSol: null,
 
     blockFeesTotalLamports: null,
     blockFeesTotalSol: null,

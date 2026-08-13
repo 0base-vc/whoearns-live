@@ -252,6 +252,11 @@ describe('GET /v1/validators/:idOrVote/history', () => {
         totalSkipped: 10,
         firstEpoch: 591,
         lastEpoch: 600,
+        // `seedEpochs` writes no stake snapshot, so the stake-normalised
+        // half stays empty rather than reporting a ratio over nothing.
+        epochsWithStake: 0,
+        assignedWithStake: 0,
+        stakeWeightedSlotsPer10kSol: null,
       });
     });
 
@@ -282,6 +287,93 @@ describe('GET /v1/validators/:idOrVote/history', () => {
       expect(body.leaderSlots.firstEpoch).toBe(599);
     });
 
+    it("weights the slots-per-stake ratio by each epoch's own stake", async () => {
+      await ctx.validators.upsert({
+        votePubkey: VOTE_1,
+        identityPubkey: IDENTITY_1,
+        firstSeenEpoch: 700,
+        lastSeenEpoch: 701,
+      });
+      // Epoch 700: 10 slots at 10k SOL  → 10.0 slots per 10k SOL
+      // Epoch 701: 40 slots at 100k SOL →  4.0 slots per 10k SOL
+      //
+      // Mean of the per-epoch ratios would be 7.0. The correct figure is
+      // Σslots / Σstake = 50 / 110k SOL = 4.545…, because the epoch where
+      // the validator held ten times the stake must weigh ten times as
+      // much. This test is the guard against someone "simplifying" the
+      // SQL into an AVG() of per-row ratios.
+      await ctx.stats.upsertSlotStats({
+        epoch: 700,
+        votePubkey: VOTE_1,
+        identityPubkey: IDENTITY_1,
+        slotsAssigned: 10,
+        slotsProduced: 10,
+        slotsSkipped: 0,
+        activatedStakeLamports: 10_000n * 1_000_000_000n,
+      });
+      await ctx.stats.upsertSlotStats({
+        epoch: 701,
+        votePubkey: VOTE_1,
+        identityPubkey: IDENTITY_1,
+        slotsAssigned: 40,
+        slotsProduced: 40,
+        slotsSkipped: 0,
+        activatedStakeLamports: 100_000n * 1_000_000_000n,
+      });
+
+      const res = await ctx.app.inject({
+        method: 'GET',
+        url: `/v1/validators/${VOTE_1}/history`,
+      });
+      const body = res.json();
+      expect(body.leaderSlots.epochsWithStake).toBe(2);
+      expect(body.leaderSlots.assignedWithStake).toBe(50);
+      expect(body.leaderSlots.stakeWeightedSlotsPer10kSol).toBeCloseTo(4.5455, 3);
+      // Explicitly NOT the unweighted mean.
+      expect(body.leaderSlots.stakeWeightedSlotsPer10kSol).not.toBeCloseTo(7, 1);
+    });
+
+    it('pairs the ratio numerator with the stake-bearing epochs only', async () => {
+      await ctx.validators.upsert({
+        votePubkey: VOTE_1,
+        identityPubkey: IDENTITY_1,
+        firstSeenEpoch: 800,
+        lastSeenEpoch: 801,
+      });
+      // One epoch with stake, one without. `totalAssigned` counts both;
+      // the ratio must use only the 20 slots it has a denominator for,
+      // otherwise the 30 unpaired slots inflate it by 2.5x.
+      await ctx.stats.upsertSlotStats({
+        epoch: 800,
+        votePubkey: VOTE_1,
+        identityPubkey: IDENTITY_1,
+        slotsAssigned: 20,
+        slotsProduced: 20,
+        slotsSkipped: 0,
+        activatedStakeLamports: 20_000n * 1_000_000_000n,
+      });
+      await ctx.stats.upsertSlotStats({
+        epoch: 801,
+        votePubkey: VOTE_1,
+        identityPubkey: IDENTITY_1,
+        slotsAssigned: 30,
+        slotsProduced: 30,
+        slotsSkipped: 0,
+      });
+
+      const res = await ctx.app.inject({
+        method: 'GET',
+        url: `/v1/validators/${VOTE_1}/history`,
+      });
+      const body = res.json();
+      expect(body.leaderSlots.totalAssigned).toBe(50);
+      expect(body.leaderSlots.epochsCovered).toBe(2);
+      expect(body.leaderSlots.epochsWithStake).toBe(1);
+      expect(body.leaderSlots.assignedWithStake).toBe(20);
+      // 20 slots / 20k SOL = 10.0 per 10k SOL.
+      expect(body.leaderSlots.stakeWeightedSlotsPer10kSol).toBeCloseTo(10, 6);
+    });
+
     it('returns zeroed totals for a validator with no epochs at all', async () => {
       await ctx.validators.upsert({
         votePubkey: VOTE_1,
@@ -302,6 +394,9 @@ describe('GET /v1/validators/:idOrVote/history', () => {
         totalSkipped: 0,
         firstEpoch: null,
         lastEpoch: null,
+        epochsWithStake: 0,
+        assignedWithStake: 0,
+        stakeWeightedSlotsPer10kSol: null,
       });
     });
   });

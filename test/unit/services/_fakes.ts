@@ -925,6 +925,11 @@ export class FakeStatsRepo {
         : new Set(args.candidateVotes);
     const epochs = new Map(args.epochs.map((e) => [e.epoch, e.isCurrent]));
     const byVote = new Map<VotePubkey, WindowedLeaderboardStats>();
+    // Stake-matched accumulators, mirroring the SQL's FILTER clauses:
+    // slots are only summed for epochs that also carry a stake snapshot,
+    // so numerator and denominator always describe one population.
+    const stakeSumByVote = new Map<VotePubkey, bigint>();
+    const slotsWithStakeByVote = new Map<VotePubkey, number>();
 
     for (const row of this.rows.values()) {
       const isCurrent = epochs.get(row.epoch);
@@ -954,6 +959,9 @@ export class FakeStatsRepo {
         slotWindowUpdatedAt: null,
         lastUpdatedAt: null,
         activatedStakeLamports: row.activatedStakeLamports,
+        slotsPer10kSol: null,
+        hasIncomeEvidence: true,
+        windowSlotsWithStake: null,
       };
       next.identityPubkey = isCurrent ? row.identityPubkey : next.identityPubkey;
       next.windowSlots += denominator;
@@ -980,11 +988,84 @@ export class FakeStatsRepo {
       if (isCurrent && row.activatedStakeLamports !== null) {
         next.activatedStakeLamports = row.activatedStakeLamports;
       }
+      // BOOL_AND semantics: every included epoch must be covered, and
+      // BOTH streams within each — a single timestamp means partial
+      // ingest, undercounting (fees + tips) by the missing half. Starts
+      // true (see the initialiser); the first incomplete epoch clears it.
+      if (row.feesUpdatedAt === null || row.tipsUpdatedAt === null) {
+        next.hasIncomeEvidence = false;
+      }
+      // Strictly positive, mirroring the SQL: a 0n snapshot would add
+      // slots to the numerator and nothing to the denominator.
+      if (row.activatedStakeLamports !== null && row.activatedStakeLamports > 0n) {
+        // Running epoch contributes stake in proportion to the EPOCH-WIDE
+        // elapsed fraction, matching the SQL — its numerator is elapsed
+        // slots. Per-validator slot progress is deliberately not used.
+        // Exposure is applied as an exact integer ratio, never a rounded
+        // float. At the very start of an epoch the fraction is tiny
+        // (1 / 432000 ≈ 0.0000023); rounding it to six decimals charges
+        // ~14% too little stake and inflates the ratio ~16%, which is
+        // enough for a route test to validate an ordering production
+        // would not return.
+        //
+        // Per-row watermark first (matching the SQL), epoch-wide fraction
+        // as the fallback when this row has no watermark yet.
+        const windowEpoch = args.epochs.find((e) => e.epoch === row.epoch);
+        const hasWatermarkBasis =
+          row.slotWindowLastSlot !== null &&
+          windowEpoch?.firstSlot !== undefined &&
+          windowEpoch.slotCount !== undefined &&
+          windowEpoch.slotCount > 0;
+        let exposedStake: bigint;
+        if (!isCurrent) {
+          exposedStake = row.activatedStakeLamports;
+        } else if (hasWatermarkBasis) {
+          // Inclusive slot count, matching (watermark - firstSlot + 1).
+          const elapsedSlots = row.slotWindowLastSlot! - windowEpoch!.firstSlot! + 1;
+          const clamped = Math.min(windowEpoch!.slotCount!, Math.max(0, elapsedSlots));
+          exposedStake =
+            (row.activatedStakeLamports * BigInt(clamped)) / BigInt(windowEpoch!.slotCount!);
+        } else {
+          // Float fallback: scale by 1e12 so even a first-slot fraction
+          // keeps far more precision than the value can meaningfully
+          // carry.
+          const fraction = Math.min(1, Math.max(0, windowEpoch?.elapsedFraction ?? 1));
+          const SCALE = 1_000_000_000_000n;
+          exposedStake = (row.activatedStakeLamports * BigInt(Math.round(fraction * 1e12))) / SCALE;
+        }
+        stakeSumByVote.set(
+          row.votePubkey,
+          (stakeSumByVote.get(row.votePubkey) ?? 0n) + exposedStake,
+        );
+        slotsWithStakeByVote.set(
+          row.votePubkey,
+          (slotsWithStakeByVote.get(row.votePubkey) ?? 0) + denominator,
+        );
+      }
       byVote.set(row.votePubkey, next);
     }
 
+    // Σslots / Σstake, scaled by 1e13 (1e9 lamports/SOL × 1e4 SOL) —
+    // the same expression the SQL emits, so the fake ranks and reports
+    // what the repo would.
+    for (const [vote, agg] of byVote) {
+      const stakeSum = stakeSumByVote.get(vote) ?? 0n;
+      const slots = slotsWithStakeByVote.get(vote) ?? 0;
+      agg.slotsPer10kSol = stakeSum > 0n ? (slots * 1e13) / Number(stakeSum) : null;
+      agg.windowSlotsWithStake = slotsWithStakeByVote.has(vote) ? slots : null;
+    }
+
+    const sortKey = args.sort ?? 'income_per_slot';
     const rows = [...byVote.values()].filter((r) => {
-      if (r.windowSlots < minWindowSlots) return false;
+      // Mirrors the repo's sort-aware floor: `slots_per_stake` is judged
+      // on the stake-covered sample, except for rows with no stake at
+      // all, which fall back to the window count and stay in the null
+      // tail rather than being deleted.
+      const floorBasis =
+        sortKey === 'slots_per_stake' && r.slotsPer10kSol !== null
+          ? (r.windowSlotsWithStake ?? 0)
+          : r.windowSlots;
+      if (floorBasis < minWindowSlots) return false;
       if (r.closedEpochsIncluded < requiredClosedEpochs) return false;
       // Stake bracket: window-representative stake STRICTLY below the
       // ceiling; NULL stake excluded — matches the real repo's outer
@@ -1006,7 +1087,7 @@ export class FakeStatsRepo {
       const right = bNum * BigInt(aDen);
       return compareBigIntDesc(left, right);
     };
-    switch (args.sort ?? 'income_per_slot') {
+    switch (sortKey) {
       case 'total_income':
         rows.sort((a, b) => compareBigIntDesc(total(a), total(b)));
         break;
@@ -1018,6 +1099,18 @@ export class FakeStatsRepo {
         break;
       case 'skip_rate':
         rows.sort((a, b) => a.slotsSkipped / a.windowSlots - b.slotsSkipped / b.windowSlots);
+        break;
+      case 'slots_per_stake':
+        // NULLS LAST, matching the SQL: a row with no stake snapshot is
+        // unmeasurable, not bottom-ranked-with-value-zero.
+        rows.sort((a, b) => {
+          const av = a.slotsPer10kSol;
+          const bv = b.slotsPer10kSol;
+          if (av === null && bv === null) return 0;
+          if (av === null) return 1;
+          if (bv === null) return -1;
+          return bv - av;
+        });
         break;
       case 'income_per_slot':
       default:
@@ -1092,6 +1185,21 @@ export class FakeStatsRepo {
    * with `slotsUpdatedAt !== null`, matching the SQL predicate — a row
    * created by `addFeeDelta` alone must not contribute a 0-slot epoch.
    */
+  /**
+   * Mirror of `StatsRepository.findEpochSlotWatermark` — the highest
+   * slot the ingester has counted for an epoch, which is the tip
+   * `slotsElapsedAssigned` is measured through.
+   */
+  async findEpochSlotWatermark(epoch: Epoch): Promise<Slot | null> {
+    let max: number | null = null;
+    for (const row of this.rows.values()) {
+      if (row.epoch !== epoch) continue;
+      if (row.slotWindowLastSlot === null) continue;
+      if (max === null || row.slotWindowLastSlot > max) max = row.slotWindowLastSlot;
+    }
+    return max;
+  }
+
   async sumLeaderSlotsByVote(vote: VotePubkey): Promise<ValidatorLeaderSlotTotals> {
     const rows = [...this.rows.values()].filter(
       (r) => r.votePubkey === vote && r.slotsUpdatedAt !== null,
@@ -1104,9 +1212,23 @@ export class FakeStatsRepo {
         totalSkipped: 0,
         firstEpoch: null,
         lastEpoch: null,
+        epochsWithStake: 0,
+        assignedWithStake: 0,
+        stakeWeightedSlotsPer10kSol: null,
       };
     }
     const epochs = rows.map((r) => r.epoch);
+    // Stake-bearing subset, mirroring the SQL's FILTER clauses. Σslots
+    // and Σstake are accumulated over the SAME rows so the ratio's
+    // numerator and denominator cover one population.
+    // Strictly positive, mirroring the SQL: a 0n snapshot (the RPC
+    // reporting zero activated stake) would add slots to the numerator
+    // and nothing to the denominator.
+    const staked = rows.filter(
+      (r) => r.activatedStakeLamports !== null && r.activatedStakeLamports > 0n,
+    );
+    const stakeSum = staked.reduce((sum, r) => sum + (r.activatedStakeLamports ?? 0n), 0n);
+    const assignedWithStake = staked.reduce((sum, r) => sum + r.slotsAssigned, 0);
     return {
       epochsCovered: rows.length,
       totalAssigned: rows.reduce((sum, r) => sum + r.slotsAssigned, 0),
@@ -1114,6 +1236,11 @@ export class FakeStatsRepo {
       totalSkipped: rows.reduce((sum, r) => sum + r.slotsSkipped, 0),
       firstEpoch: Math.min(...epochs),
       lastEpoch: Math.max(...epochs),
+      epochsWithStake: staked.length,
+      assignedWithStake,
+      // 1e13 = 1e9 lamports/SOL × 1e4 SOL per reporting unit.
+      stakeWeightedSlotsPer10kSol:
+        stakeSum > 0n ? (assignedWithStake * 1e13) / Number(stakeSum) : null,
     };
   }
 
