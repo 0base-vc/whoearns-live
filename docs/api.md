@@ -383,8 +383,16 @@ usually read either 0 or one highly volatile group no matter how long the
 window. Read the ratio alongside `windowSlotsWithStake`: that count, not
 the window length, is what tells you how much the number is worth.
 
-A third caveat is structural: leaderboard rows are grouped by vote
-account, while the leader schedule is an identity-level fact. During a
+A third caveat is structural, and has two faces. Both come from rows
+being keyed by vote account while the leader schedule is an
+identity-level fact.
+
+The first: the N-2 stake lookup joins on the vote pubkey, so a validator
+that rotated vote accounts in between finds no snapshot and reports no
+ratio for that epoch — it is omitted, not mis-stated.
+
+The second: leaderboard rows are grouped by vote account, while the
+leader schedule is an identity-level fact. During a
 vote rotation two vote accounts can share one identity, and each row then
 carries the identity's full schedule against only its own share of the
 stake — so both read high. This predates the stake-normalised sort (the

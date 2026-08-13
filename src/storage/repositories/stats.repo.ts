@@ -1263,6 +1263,15 @@ export class StatsRepository {
          -- epoch whose N-2 snapshot is missing (start of history, or a
          -- gap) contributes to totalAssigned but not to the ratio, the
          -- same treatment stake-less epochs already get.
+         --
+         -- KNOWN LIMITATION: the join is by vote_pubkey, so a validator
+         -- that rotated vote accounts between N-2 and N finds no source
+         -- row even though the identity-level stake exists. Its ratio
+         -- goes null and it sorts behind measured rows. That understates
+         -- rather than distorts, and resolving it needs a per-epoch
+         -- vote/identity rotation mapping — the same missing piece behind
+         -- the identity fan-out noted on the leaderboard sort. Tracked
+         -- separately rather than half-built here.
          LEFT JOIN epoch_validator_stats src
                 ON src.vote_pubkey = e.vote_pubkey
                AND src.epoch = e.epoch - 2
@@ -2187,6 +2196,12 @@ export class StatsRepository {
          -- its slots: a validator whose delegation left mid-window had
          -- large-stake allocations divided by a tiny current stake,
          -- reading hundreds of times the cohort baseline.
+         --
+         -- Joined by vote_pubkey, so a vote rotation between N-2 and N
+         -- leaves the epoch without a divisor: it drops out of
+         -- window_slots_with_stake and the row's ratio goes null. An
+         -- understatement, not a distortion; see the matching note on
+         -- sumLeaderSlotsByVote.
          LEFT JOIN epoch_validator_stats stake_src
                 ON stake_src.vote_pubkey = evs.vote_pubkey
                AND stake_src.epoch = evs.epoch - 2
