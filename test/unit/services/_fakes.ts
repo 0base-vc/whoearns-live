@@ -925,6 +925,11 @@ export class FakeStatsRepo {
         : new Set(args.candidateVotes);
     const epochs = new Map(args.epochs.map((e) => [e.epoch, e.isCurrent]));
     const byVote = new Map<VotePubkey, WindowedLeaderboardStats>();
+    // Stake-matched accumulators, mirroring the SQL's FILTER clauses:
+    // slots are only summed for epochs that also carry a stake snapshot,
+    // so numerator and denominator always describe one population.
+    const stakeSumByVote = new Map<VotePubkey, bigint>();
+    const slotsWithStakeByVote = new Map<VotePubkey, number>();
 
     for (const row of this.rows.values()) {
       const isCurrent = epochs.get(row.epoch);
@@ -954,6 +959,7 @@ export class FakeStatsRepo {
         slotWindowUpdatedAt: null,
         lastUpdatedAt: null,
         activatedStakeLamports: row.activatedStakeLamports,
+        slotsPer10kSol: null,
       };
       next.identityPubkey = isCurrent ? row.identityPubkey : next.identityPubkey;
       next.windowSlots += denominator;
@@ -980,7 +986,26 @@ export class FakeStatsRepo {
       if (isCurrent && row.activatedStakeLamports !== null) {
         next.activatedStakeLamports = row.activatedStakeLamports;
       }
+      if (row.activatedStakeLamports !== null) {
+        stakeSumByVote.set(
+          row.votePubkey,
+          (stakeSumByVote.get(row.votePubkey) ?? 0n) + row.activatedStakeLamports,
+        );
+        slotsWithStakeByVote.set(
+          row.votePubkey,
+          (slotsWithStakeByVote.get(row.votePubkey) ?? 0) + denominator,
+        );
+      }
       byVote.set(row.votePubkey, next);
+    }
+
+    // Σslots / Σstake, scaled by 1e13 (1e9 lamports/SOL × 1e4 SOL) —
+    // the same expression the SQL emits, so the fake ranks and reports
+    // what the repo would.
+    for (const [vote, agg] of byVote) {
+      const stakeSum = stakeSumByVote.get(vote) ?? 0n;
+      const slots = slotsWithStakeByVote.get(vote) ?? 0;
+      agg.slotsPer10kSol = stakeSum > 0n ? (slots * 1e13) / Number(stakeSum) : null;
     }
 
     const rows = [...byVote.values()].filter((r) => {
@@ -1018,6 +1043,18 @@ export class FakeStatsRepo {
         break;
       case 'skip_rate':
         rows.sort((a, b) => a.slotsSkipped / a.windowSlots - b.slotsSkipped / b.windowSlots);
+        break;
+      case 'slots_per_stake':
+        // NULLS LAST, matching the SQL: a row with no stake snapshot is
+        // unmeasurable, not bottom-ranked-with-value-zero.
+        rows.sort((a, b) => {
+          const av = a.slotsPer10kSol;
+          const bv = b.slotsPer10kSol;
+          if (av === null && bv === null) return 0;
+          if (av === null) return 1;
+          if (bv === null) return -1;
+          return bv - av;
+        });
         break;
       case 'income_per_slot':
       default:

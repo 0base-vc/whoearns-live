@@ -193,6 +193,24 @@ interface LeaderboardRow {
   activatedStakeLamports: string | null;
   activatedStakeSol: string | null;
   incomePerStake: number | null;
+  /**
+   * Leader slots per 10,000 SOL of activated stake over the selected
+   * window — the size-neutral view of the schedule draw, since raw slot
+   * counts scale with delegation.
+   *
+   * Comes straight from the repository, which computes it as
+   * (Σ window slots with stake) / (Σ stake) so the denominator matches
+   * its numerator epoch for epoch. Clients must NOT recompute it from
+   * `windowSlots` and `activatedStakeLamports`: the latter is the
+   * window's newest snapshot, not a sum, so for a validator whose stake
+   * moved mid-window the two disagree — and the sort follows the
+   * repository's value.
+   *
+   * Magnitudes are window-scoped: a longer window accumulates more slots
+   * per epoch of stake, so compare rows within one window, not across.
+   * Null when no epoch in the window carries a stake snapshot.
+   */
+  slotsPer10kSol: number | null;
   claimed: boolean;
   decadeEpochStart: number | null;
   decadeEpochEnd: number | null;
@@ -309,6 +327,7 @@ function toRow(
     activatedStakeLamports: stake === null ? null : stake.toString(),
     activatedStakeSol: stake === null ? null : lamportsToSol(stake),
     incomePerStake,
+    slotsPer10kSol: stats.slotsPer10kSol,
     claimed,
     decadeEpochStart: decadeBadge?.epochStart ?? null,
     decadeEpochEnd: decadeBadge?.epochEnd ?? null,

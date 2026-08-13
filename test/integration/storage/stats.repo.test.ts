@@ -937,4 +937,160 @@ describe('StatsRepository', () => {
       });
     });
   });
+
+  describe('findTopNByWindow: slots_per_stake', () => {
+    const SOL = 1_000_000_000n;
+
+    async function seed(args: {
+      epoch: number;
+      vote: string;
+      identity: string;
+      slots: number;
+      stakeSol: bigint | null;
+      fees?: bigint;
+    }): Promise<void> {
+      await repo.upsertSlotStats({
+        epoch: args.epoch,
+        votePubkey: args.vote,
+        identityPubkey: args.identity,
+        slotsAssigned: args.slots,
+        slotsProduced: args.slots,
+        slotsSkipped: 0,
+        ...(args.stakeSol === null ? {} : { activatedStakeLamports: args.stakeSol * SOL }),
+      });
+      if (args.fees !== undefined) {
+        await repo.addIncomeDelta({
+          epoch: args.epoch,
+          identityPubkey: args.identity,
+          leaderFeeDeltaLamports: args.fees,
+          baseFeeDeltaLamports: 0n,
+          priorityFeeDeltaLamports: args.fees,
+          tipDeltaLamports: 0n,
+          computeUnitsDelta: 0n,
+        });
+      }
+    }
+
+    it('divides by stake summed across the window, not the newest snapshot', async () => {
+      const epochs = [
+        { epoch: 500, isCurrent: false },
+        { epoch: 501, isCurrent: false },
+      ];
+      // "Shrunk" held 100k SOL then fell to 10k, drawing slots in
+      // proportion each epoch — exactly its expected share throughout.
+      // Dividing its 110 window slots by the NEWEST snapshot (10k) yields
+      // 110 per 10k SOL and would rank it far above everyone; the correct
+      // Σslots/Σstake is 110 / 110k = 10.0.
+      await seed({
+        epoch: 500,
+        vote: 'Shrunk',
+        identity: 'ShrunkId',
+        slots: 100,
+        stakeSol: 100_000n,
+        fees: 1n,
+      });
+      await seed({
+        epoch: 501,
+        vote: 'Shrunk',
+        identity: 'ShrunkId',
+        slots: 10,
+        stakeSol: 10_000n,
+        fees: 1n,
+      });
+      // "Steady" held 50k SOL across both epochs and drew slightly better
+      // than expected: 120 slots on 100k SOL-epochs = 12.0 per 10k.
+      await seed({
+        epoch: 500,
+        vote: 'Steady',
+        identity: 'SteadyId',
+        slots: 60,
+        stakeSol: 50_000n,
+        fees: 1n,
+      });
+      await seed({
+        epoch: 501,
+        vote: 'Steady',
+        identity: 'SteadyId',
+        slots: 60,
+        stakeSol: 50_000n,
+        fees: 1n,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+
+      const shrunk = rows.find((r) => r.votePubkey === 'Shrunk')!;
+      const steady = rows.find((r) => r.votePubkey === 'Steady')!;
+      expect(shrunk.slotsPer10kSol).toBeCloseTo(10, 6);
+      expect(steady.slotsPer10kSol).toBeCloseTo(12, 6);
+      // Steady genuinely drew better per unit of stake, so it ranks first.
+      // With the newest-snapshot denominator Shrunk would have won on a
+      // ratio 11x its real one.
+      expect(rows.map((r) => r.votePubkey)).toEqual(['Steady', 'Shrunk']);
+    });
+
+    it('ranks validators with slot data but no income yet', async () => {
+      // The income-evidence predicate that every other sort requires
+      // would drop this validator entirely: the slot ingester has run,
+      // the fee ingester has not. Its allocation is fully measurable.
+      const epochs = [{ epoch: 600, isCurrent: false }];
+      await seed({
+        epoch: 600,
+        vote: 'SlotsOnly',
+        identity: 'SlotsOnlyId',
+        slots: 40,
+        stakeSol: 20_000n,
+      });
+
+      const bySlots = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      expect(bySlots.map((r) => r.votePubkey)).toEqual(['SlotsOnly']);
+      expect(bySlots[0]!.slotsPer10kSol).toBeCloseTo(20, 6);
+
+      // An income sort still excludes it — that predicate is correct
+      // there, since ranking it on income would read as "earned zero".
+      const byIncome = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'total_income',
+        minWindowSlots: 1,
+      });
+      expect(byIncome.map((r) => r.votePubkey)).toEqual([]);
+    });
+
+    it('sorts rows without any stake snapshot last, with a null ratio', async () => {
+      const epochs = [{ epoch: 700, isCurrent: false }];
+      await seed({
+        epoch: 700,
+        vote: 'HasStake',
+        identity: 'HasStakeId',
+        slots: 10,
+        stakeSol: 50_000n,
+      });
+      await seed({
+        epoch: 700,
+        vote: 'NoStake',
+        identity: 'NoStakeId',
+        slots: 400,
+        stakeSol: null,
+      });
+
+      const rows = await repo.findTopNByWindow({
+        epochs,
+        limit: 10,
+        sort: 'slots_per_stake',
+        minWindowSlots: 1,
+      });
+      expect(rows.map((r) => r.votePubkey)).toEqual(['HasStake', 'NoStake']);
+      expect(rows[1]!.slotsPer10kSol).toBeNull();
+    });
+  });
 });

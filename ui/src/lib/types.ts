@@ -800,6 +800,17 @@ export interface LeaderboardItem {
   lastUpdatedAt: string | null;
   activatedStakeLamports: string | null;
   activatedStakeSol: string | null;
+  /**
+   * Leader slots per 10,000 SOL of stake over the selected window,
+   * computed server-side as Σslots / Σstake so it matches the
+   * `slots_per_stake` ordering exactly. Do NOT recompute from
+   * `windowSlots / activatedStakeSol` — that stake is the window's
+   * newest snapshot rather than a sum, so the two diverge for any
+   * validator whose stake moved mid-window.
+   *
+   * Optional for backwards compat with older API responses.
+   */
+  slotsPer10kSol?: number | null;
   /** APR-equivalent (income / stake). Null when stake data is missing
    * (pre-stake-snapshot-migration epoch). */
   incomePerStake: number | null;

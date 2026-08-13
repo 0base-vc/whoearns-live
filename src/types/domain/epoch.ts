@@ -593,11 +593,24 @@ export interface ValidatorLeaderSlotTotals {
    * per-epoch ratios, so epochs where the validator held more stake
    * weigh proportionally more.
    *
-   * This is the comparable figure. A raw slot count (or slots-per-
-   * epoch) scales with delegation and therefore ranks validators by
-   * size; dividing by stake removes size and leaves the part that is
-   * actually the schedule lottery. Computed in SQL because the
-   * lamport sums exceed `Number.MAX_SAFE_INTEGER` for long histories.
+   * A raw slot count (or slots-per-epoch) scales with delegation and
+   * therefore ranks validators by size; dividing by stake removes size
+   * and leaves the part that is the schedule lottery. Computed in SQL
+   * because the lamport sums exceed `Number.MAX_SAFE_INTEGER` for long
+   * histories.
+   *
+   * KNOWN LIMITATION — this is not a normalised luck score. A
+   * validator's expected slots per unit of stake also depends on the
+   * epoch's TOTAL cluster stake, which this service does not index, so
+   * the baseline drifts as the cluster grows. Two validators that each
+   * drew exactly their expected allocation can show different lifetime
+   * ratios if their indexed histories cover different eras. The figure
+   * is therefore sound for validators measured over the same span (and
+   * for one validator's own epoch-to-epoch variation), and only
+   * approximate across widely different spans. Making it exact needs
+   * per-epoch cluster stake, which `refreshFromRpc` could capture from
+   * the `getVoteAccounts` call it already makes — but only going
+   * forward, since past epochs cannot be backfilled.
    *
    * Null when no epoch carries a stake snapshot, or the sum is zero.
    */

@@ -2446,11 +2446,25 @@ components:
             more stake weigh proportionally more.
 
 
-            This is the size-neutral figure. Raw slot counts (and
-            slots-per-epoch averages) scale with delegation, so ranking on
-            them ranks validators by size; dividing by stake leaves the
-            part that is the schedule lottery. Null when no epoch carries
-            a stake snapshot.
+            The size-neutral figure: raw slot counts (and slots-per-epoch
+            averages) scale with delegation, so ranking on them ranks
+            validators by size; dividing by stake leaves the part that is
+            the schedule lottery.
+
+
+            NOT a normalised luck score. Expected slots per unit of stake
+            also depend on the epoch's total cluster stake, which this
+            service does not index, so the baseline drifts as the cluster
+            grows — two validators that each drew exactly their expected
+            allocation can differ here if their histories cover different
+            eras. Sound within a shared span and for one validator's own
+            epoch-to-epoch variation; approximate across widely different
+            spans. Also degenerate for very small validators: the schedule
+            is sampled in 4-slot groups, so a sub-slot expectation pays out
+            0 or at least 4.
+
+
+            Null when no epoch carries a stake snapshot.
 
     BatchRequest:
       type: object

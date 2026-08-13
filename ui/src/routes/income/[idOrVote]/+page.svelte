@@ -1318,7 +1318,7 @@
                   label="About slots per stake"
                   placement="bottom"
                   align="right"
-                  content="Assigned leader slots divided by this epoch's activated stake, per 10,000 SOL. Stake buys expected slots, but the schedule is drawn at random — so this swings epoch to epoch even at constant stake. Unlike the raw slot count, it doesn't reward size, so it's comparable across validators."
+                  content="Assigned leader slots divided by this epoch's activated stake, per 10,000 SOL. Stake buys expected slots, but the schedule is drawn at random — so this swings epoch to epoch even at constant stake. Unlike the raw slot count it doesn't reward size, which makes it comparable across validators measured over the same period. It is not an absolute luck score: the cluster-wide baseline shifts over time, and very small validators read high because the schedule is drawn in 4-slot groups."
                 />
               </span>
             </th>

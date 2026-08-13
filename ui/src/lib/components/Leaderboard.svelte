@@ -131,7 +131,7 @@
       key: 'slots_per_stake',
       label: 'Slots / 10k SOL',
       tooltip:
-        'Leader slots won per 10,000 SOL of activated stake in the selected window. Stake buys expected slots, but the schedule is drawn at random each epoch — so this is the size-neutral view of who actually drew well. Values are scoped to the selected window: a longer window accumulates more slots against the same stake snapshot, so compare rows within one window, not across windows.',
+        'Leader slots won per 10,000 SOL of activated stake in the selected window. Stake buys expected slots, but the schedule is drawn at random each epoch — so this is the size-neutral view of who actually drew well. Values are scoped to the selected window, so compare rows within one window rather than across windows. Small validators read high: the schedule is drawn in 4-slot groups, so a sub-slot expectation pays out either nothing or at least four.',
       alignRight: true,
     },
     {
@@ -280,19 +280,20 @@
    * Leader slots won per 10,000 SOL of activated stake, over the
    * selected window.
    *
-   * Computed client-side from two fields the row already carries, so no
-   * new API surface: `windowSlots` is the window's slot total and
-   * `activatedStakeSol` is its representative stake snapshot — which is
-   * also exactly what the server's `slots_per_stake` ORDER BY divides,
-   * so the displayed number and the ranking cannot disagree.
+   * Read straight off the row rather than derived here. The server
+   * computes it as Σslots / Σstake across the window and orders by that
+   * same expression; deriving it client-side from `windowSlots` and
+   * `activatedStakeSol` would divide a multi-epoch slot total by a
+   * single-epoch stake snapshot, so any validator whose stake moved
+   * mid-window would show a number that contradicts its own rank.
    *
-   * Em-dash (not 0) when stake is missing or non-positive: a row without
-   * a stake snapshot is unmeasurable, not unlucky.
+   * Em-dash when absent: no stake snapshot in the window means
+   * unmeasurable, not unlucky.
    */
   function slotsPerStakeText(item: LeaderboardItem): string {
-    const stake = item.activatedStakeSol === null ? null : Number(item.activatedStakeSol);
-    if (stake === null || !Number.isFinite(stake) || stake <= 0) return '-';
-    return ((item.windowSlots / stake) * 10_000).toFixed(2);
+    const value = item.slotsPer10kSol;
+    if (value === null || value === undefined || !Number.isFinite(value)) return '-';
+    return value.toFixed(2);
   }
 
   function cellText(item: LeaderboardItem, key: LeaderboardSort): string {
