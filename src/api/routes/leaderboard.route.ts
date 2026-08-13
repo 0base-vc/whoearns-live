@@ -243,13 +243,17 @@ interface LeaderboardRow {
    * False when the fee/tip pipeline has not covered any epoch in the
    * window for this validator.
    *
-   * Only reachable under `sort=slots_per_stake`, which deliberately
-   * admits slot-only rows so a fee-ingester lag cannot hide an otherwise
-   * perfectly measurable allocation. Those rows carry column-default
-   * zeros in every income field, so a client that renders them without
-   * checking this flag tells the user the validator earned nothing when
-   * the truth is that nothing has been measured yet. Always true for
-   * every other sort, whose rows are filtered on income evidence.
+   * True only when every epoch in the window has BOTH fee and tip data.
+   * The income fields are `fees + tips` summed across the window, so an
+   * epoch missing either stream leaves them short by that half.
+   *
+   * Use it to withhold values the active ranking does not depend on.
+   * `sort=slots_per_stake` admits rows whose income was never ingested —
+   * their money fields are column-default zeros, and rendering those
+   * claims the validator earned nothing rather than that nothing was
+   * measured. Under an income sort the same value drives the rank, so
+   * blanking it there would contradict the ordering; those sorts carry
+   * their own eligibility predicate instead.
    */
   hasIncomeData: boolean;
   claimed: boolean;

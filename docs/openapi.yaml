@@ -2928,8 +2928,16 @@ components:
             False unless income for the window is COMPLETE: every epoch,
             and both the fee and tip streams within each. The income
             fields are window sums, so one uncovered epoch — or one epoch
-            with fees ingested but not tips — makes them a partial total
-            that would otherwise read as the full window's earnings.
+            with fees ingested but not tips — leaves them short by that
+            missing part.
+
+
+            Use it to withhold values the active ranking does not depend
+            on. Under `sort=slots_per_stake` the money columns are
+            incidental and a partial total should be shown as
+            unavailable. Under an income sort that same value drives the
+            rank, so blanking it would contradict the ordering — those
+            sorts apply their own eligibility predicate instead.
 
 
             Only reachable under `sort=slots_per_stake`, which admits

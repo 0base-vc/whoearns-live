@@ -2148,11 +2148,14 @@ export class StatsRepository {
            -- the missing half. Deliberately stricter than
            -- incomeEvidenceClause, which admits a row on ANY evidence —
            -- that clause decides whether a validator is RANKABLE, this
-           -- flag decides whether its money columns are safe to show. slots_per_stake admits rows the income predicate
-           -- would exclude (see incomeEvidenceClause), and those rows
-           -- carry column-default zeros for fees and tips — which would
-           -- otherwise render as "earned nothing" rather than "not yet
-           -- measured".
+           -- flag reports whether its income figures are COMPLETE.
+           --
+           -- Consumers must only use it to withhold values that do not
+           -- also drive the ranking. Under slots_per_stake the money
+           -- columns are incidental, so hiding a partial total is right;
+           -- under an income sort the same value IS the rank, and hiding
+           -- it while ranking by it would be incoherent. See the flag's
+           -- docs on the API response.
            BOOL_AND(
              evs.fees_updated_at IS NOT NULL AND evs.tips_updated_at IS NOT NULL
            ) AS has_income_evidence

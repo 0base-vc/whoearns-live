@@ -257,6 +257,16 @@
    * income-filtered — so the historical answer is true.
    */
   function hasIncome(item: LeaderboardItem): boolean {
+    // Only withhold a value the current ranking does not depend on.
+    //
+    // `slots_per_stake` admits rows whose fees/tips have not been
+    // ingested; their money columns are database defaults and rendering
+    // them would claim the validator earned nothing. Under an income
+    // sort, though, that same value IS the rank — showing a validator at
+    // position 3 by fees while printing "-" for its fees would be
+    // incoherent, so completeness is surfaced by the sort's own
+    // eligibility rules rather than by blanking the cell.
+    if (sort !== 'slots_per_stake') return true;
     return item.hasIncomeData !== false;
   }
 
