@@ -516,7 +516,7 @@ export class FeeService {
             const block = await this.fetchBlock(slot, {
               transactionDetails: 'full',
               rewards: true,
-              maxSupportedTransactionVersion: 0,
+              maxSupportedTransactionVersion: 1,
               commitment: 'finalized',
             });
             if (block === null) {

@@ -240,7 +240,7 @@ async function main(): Promise<number> {
                 const block = await blockFetcher.getBlock(slot, {
                   transactionDetails: 'full',
                   rewards: true,
-                  maxSupportedTransactionVersion: 0,
+                  maxSupportedTransactionVersion: 1,
                   commitment: 'finalized',
                 });
                 if (block === null) return;

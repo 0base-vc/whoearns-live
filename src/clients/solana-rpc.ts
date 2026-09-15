@@ -622,8 +622,8 @@ export class SolanaRpcClient {
    *
    * Returns `null` when the signature isn't found (provider missed
    * the slot, archive node not yet caught up, signature is invalid).
-   * Versioned transactions (v0+) are accepted via
-   * `maxSupportedTransactionVersion: 0`; LUT-loaded addresses are
+   * Versioned transactions (v0/v1) are accepted via
+   * `maxSupportedTransactionVersion: 1`; LUT-loaded addresses are
    * NOT included in `accountKeys` (the lookup-table indirection
    * lives in a different field) — which is fine for the signer
    * check because LUT addresses can never be signers, and for the
@@ -640,7 +640,7 @@ export class SolanaRpcClient {
   } | null> {
     const config: Record<string, unknown> = {
       encoding: 'json',
-      maxSupportedTransactionVersion: 0,
+      maxSupportedTransactionVersion: 1,
     };
     if (opts?.commitment !== undefined) config['commitment'] = opts.commitment;
     const raw = await this.enqueue<{
@@ -734,7 +734,7 @@ export class SolanaRpcClient {
    * wallet burn on tx fees this day". `bigint` because a year of
    * priority-fee burns can exceed `Number.MAX_SAFE_INTEGER`.
    *
-   * Versioned txs are accepted via `maxSupportedTransactionVersion: 0`.
+   * Versioned txs are accepted via `maxSupportedTransactionVersion: 1`.
    * LUT-loaded addresses are NOT included in `accountKeys`, but the
    * fee-payer is always a static key (signers can't be LUT-loaded),
    * so the position-0 read is correct for both legacy and v0 txs.
@@ -752,7 +752,7 @@ export class SolanaRpcClient {
       signature,
       {
         encoding: 'json',
-        maxSupportedTransactionVersion: 0,
+        maxSupportedTransactionVersion: 1,
         commitment: 'finalized',
       },
     ]);
