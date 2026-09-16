@@ -555,7 +555,7 @@ describe('SolanaRpcClient.getTransaction', () => {
         expect(body.params?.[0]).toBe(SIGNATURE);
         expect(body.params?.[1]).toMatchObject({
           encoding: 'json',
-          maxSupportedTransactionVersion: 0,
+          maxSupportedTransactionVersion: 1,
           commitment: 'confirmed',
         });
         return HttpResponse.json(rpcResponse(memoTxResult('canonical-nonce'), body.id));
