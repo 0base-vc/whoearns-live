@@ -43,6 +43,8 @@ export interface IngestWorkBudget {
   /** Maximum block attempts in this call; failures count toward the limit. */
   maxBlocks?: number;
   signal?: AbortSignal;
+  /** Historical passes start after the last attempted slot, then wrap to retry errors. */
+  startAfterSlot?: Slot;
 }
 
 export interface IngestPendingBlocksArgs extends IngestWorkBudget {
@@ -63,6 +65,8 @@ export interface IngestPendingBlocksResult {
   errors: number;
   /** Missing facts (including errors) after a budgeted pass; omitted for legacy callers. */
   remaining?: number;
+  /** Last slot attempted by a bounded pass, including failed RPC attempts. */
+  lastAttemptedSlot?: Slot;
 }
 
 /**
@@ -478,20 +482,33 @@ export class FeeService {
       this.processedBlocksRepo.getProcessedSlotsInRange(epoch, firstSlot, safeUpperSlot),
       this.processedBlocksRepo.getFactCapturedSlotsInRange(epoch, firstSlot, safeUpperSlot),
     ]);
-    const pending: Slot[] = [];
+    let pending: Slot[] = [];
     for (const slot of slotToIdentity.keys()) {
       if (!captured.has(slot)) pending.push(slot);
     }
     pending.sort((a, b) => (args.newestFirst === true ? b - a : a - b));
+    // A bounded historical pass must move past errors as well as successes.
+    // Otherwise a persistently failing first batch consumes every future
+    // budget and later retrievable slots never get a turn. Live polling
+    // always keeps its newest-first ordering, independent of this cursor.
+    if (args.newestFirst !== true && args.startAfterSlot !== undefined) {
+      const afterSlot = args.startAfterSlot;
+      const nextIndex = pending.findIndex((slot) => slot > afterSlot);
+      if (nextIndex > 0) pending = pending.slice(nextIndex).concat(pending.slice(0, nextIndex));
+    }
 
     const effectiveBatchSize = Math.max(1, batchSize);
     const attemptLimit = Math.min(pending.length, args.maxBlocks ?? pending.length);
     const budgeted =
-      args.deadlineMs !== undefined || args.maxBlocks !== undefined || args.signal !== undefined;
+      args.deadlineMs !== undefined ||
+      args.maxBlocks !== undefined ||
+      args.signal !== undefined ||
+      args.startAfterSlot !== undefined;
 
     let processed = 0;
     let skipped = 0;
     let errors = 0;
+    let lastAttemptedSlot: Slot | undefined;
 
     // pending may be empty — the tick still needs to fall through to the
     // median recompute below so previously-ingested epochs get their
@@ -774,6 +791,7 @@ export class FeeService {
           });
         }
       }
+      lastAttemptedSlot = chunk.at(-1);
     }
 
     // Recompute per-validator medians on EVERY tick, not just when new
@@ -805,6 +823,7 @@ export class FeeService {
       skipped,
       errors,
       ...(budgeted ? { remaining: pending.length - processed - skipped } : {}),
+      ...(budgeted && lastAttemptedSlot !== undefined ? { lastAttemptedSlot } : {}),
     };
   }
 
@@ -918,8 +937,8 @@ export class FeeService {
    *      array — reuses the same fee-extraction + median recompute the
    *      live ingest already exercises.
    *   3. Re-read produced/skipped counts from `processed_blocks` and update
-   *      the stats row. Any RPC errors remain missing facts and are retried
-   *      by the next reconciliation tick.
+   *      the stats row. RPC errors remain missing facts and get another
+   *      backfill attempt when the historical cursor wraps.
    *
    * Caller marks the backfill done via `watchedDynamicRepo.markBackfilled`
    * only when no errors or remaining facts exist. Bounded passes persist
@@ -943,6 +962,7 @@ export class FeeService {
     skipped: number;
     errors: number;
     remaining?: number;
+    lastAttemptedSlot?: Slot;
   }> {
     const slotsAssigned = args.leaderSchedule[args.identity]?.length ?? 0;
     const beforeCounts = await this.processedBlocksRepo.countStatusesForIdentityInRange(
@@ -976,6 +996,7 @@ export class FeeService {
       ...(args.deadlineMs !== undefined ? { deadlineMs: args.deadlineMs } : {}),
       ...(args.maxBlocks !== undefined ? { maxBlocks: args.maxBlocks } : {}),
       ...(args.signal !== undefined ? { signal: args.signal } : {}),
+      ...(args.startAfterSlot !== undefined ? { startAfterSlot: args.startAfterSlot } : {}),
     });
 
     // Step 3 — publish local-fact counters after any newly inserted rows.

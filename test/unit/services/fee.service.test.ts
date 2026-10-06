@@ -456,6 +456,31 @@ describe('FeeService.ingestPendingBlocks', () => {
     expect(rpc.getBlock).not.toHaveBeenCalled();
   });
 
+  it('preserves newest live slot priority even if a historical attempt cursor is supplied', async () => {
+    const rpc = makeRpc(async () => null);
+    const result = await makeService(
+      rpc,
+      new FakeStatsRepo(),
+      new FakeProcessedBlocksRepo(),
+    ).ingestPendingBlocks({
+      epoch: EPOCH,
+      identities: [IDENTITY_A],
+      leaderSchedule,
+      firstSlot: FIRST_SLOT,
+      lastSlot: FIRST_SLOT + 5,
+      safeUpperSlot: FIRST_SLOT + 5,
+      batchSize: 2,
+      maxBlocks: 2,
+      newestFirst: true,
+      startAfterSlot: FIRST_SLOT + 2,
+    });
+    expect(vi.mocked(rpc.getBlock).mock.calls.map(([slot]) => slot)).toEqual([
+      FIRST_SLOT + 3,
+      FIRST_SLOT + 2,
+    ]);
+    expect(result).toMatchObject({ skipped: 2, remaining: 2, lastAttemptedSlot: FIRST_SLOT + 2 });
+  });
+
   it('returns zero counts when no identities are watched', async () => {
     const stats = new FakeStatsRepo();
     const blocks = new FakeProcessedBlocksRepo();

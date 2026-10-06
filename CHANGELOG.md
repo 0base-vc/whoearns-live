@@ -17,7 +17,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - Fee polling now yields cold validator backlogs between RPC batches,
   prioritises newly finalised slots, and resumes previous-epoch dynamic
   backfills one batch for one validator per tick. Partial passes remain
-  pending instead of being marked complete.
+  pending instead of being marked complete. Historical attempts rotate past
+  persistent RPC errors so later retrievable slots are not starved.
 
 ### Added
 

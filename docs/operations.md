@@ -405,6 +405,16 @@ epoch. It rotates pending votes even after RPC errors. The
 without errors; partial backfills deliberately take multiple ticks. Previously
 captured blocks are skipped on resumption, including after a worker restart.
 
+Historical passes also rotate slots after the last attempt, including failed
+RPC attempts. A permanently unavailable first batch therefore cannot consume
+every later tick: later missing slots are attempted before wrapping back to
+the errors. The attempt cursor is local to the running fee job, isolated by
+vote, previous epoch and identity, and removed on completion or removal from
+the pending set. Epoch rollover and identity rotation start a fresh cursor.
+A restart can retry early errors again, but captured facts remain durable;
+errors are never treated as completed blocks. Live polling keeps its newest
+slot priority and does not use the historical cursor.
+
 The deadline is not a hard tick-duration limit: RPC requests already in flight
 and database operations drain normally. Slow database queries, RPC timeouts,
 and the startup median repair can still extend a tick. The scheduler waits

@@ -7,7 +7,7 @@ import type { ValidatorService, WatchMode } from '../services/validator.service.
 import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import type { StatsRepository } from '../storage/repositories/stats.repo.js';
 import type { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
-import type { Epoch, VotePubkey } from '../types/domain.js';
+import type { Epoch, IdentityPubkey, Slot, VotePubkey } from '../types/domain.js';
 import { withRpcFallback } from './rpc-fallback.js';
 import type { Job } from './scheduler.js';
 
@@ -68,8 +68,11 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
    */
   let medianBackfillDone = false;
   // Rotate even after failures so one unavailable validator cannot hold
-  // up every other dynamic backfill. Persisted block facts are the cursor.
+  // up every other dynamic backfill. Persisted facts track completion;
+  // per-validator attempt positions also move past persistent RPC errors.
   let lastBackfillVote: VotePubkey | null = null;
+  let backfillCursorEpoch: Epoch | null = null;
+  const backfillAttemptCursors = new Map<VotePubkey, { identity: IdentityPubkey; slot: Slot }>();
   const medianBackfillLookback = deps.medianBackfillLookback ?? 50;
 
   return {
@@ -81,6 +84,10 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
       const epochInfo =
         (await deps.epochService.getCurrent()) ?? (await deps.epochService.syncCurrent());
       const epoch = epochInfo.epoch;
+      if (backfillCursorEpoch !== epoch) {
+        backfillAttemptCursors.clear();
+        backfillCursorEpoch = epoch;
+      }
 
       const votes = await deps.validatorService.getActiveVotePubkeys(
         deps.watchMode,
@@ -247,6 +254,10 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
       ) {
         try {
           const pending = (await deps.watchedDynamicRepo.listPendingBackfill()).sort();
+          const pendingSet = new Set(pending);
+          for (const vote of backfillAttemptCursors.keys()) {
+            if (!pendingSet.has(vote)) backfillAttemptCursors.delete(vote);
+          }
           if (pending.length > 0) {
             const previousIndex =
               lastBackfillVote === null ? -1 : pending.indexOf(lastBackfillVote);
@@ -259,6 +270,7 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
                 deps,
                 deadlineMs,
                 signal,
+                attemptCursors: backfillAttemptCursors,
               });
             }
           }
@@ -289,8 +301,9 @@ async function runPreviousEpochBackfill(args: {
   deps: FeeIngesterJobDeps;
   deadlineMs: number;
   signal: AbortSignal;
+  attemptCursors: Map<VotePubkey, { identity: IdentityPubkey; slot: Slot }>;
 }): Promise<void> {
-  const { pendingVotes, currentEpoch, deps, deadlineMs, signal } = args;
+  const { pendingVotes, currentEpoch, deps, deadlineMs, signal, attemptCursors } = args;
   // Both are guaranteed non-null by the caller, but re-narrow inside this
   // helper so the function remains callable in isolation during refactors.
   if (deps.watchedDynamicRepo === undefined || deps.epochsRepo === undefined) return;
@@ -336,6 +349,10 @@ async function runPreviousEpochBackfill(args: {
       );
       continue;
     }
+    // Cursors are scoped to this epoch and identity. Never carry an old
+    // validator identity's position into the rotated identity's schedule.
+    const cursor = attemptCursors.get(vote);
+    if (cursor !== undefined && cursor.identity !== identity) attemptCursors.delete(vote);
     try {
       const result = await deps.feeService.backfillPreviousEpoch({
         epoch: prevEpoch,
@@ -348,7 +365,11 @@ async function runPreviousEpochBackfill(args: {
         maxBlocks: Math.max(1, deps.batchSize),
         deadlineMs,
         signal,
+        ...(cursor?.identity === identity ? { startAfterSlot: cursor.slot } : {}),
       });
+      if (result.lastAttemptedSlot !== undefined) {
+        attemptCursors.set(vote, { identity, slot: result.lastAttemptedSlot });
+      }
       if (result.remaining !== undefined && result.remaining > 0 && result.errors === 0) {
         deps.logger.debug(
           { vote, prevEpoch, remaining: result.remaining },
@@ -366,6 +387,7 @@ async function runPreviousEpochBackfill(args: {
       }
       if (signal.aborted) break;
       await deps.watchedDynamicRepo.markBackfilled(vote);
+      attemptCursors.delete(vote);
       filled += 1;
     } catch (err) {
       failed += 1;

@@ -407,6 +407,185 @@ describe('fee-ingester.job', () => {
     }
   });
 
+  it('reaches later historical slots despite a persistently failing first batch, then revisits errors', async () => {
+    const deps = makeDeps({
+      epochInfo: { epoch: 500, firstSlot: 2_000, lastSlot: 3_000 },
+      currentSlot: 2_100,
+      finalityBuffer: 0,
+    });
+    const stats = new FakeStatsRepo();
+    const blocks = new FakeProcessedBlocksRepo();
+    let historyAvailable = false;
+    const getBlock = vi.fn(async (slot: number) => {
+      if (slot < 2 && !historyAvailable) throw new Error('pruned history');
+      return {
+        blockhash: `block-${slot}`,
+        parentSlot: slot - 1,
+        blockHeight: slot,
+        blockTime: 0,
+        rewards: [
+          { pubkey: IDENTITY_A, lamports: 100, postBalance: 0, rewardType: 'Fee' as const },
+        ],
+      };
+    });
+    const getLeaderSchedule = vi.fn(async (firstSlot: number) =>
+      firstSlot === 0 ? { [IDENTITY_A]: [0, 1, 2, 3, 4, 5] } : { [IDENTITY_A]: [0] },
+    );
+    const rpc = { ...deps.rpc, getBlock, getLeaderSchedule } as unknown as SolanaRpcClient;
+    const watchedDynamicRepo = {
+      listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
+      markBackfilled: vi.fn(),
+    };
+    const job = createFeeIngesterJob({
+      ...deps,
+      rpc,
+      feeService: new FeeService({
+        rpc,
+        logger: silent,
+        statsRepo: stats as unknown as StatsRepository,
+        processedBlocksRepo: blocks as unknown as ProcessedBlocksRepository,
+      }),
+      epochsRepo: {
+        findByEpoch: vi.fn().mockResolvedValue({
+          epoch: 499,
+          firstSlot: 0,
+          lastSlot: 1_999,
+          slotCount: 2_000,
+          isClosed: true,
+          observedAt: new Date(),
+          closedAt: new Date(),
+          currentSlot: null,
+        }),
+      },
+      watchedDynamicRepo,
+      watchMode: 'explicit',
+      explicitVotes: [VOTE_A],
+      intervalMs: 30_000,
+      batchSize: 2,
+      logger: silent,
+    });
+    const signal = new AbortController().signal;
+    await job.tick(signal);
+    await job.tick(signal);
+    await job.tick(signal);
+    expect(getBlock.mock.calls.map(([slot]) => slot)).toEqual([2_000, 0, 1, 2, 3, 4, 5]);
+    expect([...blocks.rows.keys()]).toEqual([2_000, 2, 3, 4, 5]);
+    expect(blocks.fetchErrors.size).toBe(2);
+    expect(stats.rows.get(`499:${VOTE_A}`)?.slotsProduced).toBe(4);
+    expect(
+      stats.incomeDeltaCalls.reduce((sum, call) => sum + call.leaderFeeDeltaLamports, 0n),
+    ).toBe(500n);
+    expect(watchedDynamicRepo.markBackfilled).not.toHaveBeenCalled();
+
+    // Wrap to the errors, still respecting the same bounded work cap.
+    await job.tick(signal);
+    expect(getBlock.mock.calls.slice(-2).map(([slot]) => slot)).toEqual([0, 1]);
+    expect(watchedDynamicRepo.markBackfilled).not.toHaveBeenCalled();
+    historyAvailable = true;
+    await job.tick(signal);
+    expect(blocks.fetchErrors.size).toBe(0);
+    expect([...blocks.rows.keys()]).toEqual([2_000, 2, 3, 4, 5, 0, 1]);
+    expect(watchedDynamicRepo.markBackfilled).toHaveBeenCalledWith(VOTE_A);
+    expect(stats.rows.get(`499:${VOTE_A}`)?.slotsProduced).toBe(6);
+    expect(
+      stats.incomeDeltaCalls.reduce((sum, call) => sum + call.leaderFeeDeltaLamports, 0n),
+    ).toBe(700n);
+  });
+
+  it('keeps an attempt cursor across empty passes but isolates it by vote, epoch and identity', async () => {
+    const deps = makeDeps();
+    const backfillPreviousEpoch = vi.fn().mockResolvedValue({
+      processed: 0,
+      skipped: 0,
+      errors: 2,
+      remaining: 10,
+      lastAttemptedSlot: 1,
+    });
+    const watchedDynamicRepo = {
+      listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
+      markBackfilled: vi.fn(),
+    };
+    const epochsRepo = {
+      findByEpoch: vi.fn().mockResolvedValue({
+        epoch: 499,
+        firstSlot: 0,
+        lastSlot: 1_999,
+        slotCount: 2_000,
+        isClosed: true,
+        observedAt: new Date(),
+        closedAt: new Date(),
+        currentSlot: null,
+      }),
+    };
+    const job = createFeeIngesterJob({
+      ...deps,
+      feeService: { ...deps.feeService, backfillPreviousEpoch } as unknown as FeeService,
+      epochsRepo,
+      watchedDynamicRepo,
+      watchMode: 'explicit',
+      explicitVotes: [VOTE_A],
+      intervalMs: 30_000,
+      batchSize: 2,
+      logger: silent,
+    });
+    const signal = new AbortController().signal;
+    await job.tick(signal);
+    expect(backfillPreviousEpoch.mock.calls.at(-1)?.[0]).not.toHaveProperty('startAfterSlot');
+    backfillPreviousEpoch.mockResolvedValueOnce({
+      processed: 0,
+      skipped: 0,
+      errors: 0,
+      remaining: 10,
+    });
+    await job.tick(signal);
+    expect(backfillPreviousEpoch.mock.calls.at(-1)?.[0]).toHaveProperty('startAfterSlot', 1);
+    await job.tick(signal);
+    expect(backfillPreviousEpoch.mock.calls.at(-1)?.[0]).toHaveProperty('startAfterSlot', 1);
+
+    // Same vote, new identity: no old-identity attempt position is carried over.
+    vi.mocked(deps.validatorService.getIdentityMap).mockResolvedValue(
+      new Map([[VOTE_A, IDENTITY_B]]),
+    );
+    await job.tick(signal);
+    expect(backfillPreviousEpoch.mock.calls.at(-1)?.[0]).not.toHaveProperty('startAfterSlot');
+
+    vi.mocked(deps.epochService.getCurrent).mockResolvedValue({
+      epoch: 501,
+      firstSlot: 2_000,
+      lastSlot: 3_999,
+      slotCount: 2_000,
+      isClosed: false,
+      observedAt: new Date(),
+      closedAt: null,
+      currentSlot: null,
+    });
+    epochsRepo.findByEpoch.mockResolvedValue({
+      epoch: 500,
+      firstSlot: 0,
+      lastSlot: 1_999,
+      slotCount: 2_000,
+      isClosed: true,
+      observedAt: new Date(),
+      closedAt: new Date(),
+      currentSlot: null,
+    });
+    await job.tick(signal);
+    expect(backfillPreviousEpoch.mock.calls.at(-1)?.[0]).not.toHaveProperty('startAfterSlot');
+
+    // Different vote with the same identity must also start independently.
+    watchedDynamicRepo.listPendingBackfill.mockResolvedValue([VOTE_B]);
+    vi.mocked(deps.validatorService.getIdentityMap).mockResolvedValue(
+      new Map([[VOTE_B, IDENTITY_B]]),
+    );
+    await job.tick(signal);
+    expect(backfillPreviousEpoch.mock.calls.at(-1)?.[0]).not.toHaveProperty('startAfterSlot');
+    expect(watchedDynamicRepo.markBackfilled).not.toHaveBeenCalled();
+    for (const [args] of vi.mocked(deps.feeService.ingestPendingBlocks).mock.calls) {
+      expect(args).toHaveProperty('newestFirst', true);
+      expect(args).not.toHaveProperty('startAfterSlot');
+    }
+  });
+
   it('interleaves live ticks with one bounded previous-epoch validator and rotates past errors', async () => {
     const deps = makeDeps({
       identityMap: new Map([
