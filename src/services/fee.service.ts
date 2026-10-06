@@ -36,7 +36,16 @@ export interface FeeServiceDeps {
   logger: Logger;
 }
 
-export interface IngestPendingBlocksArgs {
+/** Cooperative bounds: finish and persist the current RPC batch before yielding. */
+export interface IngestWorkBudget {
+  /** Absolute wall-clock deadline checked before starting each batch. */
+  deadlineMs?: number;
+  /** Maximum block attempts in this call; failures count toward the limit. */
+  maxBlocks?: number;
+  signal?: AbortSignal;
+}
+
+export interface IngestPendingBlocksArgs extends IngestWorkBudget {
   epoch: Epoch;
   identities: IdentityPubkey[];
   leaderSchedule: RpcLeaderSchedule;
@@ -44,12 +53,16 @@ export interface IngestPendingBlocksArgs {
   lastSlot: Slot;
   safeUpperSlot: Slot;
   batchSize: number;
+  /** Live polling prioritises recent slots over a newly watched validator's backlog. */
+  newestFirst?: boolean;
 }
 
 export interface IngestPendingBlocksResult {
   processed: number;
   skipped: number;
   errors: number;
+  /** Missing facts (including errors) after a budgeted pass; omitted for legacy callers. */
+  remaining?: number;
 }
 
 /**
@@ -469,9 +482,12 @@ export class FeeService {
     for (const slot of slotToIdentity.keys()) {
       if (!captured.has(slot)) pending.push(slot);
     }
-    pending.sort((a, b) => a - b);
+    pending.sort((a, b) => (args.newestFirst === true ? b - a : a - b));
 
     const effectiveBatchSize = Math.max(1, batchSize);
+    const attemptLimit = Math.min(pending.length, args.maxBlocks ?? pending.length);
+    const budgeted =
+      args.deadlineMs !== undefined || args.maxBlocks !== undefined || args.signal !== undefined;
 
     let processed = 0;
     let skipped = 0;
@@ -483,8 +499,14 @@ export class FeeService {
     // out early here, meaning pods that started up already-caught-up
     // never recomputed medians, leaving `median_fee_lamports` null
     // across the board.)
-    for (let i = 0; i < pending.length; i += effectiveBatchSize) {
-      const chunk = pending.slice(i, i + effectiveBatchSize);
+    for (let i = 0; i < attemptLimit; i += effectiveBatchSize) {
+      if (
+        args.signal?.aborted === true ||
+        (args.deadlineMs !== undefined && Date.now() >= args.deadlineMs)
+      ) {
+        break;
+      }
+      const chunk = pending.slice(i, Math.min(i + effectiveBatchSize, attemptLimit));
       const results = await Promise.all(
         chunk.map(async (slot) => {
           const identity = slotToIdentity.get(slot);
@@ -763,7 +785,9 @@ export class FeeService {
     // five medians in a single scan — still cheap even for thousands of
     // blocks per identity. No-op on empty identities or when no produced
     // blocks match.
-    const medianRows = await this.statsRepo.recomputeMedians(epoch, identities);
+    const medianRows = args.signal?.aborted
+      ? 0
+      : await this.statsRepo.recomputeMedians(epoch, identities);
 
     this.logger.info(
       {
@@ -776,7 +800,12 @@ export class FeeService {
       },
       'fee.service: ingest complete',
     );
-    return { processed, skipped, errors };
+    return {
+      processed,
+      skipped,
+      errors,
+      ...(budgeted ? { remaining: pending.length - processed - skipped } : {}),
+    };
   }
 
   /**
@@ -870,11 +899,11 @@ export class FeeService {
   }
 
   /**
-   * One-shot previous-epoch backfill for a newly-tracked validator.
+   * Resumable previous-epoch backfill for a newly-tracked validator.
    *
-   * Called by the fee-ingester once per dynamic validator (the
-   * `watched_validators_dynamic.prev_epoch_backfilled_at` flag gates
-   * re-runs). Scope per the product spec: JUST the immediately-
+   * Called by the fee-ingester until each dynamic validator is complete;
+   * `watched_validators_dynamic.prev_epoch_backfilled_at` then gates
+   * further passes. Scope per the product spec: JUST the immediately-
    * previous closed epoch, not the full history — a new user adding
    * their validator sees last-epoch income immediately, and future
    * epochs flow in naturally through the regular ingest path.
@@ -893,23 +922,27 @@ export class FeeService {
    *      by the next reconciliation tick.
    *
    * Caller marks the backfill done via `watchedDynamicRepo.markBackfilled`
-   * on success; on failure the flag stays null so the next tick retries.
+   * only when no errors or remaining facts exist. Bounded passes persist
+   * each batch; the next call subtracts captured facts and resumes safely.
    */
-  async backfillPreviousEpoch(args: {
-    epoch: Epoch;
-    vote: VotePubkey;
-    identity: IdentityPubkey;
-    firstSlot: Slot;
-    lastSlot: Slot;
-    leaderSchedule: RpcLeaderSchedule;
-    batchSize: number;
-  }): Promise<{
+  async backfillPreviousEpoch(
+    args: {
+      epoch: Epoch;
+      vote: VotePubkey;
+      identity: IdentityPubkey;
+      firstSlot: Slot;
+      lastSlot: Slot;
+      leaderSchedule: RpcLeaderSchedule;
+      batchSize: number;
+    } & IngestWorkBudget,
+  ): Promise<{
     slotsAssigned: number;
     slotsProduced: number;
     slotsSkipped: number;
     processed: number;
     skipped: number;
     errors: number;
+    remaining?: number;
   }> {
     const slotsAssigned = args.leaderSchedule[args.identity]?.length ?? 0;
     const beforeCounts = await this.processedBlocksRepo.countStatusesForIdentityInRange(
@@ -940,6 +973,9 @@ export class FeeService {
       lastSlot: args.lastSlot,
       safeUpperSlot: args.lastSlot,
       batchSize: args.batchSize,
+      ...(args.deadlineMs !== undefined ? { deadlineMs: args.deadlineMs } : {}),
+      ...(args.maxBlocks !== undefined ? { maxBlocks: args.maxBlocks } : {}),
+      ...(args.signal !== undefined ? { signal: args.signal } : {}),
     });
 
     // Step 3 — publish local-fact counters after any newly inserted rows.
@@ -968,7 +1004,7 @@ export class FeeService {
         slotsSkipped: afterCounts.skipped,
         ...result,
       },
-      'fee.service: previous-epoch backfill complete',
+      'fee.service: previous-epoch backfill pass complete',
     );
     return {
       slotsAssigned,

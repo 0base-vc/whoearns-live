@@ -3,10 +3,13 @@ import { pino } from 'pino';
 import { createFeeIngesterJob, FEE_INGESTER_JOB_NAME } from '../../../src/jobs/fee-ingester.job.js';
 import type { SolanaRpcClient } from '../../../src/clients/solana-rpc.js';
 import type { EpochService } from '../../../src/services/epoch.service.js';
-import type { FeeService } from '../../../src/services/fee.service.js';
+import { FeeService } from '../../../src/services/fee.service.js';
 import type { ValidatorService } from '../../../src/services/validator.service.js';
 import type { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
-import { IDENTITY_A, VOTE_A } from '../../fixtures/rpc-fixtures.js';
+import { IDENTITY_A, IDENTITY_B, VOTE_A, VOTE_B } from '../../fixtures/rpc-fixtures.js';
+
+import { FakeProcessedBlocksRepo, FakeStatsRepo } from '../services/_fakes.js';
+import type { ProcessedBlocksRepository } from '../../../src/storage/repositories/processed-blocks.repo.js';
 
 const silent = pino({ level: 'silent' });
 
@@ -351,6 +354,110 @@ describe('fee-ingester.job', () => {
     });
     await job.tick(new AbortController().signal);
     expect(deps.rpc.getLeaderSchedule).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps ingesting newly finalised slots between passes through a 2,000-slot cold live backlog', async () => {
+    const deps = makeDeps({
+      epochInfo: { epoch: 500, firstSlot: 2_000, lastSlot: 4_000 },
+      currentSlot: 3_999,
+      finalityBuffer: 0,
+      leaderSchedule: { [IDENTITY_A]: Array.from({ length: 2_001 }, (_, i) => i) },
+    });
+    const stats = new FakeStatsRepo();
+    const blocks = new FakeProcessedBlocksRepo();
+    let clock = 0;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const getBlock = vi.fn(async () => {
+      clock += 50;
+      return null;
+    });
+    const rpc = { ...deps.rpc, getBlock } as unknown as SolanaRpcClient;
+    const watchedDynamicRepo = {
+      listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
+      markBackfilled: vi.fn(),
+    };
+    const job = createFeeIngesterJob({
+      ...deps,
+      rpc,
+      feeService: new FeeService({
+        rpc,
+        logger: silent,
+        statsRepo: stats as unknown as StatsRepository,
+        processedBlocksRepo: blocks as unknown as ProcessedBlocksRepository,
+      }),
+      watchedDynamicRepo,
+      epochsRepo: { findByEpoch: vi.fn() },
+      watchMode: 'explicit',
+      explicitVotes: [VOTE_A],
+      intervalMs: 100,
+      batchSize: 2,
+      logger: silent,
+    });
+    try {
+      await job.tick(new AbortController().signal);
+      expect(getBlock).toHaveBeenCalledTimes(2);
+      expect([...blocks.rows.keys()]).toEqual([3_999, 3_998]);
+      vi.mocked(deps.rpc.getSlot).mockResolvedValue(4_000);
+      await job.tick(new AbortController().signal);
+      expect(getBlock).toHaveBeenCalledTimes(4);
+      expect([...blocks.rows.keys()]).toEqual([3_999, 3_998, 4_000, 3_997]);
+      expect(watchedDynamicRepo.listPendingBackfill).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('interleaves live ticks with one bounded previous-epoch validator and rotates past errors', async () => {
+    const deps = makeDeps({
+      identityMap: new Map([
+        [VOTE_A, IDENTITY_A],
+        [VOTE_B, IDENTITY_B],
+      ]),
+    });
+    const watchedDynamicRepo = {
+      listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A, VOTE_B]),
+      markBackfilled: vi.fn().mockResolvedValue(undefined),
+    };
+    const backfillPreviousEpoch = vi
+      .fn()
+      .mockResolvedValueOnce({ processed: 0, skipped: 0, errors: 1, remaining: 2_000 })
+      .mockResolvedValueOnce({ processed: 2, skipped: 0, errors: 0, remaining: 0 })
+      .mockResolvedValueOnce({ processed: 2, skipped: 0, errors: 0, remaining: 1_998 });
+    const job = createFeeIngesterJob({
+      ...deps,
+      feeService: { ...deps.feeService, backfillPreviousEpoch } as unknown as FeeService,
+      epochsRepo: {
+        findByEpoch: vi.fn().mockResolvedValue({
+          epoch: 499,
+          firstSlot: 0,
+          lastSlot: 1_999,
+          slotCount: 2_000,
+          isClosed: true,
+          observedAt: new Date(),
+          closedAt: new Date(),
+          currentSlot: null,
+        }),
+      },
+      watchedDynamicRepo,
+      watchMode: 'explicit',
+      explicitVotes: [VOTE_A],
+      intervalMs: 30_000,
+      batchSize: 2,
+      logger: silent,
+    });
+    await job.tick(new AbortController().signal);
+    expect(backfillPreviousEpoch).toHaveBeenCalledTimes(1);
+    expect(watchedDynamicRepo.markBackfilled).not.toHaveBeenCalled();
+    await job.tick(new AbortController().signal);
+    expect(deps.feeService.ingestPendingBlocks).toHaveBeenCalledTimes(2);
+    expect(backfillPreviousEpoch.mock.calls.map(([args]) => args.vote)).toEqual([VOTE_A, VOTE_B]);
+    expect(watchedDynamicRepo.markBackfilled).toHaveBeenCalledWith(VOTE_B);
+    watchedDynamicRepo.listPendingBackfill.mockResolvedValue([VOTE_A]);
+    await job.tick(new AbortController().signal);
+    expect(watchedDynamicRepo.markBackfilled).toHaveBeenCalledTimes(1);
+    expect(backfillPreviousEpoch).toHaveBeenLastCalledWith(
+      expect.objectContaining({ maxBlocks: 2 }),
+    );
   });
 
   it('does not mark previous-epoch dynamic backfill complete when slot errors remain', async () => {

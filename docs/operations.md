@@ -388,3 +388,28 @@ anyway).
    few minutes.
 5. If something looks wrong, `helm rollback whoearns-live <prev-revision>`
    before more data lands.
+
+## Fee polling and dynamic backfill progress
+
+The `fee-ingester` gives block fetching a cooperative deadline of
+`FEE_INGEST_INTERVAL_MS` from tick start. It drains and persists an in-flight
+RPC batch before yielding, then resumes from missing block facts on the next
+tick. Live polling fetches the most recent missing slots first, so searching
+for a cold validator does not put every old current-epoch slot ahead of newly
+finalised slots.
+
+If the live pass leaves time, the job attempts at most
+`FEE_INGEST_BATCH_SIZE` blocks for one pending dynamic validator's previous
+epoch. It rotates pending votes even after RPC errors. The
+`prev_epoch_backfilled_at` marker is set only after all facts are captured
+without errors; partial backfills deliberately take multiple ticks. Previously
+captured blocks are skipped on resumption, including after a worker restart.
+
+The deadline is not a hard tick-duration limit: RPC requests already in flight
+and database operations drain normally. Slow database queries, RPC timeouts,
+and the startup median repair can still extend a tick. The scheduler waits
+`FEE_INGEST_INTERVAL_MS` after tick completion before starting another tick.
+Use `jobs_tick_duration_seconds{job="fee-ingester"}`, tick start/end logs,
+and `remaining` in bounded ingest results to separate these delays from a
+cold backlog. A deadline-exhausted live pass postpones historical work until
+there is spare capacity. No schema or environment-variable changes are needed.

@@ -14,6 +14,10 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - Economic percentile CU aggregation joins distinct vote/identity pairs
   directly to block identities, avoiding per-vote array filters while
   preserving window-wide identity rotations and produced-block weighting.
+- Fee polling now yields cold validator backlogs between RPC batches,
+  prioritises newly finalised slots, and resumes previous-epoch dynamic
+  backfills one batch for one validator per tick. Partial passes remain
+  pending instead of being marked complete.
 
 ### Added
 

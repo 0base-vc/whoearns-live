@@ -67,12 +67,17 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
    * array at startup.
    */
   let medianBackfillDone = false;
+  // Rotate even after failures so one unavailable validator cannot hold
+  // up every other dynamic backfill. Persisted block facts are the cursor.
+  let lastBackfillVote: VotePubkey | null = null;
   const medianBackfillLookback = deps.medianBackfillLookback ?? 50;
 
   return {
     name: FEE_INGESTER_JOB_NAME,
     intervalMs: deps.intervalMs,
-    async tick(_signal: AbortSignal): Promise<void> {
+    async tick(signal: AbortSignal): Promise<void> {
+      if (signal.aborted) return;
+      const deadlineMs = Date.now() + deps.intervalMs;
       const epochInfo =
         (await deps.epochService.getCurrent()) ?? (await deps.epochService.syncCurrent());
       const epoch = epochInfo.epoch;
@@ -206,6 +211,9 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
           lastSlot: epochInfo.lastSlot,
           safeUpperSlot,
           batchSize: deps.batchSize,
+          deadlineMs,
+          signal,
+          newestFirst: true,
         });
       } finally {
         try {
@@ -227,25 +235,32 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
         }
       }
 
-      // One-shot previous-epoch backfill for newly-tracked dynamic
-      // validators. Runs once per validator per-process-lifetime: on
-      // success we stamp `prev_epoch_backfilled_at`, which drops the row
-      // out of the partial index `idx_watched_dynamic_pending_backfill`
-      // so the next tick's query returns a smaller set.
-      //
-      // Kept narrow in scope (one prev epoch, one RPC get-leader-schedule,
-      // then getBlock only for the validator's missing leader slots) so
-      // even an accidental mass on-demand add event doesn't torch the
-      // RPC budget. Failures leave the flag null → retried next tick.
-      if (deps.watchedDynamicRepo !== undefined && deps.epochsRepo !== undefined) {
+      // Spend leftover tick time on ONE batch for ONE dynamic validator.
+      // The old sweep awaited every missing block for every pending vote,
+      // delaying the scheduler's next live tick by the entire cold backlog.
+      // Rotate pending votes and leave partial/error passes unstamped.
+      if (
+        !signal.aborted &&
+        Date.now() < deadlineMs &&
+        deps.watchedDynamicRepo !== undefined &&
+        deps.epochsRepo !== undefined
+      ) {
         try {
-          const pending = await deps.watchedDynamicRepo.listPendingBackfill();
+          const pending = (await deps.watchedDynamicRepo.listPendingBackfill()).sort();
           if (pending.length > 0) {
-            await runPreviousEpochBackfill({
-              pendingVotes: pending,
-              currentEpoch: epoch,
-              deps,
-            });
+            const previousIndex =
+              lastBackfillVote === null ? -1 : pending.indexOf(lastBackfillVote);
+            const vote = pending[(previousIndex + 1) % pending.length];
+            if (vote !== undefined) {
+              lastBackfillVote = vote;
+              await runPreviousEpochBackfill({
+                pendingVotes: [vote],
+                currentEpoch: epoch,
+                deps,
+                deadlineMs,
+                signal,
+              });
+            }
           }
         } catch (err) {
           deps.logger.warn({ err }, 'fee-ingester: prev-epoch backfill sweep failed');
@@ -258,7 +273,7 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
 }
 
 /**
- * Run the previous-epoch backfill for each pending dynamic validator.
+ * Run a bounded previous-epoch pass for the selected dynamic validator.
  *
  * Pulled out for readability — the main tick function was getting long,
  * and the backfill path has a handful of error-handling branches that
@@ -272,8 +287,10 @@ async function runPreviousEpochBackfill(args: {
   pendingVotes: VotePubkey[];
   currentEpoch: Epoch;
   deps: FeeIngesterJobDeps;
+  deadlineMs: number;
+  signal: AbortSignal;
 }): Promise<void> {
-  const { pendingVotes, currentEpoch, deps } = args;
+  const { pendingVotes, currentEpoch, deps, deadlineMs, signal } = args;
   // Both are guaranteed non-null by the caller, but re-narrow inside this
   // helper so the function remains callable in isolation during refactors.
   if (deps.watchedDynamicRepo === undefined || deps.epochsRepo === undefined) return;
@@ -310,6 +327,7 @@ async function runPreviousEpochBackfill(args: {
   let filled = 0;
   let failed = 0;
   for (const vote of pendingVotes) {
+    if (signal.aborted || Date.now() >= deadlineMs) break;
     const identity = identityByVote.get(vote);
     if (identity === undefined) {
       deps.logger.warn(
@@ -327,7 +345,17 @@ async function runPreviousEpochBackfill(args: {
         lastSlot: prevEpochInfo.lastSlot,
         leaderSchedule: prevSchedule,
         batchSize: deps.batchSize,
+        maxBlocks: Math.max(1, deps.batchSize),
+        deadlineMs,
+        signal,
       });
+      if (result.remaining !== undefined && result.remaining > 0 && result.errors === 0) {
+        deps.logger.debug(
+          { vote, prevEpoch, remaining: result.remaining },
+          'fee-ingester: prev-epoch backfill yielded, will resume next tick',
+        );
+        continue;
+      }
       if (result.errors > 0) {
         failed += 1;
         deps.logger.warn(
@@ -336,6 +364,7 @@ async function runPreviousEpochBackfill(args: {
         );
         continue;
       }
+      if (signal.aborted) break;
       await deps.watchedDynamicRepo.markBackfilled(vote);
       filled += 1;
     } catch (err) {
