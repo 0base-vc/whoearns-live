@@ -2,6 +2,13 @@ import type pg from 'pg';
 import { toLamports } from '../../core/lamports.js';
 import type { Epoch, IdentityPubkey, VotePubkey } from '../../types/domain.js';
 
+/** Optimistic row identity. Even a lookup update conservatively postpones claiming. */
+export interface DynamicBackfillCandidate {
+  vote: VotePubkey;
+  version: string;
+  tuple: string;
+}
+
 export interface DynamicBackfillTarget {
   epoch: Epoch;
   identity: IdentityPubkey;
@@ -175,29 +182,35 @@ export class WatchedDynamicRepository {
     return stored ? { epoch: Number(stored.epoch), identity: stored.identity } : null;
   }
 
-  /** Read-only presence check; never lock watched rows across an epoch RPC. */
-  async hasUnclaimedBackfillTargets(): Promise<boolean> {
-    const { rows } = await this.pool.query<{ pending: boolean }>(
-      `SELECT EXISTS (SELECT 1 FROM watched_validators_dynamic
-        WHERE prev_epoch_backfilled_at IS NULL AND prev_epoch_backfill_epoch IS NULL) AS pending`,
+  /** Snapshot row versions before epoch RPC; changed/re-registered rows retry. */
+  async getUnclaimedBackfillCandidates(): Promise<DynamicBackfillCandidate[]> {
+    const { rows } = await this.pool.query<{ vote: string; version: string; tuple: string }>(
+      `SELECT vote_pubkey AS vote,xmin::text AS version,ctid::text AS tuple
+         FROM watched_validators_dynamic
+        WHERE prev_epoch_backfilled_at IS NULL AND prev_epoch_backfill_epoch IS NULL
+        ORDER BY vote_pubkey`,
     );
-    return rows[0]?.pending ?? false;
+    return rows;
   }
 
   /**
    * One round trip: claim with an authoritative epoch, or pass NULL to read
-   * stored scopes without claiming rows arriving after the presence check.
+   * stored scopes without claiming. Only unchanged pre-sample candidates can
+   * be claimed; omitted candidates fail closed.
    * Both paths clear stale measurement on pending historical stats.
    */
   async getOrSetBackfillTargets(
     proposedEpoch: Epoch | null,
+    candidates: DynamicBackfillCandidate[] = [],
   ): Promise<Map<VotePubkey, DynamicBackfillTarget>> {
     const { rows } = await this.pool.query<{
       vote_pubkey: string;
       epoch: string;
       identity: string;
     }>(
-      `WITH pending AS MATERIALIZED (
+      `WITH candidates AS MATERIALIZED (
+         SELECT * FROM jsonb_to_recordset($2::jsonb) AS c(vote text,version text,tuple text)
+       ), pending AS MATERIALIZED (
          SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,
                 w.prev_epoch_backfill_identity AS identity
            FROM watched_validators_dynamic w
@@ -206,9 +219,10 @@ export class WatchedDynamicRepository {
        ), claimed AS (
          UPDATE watched_validators_dynamic w
             SET prev_epoch_backfill_epoch=$1::bigint
-           FROM pending v
+           FROM pending v JOIN candidates c ON c.vote=v.vote_pubkey
           WHERE v.vote_pubkey=w.vote_pubkey AND w.prev_epoch_backfilled_at IS NULL
             AND w.prev_epoch_backfill_epoch IS NULL AND $1::bigint IS NOT NULL
+            AND c.version=w.xmin::text AND c.tuple=w.ctid::text
          RETURNING w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,
                    w.prev_epoch_backfill_identity AS identity
        ), targets AS MATERIALIZED (
@@ -225,7 +239,7 @@ export class WatchedDynamicRepository {
          RETURNING s.vote_pubkey
        )
        SELECT vote_pubkey,epoch::text,identity FROM targets WHERE identity IS NOT NULL`,
-      [proposedEpoch],
+      [proposedEpoch, JSON.stringify(candidates)],
     );
     return new Map(
       rows.map((row) => [row.vote_pubkey, { epoch: Number(row.epoch), identity: row.identity }]),

@@ -7,6 +7,7 @@ import type { ValidatorService, WatchMode } from '../services/validator.service.
 import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import type { StatsRepository } from '../storage/repositories/stats.repo.js';
 import type {
+  DynamicBackfillCandidate,
   DynamicBackfillTarget,
   WatchedDynamicRepository,
 } from '../storage/repositories/watched-dynamic.repo.js';
@@ -34,7 +35,7 @@ export interface FeeIngesterJobDeps {
    */
   watchedDynamicRepo?: Pick<
     WatchedDynamicRepository,
-    'hasUnclaimedBackfillTargets' | 'getOrSetBackfillTargets' | 'markBackfilled'
+    'getUnclaimedBackfillCandidates' | 'getOrSetBackfillTargets' | 'markBackfilled'
   >;
   rpc: SolanaRpcClient;
   rpcFallback?: Pick<SolanaRpcClient, 'getLeaderSchedule' | 'getSlot'>;
@@ -83,14 +84,47 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
   >();
   const medianBackfillLookback = deps.medianBackfillLookback ?? 50;
 
+  async function syncClaimEpoch(signal: AbortSignal) {
+    // A separate, caller-owned RPC allowance. Ordinary RPC retry/timeout
+    // defaults remain unchanged. DB statements already in flight drain.
+    const budgetMs = Math.max(1, Math.min(1_000, Math.floor(deps.intervalMs / 10)));
+    const deadline = Date.now() + budgetMs;
+    const controller = new AbortController();
+    const timeout = new DOMException('epoch claim preflight budget exhausted', 'TimeoutError');
+    const timer = setTimeout(() => controller.abort(timeout), budgetMs);
+    const claimSignal = AbortSignal.any([signal, controller.signal]);
+    try {
+      const fresh = await deps.epochService.syncCurrent(claimSignal);
+      claimSignal.throwIfAborted();
+      if (Date.now() >= deadline) throw timeout;
+      return fresh;
+    } finally {
+      clearTimeout(timer);
+      // Promise.all can reject while its companion request is still waiting.
+      // Cancel that request too, so it cannot retain shared RPC capacity.
+      controller.abort();
+    }
+  }
+
   return {
     name: FEE_INGESTER_JOB_NAME,
     intervalMs: deps.intervalMs,
     async tick(signal: AbortSignal): Promise<void> {
       if (signal.aborted) return;
-      const deadlineMs = Date.now() + deps.intervalMs;
       const cachedEpochInfo = await deps.epochService.getCurrent();
-      let epochInfo = cachedEpochInfo ?? (await deps.epochService.syncCurrent());
+      let candidates: DynamicBackfillCandidate[] = [];
+      if (deps.watchedDynamicRepo !== undefined && deps.epochsRepo !== undefined) {
+        try {
+          // Snapshot BEFORE any chain sample, including initial cache fill.
+          candidates = await deps.watchedDynamicRepo.getUnclaimedBackfillCandidates();
+        } catch (err) {
+          deps.logger.warn(
+            { err },
+            'fee-ingester: candidate snapshot failed, deferring new targets',
+          );
+        }
+      }
+      let epochInfo = cachedEpochInfo ?? (await syncClaimEpoch(signal));
 
       // A cached DB epoch can be stale after a watcher failure at rollover.
       // Only a successful sync authorizes new irreversible claims. Already
@@ -103,12 +137,9 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
         try {
           let claimEpoch =
             cachedEpochInfo === null && epochInfo.epoch > 0 ? epochInfo.epoch - 1 : null;
-          if (
-            cachedEpochInfo !== null &&
-            (await deps.watchedDynamicRepo.hasUnclaimedBackfillTargets())
-          ) {
+          if (cachedEpochInfo !== null && candidates.length > 0) {
             try {
-              epochInfo = await deps.epochService.syncCurrent();
+              epochInfo = await syncClaimEpoch(signal);
               if (epochInfo.epoch > 0) claimEpoch = epochInfo.epoch - 1;
             } catch (err) {
               deps.logger.warn(
@@ -117,7 +148,11 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
               );
             }
           }
-          backfillTargets = await deps.watchedDynamicRepo.getOrSetBackfillTargets(claimEpoch);
+          if (signal.aborted) return;
+          backfillTargets = await deps.watchedDynamicRepo.getOrSetBackfillTargets(
+            claimEpoch,
+            candidates,
+          );
           for (const vote of backfillAttemptCursors.keys()) {
             if (!backfillTargets.has(vote)) backfillAttemptCursors.delete(vote);
           }
@@ -126,6 +161,10 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
         }
       }
 
+      if (signal.aborted) return;
+      // Preflight failures cannot spend the usable live block allowance.
+      // In-flight live RPC/DB work still drains cooperatively.
+      const deadlineMs = Date.now() + deps.intervalMs;
       const epoch = epochInfo.epoch;
       const votes = await deps.validatorService.getActiveVotePubkeys(
         deps.watchMode,

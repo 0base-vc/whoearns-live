@@ -34,9 +34,14 @@ and this project follows [Semantic Versioning](https://semver.org/).
   claiming, so a stale watcher cache cannot pin two epochs behind. Sync failure
   leaves fresh rows unclaimed while cached live work and stored scopes continue.
   Claims precede live block RPC even when it exhausts the historical budget.
-  A bounded existence query avoids extra epoch RPC for already-pinned scopes;
-  bulk preflight reads them without rewriting their target. Rows arriving after
-  a negative existence check wait until the next authoritative claim.
+  Preflight epoch RPC has its own cancellable allowance (10% of the interval,
+  at most one second), followed by a fresh live block-work deadline. Queued RPC,
+  quota waits and retry sleeps honor cancellation without changing ordinary
+  timeout/retry defaults. Late responses cannot write epochs or claim targets.
+  A single candidate snapshot before RPC avoids extra epoch RPC for pinned scopes;
+  bulk claims only the exact observed row versions. New registrations, deletion/
+  re-registration and even lookup updates during RPC wait for their own fresh
+  observation. Existing pinned targets are read without rewriting their scope.
   Historical fee/reconciler writes share the durable scope, including for
   completed targets, and defer identity/income mismatches without resetting
   existing income. Completion requires all five totals to match captured

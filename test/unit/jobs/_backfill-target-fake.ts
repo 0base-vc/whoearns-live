@@ -17,24 +17,28 @@ export function withBulkTargets<
   const stored = new Map<string, { epoch: number; identity: string }>();
   return {
     ...repo,
-    hasUnclaimedBackfillTargets: vi.fn(async () =>
-      (await repo.listPendingBackfill()).some((vote) => !stored.has(vote)),
+    getUnclaimedBackfillCandidates: vi.fn(async () =>
+      (await repo.listPendingBackfill())
+        .filter((vote) => !stored.has(vote))
+        .map((vote) => ({ vote, version: 'fixture', tuple: 'fixture' })),
     ),
-    getOrSetBackfillTargets: vi.fn(async (epoch: number | null) => {
-      const pending = await repo.listPendingBackfill();
-      const mapping = await identities(pending);
-      const targets = new Map<string, { epoch: number; identity: string }>();
-      for (const vote of pending) {
-        const identity = mapping.get(vote);
-        if (identity === undefined) continue;
-        const target =
-          epoch === null
-            ? stored.get(vote)
-            : await repo.getOrSetBackfillTarget(vote, epoch, identity);
-        if (target) stored.set(vote, target);
-        if (target) targets.set(vote, target);
-      }
-      return targets;
-    }),
+    getOrSetBackfillTargets: vi.fn(
+      async (epoch: number | null, candidates: { vote: string }[] = []) => {
+        const pending = await repo.listPendingBackfill();
+        const mapping = await identities(pending);
+        const targets = new Map<string, { epoch: number; identity: string }>();
+        for (const vote of pending) {
+          const identity = mapping.get(vote);
+          if (identity === undefined) continue;
+          const target =
+            epoch === null || !candidates.some((c) => c.vote === vote)
+              ? stored.get(vote)
+              : await repo.getOrSetBackfillTarget(vote, epoch, identity);
+          if (target) stored.set(vote, target);
+          if (target) targets.set(vote, target);
+        }
+        return targets;
+      },
+    ),
   };
 }

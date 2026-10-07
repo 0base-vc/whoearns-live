@@ -1,3 +1,5 @@
+import { abortable, cancellableSleep } from '../core/cancellation.js';
+
 /**
  * In-memory token bucket for rate-limiting a single client process.
  *
@@ -10,8 +12,8 @@
  *   - `capacity` = max tokens the bucket holds (allows short bursts).
  *   - `refillPerSec` = steady-state token inflow rate.
  *   - `acquire(cost)` blocks (async wait) until `cost` tokens are
- *     available, then deducts them. Does NOT reject — callers rely on
- *     the eventual progress guarantee.
+ *     available, then deducts them. An optional caller signal cancels waits;
+ *     without it, callers retain the eventual progress guarantee.
  *
  * Not strictly fair across concurrent waiters — when capacity refills,
  * whichever waiter next polls wins. That's acceptable here because our
@@ -35,8 +37,10 @@ export class TokenBucket {
      * Async sleep function. Defaults to `setTimeout`-based; tests can
      * inject a fake to advance a virtual clock deterministically.
      */
-    private readonly sleepMs: (ms: number) => Promise<void> = (ms) =>
-      new Promise((r) => setTimeout(r, ms)),
+    private readonly sleepMs: (
+      ms: number,
+      signal?: AbortSignal,
+    ) => Promise<void> = cancellableSleep,
   ) {
     if (capacity <= 0 || refillPerSec <= 0) {
       throw new RangeError('TokenBucket requires capacity>0 and refillPerSec>0');
@@ -52,7 +56,8 @@ export class TokenBucket {
    * exceeds capacity by one request. Callers should size capacity so
    * no single request needs more than `capacity` tokens in practice.
    */
-  async acquire(cost: number): Promise<void> {
+  async acquire(cost: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if (cost <= 0) return;
     // Treat over-capacity requests as if they fit at capacity — caller
     // opted into the request, blocking indefinitely on a too-large cost
@@ -63,6 +68,7 @@ export class TokenBucket {
     // contention multiple waiters may each see `tokens >= effectiveCost`
     // in succession — acceptable given our non-fair semantics above.
     while (true) {
+      signal?.throwIfAborted();
       this.refill();
       if (this.tokens >= effectiveCost) {
         this.tokens -= effectiveCost;
@@ -70,7 +76,7 @@ export class TokenBucket {
       }
       const deficit = effectiveCost - this.tokens;
       const waitMs = Math.max(1, Math.ceil((deficit / this.refillPerSec) * 1000));
-      await this.sleepMs(waitMs);
+      await abortable(this.sleepMs(waitMs, signal), signal);
     }
   }
 

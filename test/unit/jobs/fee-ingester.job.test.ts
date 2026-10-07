@@ -503,7 +503,7 @@ describe('fee-ingester.job', () => {
     });
     const backfillPreviousEpoch = vi.fn().mockResolvedValue({ errors: 0, remaining: 0 });
     const watchedDynamicRepo = {
-      hasUnclaimedBackfillTargets: vi.fn().mockResolvedValue(false),
+      getUnclaimedBackfillCandidates: vi.fn().mockResolvedValue([]),
       getOrSetBackfillTargets: vi
         .fn()
         .mockRejectedValueOnce(new Error('transient bulk claim failure'))

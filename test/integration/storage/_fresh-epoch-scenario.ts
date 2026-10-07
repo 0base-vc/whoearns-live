@@ -80,9 +80,9 @@ export async function runFreshEpochScenario(pool: pg.Pool, kind: FreshEpochScena
   const cachedBefore = (await epochService.getCurrent())?.epoch ?? null;
   if (kind === 'late arrival') {
     await pool.query("DELETE FROM watched_validators_dynamic WHERE vote_pubkey='A'");
-    const original = watchedDynamicRepo.hasUnclaimedBackfillTargets.bind(watchedDynamicRepo);
+    const original = watchedDynamicRepo.getUnclaimedBackfillCandidates.bind(watchedDynamicRepo);
     let inserted = false;
-    watchedDynamicRepo.hasUnclaimedBackfillTargets = async () => {
+    watchedDynamicRepo.getUnclaimedBackfillCandidates = async () => {
       const result = await original();
       if (!inserted) {
         inserted = true;

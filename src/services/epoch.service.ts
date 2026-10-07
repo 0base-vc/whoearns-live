@@ -1,3 +1,4 @@
+import { abortable } from '../core/cancellation.js';
 import type { SolanaRpcClient } from '../clients/solana-rpc.js';
 import type { RpcEpochSchedule } from '../clients/types.js';
 import type { Logger } from '../core/logger.js';
@@ -84,11 +85,13 @@ export class EpochService {
     this.logger = deps.logger;
   }
 
-  async syncCurrent(): Promise<EpochInfo> {
-    const [info, schedule] = await Promise.all([
-      this.rpc.getEpochInfo('confirmed'),
-      this.rpc.getEpochSchedule(),
-    ]);
+  async syncCurrent(signal?: AbortSignal): Promise<EpochInfo> {
+    signal?.throwIfAborted();
+    const [info, schedule] = await abortable(
+      Promise.all([this.rpc.getEpochInfo('confirmed', signal), this.rpc.getEpochSchedule(signal)]),
+      signal,
+    );
+    signal?.throwIfAborted();
 
     const epoch = info.epoch;
     const firstSlot = firstSlotOfEpoch(epoch, schedule);
@@ -103,6 +106,7 @@ export class EpochService {
     // is still flagged open. We detect transitions by looking at the latest
     // row — if it's a lower epoch and still open, it needs closing.
     const previous = await this.epochsRepo.findCurrent();
+    signal?.throwIfAborted();
     if (previous !== null && previous.epoch < epoch && !previous.isClosed) {
       this.logger.info(
         { closingEpoch: previous.epoch, newEpoch: epoch },
@@ -111,6 +115,7 @@ export class EpochService {
       await this.epochsRepo.markClosed(previous.epoch, new Date());
     }
 
+    signal?.throwIfAborted();
     await this.epochsRepo.upsert({
       epoch,
       firstSlot,
@@ -120,6 +125,7 @@ export class EpochService {
       isClosed: false,
     });
 
+    signal?.throwIfAborted();
     this.logger.debug(
       { epoch, firstSlot, lastSlot, slotCount, currentSlot },
       'epoch.service: synced current epoch',

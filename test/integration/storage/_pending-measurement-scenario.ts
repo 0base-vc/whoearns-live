@@ -98,7 +98,7 @@ export async function runMeasurementClaim(pool: pg.Pool, kind: MeasurementClaim)
   }
   if (kind === 'single') await repo.getOrSetBackfillTarget('A', 499);
   else if (kind === 'scopes') await repo.getBackfillScopes(['A'], 499);
-  else await repo.getOrSetBackfillTargets(499);
+  else await repo.getOrSetBackfillTargets(499, await repo.getUnclaimedBackfillCandidates());
   if (kind === 'deferred') {
     deferred = !(await stats.upsertSlotStatsIfIdentityMatches({
       epoch: 499,
@@ -245,7 +245,11 @@ export async function runCompletionRace(
       throw new Error('expected complete facts');
     const { rows } = await observer.query('SELECT pg_backend_pid() AS pid');
     if (kind === 'single') pending = observerRepo.getOrSetBackfillTarget('A', 499);
-    else if (kind === 'bulk') pending = observerRepo.getOrSetBackfillTargets(499);
+    else if (kind === 'bulk')
+      pending = observerRepo.getOrSetBackfillTargets(
+        499,
+        await observerRepo.getUnclaimedBackfillCandidates(),
+      );
     else if (kind === 'scopes') pending = observerRepo.getBackfillScopes(['A'], 499);
     else if (kind === 'rebuild')
       pending = observerStats.rebuildIncomeTotalsFromProcessedBlocks(499, ['IA'], [], true);

@@ -411,15 +411,28 @@ after a successful authoritative `EpochService.syncCurrent()`, before live
 block RPC work or a leftover-budget check, then keeps that original epoch
 through rollover and restart. A stale open database epoch after a watcher
 outage is insufficient. Sync failure leaves new rows unclaimed while existing
-scopes and cached live ingestion continue. A bounded read-only existence query
-avoids extra epoch RPC for already-pinned epochs, including unknown identities.
-With no cached epoch, the initial successful sync is reused. No watched-row
-lock is held across epoch RPC. One bulk SQL statement claims only with a fresh
-proposal and reads existing pairs. A NULL proposal skips claims, including rows
-registered after a negative existence check; these retry next tick. Already-pinned
-targets are not rewritten and there is no serial per-validator claim loop. All pending targets are resolved before
-the expensive historical passes rotate one validator per tick. Registration
-queues a pending row; target selection happens when the worker observes it.
+scopes and cached live ingestion continue. One read-only candidate snapshot precedes the chain sample, including on an
+empty epoch cache. It records vote, `xmin` and `ctid`; bulk SQL claims only the
+unchanged observed versions. A new registration after the sample, or a row
+changed/deleted/re-registered while RPC runs, waits for the next fresh sample.
+Even ordinary lookup updates conservatively postpone that claim. Already-pinned
+epochs, including unknown identities, need no extra epoch RPC and are not rewritten.
+Snapshot and bulk resolution each use one query, with no per-validator claim loop.
+No watched-row lock spans RPC. With no cached epoch, the initial sync is reused.
+A NULL proposal or omitted candidate cohort never claims new rows.
+
+The claim preflight has its own caller-owned RPC allowance: 10% of the ingest
+interval, capped at one second and floored at one millisecond. It forwards a
+cancellation signal through epoch reads, the shared RPC queue, quota waits,
+response reads and retry delays; ordinary timeout/retry policy is unchanged.
+Early failure also cancels the companion epoch request. Late RPC settlements
+are consumed without epoch writes or claims. After preflight and target
+resolution, a new `FEE_INGEST_INTERVAL_MS` deadline governs live block work
+and the remaining historical batch. An epoch RPC outage therefore cannot
+repeatedly consume the live allowance. Already-started database statements
+drain normally, so this remains cooperative rather than a hard tick-duration
+guarantee. Registration queues a pending row; selection waits for its own
+successful fresh observation.
 Migration
 `0048_dynamic_backfill_target_identity.sql` adds the nullable
 `prev_epoch_backfill_identity` column. The target is now an immutable

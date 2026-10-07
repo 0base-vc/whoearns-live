@@ -1,5 +1,6 @@
 import { runZeroIncomeScenario } from './_zero-income-scenario.js';
 import { runFirstTrackingScenario } from './_first-tracking-scenario.js';
+import { runClaimPreflightScenario, runCandidateWriteRace } from './_claim-preflight-scenario.js';
 import { runFreshEpochScenario } from './_fresh-epoch-scenario.js';
 import { runDeferredGapScenario } from './_deferred-gap-scenario.js';
 import {
@@ -305,7 +306,9 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
     if (!fixture) throw new Error('fixture unavailable');
     await fixture.pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=NULL,
       prev_epoch_backfill_identity=NULL`);
-    expect(await repo.getOrSetBackfillTargets(499)).toEqual(new Map());
+    expect(
+      await repo.getOrSetBackfillTargets(499, await repo.getUnclaimedBackfillCandidates()),
+    ).toEqual(new Map());
     const { rows } = await fixture.pool.query(`SELECT prev_epoch_backfill_epoch::text AS epoch,
       prev_epoch_backfill_identity AS identity FROM watched_validators_dynamic ORDER BY vote_pubkey`);
     expect(rows).toEqual([
@@ -315,7 +318,10 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
     // Explicit fixture verification, independent of current lookup/aggregate rows.
     await fixture.pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_identity=
       CASE vote_pubkey WHEN 'A' THEN 'IA' ELSE 'IB' END`);
-    const first = await repo.getOrSetBackfillTargets(500);
+    const first = await repo.getOrSetBackfillTargets(
+      500,
+      await repo.getUnclaimedBackfillCandidates(),
+    );
     expect(first).toEqual(
       new Map([
         ['A', { epoch: 499, identity: 'IA' }],
@@ -330,14 +336,16 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
       ).rows;
     const before = await versions();
     await fixture.pool.query(`UPDATE validators SET identity_pubkey='IC' WHERE vote_pubkey='A'`);
-    expect(await repo.getOrSetBackfillTargets(500)).toEqual(first);
+    expect(
+      await repo.getOrSetBackfillTargets(500, await repo.getUnclaimedBackfillCandidates()),
+    ).toEqual(first);
     expect(await repo.getOrSetBackfillTarget('A', 501)).toEqual(first.get('A'));
     expect(await versions()).toEqual(before);
   });
 
   it('retains historical scopes for completed targets and returns ambiguous legacy scopes unchanged', async () => {
     if (!fixture) throw new Error('fixture unavailable');
-    await repo.getOrSetBackfillTargets(499);
+    await repo.getOrSetBackfillTargets(499, await repo.getUnclaimedBackfillCandidates());
     await fixture.pool.query(
       `INSERT INTO epoch_validator_stats(epoch,vote_pubkey,identity_pubkey) VALUES(499,'A','IA')`,
     );
@@ -628,7 +636,7 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
 
   it('refuses to stamp zero measurement or completion when assigned facts are still missing', async () => {
     if (!fixture) throw new Error('fixture unavailable');
-    await repo.getOrSetBackfillTargets(499);
+    await repo.getOrSetBackfillTargets(499, await repo.getUnclaimedBackfillCandidates());
     const stats = new StatsRepository(fixture.pool);
     await stats.upsertSlotStats({
       epoch: 499,
@@ -944,13 +952,79 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
       prev_epoch_backfill_epoch FROM watched_validators_dynamic WHERE vote_pubkey='A'`)
       ).rows;
     const before = await tuple();
-    expect(await repo.hasUnclaimedBackfillTargets()).toBe(true);
+    expect(await repo.getUnclaimedBackfillCandidates()).toHaveLength(1);
     expect(await repo.getOrSetBackfillTargets(null)).toEqual(
       new Map([['B', { epoch: 499, identity: 'IB' }]]),
     );
     expect(await tuple()).toEqual(before);
-    await repo.getOrSetBackfillTargets(500);
-    expect(await repo.hasUnclaimedBackfillTargets()).toBe(false);
+    await repo.getOrSetBackfillTargets(500, await repo.getUnclaimedBackfillCandidates());
+    expect(await repo.getUnclaimedBackfillCandidates()).toEqual([]);
     expect((await tuple())[0].prev_epoch_backfill_epoch).toBe('500');
   });
+
+  it.each([
+    'timeout',
+    'late registration',
+    'late registration empty cache',
+    're-registration',
+    'lookup update',
+  ] as const)(
+    'preserves live work and restricts claims to pre-sample row versions (%s)',
+    async (kind) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      let clock = 0;
+      const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+      try {
+        const r = await runClaimPreflightScenario(fixture.pool, kind, (ms) => {
+          clock += ms;
+        });
+        const a = (state: typeof r.first) => state.targets.find((t) => t.vote_pubkey === 'A');
+        const b = (state: typeof r.first) => state.targets.find((t) => t.vote_pubkey === 'B');
+        if (kind === 'timeout') {
+          expect(a(r.first)).toEqual({ vote_pubkey: 'A', epoch: null, identity: null });
+          expect(a(r.second)).toEqual(a(r.first));
+          expect(r.first.slots).toContain(50001);
+          expect(r.second.slots).toContain(50002);
+          expect(r.second.calls).toBe(2);
+          expect(a(r.recovered)).toEqual({ vote_pubkey: 'A', epoch: '500', identity: null });
+          expect(r.recovered.calls).toBe(3);
+        } else if (kind.startsWith('late registration')) {
+          expect(a(r.first)).toEqual({ vote_pubkey: 'A', epoch: '499', identity: null });
+          expect(r.first.targets.find((t) => t.vote_pubkey === 'C')).toEqual({
+            vote_pubkey: 'C',
+            epoch: null,
+            identity: null,
+          });
+          expect(r.second.targets.find((t) => t.vote_pubkey === 'C')).toEqual({
+            vote_pubkey: 'C',
+            epoch: '500',
+            identity: null,
+          });
+          expect(a(r.recovered)).toEqual(a(r.first));
+          expect(r.recovered.calls).toBe(2);
+        } else {
+          expect(a(r.first)).toEqual({ vote_pubkey: 'A', epoch: null, identity: null });
+          expect(a(r.second)).toEqual({ vote_pubkey: 'A', epoch: '500', identity: null });
+          expect(a(r.recovered)).toEqual(a(r.second));
+          expect(r.recovered.calls).toBe(2);
+        }
+        expect(b(r.first)).toEqual({ vote_pubkey: 'B', epoch: '499', identity: 'IB' });
+        expect(b(r.recovered)).toEqual(b(r.first));
+        expect(r.recovered.slots).toContain(50103);
+      } finally {
+        now.mockRestore();
+      }
+    },
+  );
+
+  it.each(['lookup', 're-registration'] as const)(
+    'rejects a changed candidate after bulk claim waits for a concurrent %s',
+    async (kind) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      const r = await runCandidateWriteRace(fixture.pool, kind);
+      expect(r.blocked).toBe(true);
+      expect(r.afterRace).toEqual({ epoch: null, identity: null });
+      expect(r.afterRetry).toEqual({ epoch: '500', identity: null });
+    },
+  );
 });
