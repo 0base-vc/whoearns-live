@@ -78,8 +78,9 @@ describe('concurrent current epoch observations — PostgreSQL16', () => {
       observeCurrent: (e: Args, signal?: AbortSignal) =>
         ordered(e.epoch, () =>
           Reflect.apply(
-            (repo as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)
-              .observeCurrent,
+            (repo as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[
+              'observeCurrent'
+            ]!,
             repo,
             [e, signal],
           ),
