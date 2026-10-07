@@ -18,6 +18,8 @@ async function seed(pool: pg.Pool) {
   await pool.query(`DELETE FROM watched_validators_dynamic WHERE vote_pubkey='B'`);
   await pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=NULL,
     prev_epoch_backfill_identity=NULL WHERE vote_pubkey='A'`);
+  // This case intentionally shares IA across votes to exercise identity-wide writers.
+  await pool.query("UPDATE validators SET identity_pubkey='IA' WHERE vote_pubkey='B'");
   const stats = new StatsRepository(pool);
   for (const [votePubkey, epoch] of [
     ['A', 499],

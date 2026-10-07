@@ -147,5 +147,8 @@ export async function runFreshEpochScenario(pool: pg.Pool, kind: FreshEpochScena
   await seedEpoch(502, false);
   worker = makeWorker();
   await worker.tick(signal);
+  // An empty cache has no epoch-500 row: A stays pinned/pending while the
+  // next round-robin tick still finishes B's genuinely available epoch 499.
+  if (kind === 'empty cache') await worker.tick(signal);
   return { watcherFailure, cachedBefore, first, recovered, restarted: await snapshot() };
 }

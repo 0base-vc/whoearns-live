@@ -531,6 +531,6 @@ and `remaining` in bounded ingest results to separate these delays from a
 cold backlog. A deadline-exhausted live pass postpones historical work until
 there is spare capacity. No environment-variable changes are needed.
 Migrations 0047 and 0048 add the durable target columns; the all-in-one
-startup runs migrations before starting the API and worker. Apply both
-migrations before running the updated worker. This change does not run a
+startup runs migrations before starting the API and worker. Apply 0047 followed by 0048
+through the ordered migration runner before running the updated worker. This change does not run a
 production migration or require manual edits to block facts.

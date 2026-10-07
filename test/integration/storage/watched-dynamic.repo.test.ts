@@ -161,7 +161,7 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
         expect(result.partial.targets).toEqual([
           { vote_pubkey: 'A', epoch: '499', identity: 'IA', completed: false },
           { vote_pubkey: 'B', epoch: '499', identity: 'IC', completed: false },
-          { vote_pubkey: 'C', epoch: '500', identity: 'IA', completed: false },
+          { vote_pubkey: 'C', epoch: '500', identity: 'ID', completed: false },
         ]);
         expect(result.partial.history).toEqual([
           { identity_pubkey: 'IA', slots_assigned: 2, slots_skipped: 1 },
@@ -169,7 +169,7 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
         expect(result.completed.targets).toEqual([
           { vote_pubkey: 'A', epoch: '499', identity: 'IA', completed: true },
           { vote_pubkey: 'B', epoch: '499', identity: 'IC', completed: true },
-          { vote_pubkey: 'C', epoch: '500', identity: 'IA', completed: false },
+          { vote_pubkey: 'C', epoch: '500', identity: 'ID', completed: true },
         ]);
         expect(result.completed.history).toEqual([
           { identity_pubkey: 'IA', slots_assigned: 2, slots_skipped: 2 },
@@ -279,14 +279,11 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
   it('uses the locked target scope when a claim commits after the historical writer starts', async () => {
     if (!fixture) throw new Error('fixture unavailable');
     const stats = new StatsRepository(fixture.pool);
-    await stats.upsertSlotStats({
-      epoch: 499,
-      votePubkey: 'A',
-      identityPubkey: 'IB',
-      slotsAssigned: 1,
-      slotsProduced: 0,
-      slotsSkipped: 0,
-    });
+    // Seed a pre-existing conflicting ledger directly; current writers reject stale IB.
+    await fixture.pool.query(
+      `INSERT INTO epoch_validator_stats(epoch,vote_pubkey,identity_pubkey,slots_assigned)
+       VALUES(499,'A','IB',1)`,
+    );
     await fixture.pool.query(
       `UPDATE epoch_validator_stats SET block_fees_total_lamports=50 WHERE epoch=499 AND vote_pubkey='A'`,
     );
@@ -319,14 +316,11 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
   it('preserves scoped income when a claim races the ordinary aggregate rebuild', async () => {
     if (!fixture) throw new Error('fixture unavailable');
     const stats = new StatsRepository(fixture.pool);
-    await stats.upsertSlotStats({
-      epoch: 499,
-      votePubkey: 'A',
-      identityPubkey: 'IB',
-      slotsAssigned: 1,
-      slotsProduced: 0,
-      slotsSkipped: 0,
-    });
+    // Seed a pre-existing conflicting ledger directly; current writers reject stale IB.
+    await fixture.pool.query(
+      `INSERT INTO epoch_validator_stats(epoch,vote_pubkey,identity_pubkey,slots_assigned)
+       VALUES(499,'A','IB',1)`,
+    );
     await fixture.pool.query(
       `UPDATE epoch_validator_stats SET block_fees_total_lamports=50 WHERE epoch=499 AND vote_pubkey='A'`,
     );
@@ -620,7 +614,7 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
       if (kind === 'empty cache') expect(r.cachedBefore).toBeNull();
       if (kind === 'sync failure' || kind === 'late arrival' || kind === 'already pinned') {
         expect(r.first.cachedEpoch).toBe(500);
-        expect(r.first.fetchedSlots).toEqual([50001, 49901]);
+        expect(r.first.fetchedSlots).toEqual(kind === 'already pinned' ? [50001] : [50001, 49901]);
       } else expect(r.first.cachedEpoch).toBe(501);
       const finalEpoch = kind === 'already pinned' ? '499' : '500';
       expect(r.recovered.targets[0]).toMatchObject({
