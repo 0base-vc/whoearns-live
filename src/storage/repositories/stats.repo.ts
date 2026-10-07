@@ -1397,12 +1397,14 @@ export class StatsRepository {
       -- mid-epoch runs that epoch under two identities; pooling
       -- blocks by the windowed identity set folds both halves rather
       -- than dropping the unrecorded one.
+      -- DISTINCT (vote, identity) rows prevent repeated epochs from
+      -- multiplying blocks. Equality exposes the identity join to the
+      -- planner rather than filtering each vote through an ANY array.
       cu_vote_identities AS (
-        SELECT
+        SELECT DISTINCT
           vote_pubkey,
-          ARRAY_AGG(DISTINCT identity_pubkey) AS identities
+          identity_pubkey
         FROM per_validator_per_epoch
-        GROUP BY vote_pubkey
       ),
       cu_per_validator AS (
         SELECT
@@ -1418,7 +1420,7 @@ export class StatsRepository {
           -- without it the hash side scans every partition of the
           -- largest table on the DB.
           ON pb.epoch BETWEEN $1::bigint AND $2::bigint
-         AND pb.leader_identity = ANY(cvi.identities)
+         AND pb.leader_identity = cvi.identity_pubkey
         GROUP BY cvi.vote_pubkey
       ),
       windowed_cu AS (

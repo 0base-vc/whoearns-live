@@ -11,6 +11,9 @@ and this project follows [Semantic Versioning](https://semver.org/).
   waiting for optional scoring. Tier and commission details load separately
   with visible failure and retry states; navigation cancels old requests
   and ignores stale responses.
+- Economic percentile CU aggregation joins distinct vote/identity pairs
+  directly to block identities, avoiding per-vote array filters while
+  preserving window-wide identity rotations and produced-block weighting.
 
 ### Added
 
