@@ -580,4 +580,126 @@ describe('automatic current-identity collection — PostgreSQL 16', () => {
       slotsSkipped: 1,
     });
   });
+
+  it('enrolls a completed target epoch before a mapping change makes it eligible to transition', async () => {
+    const db = pool(),
+      w = worker(db);
+    await w.tick();
+    await w.tick();
+    expect((await w.watched.findByVote('A'))?.prevEpochBackfilledAt).toBeInstanceOf(Date);
+    await db.query(
+      "INSERT INTO epoch_validator_stats(epoch,vote_pubkey,identity_pubkey,block_fees_total_lamports) VALUES(498,'A','IA',99)",
+    );
+    const runner = await db.connect(),
+      publisher = await db.connect();
+    let releaseCommit!: () => void, reachedCommit!: () => void;
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    const beforeCommit = new Promise<void>((resolve) => {
+      reachedCommit = resolve;
+    });
+    let enrolled = -1,
+      changed = false;
+    const query = async (sql: string, values?: unknown[]) => {
+      if (sql === 'COMMIT') {
+        reachedCommit();
+        await commitGate;
+      }
+      const result = await runner.query(sql, values);
+      if (sql.includes('SELECT pg_advisory_xact_lock') && !changed) {
+        enrolled = result.rows.length;
+        changed = true;
+        await db.query("UPDATE validators SET identity_pubkey='IB' WHERE vote_pubkey='A'");
+      }
+      return result;
+    };
+    const resolver = new WatchedDynamicRepository({
+      query,
+      connect: async () => ({ query, release: () => {} }),
+    } as unknown as pg.Pool);
+    let resolution: Promise<unknown> | undefined, publication: Promise<unknown> | undefined;
+    try {
+      resolution = resolver.getOrSetBackfillTargets(null);
+      await beforeCommit;
+      await db.query(
+        "INSERT INTO processed_blocks(slot,epoch,leader_identity,block_status,fees_lamports,base_fees_lamports,priority_fees_lamports,tips_lamports,compute_units_consumed,facts_captured_at) VALUES(49903,499,'IB','produced',30,5,25,2,100,NOW())",
+      );
+      const pid = Number((await publisher.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
+      let published = false;
+      publication = new StatsRepository(boundPgPool(publisher))
+        .addIncomeDelta({
+          epoch: 499,
+          identityPubkey: 'IB',
+          leaderFeeDeltaLamports: 30n,
+          baseFeeDeltaLamports: 5n,
+          priorityFeeDeltaLamports: 25n,
+          tipDeltaLamports: 2n,
+          computeUnitsDelta: 100n,
+          fromCapturedFacts: true,
+        })
+        .then(() => {
+          published = true;
+        });
+      const deadline = Date.now() + 3000;
+      let blocked = false;
+      while (Date.now() < deadline && !published) {
+        const { rows } = await db.query('SELECT cardinality(pg_blocking_pids($1)) AS blockers', [
+          pid,
+        ]);
+        if (Number(rows[0].blockers) > 0) {
+          blocked = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(blocked || published).toBe(true);
+      releaseCommit();
+      await resolution;
+      await publication;
+      const row = await w.stats.findByVoteEpoch('A', 499);
+      const guard = await w.stats.upsertSlotStatsIfIdentityMatches({
+        epoch: 499,
+        votePubkey: 'A',
+        identityPubkey: 'IB',
+        slotsAssigned: 2,
+        slotsProduced: 1,
+        slotsSkipped: 0,
+      });
+      console.info(
+        `completed-target enrollment reproduction: enrolled=${enrolled}, publicationBlocked=${blocked}, A=${row?.identityPubkey}, fees=${row?.blockFeesTotalLamports}, guard=${guard}`,
+      );
+      expect(enrolled).toBe(1);
+      expect(blocked).toBe(true);
+      expect(row).toMatchObject({
+        identityPubkey: 'IB',
+        blockFeesTotalLamports: 30n,
+        blockBaseFeesTotalLamports: 5n,
+        blockPriorityFeesTotalLamports: 25n,
+        blockTipsTotalLamports: 2n,
+        computeUnitsTotal: 100n,
+        feesUpdatedAt: null,
+        tipsUpdatedAt: null,
+      });
+      expect(guard).toBe(true);
+      await worker(db).tick();
+      expect((await w.watched.findByVote('A'))?.prevEpochBackfilledAt).toBeInstanceOf(Date);
+      expect(await w.stats.findByVoteEpoch('A', 498)).toMatchObject({
+        identityPubkey: 'IA',
+        blockFeesTotalLamports: 99n,
+      });
+      expect(
+        (
+          await db.query(
+            "SELECT COUNT(*)::int AS count FROM processed_blocks WHERE epoch=499 AND leader_identity='IA'",
+          )
+        ).rows[0].count,
+      ).toBe(2);
+    } finally {
+      releaseCommit();
+      await Promise.allSettled([resolution, publication]);
+      runner.release();
+      publisher.release();
+    }
+  });
 });
