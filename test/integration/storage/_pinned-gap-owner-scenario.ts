@@ -42,8 +42,8 @@ export async function runPinnedGapOwnerScenario(
     SELECT e,v.vote_pubkey,v.identity_pubkey,CASE WHEN v.vote_pubkey='C' THEN 1 ELSE 2 END,
       CASE WHEN v.vote_pubkey='C' THEN 1 ELSE 2 END,NOW(),NOW(),NOW()
     FROM generate_series(492,501) e CROSS JOIN validators v`);
-  await pool.query(`INSERT INTO processed_blocks(slot,epoch,leader_identity,block_status,fees_lamports)
-    SELECT e*10+s.slot,e,s.identity,'skipped',0 FROM generate_series(492,501) e
+  await pool.query(`INSERT INTO processed_blocks(slot,epoch,leader_identity,block_status,fees_lamports,facts_captured_at)
+    SELECT e*10+s.slot,e,s.identity,'skipped',0,NOW() FROM generate_series(492,501) e
       CROSS JOIN (VALUES(1,'IA'),(2,'IA'),(3,'IB'),(4,'IB'),(5,'IC')) s(slot,identity)`);
   await pool.query("DELETE FROM processed_blocks WHERE epoch=499 AND leader_identity='IA'");
   await pool.query(

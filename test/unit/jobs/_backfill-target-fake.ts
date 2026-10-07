@@ -1,8 +1,8 @@
 import { vi } from 'vitest';
 
 /**
- * Job tests supply known historical fixture identities at this boundary.
- * This is not a provenance resolver: production fresh claims pin only epoch.
+ * Job tests supply the current fixture mapping at this collection boundary.
+ * Production records the current address as an explicit product assumption.
  */
 export function withBulkTargets<
   T extends {

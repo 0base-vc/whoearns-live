@@ -22,17 +22,18 @@ and this project follows [Semantic Versioning](https://semver.org/).
   backfill targets are stored per validator (migration 0047), preserving
   unfinished epochs through rollover and restart and preventing completion
   against a different epoch. Migration 0048 also stores the historical
-  target identity, so rotation cannot stamp unfinished old slots complete
-  by switching to the new identity's empty or shorter schedule. Fresh closed
-  targets pin epoch with identity NULL: current validator mappings and generic
-  stats do not prove historical identity, including rotation before tracking.
-  Previous-epoch data stays unmeasured until independent offline verification;
-  live ingestion and existing verified scopes continue. Legacy
-  epoch-only targets remain pending until their identity is independently
-  verified and manually corrected; reconciler-created stats are not identity
-  provenance. Fresh targets require a successful authoritative epoch sync before
-  claiming, so a stale watcher cache cannot pin two epochs behind. Sync failure
-  leaves fresh rows unclaimed while cached live work and stored scopes continue.
+  collection identity. Per the owner's product requirement, fresh and legacy
+  targets automatically use the current validator address, recorded as a
+  collection assumption rather than historical provenance. An observed identity
+  change requeues collection for the pinned epoch, starts a fresh attempt cursor
+  and replaces only that derived address summary using its captured facts.
+  Other epochs and all raw block history are preserved. Completion checks the
+  exact scope revision, preventing stale work from completing a replacement.
+  Captured income publication is idempotent and cannot add a delayed delta to
+  already-reconstructed totals. Actual same-address ledger conflicts still defer.
+  Fresh targets require a successful authoritative epoch sync before claiming;
+  sync failure leaves fresh rows unclaimed while cached live work and stored
+  scopes continue.
   Claims precede live block RPC even when it exhausts the historical budget.
   Preflight epoch RPC has its own cancellable allowance (10% of the interval,
   at most one second), followed by a fresh live block-work deadline. Queued RPC,
@@ -42,12 +43,11 @@ and this project follows [Semantic Versioning](https://semver.org/).
   bulk claims only the exact observed row versions. New registrations, deletion/
   re-registration and even lookup updates during RPC wait for their own fresh
   observation. Existing pinned targets are read without rewriting their scope.
-  Historical fee/reconciler writes share the durable scope, including for
+  Historical fee/reconciler writes share the recorded collection scope, including for
   completed targets, and defer identity/income mismatches without resetting
   existing income. Completion requires all five totals to match captured
   produced facts, so a committed fact followed by a failed income delta cannot
-  falsely finish the target. Legacy recovery requires verified offline ledger
-  reconciliation; changing the target identity alone is insufficient.
+  falsely finish the target. A same-address ledger conflict requires reconciliation before completion.
   Fully captured zero-income targets now atomically record fee/tip measurement
   timestamps with completion, without rewriting income. Partial/error passes
   stay unmeasured; an observed empty schedule is measured zero but remains

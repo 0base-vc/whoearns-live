@@ -130,8 +130,8 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
       // Only a successful sync authorizes new irreversible claims. Already
       // pinned scopes need no epoch RPC, even when their identity is unknown.
       // Resolve targets before live block RPC or leftover-budget checks.
-      // Fresh epochs are pinned even without historical identity proof; only
-      // independently resolved stored scopes are returned for historical RPC.
+      // Collect with the current validator identity per the product policy.
+      // The stored address records this assumption, not historical provenance.
       let backfillTargets = new Map<VotePubkey, DynamicBackfillTarget>();
       if (deps.watchedDynamicRepo !== undefined && deps.epochsRepo !== undefined) {
         try {
@@ -152,6 +152,7 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
           backfillTargets = await deps.watchedDynamicRepo.getOrSetBackfillTargets(
             claimEpoch,
             candidates,
+            true,
           );
           for (const vote of backfillAttemptCursors.keys()) {
             if (!backfillTargets.has(vote)) backfillAttemptCursors.delete(vote);
@@ -330,7 +331,7 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
         deps.epochsRepo !== undefined
       ) {
         try {
-          // Ambiguous legacy targets stay pending but cannot consume a turn.
+          // Missing mappings stay pending; known current addresses collect automatically.
           const pending = [...backfillTargets.keys()].sort();
           if (pending.length > 0) {
             const previousIndex =
@@ -476,7 +477,14 @@ async function runPreviousEpochBackfill(args: {
         continue;
       }
       if (signal.aborted) break;
-      if (await deps.watchedDynamicRepo.markBackfilled(vote, prevEpoch, identity)) {
+      if (
+        await deps.watchedDynamicRepo.markBackfilled(
+          vote,
+          prevEpoch,
+          identity,
+          ...(target.revision !== undefined ? ([target.revision, target.tuple] as const) : []),
+        )
+      ) {
         attemptCursors.delete(vote);
         filled += 1;
       } else {

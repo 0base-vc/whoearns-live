@@ -18,7 +18,7 @@ export async function runBudgetBoundaryScenario(
 ) {
   const logger = pino({ level: 'silent' });
   await pool.query(`UPDATE validators SET identity_pubkey='IC' WHERE vote_pubkey='B'`);
-  // Historical progress here uses independently verified fixture scopes.
+  // Persisted current-address scopes precede the exhausted live budget.
   await pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499,
     prev_epoch_backfill_identity=CASE vote_pubkey WHEN 'A' THEN 'IA' ELSE 'IC' END`);
   let currentEpoch = 500;
@@ -48,7 +48,7 @@ export async function runBudgetBoundaryScenario(
       schedules.push(firstSlot);
       if (firstSlot === 0) return { IA: [1, 2], IC: [3] };
       if (firstSlot === 100) return { IA: [0], IB: [1], ID: [2] };
-      return { IB: [0], IC: [1], ID: [2] };
+      return { IA: [0], IC: [1], ID: [2] };
     },
   } as unknown as SolanaRpcClient;
   const makeWorker = () => {
@@ -72,12 +72,7 @@ export async function runBudgetBoundaryScenario(
       validatorService: {
         getActiveVotePubkeys: async () => tracked,
         getIdentityMap: async (votes: string[]) =>
-          new Map(
-            votes.map((vote) => [
-              vote,
-              vote === 'A' ? (currentEpoch === 500 ? 'IA' : 'IB') : vote === 'B' ? 'IC' : 'ID',
-            ]),
-          ),
+          new Map(votes.map((vote) => [vote, vote === 'A' ? 'IA' : vote === 'B' ? 'IC' : 'ID'])),
         getActivatedStakeLamports: () => null,
       } as unknown as ValidatorService,
       watchMode: 'explicit',
@@ -98,7 +93,6 @@ export async function runBudgetBoundaryScenario(
     activatedStakeLamportsAtAdd: 2n,
   });
   currentEpoch = 501;
-  await pool.query(`UPDATE validators SET identity_pubkey='IB' WHERE vote_pubkey='A'`);
   await pool.query(`INSERT INTO validators(vote_pubkey,identity_pubkey,first_seen_epoch,last_seen_epoch)
     VALUES('C','ID',501,502)`);
   await new WatchedDynamicRepository(pool).add({

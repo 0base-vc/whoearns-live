@@ -416,7 +416,7 @@ empty epoch cache. It records vote, `xmin` and `ctid`; bulk SQL claims only the
 unchanged observed versions. A new registration after the sample, or a row
 changed/deleted/re-registered while RPC runs, waits for the next fresh sample.
 Even ordinary lookup updates conservatively postpone that claim. Already-pinned
-epochs, including unknown identities, need no extra epoch RPC and are not rewritten.
+epochs need no extra epoch RPC. Their addresses update only when the mapping changes.
 Snapshot and bulk resolution each use one query, with no per-validator claim loop.
 No watched-row lock spans RPC. With no cached epoch, the initial sync is reused.
 A NULL proposal or omitted candidate cohort never claims new rows.
@@ -435,48 +435,39 @@ guarantee. Registration queues a pending row; selection waits for its own
 successful fresh observation.
 Migration
 `0048_dynamic_backfill_target_identity.sql` adds the nullable
-`prev_epoch_backfill_identity` column. The target is now an immutable
-`(epoch, identity)` pair once the historical identity has been independently
-verified. A fresh closed-epoch target pins only its epoch and leaves identity
-NULL. The latest `validators.identity_pubkey` may have rotated before tracking
-started; neither it nor generic epoch stats proves the closed-epoch identity.
-The schema has no authoritative vote-to-identity history for a chain epoch.
-Block facts identify leaders but do not link a historical leader to a vote;
-claim/audit timestamps record point-in-time signatures, not full epoch scope.
-The runtime does not invent that provenance or infer it from an empty schedule.
-An epoch with a NULL target identity remains pending and
-unchanged, even if stats later appear: earlier reconcilers or unscoped callers
-could create those rows from the current identity, so they do not prove a historical
-vote-to-identity mapping. These legacy 0047 targets need verified offline
-reconciliation of both the original identity and the existing income ledger;
-editing the target identity alone is insufficient. Pause both historical
-writers during that maintenance, preserve all legitimate rotated-identity
-income, and verify the aggregate against authoritative facts before resuming.
-Adding a stats row or running the ordinary reconciler alone cannot establish
-that provenance. If it cannot be verified, keep the target pending. Other backfills and live polling continue
-while that target is deferred, and it does not consume a historical turn.
-Consequently, newly tracked validators' one-shot previous-epoch data remains
-missing/unmeasured until verified offline identity and ledger reconciliation
-provides a historical scope. This can delay history completeness and tiers;
-it must not appear as a measured zero. Current and future live ingestion
-continues. Existing independently verified stored scopes continue backfilling;
-the worker preserves their epoch/identity across rollover and restart.
-Completed rows stay completed. The completion marker can only be set for the stored
-epoch and identity, and only when all five income totals match the stored
-identity's captured produced-block facts, with assigned slots fully accounted for
-by captured produced/skipped facts. Completion atomically fills missing fee/tip
-measurement timestamps without rewriting totals. This records all-skipped and
-zero-fee produced schedules as measured zero; partial/error passes stay unmeasured.
-An observed empty schedule is also measured zero but remains outside the economic
-cohort because that cohort requires positive assigned slots.
-Live polling follows the current identity independently. Newly
-tracked validators choose their own target and keep rotating independently.
+`prev_epoch_backfill_identity` column. The worker records the current validator
+identity used for automatic collection. This is the owner's accepted product
+assumption; it is not proof of the vote's full historical identity. Fresh and
+legacy epoch-only targets automatically adopt the current mapping, without a
+manual provenance prerequisite. Missing validator mappings remain pending.
+
+An observed identity change requeues that validator's original pinned epoch
+using the new address, including after an earlier collection completed. Its
+attempt cursor starts over. Only the affected derived `(epoch, vote)` row
+switches to the new address and its captured facts; other epochs and all raw
+blocks remain intact. Old-address income is not carried into new-address totals.
+The row records the collection address, so it does not claim a combined history
+for an actual rotation. A schedule observed empty under the accepted assumption
+can complete as measured zero and stays outside the positive-slot economic cohort.
+
+Completion validates epoch, address, the row revision observed by that tick,
+all assigned produced/skipped facts and all five income totals. A delayed old
+collection cannot stamp a replacement, including an address that changes back.
+Current-address conflicts with an existing derived ledger still defer for
+reconciliation instead of silently clearing income. The runtime does not infer
+provenance from generic stats, and does not require it for ordinary collection.
+
+Captured-block writers publish exact identity sums under watched/stats locks
+using a fresh facts snapshot, instead of adding delayed deltas to totals already
+reconstructed during an address change. Repeated/concurrent publication is
+idempotent. Fact capture and publication remain separate writes; publication
+failure leaves historical measurement pending until the ledger is reconciled.
 
 Pending historical scopes keep both fee/tip measurement timestamps NULL even
-when captured batches have nonzero income or CU. Deltas accumulate normally;
+when captured batches have nonzero income or CU. Captured income is published;
 only guarded completion marks that scope measured. Resolving or claiming a
 pending scope also clears pre-existing measurement timestamps, including for
-deferred legacy/identity-mismatch rows, without altering counters or income.
+same-address ledger conflicts, without altering counters or income.
 Claims, deltas and completion serialize on watched rows before locking stats;
 a claim waiting for an earlier delta reads the locked stats' latest timestamps.
 Already-unmeasured stats are not rewritten during repeated target resolution.
@@ -507,7 +498,9 @@ Block-fact insertion and income-delta updates are separate existing writes.
 If a delta fails after the fact commits, a restarted worker skips that captured
 block but now keeps the target pending until the income ledger is reconciled.
 Raw gap detection still reports pending targets after clearing stale measurement;
-that does not repair an undercount. No automatic historical income reset or reconstruction is performed.
+that does not itself repair an undercount. Later captured-fact publication can
+reconcile exact address sums; completion still validates those sums. Same-address ledger conflicts are not automatically reset. Address changes
+reconstruct only the new address collection from its facts.
 
 Historical passes also rotate slots after the last attempt, including failed
 RPC attempts. A permanently unavailable first batch therefore cannot consume
@@ -515,9 +508,8 @@ every later tick: later missing slots are attempted before wrapping back to
 the errors. The attempt cursor is local to the running fee job, isolated by
 vote, previous epoch and identity, and removed on completion or removal from
 the pending set. Current-epoch rollover preserves the original backfill
-target and cursor. Current identity rotation also preserves the original
-historical identity and cursor; it cannot switch backfill to an empty new
-identity schedule and stamp the original epoch complete.
+target and cursor. An observed current identity change starts a new address collection and cursor;
+it does not complete the unfinished old-address collection.
 A restart can retry early errors again, but captured facts remain durable;
 errors are never treated as completed blocks. Live polling keeps its newest
 slot priority and does not use the historical cursor.

@@ -788,6 +788,7 @@ export class FeeService {
             priorityFeeDeltaLamports: delta.priorityFees,
             tipDeltaLamports: delta.tips,
             computeUnitsDelta: delta.computeUnits,
+            fromCapturedFacts: true,
           });
         }
       }
@@ -912,6 +913,7 @@ export class FeeService {
         priorityFeeDeltaLamports: income.priorityFees,
         tipDeltaLamports: income.mevTips,
         computeUnitsDelta: slotFacts.computeUnitsConsumed,
+        fromCapturedFacts: true,
       });
     }
     return true;

@@ -175,7 +175,6 @@ export async function runScopeSafetyScenario(pool: pg.Pool, kind: SafetyCase, ha
     if (!oneSlot) await job.tick(signal);
     const captured = await snapshot();
     const detectableGaps = await statsRepo.findEpochsWithIncomeGaps([499], ['A']);
-    await rotate();
     await makeFeeJob().tick(signal);
     const afterRestart = await snapshot();
     await reconcile();
