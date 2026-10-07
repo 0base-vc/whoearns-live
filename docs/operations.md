@@ -465,8 +465,10 @@ reconstructed during an address change. Repeated/concurrent publication is
 idempotent. Publication and target transitions take the same transaction-scoped
 advisory lock per epoch before watched/stats locks. Enrollment includes completed
 stored targets because a mapping may change before the transition statement.
-That statement acts only on enrolled epochs; a concurrently introduced target
-epoch waits for the next resolution. Locks remain ordered by epoch.
+Claims and identity transitions act only on enrolled epochs; a concurrently
+introduced epoch requiring a transition waits for the next resolution. Unchanged
+stored addresses remain readable by competing observers. Locks remain ordered
+by epoch.
 A transition refreshes its
 new-address facts in a separate statement after row locks resolve; facts
 committed during that wait are visible. Publications arriving during a transition

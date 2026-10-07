@@ -211,7 +211,6 @@ export class WatchedDynamicRepository {
                 w.xmin::text AS revision,w.ctid::text AS tuple
            FROM watched_validators_dynamic w JOIN validators v USING(vote_pubkey)
           WHERE ($3::text[] IS NULL OR w.vote_pubkey=ANY($3))
-            AND COALESCE(w.prev_epoch_backfill_epoch,$1::bigint)=ANY($4::bigint[])
             AND (w.prev_epoch_backfilled_at IS NULL
               OR (w.prev_epoch_backfill_epoch IS NOT NULL
                 AND w.prev_epoch_backfill_identity IS DISTINCT FROM v.identity_pubkey))
@@ -222,6 +221,7 @@ export class WatchedDynamicRepository {
                 prev_epoch_backfill_identity=v.current_identity,prev_epoch_backfilled_at=NULL
            FROM pending v
           WHERE v.vote_pubkey=w.vote_pubkey
+            AND COALESCE(w.prev_epoch_backfill_epoch,$1::bigint)=ANY($4::bigint[])
             AND ((w.prev_epoch_backfill_epoch IS NOT NULL
                   AND w.prev_epoch_backfill_identity IS DISTINCT FROM v.current_identity)
               OR (w.prev_epoch_backfill_epoch IS NULL AND $1::bigint IS NOT NULL
