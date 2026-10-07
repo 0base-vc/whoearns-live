@@ -21,7 +21,9 @@ and this project follows [Semantic Versioning](https://semver.org/).
   persistent RPC errors so later retrievable slots are not starved. Dynamic
   backfill targets are stored per validator (migration 0047), preserving
   unfinished epochs through rollover and restart and preventing completion
-  against a different epoch.
+  against a different epoch. Migration 0048 also stores the historical
+  target identity, so rotation cannot stamp unfinished old slots complete
+  by switching to the new identity's empty or shorter schedule.
 
 ### Added
 

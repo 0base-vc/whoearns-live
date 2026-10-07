@@ -407,10 +407,16 @@ captured blocks are skipped on resumption, including after a worker restart.
 Migration `0047_dynamic_backfill_target_epoch.sql` adds the nullable
 `prev_epoch_backfill_epoch` column. The worker atomically chooses each
 pending validator's target before its first historical pass, then keeps
-that original epoch through rollover and restart. Existing pending rows
+that original epoch through rollover and restart. Migration
+`0048_dynamic_backfill_target_identity.sql` adds the nullable
+`prev_epoch_backfill_identity` column. The target is now an immutable
+`(epoch, identity)` pair. Historical epoch stats supply the identity when
+known, including for partially filled epoch-only targets from 0047;
+otherwise the identity resolved on the first pass is stored. Existing pending rows
 choose the previous epoch on their first pass after upgrading; completed
 rows stay completed. The completion marker can only be set for the stored
-target, so completing newer work cannot hide older missing facts. Newly
+epoch and identity, so completing a different schedule cannot hide older
+missing facts. Live polling follows the current identity independently. Newly
 tracked validators choose their own target and keep rotating independently.
 
 Historical passes also rotate slots after the last attempt, including failed
@@ -419,7 +425,9 @@ every later tick: later missing slots are attempted before wrapping back to
 the errors. The attempt cursor is local to the running fee job, isolated by
 vote, previous epoch and identity, and removed on completion or removal from
 the pending set. Current-epoch rollover preserves the original backfill
-target and cursor; identity rotation starts a fresh cursor for that target.
+target and cursor. Current identity rotation also preserves the original
+historical identity and cursor; it cannot switch backfill to an empty new
+identity schedule and stamp the original epoch complete.
 A restart can retry early errors again, but captured facts remain durable;
 errors are never treated as completed blocks. Live polling keeps its newest
 slot priority and does not use the historical cursor.
@@ -431,4 +439,8 @@ and the startup median repair can still extend a tick. The scheduler waits
 Use `jobs_tick_duration_seconds{job="fee-ingester"}`, tick start/end logs,
 and `remaining` in bounded ingest results to separate these delays from a
 cold backlog. A deadline-exhausted live pass postpones historical work until
-there is spare capacity. No schema or environment-variable changes are needed.
+there is spare capacity. No environment-variable changes are needed.
+Migrations 0047 and 0048 add the durable target columns; the all-in-one
+startup runs migrations before starting the API and worker. Apply both
+migrations before running the updated worker. This change does not run a
+production migration or require manual edits to block facts.

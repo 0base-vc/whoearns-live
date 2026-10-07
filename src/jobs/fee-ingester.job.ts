@@ -31,7 +31,7 @@ export interface FeeIngesterJobDeps {
    */
   watchedDynamicRepo?: Pick<
     WatchedDynamicRepository,
-    'listPendingBackfill' | 'getOrSetBackfillEpoch' | 'markBackfilled'
+    'listPendingBackfill' | 'getOrSetBackfillTarget' | 'markBackfilled'
   >;
   rpc: SolanaRpcClient;
   rpcFallback?: Pick<SolanaRpcClient, 'getLeaderSchedule' | 'getSlot'>;
@@ -317,13 +317,27 @@ async function runPreviousEpochBackfill(args: {
   let failed = 0;
   for (const vote of pendingVotes) {
     if (signal.aborted || Date.now() >= deadlineMs) break;
-    // Pin before any RPC work so rollover, errors and restart cannot
-    // replace a partially captured epoch with a newer, easier target.
-    const prevEpoch = await deps.watchedDynamicRepo.getOrSetBackfillEpoch(vote, currentEpoch - 1);
-    if (prevEpoch === null) {
+    const identityByVote = await deps.validatorService.getIdentityMap([vote]);
+    const proposedIdentity = identityByVote.get(vote);
+    if (proposedIdentity === undefined) {
+      deps.logger.warn(
+        { vote },
+        'fee-ingester: no identity mapping for pending dynamic validator, skipping backfill',
+      );
+      continue;
+    }
+    // Pin the historical scope before any block work. A current identity
+    // rotation must not replace unfinished slots with an empty schedule.
+    const target = await deps.watchedDynamicRepo.getOrSetBackfillTarget(
+      vote,
+      currentEpoch - 1,
+      proposedIdentity,
+    );
+    if (target === null) {
       attemptCursors.delete(vote);
       continue;
     }
+    const { epoch: prevEpoch, identity } = target;
     const prevEpochInfo = await deps.epochsRepo.findByEpoch(prevEpoch);
     if (prevEpochInfo === null || !prevEpochInfo.isClosed) {
       deps.logger.debug(
@@ -346,17 +360,8 @@ async function runPreviousEpochBackfill(args: {
       continue;
     }
 
-    const identityByVote = await deps.validatorService.getIdentityMap([vote]);
-    const identity = identityByVote.get(vote);
-    if (identity === undefined) {
-      deps.logger.warn(
-        { vote },
-        'fee-ingester: no identity mapping for pending dynamic validator, skipping backfill',
-      );
-      continue;
-    }
-    // Cursors are scoped to this epoch and identity. Never carry an old
-    // validator identity's position into the rotated identity's schedule.
+    // Cursors belong to the persisted historical pair. A live identity
+    // change cannot move this position to another leader schedule.
     const cursor = attemptCursors.get(vote);
     const matchingCursor = cursor?.epoch === prevEpoch && cursor.identity === identity;
     if (!matchingCursor) attemptCursors.delete(vote);
@@ -393,7 +398,7 @@ async function runPreviousEpochBackfill(args: {
         continue;
       }
       if (signal.aborted) break;
-      await deps.watchedDynamicRepo.markBackfilled(vote, prevEpoch);
+      await deps.watchedDynamicRepo.markBackfilled(vote, prevEpoch, identity);
       attemptCursors.delete(vote);
       filled += 1;
     } catch (err) {

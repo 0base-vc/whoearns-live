@@ -1,6 +1,11 @@
 import type pg from 'pg';
 import { toLamports } from '../../core/lamports.js';
-import type { Epoch, VotePubkey } from '../../types/domain.js';
+import type { Epoch, IdentityPubkey, VotePubkey } from '../../types/domain.js';
+
+export interface DynamicBackfillTarget {
+  epoch: Epoch;
+  identity: IdentityPubkey;
+}
 
 interface DynamicWatchedRow {
   vote_pubkey: string;
@@ -127,28 +132,42 @@ export class WatchedDynamicRepository {
   /**
    * Atomically choose a pending validator's one-shot target once. Returning
    * the stored target keeps later passes and restarted workers on the same
-   * epoch. Completed or removed validators return null.
+   * epoch AND identity. Historical stats recover epoch-only targets from
+   * migration 0047, or provide an already-known historical identity on the
+   * first pass. Completed or removed validators return null.
    */
-  async getOrSetBackfillEpoch(vote: VotePubkey, proposedEpoch: Epoch): Promise<Epoch | null> {
-    const { rows } = await this.pool.query<{ epoch: string }>(
-      `UPDATE watched_validators_dynamic
-          SET prev_epoch_backfill_epoch = COALESCE(prev_epoch_backfill_epoch, $2::bigint)
-        WHERE vote_pubkey = $1 AND prev_epoch_backfilled_at IS NULL
-        RETURNING prev_epoch_backfill_epoch::text AS epoch`,
-      [vote, proposedEpoch],
+  async getOrSetBackfillTarget(
+    vote: VotePubkey,
+    proposedEpoch: Epoch,
+    proposedIdentity: IdentityPubkey,
+  ): Promise<DynamicBackfillTarget | null> {
+    const { rows } = await this.pool.query<{ epoch: string; identity: string }>(
+      `UPDATE watched_validators_dynamic w
+          SET prev_epoch_backfill_epoch = COALESCE(w.prev_epoch_backfill_epoch, $2::bigint),
+              prev_epoch_backfill_identity = COALESCE(
+                w.prev_epoch_backfill_identity,
+                (SELECT evs.identity_pubkey FROM epoch_validator_stats evs
+                  WHERE evs.vote_pubkey = w.vote_pubkey
+                    AND evs.epoch = COALESCE(w.prev_epoch_backfill_epoch, $2::bigint)),
+                $3::text)
+        WHERE w.vote_pubkey = $1 AND w.prev_epoch_backfilled_at IS NULL
+        RETURNING prev_epoch_backfill_epoch::text AS epoch,
+                  prev_epoch_backfill_identity AS identity`,
+      [vote, proposedEpoch, proposedIdentity],
     );
-    return rows[0] ? Number(rows[0].epoch) : null;
+    return rows[0] ? { epoch: Number(rows[0].epoch), identity: rows[0].identity } : null;
   }
 
-  /** Complete only the pinned target; a different epoch cannot stamp it. */
-  async markBackfilled(vote: VotePubkey, epoch: Epoch): Promise<void> {
+  /** Complete only the pinned target; a different epoch or identity cannot stamp it. */
+  async markBackfilled(vote: VotePubkey, epoch: Epoch, identity: IdentityPubkey): Promise<void> {
     await this.pool.query(
       `UPDATE watched_validators_dynamic
           SET prev_epoch_backfilled_at = NOW()
         WHERE vote_pubkey = $1
           AND prev_epoch_backfill_epoch = $2::bigint
+          AND prev_epoch_backfill_identity = $3
           AND prev_epoch_backfilled_at IS NULL`,
-      [vote, epoch],
+      [vote, epoch, identity],
     );
   }
 }

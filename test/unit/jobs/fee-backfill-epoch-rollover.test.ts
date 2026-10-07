@@ -19,17 +19,18 @@ describe.each([false, true])('dynamic backfill rollover (restart=%s)', (restart)
     const blocks = new FakeProcessedBlocksRepo();
     // This store outlives a job instance, like the dynamic watched DB row.
     // The integration suite separately checks the real atomic SQL behavior.
-    const targets = new Map<string, number>();
+    const targets = new Map<string, { epoch: number; identity: string }>();
     const completed = new Map<string, number>();
     const tracked = [VOTE_A];
     const watchedDynamicRepo = {
       listPendingBackfill: vi.fn(async () => tracked.filter((vote) => !completed.has(vote))),
-      getOrSetBackfillEpoch: vi.fn(async (vote: string, proposed: number) => {
-        if (!targets.has(vote)) targets.set(vote, proposed);
+      getOrSetBackfillTarget: vi.fn(async (vote: string, proposed: number, identity: string) => {
+        if (!targets.has(vote)) targets.set(vote, { epoch: proposed, identity });
         return targets.get(vote)!;
       }),
-      markBackfilled: vi.fn(async (vote: string, epoch: number) => {
-        if (targets.get(vote) === epoch) completed.set(vote, epoch);
+      markBackfilled: vi.fn(async (vote: string, epoch: number, identity: string) => {
+        if (targets.get(vote)?.epoch === epoch && targets.get(vote)?.identity === identity)
+          completed.set(vote, epoch);
       }),
     };
     const getBlock = vi.fn(async (slot: number) => {
@@ -121,7 +122,7 @@ describe.each([false, true])('dynamic backfill rollover (restart=%s)', (restart)
     expect(calls.filter((args) => args.vote === VOTE_B).every((args) => args.epoch === 500)).toBe(
       true,
     );
-    expect(watchedDynamicRepo.markBackfilled).not.toHaveBeenCalledWith(VOTE_A, 500);
+    expect(watchedDynamicRepo.markBackfilled).not.toHaveBeenCalledWith(VOTE_A, 500, IDENTITY_A);
     expect(completed.get(VOTE_B)).toBe(500);
     expect(completed.has(VOTE_A)).toBe(false);
     expect(blocks.rows.has(1)).toBe(true);
@@ -135,7 +136,7 @@ describe.each([false, true])('dynamic backfill rollover (restart=%s)', (restart)
     expect(completed.get(VOTE_A)).toBe(499);
     expect(blocks.rows.has(0)).toBe(true);
     expect(stats.rows.get(`499:${VOTE_A}`)?.slotsSkipped).toBe(3);
-    expect(watchedDynamicRepo.markBackfilled).toHaveBeenCalledWith(VOTE_A, 499);
+    expect(watchedDynamicRepo.markBackfilled).toHaveBeenCalledWith(VOTE_A, 499, IDENTITY_A);
     const attempts = getBlock.mock.calls.map(([slot]) => slot);
     expect(attempts.filter((slot) => slot === 100)).toHaveLength(1);
     expect(attempts.filter((slot) => slot === 1)).toHaveLength(1);
