@@ -366,4 +366,154 @@ describe('automatic current-identity collection — PostgreSQL 16', () => {
     });
     expect((await w.watched.findByVote('A'))?.prevEpochBackfilledAt).toBeInstanceOf(Date);
   });
+
+  it('reconstructs facts committed after a rotation statement starts waiting on its watched lock', async () => {
+    const db = pool();
+    const w = worker(db);
+    await w.tick();
+    await db.query("UPDATE validators SET identity_pubkey='IB' WHERE vote_pubkey='A'");
+    await db.query(
+      "INSERT INTO validators(vote_pubkey,identity_pubkey,first_seen_epoch,last_seen_epoch) VALUES('B','IB',498,501)",
+    );
+    await w.watched.add({ votePubkey: 'B', activatedStakeLamportsAtAdd: 1n });
+    await db.query(
+      "UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499,prev_epoch_backfill_identity='IB' WHERE vote_pubkey='B'",
+    );
+    await db.query(
+      "INSERT INTO epoch_validator_stats(epoch,vote_pubkey,identity_pubkey) VALUES(499,'B','IB')",
+    );
+    const holder = await db.connect(),
+      runner = await db.connect();
+    const bound = { query: runner.query.bind(runner), release: () => {} };
+    const rotating = new WatchedDynamicRepository({
+      query: bound.query,
+      connect: async () => bound,
+    } as unknown as pg.Pool);
+    let pending: Promise<unknown> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query(
+        "SELECT vote_pubkey FROM watched_validators_dynamic WHERE vote_pubkey='A' FOR UPDATE",
+      );
+      const {
+        rows: [{ pid }],
+      } = await runner.query('SELECT pg_backend_pid() AS pid');
+      pending = rotating.getOrSetBackfillTargets(null);
+      const deadline = Date.now() + 3000;
+      let blocked = false;
+      while (Date.now() < deadline) {
+        const { rows } = await db.query('SELECT cardinality(pg_blocking_pids($1)) AS blockers', [
+          pid,
+        ]);
+        if (Number(rows[0].blockers) > 0) {
+          blocked = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(blocked).toBe(true);
+      await db.query(
+        "INSERT INTO processed_blocks(slot,epoch,leader_identity,block_status,fees_lamports,base_fees_lamports,priority_fees_lamports,tips_lamports,compute_units_consumed,facts_captured_at) VALUES(49903,499,'IB','produced',30,5,25,2,100,NOW())",
+      );
+      await w.stats.addIncomeDelta({
+        epoch: 499,
+        identityPubkey: 'IB',
+        leaderFeeDeltaLamports: 30n,
+        baseFeeDeltaLamports: 5n,
+        priorityFeeDeltaLamports: 25n,
+        tipDeltaLamports: 2n,
+        computeUnitsDelta: 100n,
+        fromCapturedFacts: true,
+      });
+      expect(await w.stats.findByVoteEpoch('B', 499)).toMatchObject({
+        blockFeesTotalLamports: 30n,
+      });
+      expect(await w.stats.findByVoteEpoch('A', 499)).toMatchObject({
+        identityPubkey: 'IA',
+        blockFeesTotalLamports: 10n,
+      });
+      await holder.query('COMMIT');
+      await pending;
+      const after = await w.stats.findByVoteEpoch('A', 499);
+      const guard = await w.stats.upsertSlotStatsIfIdentityMatches({
+        epoch: 499,
+        votePubkey: 'A',
+        identityPubkey: 'IB',
+        slotsAssigned: 2,
+        slotsProduced: 1,
+        slotsSkipped: 0,
+      });
+      console.info(
+        `rotation lock reproduction: blocked=${blocked}, A=${after?.identityPubkey}, fees=${after?.blockFeesTotalLamports}, guard=${guard}`,
+      );
+      expect(after).toMatchObject({
+        identityPubkey: 'IB',
+        blockFeesTotalLamports: 30n,
+        blockBaseFeesTotalLamports: 5n,
+        blockPriorityFeesTotalLamports: 25n,
+        blockTipsTotalLamports: 2n,
+        computeUnitsTotal: 100n,
+        feesUpdatedAt: null,
+        tipsUpdatedAt: null,
+      });
+      expect(guard).toBe(true);
+      await worker(db).tick();
+      expect((await w.watched.findByVote('A'))?.prevEpochBackfilledAt).toBeInstanceOf(Date);
+      expect(
+        (
+          await db.query(
+            "SELECT COUNT(*)::int AS count FROM processed_blocks WHERE epoch=499 AND leader_identity='IA'",
+          )
+        ).rows[0].count,
+      ).toBe(1);
+    } finally {
+      await holder.query('ROLLBACK');
+      if (pending) await Promise.allSettled([pending]);
+      holder.release();
+      runner.release();
+    }
+  });
+
+  it('publishes repaired missing facts exactly and finishes the pinned current-address target', async () => {
+    const db = pool(),
+      w = worker(db);
+    await db.query(
+      "UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499,prev_epoch_backfill_identity='IA'",
+    );
+    await db.query(
+      "INSERT INTO epoch_validator_stats(epoch,vote_pubkey,identity_pubkey,slots_assigned,slots_produced,block_fees_total_lamports) VALUES(499,'A','IA',2,1,10),(498,'A','IA',1,1,99)",
+    );
+    await db.query(
+      "INSERT INTO processed_blocks(slot,epoch,leader_identity,block_status,fees_lamports) VALUES(49901,499,'IA','produced',10)",
+    );
+    await w.tick();
+    const {
+      rows: [fact],
+    } = await db.query(
+      'SELECT fees_lamports::text AS fees,base_fees_lamports::text AS base,priority_fees_lamports::text AS priority,tips_lamports::text AS tips,compute_units_consumed::text AS cu,facts_captured_at FROM processed_blocks WHERE slot=49901',
+    );
+    const repaired = await w.stats.findByVoteEpoch('A', 499);
+    console.info(
+      `missing-fact repair reproduction: factCU=${fact.cu}, statsCU=${repaired?.computeUnitsTotal}, captured=${fact.facts_captured_at !== null}`,
+    );
+    expect(fact.facts_captured_at).toBeInstanceOf(Date);
+    expect(fact.cu).toBe('100');
+    expect(repaired).toMatchObject({
+      blockFeesTotalLamports: BigInt(fact.fees),
+      blockBaseFeesTotalLamports: BigInt(fact.base),
+      blockPriorityFeesTotalLamports: BigInt(fact.priority),
+      blockTipsTotalLamports: BigInt(fact.tips),
+      computeUnitsTotal: BigInt(fact.cu),
+      feesUpdatedAt: null,
+      tipsUpdatedAt: null,
+    });
+    await w.tick();
+    await worker(db).tick();
+    expect((await w.watched.findByVote('A'))?.prevEpochBackfilledAt).toBeInstanceOf(Date);
+    expect(await w.stats.findByVoteEpoch('A', 499)).toMatchObject({
+      blockFeesTotalLamports: 30n,
+      computeUnitsTotal: 200n,
+    });
+    expect(await w.stats.findByVoteEpoch('A', 498)).toMatchObject({ blockFeesTotalLamports: 99n });
+  });
 });
