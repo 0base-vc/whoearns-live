@@ -36,6 +36,10 @@ and this project follows [Semantic Versioning](https://semver.org/).
   produced facts, so a committed fact followed by a failed income delta cannot
   falsely finish the target. Legacy recovery requires verified offline ledger
   reconciliation; changing the target identity alone is insufficient.
+  Fully captured zero-income targets now atomically record fee/tip measurement
+  timestamps with completion, without rewriting income. Partial/error passes
+  stay unmeasured; an observed empty schedule is measured zero but remains
+  outside the positive-assigned-slot economic cohort.
 
 ### Added
 

@@ -217,26 +217,41 @@ export class WatchedDynamicRepository {
     return new Map(rows.map((row) => [row.vote_pubkey, row.identity]));
   }
 
-  /** Complete only the pinned scope with income equal to all five captured-fact totals. */
+  /** Atomically measure and complete only a fully captured, income-consistent pinned scope. */
   async markBackfilled(vote: VotePubkey, epoch: Epoch, identity: IdentityPubkey): Promise<boolean> {
     const { rowCount } = await this.pool.query(
-      `UPDATE watched_validators_dynamic
-          SET prev_epoch_backfilled_at = NOW()
-        WHERE vote_pubkey = $1
-          AND prev_epoch_backfill_epoch = $2::bigint
-          AND prev_epoch_backfill_identity = $3
-          AND prev_epoch_backfilled_at IS NULL
-          AND EXISTS (
-            SELECT 1 FROM epoch_validator_stats s
-             WHERE s.vote_pubkey=$1 AND s.epoch=$2::bigint AND s.identity_pubkey=$3
-               AND (s.block_fees_total_lamports,s.block_base_fees_total_lamports,
-                    s.block_priority_fees_total_lamports,s.block_tips_total_lamports,s.compute_units_total)
-                 = (SELECT COALESCE(SUM(p.fees_lamports),0),COALESCE(SUM(p.base_fees_lamports),0),
-                           COALESCE(SUM(p.priority_fees_lamports),0),COALESCE(SUM(p.tips_lamports),0),
-                           COALESCE(SUM(p.compute_units_consumed),0)
-                      FROM processed_blocks p WHERE p.epoch=$2::bigint AND p.leader_identity=$3
-                        AND p.block_status='produced')
-          )`,
+      `WITH target AS MATERIALIZED (
+         SELECT vote_pubkey FROM watched_validators_dynamic
+          WHERE vote_pubkey=$1 AND prev_epoch_backfill_epoch=$2::bigint
+            AND prev_epoch_backfill_identity=$3 AND prev_epoch_backfilled_at IS NULL
+          FOR UPDATE
+       ), facts AS MATERIALIZED (
+         SELECT COALESCE(SUM(fees_lamports) FILTER (WHERE block_status='produced'),0) AS fees,
+                COALESCE(SUM(base_fees_lamports) FILTER (WHERE block_status='produced'),0) AS base,
+                COALESCE(SUM(priority_fees_lamports) FILTER (WHERE block_status='produced'),0) AS priority,
+                COALESCE(SUM(tips_lamports) FILTER (WHERE block_status='produced'),0) AS tips,
+                COALESCE(SUM(compute_units_consumed) FILTER (WHERE block_status='produced'),0) AS cu,
+                COUNT(*) FILTER (WHERE block_status='produced') AS produced,
+                COUNT(*) FILTER (WHERE block_status='skipped') AS skipped
+           FROM processed_blocks WHERE epoch=$2::bigint AND leader_identity=$3
+       ), measured AS (
+         UPDATE epoch_validator_stats s
+            SET fees_updated_at=COALESCE(s.fees_updated_at,NOW()),
+                tips_updated_at=COALESCE(s.tips_updated_at,NOW())
+           FROM facts f
+          WHERE s.vote_pubkey=$1 AND s.epoch=$2::bigint AND s.identity_pubkey=$3
+            AND EXISTS (SELECT 1 FROM target)
+            AND s.slots_assigned=s.slots_produced+s.slots_skipped
+            AND (s.slots_produced,s.slots_skipped)=(f.produced,f.skipped)
+            AND (s.block_fees_total_lamports,s.block_base_fees_total_lamports,
+                 s.block_priority_fees_total_lamports,s.block_tips_total_lamports,s.compute_units_total)
+              = (f.fees,f.base,f.priority,f.tips,f.cu)
+         RETURNING s.vote_pubkey
+       )
+       UPDATE watched_validators_dynamic w SET prev_epoch_backfilled_at=NOW()
+        WHERE w.vote_pubkey=$1 AND w.prev_epoch_backfill_epoch=$2::bigint
+          AND w.prev_epoch_backfill_identity=$3 AND w.prev_epoch_backfilled_at IS NULL
+          AND EXISTS (SELECT 1 FROM measured)`,
       [vote, epoch, identity],
     );
     return (rowCount ?? 0) > 0;

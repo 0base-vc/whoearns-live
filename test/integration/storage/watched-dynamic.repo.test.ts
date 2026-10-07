@@ -1,3 +1,4 @@
+import { runZeroIncomeScenario } from './_zero-income-scenario.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WatchedDynamicRepository } from '../../../src/storage/repositories/watched-dynamic.repo.js';
 import { resetTables, setupPgFixture, teardownPgFixture, type PgFixture } from './_pg-fixture.js';
@@ -507,5 +508,70 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
       await writer.query('ROLLBACK');
       writer.release();
     }
+  });
+  it.each(['skipped', 'zero-fee'] as const)(
+    'measures completed zero income without stamping partial/error passes (%s)',
+    async (mode) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      const r = await runZeroIncomeScenario(fixture.pool, mode);
+      for (const state of [r.partial, r.failed, r.afterFailedReconciler]) {
+        expect(state.completed).toBe(false);
+        expect(state.stats?.feesUpdatedAt).toBeNull();
+        expect(state.stats?.tipsUpdatedAt).toBeNull();
+        expect(state.cohort).not.toContain('A');
+        expect(state.gaps).toContain(499);
+      }
+      for (const state of [r.completed, r.reconciled]) {
+        expect(state.completed).toBe(true);
+        expect(state.stats?.slotsAssigned).toBe(2);
+        expect(state.stats?.slotsProduced).toBe(mode === 'zero-fee' ? 2 : 0);
+        expect(state.stats?.slotsSkipped).toBe(mode === 'skipped' ? 2 : 0);
+        expect(state.stats?.blockFeesTotalLamports).toBe(0n);
+        expect(state.stats?.blockBaseFeesTotalLamports).toBe(0n);
+        expect(state.stats?.blockPriorityFeesTotalLamports).toBe(0n);
+        expect(state.stats?.blockTipsTotalLamports).toBe(0n);
+        expect(state.stats?.computeUnitsTotal).toBe(0n);
+        expect(state.stats?.feesUpdatedAt).toBeInstanceOf(Date);
+        expect(state.stats?.tipsUpdatedAt).toBeInstanceOf(Date);
+        expect(state.cohort).toContain('A');
+        expect(state.gaps).toEqual([]);
+      }
+      expect(r.calls).toEqual([1, 2, 2, 2]);
+    },
+  );
+
+  it('measures an observed empty schedule as known zero while leaving it outside the positive-slot economic cohort', async () => {
+    if (!fixture) throw new Error('fixture unavailable');
+    const r = await runZeroIncomeScenario(fixture.pool, 'empty');
+    expect(r.calls).toEqual([]);
+    for (const state of [r.partial, r.failed, r.completed, r.reconciled]) {
+      expect(state.completed).toBe(true);
+      expect(state.stats?.slotsAssigned).toBe(0);
+      expect(state.stats?.slotsProduced).toBe(0);
+      expect(state.stats?.slotsSkipped).toBe(0);
+      expect(state.stats?.feesUpdatedAt).toBeInstanceOf(Date);
+      expect(state.stats?.tipsUpdatedAt).toBeInstanceOf(Date);
+      expect(state.cohort).not.toContain('A');
+      expect(state.gaps).toEqual([]);
+    }
+  });
+
+  it('refuses to stamp zero measurement or completion when assigned facts are still missing', async () => {
+    if (!fixture) throw new Error('fixture unavailable');
+    await repo.getOrSetBackfillTargets(499);
+    const stats = new StatsRepository(fixture.pool);
+    await stats.upsertSlotStats({
+      epoch: 499,
+      votePubkey: 'A',
+      identityPubkey: 'IA',
+      slotsAssigned: 2,
+      slotsProduced: 0,
+      slotsSkipped: 0,
+    });
+    expect(await repo.markBackfilled('A', 499, 'IA')).toBe(false);
+    const row = await stats.findByVoteEpoch('A', 499);
+    expect(row?.feesUpdatedAt).toBeNull();
+    expect(row?.tipsUpdatedAt).toBeNull();
+    expect((await repo.findByVote('A'))?.prevEpochBackfilledAt).toBeNull();
   });
 });

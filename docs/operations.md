@@ -431,7 +431,13 @@ that provenance. If it cannot be verified, keep the target pending. Other backfi
 while that target is deferred, and it does not consume a historical turn.
 Completed rows stay completed. The completion marker can only be set for the stored
 epoch and identity, and only when all five income totals match the stored
-identity's captured produced-block facts. Live polling follows the current identity independently. Newly
+identity's captured produced-block facts, with assigned slots fully accounted for
+by captured produced/skipped facts. Completion atomically fills missing fee/tip
+measurement timestamps without rewriting totals. This records all-skipped and
+zero-fee produced schedules as measured zero; partial/error passes stay unmeasured.
+An observed empty schedule is also measured zero but remains outside the economic
+cohort because that cohort requires positive assigned slots.
+Live polling follows the current identity independently. Newly
 tracked validators choose their own target and keep rotating independently.
 
 The ordinary income reconciler follows the stored historical scope for its
