@@ -219,3 +219,24 @@ describe('EpochService.getCurrent', () => {
     expect(await service.getCurrent()).toBeNull();
   });
 });
+
+it('rolls back the paired epoch writes when cancellation arrives during close', async () => {
+  const repo = new FakeEpochsRepo();
+  await repo.upsert(makeEpochInfo(499, 0, 431999));
+  const controller = new AbortController();
+  const close = repo.markClosed.bind(repo);
+  repo.markClosed = async (...args) => {
+    await close(...args);
+    controller.abort(new Error('cancel during close'));
+  };
+  const rpc = makeRpcStub(
+    { epoch: 500, slotIndex: 0, slotsInEpoch: 432000, absoluteSlot: 0, blockHeight: 0 },
+    NORMAL_SCHEDULE,
+  );
+  await expect(makeService(rpc, repo).syncCurrent(controller.signal)).rejects.toThrow(
+    'cancel during close',
+  );
+  expect((await repo.findCurrent())?.isClosed).toBe(false);
+  expect((await repo.findByEpoch(499))?.isClosed).toBe(false);
+  expect(await repo.findByEpoch(500)).toBeNull();
+});

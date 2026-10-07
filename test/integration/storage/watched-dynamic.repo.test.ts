@@ -1,3 +1,4 @@
+import { runPinnedGapOwnerScenario } from './_pinned-gap-owner-scenario.js';
 import { runZeroIncomeScenario } from './_zero-income-scenario.js';
 import { runFirstTrackingScenario } from './_first-tracking-scenario.js';
 import { runClaimPreflightScenario, runCandidateWriteRace } from './_claim-preflight-scenario.js';
@@ -1027,4 +1028,71 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
       expect(r.afterRetry).toEqual({ epoch: '500', identity: null });
     },
   );
+  it.each(['identity', 'fees', 'base', 'priority', 'tips', 'cu'] as const)(
+    'does not repeatedly reconcile healthy votes for a pinned %s conflict, but bounded work resumes after verified fixture repair',
+    async (conflict) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      const r = await runPinnedGapOwnerScenario(fixture.pool, conflict);
+      expect(r.before.raw.income).toContain(499);
+      expect(r.before.repair).toEqual({ income: [], missing: [] });
+      for (const cycle of r.cycles) {
+        expect(cycle.schedules).toEqual([501]);
+        expect(cycle.repairs.some((x) => x.epoch === 499)).toBe(false);
+        expect(cycle.blocks).toEqual([]);
+      }
+      expect(r.afterReconciler.stats).toEqual(r.before.stats);
+      expect(r.afterReconciler.cohort).not.toContain('A');
+      expect(r.firstOwner.completed).toBe(false);
+      expect(r.firstOwner.repairs).toContainEqual({
+        epoch: 499,
+        vote: 'A',
+        deferred: true,
+        bounded: true,
+      });
+      expect(r.firstOwner.stats).toEqual(r.before.stats);
+      expect(r.resumed[0]!.completed).toBe(false);
+      expect(r.resumed[0]!.stats).toMatchObject({ feesUpdatedAt: null, tipsUpdatedAt: null });
+      expect(r.final.completed).toBe(true);
+      expect(r.final.stats?.feesUpdatedAt).toBeInstanceOf(Date);
+      expect(r.final.stats?.tipsUpdatedAt).toBeInstanceOf(Date);
+      expect(r.final.raw.income).not.toContain(499);
+      expect(r.afterCompletion.schedules).toEqual([501]);
+    },
+  );
+
+  it.each(['missing', 'unmeasured', 'other epoch'] as const)(
+    'preserves a genuine %s gap outside the exact pinned pair and stops repeating after recovery',
+    async (gap) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      const r = await runPinnedGapOwnerScenario(fixture.pool, 'identity', gap);
+      const repairedEpoch = gap === 'other epoch' ? 498 : 499;
+      const repairedVote = gap === 'other epoch' ? 'A' : 'B';
+      expect([...r.before.repair.income, ...r.before.repair.missing]).toContain(repairedEpoch);
+      expect(r.cycles[0]!.schedules).toContain(repairedEpoch);
+      expect(r.cycles[0]!.repairs).toContainEqual({
+        epoch: repairedEpoch,
+        vote: repairedVote,
+        deferred: false,
+        bounded: false,
+      });
+      expect(r.cycles[1]!.schedules).toEqual([501]);
+      expect(r.cycles[2]!.schedules).toEqual([501]);
+      expect(r.afterReconciler.stats).toEqual(r.before.stats);
+      expect(r.final.completed).toBe(true);
+    },
+  );
+
+  it('leaves healthy pending pinned work to the bounded owner, which still measures completion', async () => {
+    if (!fixture) throw new Error('fixture unavailable');
+    const r = await runPinnedGapOwnerScenario(fixture.pool, 'healthy');
+    expect(r.before.raw.income).toContain(499);
+    expect(r.before.repair.income).toEqual([]);
+    expect(r.cycles.map((x) => x.schedules)).toEqual([[501], [501], [501]]);
+    expect(r.firstOwner.completed).toBe(false);
+    expect(r.firstOwner.stats).toMatchObject({ feesUpdatedAt: null, tipsUpdatedAt: null });
+    expect(r.firstOwner.blocks).toEqual([4991]);
+    expect(r.resumed[0]!.blocks).toEqual([4992]);
+    expect(r.final.completed).toBe(true);
+    expect(r.final.cohort).toContain('A');
+  });
 });
