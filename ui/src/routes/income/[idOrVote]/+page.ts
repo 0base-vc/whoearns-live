@@ -1,33 +1,23 @@
 import { error } from '@sveltejs/kit';
-import { fetchCurrentEpoch, fetchScoring, fetchValidatorHistory, ApiError } from '$lib/api';
+import { fetchValidatorHistory, ApiError } from '$lib/api';
 import { HISTORY_FETCH_EPOCHS } from '$lib/history-window';
 import type { PageLoad } from './$types';
 
 export const load: PageLoad = async ({ params, fetch: fetchFn }) => {
   const { idOrVote } = params;
   try {
-    // Run the requests in parallel — the endpoints are independent and
-    // the page needs both `history` and `currentEpoch` before it can
-    // render meaningfully. `scoring` is best-effort: if the validator
-    // is unrated, opted-out, or otherwise gated out of the tier
-    // surface the call 404s and we fall back to `null`, which the
-    // page renders as a "no tier yet" pill. The income page renders
-    // fine without it.
-    const [history, currentEpoch, scoring] = await Promise.all([
-      // Overshoots the table by the schedule-stake lag so the oldest
-      // visible rows still have an N-2 divisor; see `$lib/history-window`.
-      fetchValidatorHistory(idOrVote, HISTORY_FETCH_EPOCHS, fetchFn),
-      fetchCurrentEpoch(fetchFn).catch(() => null),
-      fetchScoring(idOrVote, fetchFn).catch(() => null),
-    ]);
+    // Only history gates navigation. Tier/commission details are loaded
+    // by the mounted page with their own loading, failure and retry states.
+    // History already includes its running-epoch rows; this page does not
+    // consume the separate /epoch/current response.
+    // Overshoot by the schedule-stake lag for the oldest rows' N-2 divisor.
+    const history = await fetchValidatorHistory(idOrVote, HISTORY_FETCH_EPOCHS, fetchFn);
     // Signal to the layout that the 0base.vc footer CTA should be
     // hidden on THIS validator's page. The layout reads `page.data`
     // via `$app/state` — returning the flag here is the single
     // plumbing point; no store, no context, no prop drilling.
     return {
       history,
-      currentEpoch,
-      scoring,
       hideFooterCta: history.profile?.hideFooterCta === true,
     };
   } catch (err) {

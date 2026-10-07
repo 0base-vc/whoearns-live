@@ -15,7 +15,7 @@ import type {
   ValidatorHistory,
   ValidatorProfile,
   ValidatorSearchResponse,
-} from './types';
+} from './types.js';
 
 /**
  * Base URL for the indexer API.

@@ -55,6 +55,8 @@
   import AddressDisplay from '$lib/components/AddressDisplay.svelte';
   import VerifiedBadge from '$lib/components/VerifiedBadge.svelte';
   import TierBadge from '$lib/components/TierBadge.svelte';
+  import IncomeScoringStatus from '$lib/components/IncomeScoringStatus.svelte';
+  import { createIncomeScoringLoader, type IncomeScoringState } from '$lib/income-scoring';
   import ShareWidget from '$lib/components/ShareWidget.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { serializeJsonLd } from '$lib/json-ld';
@@ -87,15 +89,25 @@
   let { data }: { data: PageData } = $props();
 
   const history = $derived(data.history);
-  /**
-   * Best-effort tier surface for the cross-link strip below the
-   * breadcrumb. `null` when:
-   *   - the validator has no scoring yet (unrated / sample too thin),
-   *   - the operator opted out of the gamification surface, or
-   *   - the `/scoring` endpoint 404s for any other reason.
-   * Income page renders fine without it; the strip just collapses.
-   */
-  const scoring = $derived(data.scoring);
+  let scoringState = $state<IncomeScoringState>({ vote: null, status: 'loading' });
+  const scoringLoader = createIncomeScoringLoader((state) => {
+    scoringState = state;
+  });
+  $effect(() => {
+    void scoringLoader.load(history.vote);
+    // Runs both for param-only navigation and when leaving the page.
+    return () => scoringLoader.cancel();
+  });
+  // Gate by vote as well as request generation: reused page components
+  // must not display the preceding validator's tier even for one render.
+  const scoring = $derived(
+    scoringState.vote === history.vote && scoringState.status === 'ready'
+      ? scoringState.data
+      : null,
+  );
+  const scoringStatus = $derived(
+    scoringState.vote === history.vote ? scoringState.status : 'loading',
+  );
 
   /**
    * Tier-name in plain English for the cross-link strip. Mirrors the
@@ -533,16 +545,20 @@
   IS curious about the operator-craft side of things hop over in one
   click without making that the default destination.
 
-  Collapses silently when scoring is unavailable (unrated, opted-out,
-  /scoring 404) — the income page is the contract; the strip is
-  cross-link garnish.
+  Loading and failed requests keep the income page visible. A failed
+  request offers a retry; an expected /scoring 404 has a distinct state.
 
   Whole strip is a single `<a>` so the hover affordance covers the
   entire row and the click target is large (WCAG 2.5.5 — 44×44 on
   mobile, the strip's `py-2.5` gives ~44px vertical even for a one-
   line text + 18px badge).
 -->
-{#if scoring !== null && tierName !== null}
+{#if scoringStatus !== 'ready'}
+  <IncomeScoringStatus
+    status={scoringStatus}
+    onRetry={() => void scoringLoader.load(history.vote)}
+  />
+{:else if scoring !== null && tierName !== null}
   <a
     href={`/v/${history.vote}`}
     class="mb-4 flex items-center justify-between gap-3 rounded-lg border border-[color:var(--color-border-default)] bg-[color:var(--color-surface-muted)]/40 px-3 py-2.5 transition-colors hover:border-[color:var(--color-brand-500)] hover:bg-[color:var(--color-surface-muted)]"

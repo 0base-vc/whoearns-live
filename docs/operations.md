@@ -273,6 +273,28 @@ deployment hit.
 
 ## Troubleshooting
 
+### Symptoms: income history loads but tier and commission details fail
+
+The income page only waits for `/history` during navigation. Once visible,
+it requests `/scoring` separately; pending or failed scoring cannot delay
+the history table. A scoring failure displays a **Retry details** button
+that retries only scoring. A scoring 404 is shown as unavailable rather
+than as a transient error. Navigating to another validator or leaving the
+page aborts the previous scoring request and discards any late response.
+The normal 15-second API client timeout remains unchanged.
+
+Correlate incoming request, completion and error logs by request ID before
+attributing a delay. SQLSTATE `57014` with **"canceling statement due to
+statement timeout"** confirms a PostgreSQL statement timeout; the code
+alone also covers other cancellations. A stack through
+`StatsRepository.findEconomicPercentile` points to the scoring cohort/CU
+query, which also runs from the tier snapshot job. It does not identify
+whether query execution, lock waits or resource pressure caused the
+timeout. The query's rotation-aware `processed_blocks` aggregation is not
+equivalent to simply reading `epoch_validator_stats.compute_units_total`
+(see migration 0043). Query changes need local PostgreSQL correctness and
+performance evidence; increasing the timeout is not a UI fix.
+
 ### Symptoms: repeated `429` or `-32005` from Solana RPC
 
 - The default `SOLANA_RPC_URL` is the public PublicNode endpoint.

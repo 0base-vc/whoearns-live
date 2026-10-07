@@ -5,6 +5,13 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Validator income pages render as soon as history is available, without
+  waiting for optional scoring. Tier and commission details load separately
+  with visible failure and retry states; navigation cancels old requests
+  and ignores stale responses.
+
 ### Added
 
 - Live Trend 2.0 leaderboard windows: `live_trend` (default),
