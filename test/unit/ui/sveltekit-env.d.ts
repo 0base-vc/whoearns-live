@@ -17,3 +17,8 @@ declare module '$env/static/public' {
   export const PUBLIC_SITE_URL: string;
   export const PUBLIC_INDEXER_API_URL: string;
 }
+
+/** Vite's import.meta.env for UI fetchers imported by backend unit tests. */
+interface ImportMeta {
+  readonly env?: { readonly PUBLIC_INDEXER_API_URL?: string };
+}
