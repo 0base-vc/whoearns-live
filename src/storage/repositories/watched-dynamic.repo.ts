@@ -132,10 +132,11 @@ export class WatchedDynamicRepository {
   /**
    * Atomically choose a pending validator's one-shot target once. Returning
    * the stored target keeps later passes and restarted workers on the same
-   * epoch AND identity. Historical stats recover epoch-only targets from
-   * migration 0047, or provide an already-known historical identity on the
-   * first pass. Epoch-only targets without historical identity evidence are
-   * deferred unchanged. Completed, removed and deferred validators return null.
+   * epoch AND identity. Only a fresh target may use the observed identity.
+   * Epoch-only targets from migration 0047 are deferred unchanged: generic
+   * stats can be produced using the current identity and prove no historical
+   * mapping. They require a verified manual correction of the target identity.
+   * Completed, removed and deferred validators return null.
    */
   async getOrSetBackfillTarget(
     vote: VotePubkey,
@@ -147,16 +148,10 @@ export class WatchedDynamicRepository {
           SET prev_epoch_backfill_epoch = COALESCE(w.prev_epoch_backfill_epoch, $2::bigint),
               prev_epoch_backfill_identity = COALESCE(
                 w.prev_epoch_backfill_identity,
-                (SELECT evs.identity_pubkey FROM epoch_validator_stats evs
-                  WHERE evs.vote_pubkey = w.vote_pubkey
-                    AND evs.epoch = COALESCE(w.prev_epoch_backfill_epoch, $2::bigint)),
                 CASE WHEN w.prev_epoch_backfill_epoch IS NULL THEN $3::text END)
         WHERE w.vote_pubkey = $1 AND w.prev_epoch_backfilled_at IS NULL
           AND (w.prev_epoch_backfill_identity IS NOT NULL
-            OR w.prev_epoch_backfill_epoch IS NULL
-            OR EXISTS (SELECT 1 FROM epoch_validator_stats evs
-                        WHERE evs.vote_pubkey = w.vote_pubkey
-                          AND evs.epoch = w.prev_epoch_backfill_epoch))
+            OR w.prev_epoch_backfill_epoch IS NULL)
         RETURNING prev_epoch_backfill_epoch::text AS epoch,
                   prev_epoch_backfill_identity AS identity`,
       [vote, proposedEpoch, proposedIdentity],

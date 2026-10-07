@@ -406,18 +406,26 @@ without errors; partial backfills deliberately take multiple ticks. Previously
 captured blocks are skipped on resumption, including after a worker restart.
 Migration `0047_dynamic_backfill_target_epoch.sql` adds the nullable
 `prev_epoch_backfill_epoch` column. The worker atomically chooses each
-pending validator's target before its first historical pass, then keeps
-that original epoch through rollover and restart. Migration
+pending validator's target on its first resolved pending-set observation,
+before live RPC work or a leftover-budget check, then keeps that original
+epoch through rollover and restart. All pending targets are claimed before
+the expensive historical passes rotate one validator per tick. Registration
+queues a pending row; target selection happens when the worker observes it.
+Migration
 `0048_dynamic_backfill_target_identity.sql` adds the nullable
 `prev_epoch_backfill_identity` column. The target is now an immutable
-`(epoch, identity)` pair. Historical epoch stats supply the identity when
-known, including for partially filled epoch-only targets from 0047. An
-already-pinned epoch with no historical identity evidence stays pending and
-unchanged until historical stats supply its identity. Other backfills and live
-polling continue while that target is deferred. Only a target with no pinned
-epoch may fall back to the current identity on its first pass. Existing pending
-rows with no target choose the previous epoch on their first pass after upgrading;
-completed rows stay completed. The completion marker can only be set for the stored
+`(epoch, identity)` pair. A fresh target uses the current identity resolved
+at first observation; generic epoch stats never select the target identity.
+An already-pinned epoch with a NULL target identity remains pending and
+unchanged, even if stats later appear: the ordinary income reconciler can
+create those rows from the current identity, so they do not prove a historical
+vote-to-identity mapping. These legacy 0047 targets need manual reconciliation
+using independently verified historical identity evidence before correcting
+the stored target identity; adding a stats row or running the ordinary
+reconciler alone cannot release them. If the original identity cannot be
+verified, keep the target pending. Other backfills and live polling continue
+while that target is deferred, and it does not consume a historical turn.
+Completed rows stay completed. The completion marker can only be set for the stored
 epoch and identity, so completing a different schedule cannot hide older
 missing facts. Live polling follows the current identity independently. Newly
 tracked validators choose their own target and keep rotating independently.

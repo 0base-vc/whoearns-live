@@ -6,7 +6,10 @@ import type { FeeService } from '../services/fee.service.js';
 import type { ValidatorService, WatchMode } from '../services/validator.service.js';
 import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import type { StatsRepository } from '../storage/repositories/stats.repo.js';
-import type { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
+import type {
+  DynamicBackfillTarget,
+  WatchedDynamicRepository,
+} from '../storage/repositories/watched-dynamic.repo.js';
 import type { Epoch, IdentityPubkey, Slot, VotePubkey } from '../types/domain.js';
 import { withRpcFallback } from './rpc-fallback.js';
 import type { Job } from './scheduler.js';
@@ -89,6 +92,39 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
       const epochInfo =
         (await deps.epochService.getCurrent()) ?? (await deps.epochService.syncCurrent());
       const epoch = epochInfo.epoch;
+
+      // Record every pending target on first observation, before live RPC or
+      // any leftover-budget check. Otherwise a cold live pass or unavailable
+      // schedule could postpone the first claim across an epoch boundary.
+      const backfillTargets = new Map<VotePubkey, DynamicBackfillTarget>();
+      if (epoch > 0 && deps.watchedDynamicRepo !== undefined && deps.epochsRepo !== undefined) {
+        try {
+          const pending = (await deps.watchedDynamicRepo.listPendingBackfill()).sort();
+          const pendingSet = new Set(pending);
+          for (const vote of backfillAttemptCursors.keys()) {
+            if (!pendingSet.has(vote)) backfillAttemptCursors.delete(vote);
+          }
+          const pendingIdentities = await deps.validatorService.getIdentityMap(pending);
+          for (const vote of pending) {
+            if (signal.aborted) return;
+            const identity = pendingIdentities.get(vote);
+            if (identity === undefined) continue;
+            try {
+              const target = await deps.watchedDynamicRepo.getOrSetBackfillTarget(
+                vote,
+                epoch - 1,
+                identity,
+              );
+              if (target !== null) backfillTargets.set(vote, target);
+              else backfillAttemptCursors.delete(vote);
+            } catch (err) {
+              deps.logger.warn({ err, vote }, 'fee-ingester: backfill target claim failed');
+            }
+          }
+        } catch (err) {
+          deps.logger.warn({ err }, 'fee-ingester: backfill target lookup failed, continuing live');
+        }
+      }
 
       const votes = await deps.validatorService.getActiveVotePubkeys(
         deps.watchMode,
@@ -254,11 +290,8 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
         deps.epochsRepo !== undefined
       ) {
         try {
-          const pending = (await deps.watchedDynamicRepo.listPendingBackfill()).sort();
-          const pendingSet = new Set(pending);
-          for (const vote of backfillAttemptCursors.keys()) {
-            if (!pendingSet.has(vote)) backfillAttemptCursors.delete(vote);
-          }
+          // Ambiguous legacy targets stay pending but cannot consume a turn.
+          const pending = [...backfillTargets.keys()];
           if (pending.length > 0) {
             const previousIndex =
               lastBackfillVote === null ? -1 : pending.indexOf(lastBackfillVote);
@@ -267,7 +300,7 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
               lastBackfillVote = vote;
               await runPreviousEpochBackfill({
                 pendingVotes: [vote],
-                currentEpoch: epoch,
+                backfillTargets,
                 deps,
                 deadlineMs,
                 signal,
@@ -298,45 +331,23 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
  */
 async function runPreviousEpochBackfill(args: {
   pendingVotes: VotePubkey[];
-  currentEpoch: Epoch;
+  backfillTargets: Map<VotePubkey, DynamicBackfillTarget>;
   deps: FeeIngesterJobDeps;
   deadlineMs: number;
   signal: AbortSignal;
   attemptCursors: Map<VotePubkey, { epoch: Epoch; identity: IdentityPubkey; slot: Slot }>;
 }): Promise<void> {
-  const { pendingVotes, currentEpoch, deps, deadlineMs, signal, attemptCursors } = args;
+  const { pendingVotes, backfillTargets, deps, deadlineMs, signal, attemptCursors } = args;
   // Both are guaranteed non-null by the caller, but re-narrow inside this
   // helper so the function remains callable in isolation during refactors.
   if (deps.watchedDynamicRepo === undefined || deps.epochsRepo === undefined) return;
 
-  if (currentEpoch < 1) {
-    deps.logger.debug('fee-ingester: no previous epoch yet (cluster genesis); deferring backfill');
-    return;
-  }
   let filled = 0;
   let failed = 0;
   for (const vote of pendingVotes) {
     if (signal.aborted || Date.now() >= deadlineMs) break;
-    const identityByVote = await deps.validatorService.getIdentityMap([vote]);
-    const proposedIdentity = identityByVote.get(vote);
-    if (proposedIdentity === undefined) {
-      deps.logger.warn(
-        { vote },
-        'fee-ingester: no identity mapping for pending dynamic validator, skipping backfill',
-      );
-      continue;
-    }
-    // Pin the historical scope before any block work. A current identity
-    // rotation must not replace unfinished slots with an empty schedule.
-    const target = await deps.watchedDynamicRepo.getOrSetBackfillTarget(
-      vote,
-      currentEpoch - 1,
-      proposedIdentity,
-    );
-    if (target === null) {
-      attemptCursors.delete(vote);
-      continue;
-    }
+    const target = backfillTargets.get(vote);
+    if (target === undefined) continue;
     const { epoch: prevEpoch, identity } = target;
     const prevEpochInfo = await deps.epochsRepo.findByEpoch(prevEpoch);
     if (prevEpochInfo === null || !prevEpochInfo.isClosed) {

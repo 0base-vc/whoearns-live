@@ -410,10 +410,120 @@ describe('fee-ingester.job', () => {
       await job.tick(new AbortController().signal);
       expect(getBlock).toHaveBeenCalledTimes(4);
       expect([...blocks.rows.keys()]).toEqual([3_999, 3_998, 4_000, 3_997]);
-      expect(watchedDynamicRepo.listPendingBackfill).not.toHaveBeenCalled();
+      expect(watchedDynamicRepo.getOrSetBackfillTarget).toHaveBeenCalledWith(
+        VOTE_A,
+        499,
+        IDENTITY_A,
+      );
+      // Lightweight target claims run even when live work consumes the budget;
+      // expensive historical metadata/schedule/block work waits for another tick.
+      expect(watchedDynamicRepo.markBackfilled).not.toHaveBeenCalled();
     } finally {
       now.mockRestore();
     }
+  });
+
+  it.each(['unavailable schedule', 'RPC failure', 'no finalised live slots'])(
+    'keeps the first target through rollover/restart when live work stops early: %s',
+    async (failure) => {
+      const deps = makeDeps({ currentSlot: failure === 'no finalised live slots' ? 0 : 200 });
+      const getOrSetBackfillTarget = makeBackfillTargetStore();
+      const backfillPreviousEpoch = vi.fn().mockResolvedValue({ errors: 0, remaining: 0 });
+      const watchedDynamicRepo = {
+        getOrSetBackfillTarget,
+        listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
+        markBackfilled: vi.fn(),
+      };
+      const epochsRepo = {
+        findByEpoch: vi.fn().mockResolvedValue({
+          epoch: 499,
+          firstSlot: 0,
+          lastSlot: 999,
+          isClosed: true,
+        }),
+      };
+      const makeJob = () =>
+        createFeeIngesterJob({
+          ...deps,
+          watchedDynamicRepo,
+          epochsRepo,
+          feeService: { ...deps.feeService, backfillPreviousEpoch } as unknown as FeeService,
+          watchMode: 'explicit',
+          explicitVotes: [VOTE_A],
+          intervalMs: 30_000,
+          batchSize: 1,
+          logger: silent,
+        });
+      if (failure === 'unavailable schedule')
+        vi.mocked(deps.rpc.getLeaderSchedule).mockResolvedValueOnce(null);
+      if (failure === 'RPC failure')
+        vi.mocked(deps.rpc.getLeaderSchedule).mockRejectedValueOnce(new Error('offline'));
+      const tick = makeJob().tick(new AbortController().signal);
+      if (failure === 'RPC failure') await expect(tick).rejects.toThrow('offline');
+      else await tick;
+      expect(backfillPreviousEpoch).not.toHaveBeenCalled();
+      expect(getOrSetBackfillTarget).toHaveBeenCalledWith(VOTE_A, 499, IDENTITY_A);
+      vi.mocked(deps.epochService.getCurrent).mockResolvedValue({
+        epoch: 501,
+        firstSlot: 1000,
+        lastSlot: 1999,
+        slotCount: 1000,
+        isClosed: false,
+        currentSlot: null,
+        observedAt: new Date(),
+        closedAt: null,
+      });
+      vi.mocked(deps.rpc.getSlot).mockResolvedValue(1100);
+      vi.mocked(deps.validatorService.getIdentityMap).mockResolvedValue(
+        new Map([[VOTE_A, IDENTITY_B]]),
+      );
+      await makeJob().tick(new AbortController().signal);
+      expect(backfillPreviousEpoch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          epoch: 499,
+          identity: IDENTITY_A,
+        }),
+      );
+    },
+  );
+
+  it('isolates a failed target claim so other pending votes and live work can progress', async () => {
+    const deps = makeDeps({
+      identityMap: new Map([
+        [VOTE_A, IDENTITY_A],
+        [VOTE_B, IDENTITY_B],
+      ]),
+    });
+    const getOrSetBackfillTarget = vi.fn(async (vote: string, epoch: number, identity: string) => {
+      if (vote === VOTE_A) throw new Error('transient claim failure');
+      return { epoch, identity };
+    });
+    const backfillPreviousEpoch = vi.fn().mockResolvedValue({ errors: 0, remaining: 0 });
+    const watchedDynamicRepo = {
+      getOrSetBackfillTarget,
+      listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A, VOTE_B]),
+      markBackfilled: vi.fn(),
+    };
+    const job = createFeeIngesterJob({
+      ...deps,
+      watchedDynamicRepo,
+      epochsRepo: {
+        findByEpoch: vi
+          .fn()
+          .mockResolvedValue({ epoch: 499, firstSlot: 0, lastSlot: 999, isClosed: true }),
+      },
+      feeService: { ...deps.feeService, backfillPreviousEpoch } as unknown as FeeService,
+      watchMode: 'explicit',
+      explicitVotes: [VOTE_A],
+      intervalMs: 30_000,
+      batchSize: 1,
+      logger: silent,
+    });
+    await job.tick(new AbortController().signal);
+    expect(deps.feeService.ingestPendingBlocks).toHaveBeenCalledTimes(1);
+    expect(getOrSetBackfillTarget).toHaveBeenCalledWith(VOTE_B, 499, IDENTITY_B);
+    expect(backfillPreviousEpoch).toHaveBeenCalledWith(expect.objectContaining({ vote: VOTE_B }));
+    expect(watchedDynamicRepo.markBackfilled).toHaveBeenCalledWith(VOTE_B, 499, IDENTITY_B);
   });
 
   it('reaches later historical slots despite a persistently failing first batch, then revisits errors', async () => {

@@ -24,8 +24,11 @@ and this project follows [Semantic Versioning](https://semver.org/).
   against a different epoch. Migration 0048 also stores the historical
   target identity, so rotation cannot stamp unfinished old slots complete
   by switching to the new identity's empty or shorter schedule. Legacy
-  epoch-only targets without historical identity evidence remain pending
-  until that evidence becomes available.
+  epoch-only targets remain pending until their identity is independently
+  verified and manually corrected; reconciler-created stats are not identity
+  provenance. All pending targets are pinned before live RPC work, even when
+  live work exhausts the historical budget, preserving the first observed
+  epoch through rollover and restart.
 
 ### Added
 

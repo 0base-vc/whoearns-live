@@ -1,7 +1,8 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WatchedDynamicRepository } from '../../../src/storage/repositories/watched-dynamic.repo.js';
 import { resetTables, setupPgFixture, teardownPgFixture, type PgFixture } from './_pg-fixture.js';
 import { runLegacyBackfillScenario } from './_legacy-backfill-scenario.js';
+import { runBudgetBoundaryScenario } from './_budget-boundary-scenario.js';
 
 describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', () => {
   let fixture: PgFixture | undefined;
@@ -99,7 +100,7 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
     expect(await repo.listPendingBackfill()).not.toContain('A');
   });
 
-  it('recovers an epoch-only 0047 target from its historical stats after identity rotation and restart', async () => {
+  it('does not recover an epoch-only target from generic stats after identity rotation and restart', async () => {
     if (!fixture) throw new Error('fixture unavailable');
     await fixture.pool.query(
       `UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499 WHERE vote_pubkey='A'`,
@@ -109,34 +110,28 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
     );
     await fixture.pool.query(`UPDATE validators SET identity_pubkey='IB' WHERE vote_pubkey='A'`);
     const restarted = new WatchedDynamicRepository(fixture.pool);
-    expect(await restarted.getOrSetBackfillTarget('A', 500, 'IB')).toEqual({
-      epoch: 499,
-      identity: 'IA',
-    });
-    expect(await restarted.getOrSetBackfillTarget('A', 501, 'IC')).toEqual({
-      epoch: 499,
-      identity: 'IA',
-    });
+    expect(await restarted.getOrSetBackfillTarget('A', 500, 'IB')).toBeNull();
+    expect(await restarted.getOrSetBackfillTarget('A', 501, 'IC')).toBeNull();
     await restarted.markBackfilled('A', 499, 'IB');
     expect((await restarted.findByVote('A'))?.prevEpochBackfilledAt).toBeNull();
   });
 
-  it('uses an already-known historical identity on the first pass instead of the current identity', async () => {
+  it('pins the first observation without treating generic stats as identity provenance', async () => {
     if (!fixture) throw new Error('fixture unavailable');
     await fixture.pool.query(
       `INSERT INTO epoch_validator_stats(epoch,vote_pubkey,identity_pubkey) VALUES(499,'A','IA')`,
     );
     expect(await repo.getOrSetBackfillTarget('A', 499, 'IB')).toEqual({
       epoch: 499,
-      identity: 'IA',
+      identity: 'IB',
     });
     expect(await repo.getOrSetBackfillTarget('A', 500, 'IB')).toEqual({
       epoch: 499,
-      identity: 'IA',
+      identity: 'IB',
     });
   });
 
-  it('defers an epoch-only target with no stats through rotation/restart and recovers only from historical evidence', async () => {
+  it('defers an epoch-only target regardless of stats and resumes only after a verified manual correction', async () => {
     if (!fixture) throw new Error('fixture unavailable');
     await fixture.pool.query(
       `UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499 WHERE vote_pubkey='A'`,
@@ -157,6 +152,10 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
     await fixture.pool.query(
       `INSERT INTO epoch_validator_stats(epoch,vote_pubkey,identity_pubkey) VALUES(499,'A','IA')`,
     );
+    expect(await restarted.getOrSetBackfillTarget('A', 501, 'IB')).toBeNull();
+    await fixture.pool
+      .query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_identity='IA'
+      WHERE vote_pubkey='A' AND prev_epoch_backfill_epoch=499 AND prev_epoch_backfilled_at IS NULL`);
     expect(await restarted.getOrSetBackfillTarget('A', 501, 'IB')).toEqual({
       epoch: 499,
       identity: 'IA',
@@ -164,11 +163,16 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
   });
 
   it.each([false, true])(
-    'keeps unknown legacy targets pending while live/new backfills progress, then recovers (new identity has old slots=%s)',
+    'keeps legacy targets pending despite real reconciler stats until manual correction (new identity has old slots=%s)',
     async (hasSlots) => {
       if (!fixture) throw new Error('fixture unavailable');
       const result = await runLegacyBackfillScenario(fixture.pool, hasSlots);
-      for (const state of [result.deferred, result.restarted]) {
+      for (const state of [
+        result.deferred,
+        result.afterReconciler,
+        result.restarted,
+        result.ambiguousOldIdentity,
+      ]) {
         expect(state.targets[0]).toEqual({
           vote_pubkey: 'A',
           epoch: '499',
@@ -181,9 +185,17 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
           identity: 'IC',
           completed: true,
         });
-        expect(state.history).toEqual([]);
         expect(state.slots).toEqual(expect.arrayContaining([100, 200, 201]));
       }
+      expect(result.deferred.history).toEqual([]);
+      expect(result.reconciled.history).toEqual([
+        {
+          identity_pubkey: 'IB',
+          slots_assigned: hasSlots ? 1 : 0,
+          slots_skipped: hasSlots ? 1 : 0,
+        },
+      ]);
+      expect(result.ambiguousOldIdentity.history[0]?.identity_pubkey).toBe('IA');
       expect(result.restarted.slots).toEqual(expect.arrayContaining([300, 301]));
       expect(result.partial.targets[0]).toEqual({
         vote_pubkey: 'A',
@@ -201,7 +213,51 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
         { identity_pubkey: 'IA', slots_assigned: 2, slots_skipped: 2 },
       ]);
       expect(result.recovered.slots).toEqual(expect.arrayContaining([1, 2]));
-      expect(result.recovered.slots).not.toContain(3);
+      expect(result.recovered.slots.includes(3)).toBe(hasSlots);
+    },
+  );
+
+  it.each([false, true])(
+    'pins every first-observed target before a live batch exhausts the budget and keeps it across rollover (restart=%s)',
+    async (restart) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      let clock = 0;
+      const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+      try {
+        const result = await runBudgetBoundaryScenario(fixture.pool, restart, () => {
+          clock += 100;
+        });
+        expect(result.first.targets).toEqual([
+          { vote_pubkey: 'A', epoch: '499', identity: 'IA', completed: false },
+          { vote_pubkey: 'B', epoch: '499', identity: 'IC', completed: false },
+        ]);
+        expect(result.first.history).toEqual([]);
+        expect(result.firstSchedules).toEqual([100]);
+        expect(result.first.slots).toEqual([100]);
+        expect(result.partial.targets).toEqual([
+          { vote_pubkey: 'A', epoch: '499', identity: 'IA', completed: false },
+          { vote_pubkey: 'B', epoch: '499', identity: 'IC', completed: false },
+          { vote_pubkey: 'C', epoch: '500', identity: 'ID', completed: false },
+        ]);
+        expect(result.partial.history).toEqual([
+          { identity_pubkey: 'IA', slots_assigned: 2, slots_skipped: 1 },
+        ]);
+        expect(result.completed.targets).toEqual([
+          { vote_pubkey: 'A', epoch: '499', identity: 'IA', completed: true },
+          { vote_pubkey: 'B', epoch: '499', identity: 'IC', completed: true },
+          { vote_pubkey: 'C', epoch: '500', identity: 'ID', completed: true },
+        ]);
+        expect(result.completed.history).toEqual([
+          { identity_pubkey: 'IA', slots_assigned: 2, slots_skipped: 2 },
+        ]);
+        expect(result.completed.slots).toEqual(
+          expect.arrayContaining([1, 2, 3, 102, 200, 201, 202]),
+        );
+        expect(result.later.targets).toEqual(result.completed.targets);
+        expect(result.later.slots).toEqual(expect.arrayContaining([300, 301, 302]));
+      } finally {
+        now.mockRestore();
+      }
     },
   );
 });
