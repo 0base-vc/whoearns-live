@@ -144,31 +144,41 @@ export class WatchedDynamicRepository {
     proposedIdentity: IdentityPubkey,
   ): Promise<DynamicBackfillTarget | null> {
     const { rows } = await this.pool.query<{ epoch: string; identity: string }>(
-      `UPDATE watched_validators_dynamic w
+      `WITH pending AS MATERIALIZED (
+         SELECT vote_pubkey,prev_epoch_backfill_epoch AS epoch,prev_epoch_backfill_identity AS identity
+           FROM watched_validators_dynamic WHERE vote_pubkey=$1 AND prev_epoch_backfilled_at IS NULL
+           FOR UPDATE
+       ), claimed AS (
+        UPDATE watched_validators_dynamic w
           SET prev_epoch_backfill_epoch = COALESCE(w.prev_epoch_backfill_epoch, $2::bigint),
               prev_epoch_backfill_identity = COALESCE(
                 w.prev_epoch_backfill_identity,
                 CASE WHEN w.prev_epoch_backfill_epoch IS NULL THEN $3::text END)
         WHERE w.vote_pubkey = $1 AND w.prev_epoch_backfilled_at IS NULL
           AND w.prev_epoch_backfill_epoch IS NULL
-        RETURNING prev_epoch_backfill_epoch::text AS epoch,
-                  prev_epoch_backfill_identity AS identity`,
+          AND EXISTS (SELECT 1 FROM pending)
+        RETURNING w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,
+                  w.prev_epoch_backfill_identity AS identity
+       ), targets AS MATERIALIZED (
+         SELECT * FROM claimed UNION ALL SELECT * FROM pending WHERE epoch IS NOT NULL
+       ), locked_stats AS MATERIALIZED (
+         SELECT s.vote_pubkey,s.epoch,s.fees_updated_at,s.tips_updated_at
+           FROM epoch_validator_stats s JOIN targets t ON s.vote_pubkey=t.vote_pubkey AND s.epoch=t.epoch
+          ORDER BY s.vote_pubkey,s.epoch FOR UPDATE OF s
+       ), unmeasured AS (
+         UPDATE epoch_validator_stats s SET fees_updated_at=NULL,tips_updated_at=NULL
+           FROM locked_stats t WHERE s.vote_pubkey=t.vote_pubkey AND s.epoch=t.epoch
+             AND (t.fees_updated_at IS NOT NULL OR t.tips_updated_at IS NOT NULL)
+         RETURNING s.vote_pubkey
+       )
+       SELECT epoch::text,identity FROM targets WHERE identity IS NOT NULL`,
       [vote, proposedEpoch, proposedIdentity],
     );
-    const stored =
-      rows[0] ??
-      (
-        await this.pool.query<{ epoch: string; identity: string }>(
-          `SELECT prev_epoch_backfill_epoch::text AS epoch,prev_epoch_backfill_identity AS identity
-         FROM watched_validators_dynamic WHERE vote_pubkey=$1 AND prev_epoch_backfilled_at IS NULL
-           AND prev_epoch_backfill_identity IS NOT NULL`,
-          [vote],
-        )
-      ).rows[0];
+    const stored = rows[0];
     return stored ? { epoch: Number(stored.epoch), identity: stored.identity } : null;
   }
 
-  /** One round trip: only fresh rows are written; all pinned pending pairs are read. */
+  /** One round trip: claim fresh rows and clear stale measurement on pending historical stats. */
   async getOrSetBackfillTargets(
     proposedEpoch: Epoch,
   ): Promise<Map<VotePubkey, DynamicBackfillTarget>> {
@@ -177,25 +187,34 @@ export class WatchedDynamicRepository {
       epoch: string;
       identity: string;
     }>(
-      `WITH fresh AS MATERIALIZED (
-         SELECT w.vote_pubkey,v.identity_pubkey
-           FROM watched_validators_dynamic w JOIN validators v ON v.vote_pubkey=w.vote_pubkey
-          WHERE w.prev_epoch_backfilled_at IS NULL AND w.prev_epoch_backfill_epoch IS NULL
+      `WITH pending AS MATERIALIZED (
+         SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,
+                w.prev_epoch_backfill_identity AS identity,v.identity_pubkey
+           FROM watched_validators_dynamic w LEFT JOIN validators v ON v.vote_pubkey=w.vote_pubkey
+          WHERE w.prev_epoch_backfilled_at IS NULL
           ORDER BY w.vote_pubkey FOR UPDATE OF w
        ), claimed AS (
          UPDATE watched_validators_dynamic w
             SET prev_epoch_backfill_epoch=$1::bigint,prev_epoch_backfill_identity=v.identity_pubkey
-           FROM fresh v
+           FROM pending v
           WHERE v.vote_pubkey=w.vote_pubkey AND w.prev_epoch_backfilled_at IS NULL
-            AND w.prev_epoch_backfill_epoch IS NULL
-         RETURNING w.vote_pubkey,w.prev_epoch_backfill_epoch::text AS epoch,
+            AND w.prev_epoch_backfill_epoch IS NULL AND v.identity_pubkey IS NOT NULL
+         RETURNING w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,
                    w.prev_epoch_backfill_identity AS identity
+       ), targets AS MATERIALIZED (
+         SELECT * FROM claimed UNION ALL
+         SELECT vote_pubkey,epoch,identity FROM pending WHERE epoch IS NOT NULL
+       ), locked_stats AS MATERIALIZED (
+         SELECT s.vote_pubkey,s.epoch,s.fees_updated_at,s.tips_updated_at
+           FROM epoch_validator_stats s JOIN targets t ON s.vote_pubkey=t.vote_pubkey AND s.epoch=t.epoch
+          ORDER BY s.vote_pubkey,s.epoch FOR UPDATE OF s
+       ), unmeasured AS (
+         UPDATE epoch_validator_stats s SET fees_updated_at=NULL,tips_updated_at=NULL
+           FROM locked_stats t WHERE s.vote_pubkey=t.vote_pubkey AND s.epoch=t.epoch
+             AND (t.fees_updated_at IS NOT NULL OR t.tips_updated_at IS NOT NULL)
+         RETURNING s.vote_pubkey
        )
-       SELECT * FROM claimed
-       UNION ALL
-       SELECT vote_pubkey,prev_epoch_backfill_epoch::text,prev_epoch_backfill_identity
-         FROM watched_validators_dynamic
-        WHERE prev_epoch_backfilled_at IS NULL AND prev_epoch_backfill_identity IS NOT NULL`,
+       SELECT vote_pubkey,epoch::text,identity FROM targets WHERE identity IS NOT NULL`,
       [proposedEpoch],
     );
     return new Map(
@@ -203,15 +222,28 @@ export class WatchedDynamicRepository {
     );
   }
 
-  /** Stored historical scope also governs the normal reconciler after completion. */
+  /** Resolve stored scope and invalidate pending measurement; completed scopes stay measured. */
   async getBackfillScopes(
     votes: VotePubkey[],
     epoch: Epoch,
   ): Promise<Map<VotePubkey, IdentityPubkey | null>> {
     if (votes.length === 0) return new Map();
     const { rows } = await this.pool.query<{ vote_pubkey: string; identity: string | null }>(
-      `SELECT vote_pubkey,prev_epoch_backfill_identity AS identity FROM watched_validators_dynamic
-        WHERE vote_pubkey=ANY($1::text[]) AND prev_epoch_backfill_epoch=$2::bigint`,
+      `WITH scopes AS MATERIALIZED (
+         SELECT vote_pubkey,prev_epoch_backfill_identity AS identity,prev_epoch_backfilled_at AS completed
+           FROM watched_validators_dynamic
+          WHERE vote_pubkey=ANY($1::text[]) AND prev_epoch_backfill_epoch=$2::bigint
+          ORDER BY vote_pubkey FOR UPDATE
+       ), locked_stats AS MATERIALIZED (
+         SELECT s.vote_pubkey,s.fees_updated_at,s.tips_updated_at
+           FROM epoch_validator_stats s JOIN scopes t ON s.vote_pubkey=t.vote_pubkey
+          WHERE s.epoch=$2::bigint AND t.completed IS NULL ORDER BY s.vote_pubkey FOR UPDATE OF s
+       ), unmeasured AS (
+         UPDATE epoch_validator_stats s SET fees_updated_at=NULL,tips_updated_at=NULL
+           FROM locked_stats t WHERE s.vote_pubkey=t.vote_pubkey AND s.epoch=$2::bigint
+             AND (t.fees_updated_at IS NOT NULL OR t.tips_updated_at IS NOT NULL)
+         RETURNING s.vote_pubkey
+       ) SELECT vote_pubkey,identity FROM scopes`,
       [votes, epoch],
     );
     return new Map(rows.map((row) => [row.vote_pubkey, row.identity]));

@@ -12,26 +12,58 @@ import { ProcessedBlocksRepository } from '../../../src/storage/repositories/pro
 import { WatchedDynamicRepository } from '../../../src/storage/repositories/watched-dynamic.repo.js';
 import { ValidatorsRepository } from '../../../src/storage/repositories/validators.repo.js';
 
-export async function runZeroIncomeScenario(pool: pg.Pool, mode: 'skipped' | 'zero-fee' | 'empty') {
+export async function runZeroIncomeScenario(
+  pool: pg.Pool,
+  mode: 'skipped' | 'zero-fee' | 'empty' | 'nonzero',
+  concurrentFirstBatch = false,
+) {
   await pool.query(`DELETE FROM watched_validators_dynamic WHERE vote_pubkey='B'`);
   const logger = pino({ level: 'silent' });
   let recovered = false;
   const calls: number[] = [];
+  let releaseFirst: (() => void) | undefined;
+  const firstBatch = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
   const rpc = {
     getSlot: async () => 105,
     getLeaderSchedule: async (slot: number) =>
       slot === 0 ? { IA: mode === 'empty' ? [] : [1, 2] } : {},
     getBlock: async (slot: number) => {
       calls.push(slot);
+      if (concurrentFirstBatch && slot === 1) {
+        if (calls.filter((attempt) => attempt === 1).length === 2) releaseFirst?.();
+        await firstBatch;
+      }
       if (slot === 2 && !recovered) throw new Error('temporary missing block');
-      if (mode !== 'zero-fee') return null;
+      if (mode !== 'zero-fee' && mode !== 'nonzero') return null;
       return {
         blockhash: `zero-${slot}`,
         parentSlot: slot - 1,
         blockHeight: slot,
         blockTime: 0,
-        transactions: [],
-        rewards: [],
+        transactions:
+          mode === 'nonzero'
+            ? [
+                {
+                  transaction: {
+                    signatures: ['sig'],
+                    message: { accountKeys: ['11111111111111111111111111111111'] },
+                  },
+                  meta: {
+                    err: null,
+                    fee: 15000,
+                    computeUnitsConsumed: 100,
+                    preBalances: [100000],
+                    postBalances: [100000],
+                  },
+                },
+              ]
+            : [],
+        rewards:
+          mode === 'nonzero'
+            ? [{ pubkey: 'IA', lamports: 12500, postBalance: 0, rewardType: 'Fee' }]
+            : [],
       };
     },
   } as unknown as SolanaRpcClient;
@@ -100,15 +132,26 @@ export async function runZeroIncomeScenario(pool: pg.Pool, mode: 'skipped' | 'ze
   });
   const signal = new AbortController().signal;
   const worker = makeWorker();
-  await worker.tick(signal);
+  if (concurrentFirstBatch) await Promise.all([worker.tick(signal), reconcile()]);
+  else await worker.tick(signal);
   const partial = await snapshot();
   await worker.tick(signal);
   const failed = await snapshot();
   await reconcile();
   const afterFailedReconciler = await snapshot();
+  await makeWorker().tick(signal);
+  const afterFailedRestart = await snapshot();
   recovered = true;
   await makeWorker().tick(signal);
   const completed = await snapshot();
   await reconcile();
-  return { partial, failed, afterFailedReconciler, completed, reconciled: await snapshot(), calls };
+  return {
+    partial,
+    failed,
+    afterFailedReconciler,
+    afterFailedRestart,
+    completed,
+    reconciled: await snapshot(),
+    calls,
+  };
 }

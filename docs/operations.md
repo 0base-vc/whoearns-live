@@ -409,7 +409,7 @@ Migration `0047_dynamic_backfill_target_epoch.sql` adds the nullable
 pending validator's target on its first resolved pending-set observation,
 before live RPC work or a leftover-budget check, then keeps that original
 epoch through rollover and restart. One bulk SQL statement claims only fresh
-rows and reads existing pairs; already-pinned targets are not rewritten and
+watched rows and reads existing pairs; already-pinned targets are not rewritten and
 there is no serial per-validator claim loop. All pending targets are resolved before
 the expensive historical passes rotate one validator per tick. Registration
 queues a pending row; target selection happens when the worker observes it.
@@ -440,6 +440,16 @@ cohort because that cohort requires positive assigned slots.
 Live polling follows the current identity independently. Newly
 tracked validators choose their own target and keep rotating independently.
 
+Pending historical scopes keep both fee/tip measurement timestamps NULL even
+when captured batches have nonzero income or CU. Deltas accumulate normally;
+only guarded completion marks that scope measured. Resolving or claiming a
+pending scope also clears pre-existing measurement timestamps, including for
+deferred legacy/identity-mismatch rows, without altering counters or income.
+Claims, deltas and completion serialize on watched rows before locking stats;
+a claim waiting for an earlier delta reads the locked stats' latest timestamps.
+Already-unmeasured stats are not rewritten during repeated target resolution.
+Completed scopes and unrelated live rows retain their normal measurement behaviour.
+
 The ordinary income reconciler follows the stored historical scope for its
 target epoch, including after completion. Slot writes lock and validate that
 scope in SQL, so a claim or rotation between lookup and write cannot relabel
@@ -456,8 +466,8 @@ keep it pending instead of dropping income to satisfy the runtime check.
 Block-fact insertion and income-delta updates are separate existing writes.
 If a delta fails after the fact commits, a restarted worker skips that captured
 block but now keeps the target pending until the income ledger is reconciled.
-This also covers undercounts whose non-null timestamps evade ordinary gap
-detection. No automatic historical income reset or reconstruction is performed.
+Clearing stale measurement exposes pending targets to gap detection but does not
+repair an undercount. No automatic historical income reset or reconstruction is performed.
 
 Historical passes also rotate slots after the last attempt, including failed
 RPC attempts. A permanently unavailable first batch therefore cannot consume

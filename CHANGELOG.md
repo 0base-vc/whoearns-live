@@ -29,7 +29,7 @@ and this project follows [Semantic Versioning](https://semver.org/).
   provenance. All pending targets are pinned before live RPC work, even when
   live work exhausts the historical budget, preserving the first observed
   epoch through rollover and restart.
-  Target preflight now uses one bulk statement and writes only fresh rows.
+  Target preflight now uses one bulk statement and claims only fresh watched rows.
   Historical fee/reconciler writes share the durable scope, including for
   completed targets, and defer identity/income mismatches without resetting
   existing income. Completion requires all five totals to match captured
@@ -40,6 +40,11 @@ and this project follows [Semantic Versioning](https://semver.org/).
   timestamps with completion, without rewriting income. Partial/error passes
   stay unmeasured; an observed empty schedule is measured zero but remains
   outside the positive-assigned-slot economic cohort.
+  Nonzero pending historical batches also remain unmeasured across delta and
+  reconciler writers until guarded completion. Claims invalidate stale
+  measurement without changing income, including on deferred legacy rows;
+  SQL locks preserve this invariant across concurrent claims and completion.
+  Ordinary live and completed-scope measurement retain their existing behaviour.
 
 ### Added
 

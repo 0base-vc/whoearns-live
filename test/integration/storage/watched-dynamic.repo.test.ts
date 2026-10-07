@@ -1,4 +1,10 @@
 import { runZeroIncomeScenario } from './_zero-income-scenario.js';
+import {
+  runMeasurementClaim,
+  runMeasurementWriter,
+  runMeasurementRace,
+  runCompletionRace,
+} from './_pending-measurement-scenario.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WatchedDynamicRepository } from '../../../src/storage/repositories/watched-dynamic.repo.js';
 import { resetTables, setupPgFixture, teardownPgFixture, type PgFixture } from './_pg-fixture.js';
@@ -375,12 +381,17 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
     if (!fixture) throw new Error('fixture unavailable');
     const r = await runScopeSafetyScenario(fixture.pool, 'manual mismatch');
     expect(r.before?.ledger[0]?.fees).toBe('50');
-    expect(r.afterFee?.ledger).toEqual(r.before?.ledger);
+    const unmeasured = r.before?.ledger.map((row) => ({
+      ...row,
+      fees_measured: false,
+      tips_measured: false,
+    }));
+    expect(r.afterFee?.ledger).toEqual(unmeasured);
     expect(r.afterFee?.targets[0]?.completed).toBe(false);
     expect(r.afterFee?.slots).toContain(3);
     expect(r.afterFee?.slots).not.toContain(1);
     expect(r.afterFee?.slots).not.toContain(2);
-    expect(r.afterReconciler?.ledger).toEqual(r.before?.ledger);
+    expect(r.afterReconciler?.ledger).toEqual(unmeasured);
     expect(r.afterReconciler?.targets[0]?.completed).toBe(false);
   });
 
@@ -429,8 +440,9 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
       expect(r.captured?.slots).toContain(1);
       if (!first) expect(r.captured?.slots).toContain(2);
       expect(r.captured?.ledger[0]?.fees).toBe(first ? '0' : '10');
-      expect(r.captured?.ledger[0]?.fees_measured).toBe(!first);
-      expect(r.detectableGaps).toEqual(first ? [499] : []);
+      expect(r.captured?.ledger[0]?.fees_measured).toBe(false);
+      expect(r.captured?.ledger[0]?.tips_measured).toBe(false);
+      expect(r.detectableGaps).toEqual([499]);
       expect(r.afterRestart?.targets[0]?.completed).toBe(false);
       expect(r.afterReconciler?.targets[0]?.completed).toBe(false);
       expect(r.afterReconciler?.ledger[0]?.fees).toBe(first ? '0' : '10');
@@ -509,34 +521,36 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
       writer.release();
     }
   });
-  it.each(['skipped', 'zero-fee'] as const)(
-    'measures completed zero income without stamping partial/error passes (%s)',
+  it.each(['skipped', 'zero-fee', 'nonzero'] as const)(
+    'measures income only at completion across partial/error/restarted fee and reconciler passes (%s)',
     async (mode) => {
       if (!fixture) throw new Error('fixture unavailable');
       const r = await runZeroIncomeScenario(fixture.pool, mode);
-      for (const state of [r.partial, r.failed, r.afterFailedReconciler]) {
+      for (const state of [r.partial, r.failed, r.afterFailedReconciler, r.afterFailedRestart]) {
         expect(state.completed).toBe(false);
         expect(state.stats?.feesUpdatedAt).toBeNull();
         expect(state.stats?.tipsUpdatedAt).toBeNull();
         expect(state.cohort).not.toContain('A');
         expect(state.gaps).toContain(499);
+        expect(state.stats?.blockFeesTotalLamports).toBe(mode === 'nonzero' ? 12500n : 0n);
+        expect(state.stats?.computeUnitsTotal).toBe(mode === 'nonzero' ? 100n : 0n);
       }
       for (const state of [r.completed, r.reconciled]) {
         expect(state.completed).toBe(true);
         expect(state.stats?.slotsAssigned).toBe(2);
-        expect(state.stats?.slotsProduced).toBe(mode === 'zero-fee' ? 2 : 0);
+        expect(state.stats?.slotsProduced).toBe(mode === 'skipped' ? 0 : 2);
         expect(state.stats?.slotsSkipped).toBe(mode === 'skipped' ? 2 : 0);
-        expect(state.stats?.blockFeesTotalLamports).toBe(0n);
-        expect(state.stats?.blockBaseFeesTotalLamports).toBe(0n);
-        expect(state.stats?.blockPriorityFeesTotalLamports).toBe(0n);
+        expect(state.stats?.blockFeesTotalLamports).toBe(mode === 'nonzero' ? 25000n : 0n);
+        expect(state.stats?.blockBaseFeesTotalLamports).toBe(mode === 'nonzero' ? 10000n : 0n);
+        expect(state.stats?.blockPriorityFeesTotalLamports).toBe(mode === 'nonzero' ? 20000n : 0n);
         expect(state.stats?.blockTipsTotalLamports).toBe(0n);
-        expect(state.stats?.computeUnitsTotal).toBe(0n);
+        expect(state.stats?.computeUnitsTotal).toBe(mode === 'nonzero' ? 200n : 0n);
         expect(state.stats?.feesUpdatedAt).toBeInstanceOf(Date);
         expect(state.stats?.tipsUpdatedAt).toBeInstanceOf(Date);
         expect(state.cohort).toContain('A');
         expect(state.gaps).toEqual([]);
       }
-      expect(r.calls).toEqual([1, 2, 2, 2]);
+      expect(r.calls).toEqual([1, 2, 2, 2, 2]);
     },
   );
 
@@ -554,6 +568,32 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
       expect(state.cohort).not.toContain('A');
       expect(state.gaps).toEqual([]);
     }
+  });
+
+  it('keeps concurrent nonzero fee/reconciler partial capture unmeasured and counts each fact once after recovery', async () => {
+    if (!fixture) throw new Error('fixture unavailable');
+    const r = await runZeroIncomeScenario(fixture.pool, 'nonzero', true);
+    for (const state of [r.partial, r.failed, r.afterFailedReconciler, r.afterFailedRestart]) {
+      expect(state.completed).toBe(false);
+      expect(state.stats?.feesUpdatedAt).toBeNull();
+      expect(state.stats?.tipsUpdatedAt).toBeNull();
+      expect(state.stats?.blockFeesTotalLamports).toBe(12500n);
+      expect(state.stats?.computeUnitsTotal).toBe(100n);
+      expect(state.cohort).not.toContain('A');
+    }
+    for (const state of [r.completed, r.reconciled]) {
+      expect(state.completed).toBe(true);
+      expect(state.stats?.feesUpdatedAt).toBeInstanceOf(Date);
+      expect(state.stats?.tipsUpdatedAt).toBeInstanceOf(Date);
+      expect(state.stats?.blockFeesTotalLamports).toBe(25000n);
+      expect(state.stats?.blockBaseFeesTotalLamports).toBe(10000n);
+      expect(state.stats?.blockPriorityFeesTotalLamports).toBe(20000n);
+      expect(state.stats?.blockTipsTotalLamports).toBe(0n);
+      expect(state.stats?.computeUnitsTotal).toBe(200n);
+      expect(state.cohort).toContain('A');
+      expect(state.gaps).toEqual([]);
+    }
+    expect(r.calls.filter((slot) => slot === 1)).toHaveLength(2);
   });
 
   it('refuses to stamp zero measurement or completion when assigned facts are still missing', async () => {
@@ -574,4 +614,109 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
     expect(row?.tipsUpdatedAt).toBeNull();
     expect((await repo.findByVote('A'))?.prevEpochBackfilledAt).toBeNull();
   });
+
+  it.each(['single', 'bulk', 'legacy', 'deferred', 'scopes'] as const)(
+    'invalidates pre-existing measurement without clearing income when a pending scope is resolved (%s)',
+    async (kind) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      const r = await runMeasurementClaim(fixture.pool, kind);
+      expect(r.before.cohort).toContain('A');
+      expect(r.before.target?.feesUpdatedAt).toBeInstanceOf(Date);
+      expect(r.before.target?.tipsUpdatedAt).toBeInstanceOf(Date);
+      expect(r.after.target?.feesUpdatedAt).toBeNull();
+      expect(r.after.target?.tipsUpdatedAt).toBeNull();
+      expect(r.after.completed).toBe(false);
+      expect(r.after.cohort).not.toContain('A');
+      for (const field of [
+        'blockFeesTotalLamports',
+        'blockBaseFeesTotalLamports',
+        'blockPriorityFeesTotalLamports',
+        'blockTipsTotalLamports',
+        'computeUnitsTotal',
+        'slotsAssigned',
+        'slotsProduced',
+        'slotsSkipped',
+      ] as const) {
+        expect(r.after.target?.[field]).toEqual(r.before.target?.[field]);
+      }
+      expect(r.after.live).toEqual(r.before.live);
+      expect(r.after.unrelated).toEqual(r.before.unrelated);
+      expect(r.after.cohort).toContain('B');
+      if (kind === 'deferred') expect(r.deferred).toBe(true);
+    },
+  );
+
+  it.each(['income', 'fee', 'deprecated', 'rebuild', 'guarded rebuild'] as const)(
+    'keeps pending historical measurement NULL across income writers while preserving ordinary writes (%s)',
+    async (kind) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      const r = await runMeasurementWriter(fixture.pool, kind);
+      expect(r.pending.completed).toBe(false);
+      expect(r.pending.target?.feesUpdatedAt).toBeNull();
+      expect(r.pending.target?.tipsUpdatedAt).toBeNull();
+      expect(r.pending.target?.blockFeesTotalLamports).toBe(kind === 'guarded rebuild' ? 0n : 10n);
+      expect(r.pending.cohort).not.toContain('A');
+      expect(r.pending.live?.feesUpdatedAt).toBeInstanceOf(Date);
+      expect(r.pending.live?.tipsUpdatedAt).toBeInstanceOf(Date);
+      expect(r.pending.live?.blockFeesTotalLamports).toBe(10n);
+      expect(r.pending.unrelated?.feesUpdatedAt).toBeInstanceOf(Date);
+      if (kind === 'fee') expect(r.pending.unrelated?.tipsUpdatedAt).toBeNull();
+      else expect(r.pending.unrelated?.tipsUpdatedAt).toBeInstanceOf(Date);
+      if (r.completed) {
+        expect(r.completed.completed).toBe(true);
+        expect(r.completed.target?.feesUpdatedAt).toBeInstanceOf(Date);
+        expect(r.completed.target?.tipsUpdatedAt).toBeInstanceOf(Date);
+        expect(r.completed.cohort).toContain('A');
+        for (const field of [
+          'blockFeesTotalLamports',
+          'blockBaseFeesTotalLamports',
+          'blockPriorityFeesTotalLamports',
+          'blockTipsTotalLamports',
+          'computeUnitsTotal',
+        ] as const) {
+          expect(r.completed.target?.[field]).toEqual(r.pending.target?.[field]);
+        }
+      }
+    },
+  );
+
+  describe.each(['claim first', 'writer first'] as const)('measurement SQL race: %s', (order) => {
+    it.each(['income', 'fee', 'rebuild'] as const)(
+      'serializes a pending claim with %s, including the older statement snapshot',
+      async (kind) => {
+        if (!fixture) throw new Error('fixture unavailable');
+        const r = await runMeasurementRace(fixture.pool, kind, order);
+        expect(r.completed).toBe(false);
+        expect(r.target?.feesUpdatedAt).toBeNull();
+        expect(r.target?.tipsUpdatedAt).toBeNull();
+        expect(r.target?.blockFeesTotalLamports).toBe(10n);
+        expect(r.cohort).not.toContain('A');
+        expect(r.unrelated?.feesUpdatedAt).toBeInstanceOf(Date);
+      },
+    );
+  });
+
+  it.each(['single', 'bulk', 'scopes', 'income', 'rebuild'] as const)(
+    'retains validated measurement when %s starts before guarded completion commits',
+    async (kind) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      const r = await runCompletionRace(fixture.pool, kind);
+      expect(r.before.target?.feesUpdatedAt).toBeNull();
+      expect(r.before.target?.tipsUpdatedAt).toBeNull();
+      expect(r.before.cohort).not.toContain('A');
+      expect(r.after.completed).toBe(true);
+      expect(r.after.target?.feesUpdatedAt).toBeInstanceOf(Date);
+      expect(r.after.target?.tipsUpdatedAt).toBeInstanceOf(Date);
+      expect(r.after.cohort).toContain('A');
+      for (const field of [
+        'blockFeesTotalLamports',
+        'blockBaseFeesTotalLamports',
+        'blockPriorityFeesTotalLamports',
+        'blockTipsTotalLamports',
+        'computeUnitsTotal',
+      ] as const) {
+        expect(r.after.target?.[field]).toEqual(r.before.target?.[field]);
+      }
+    },
+  );
 });

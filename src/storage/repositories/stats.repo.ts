@@ -771,9 +771,17 @@ export class StatsRepository {
 
   async addFeeDelta(args: AddFeeDeltaArgs): Promise<void> {
     await this.pool.query(
-      `UPDATE epoch_validator_stats
+      `WITH scopes AS MATERIALIZED (
+         SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,w.prev_epoch_backfilled_at AS completed
+           FROM watched_validators_dynamic w JOIN epoch_validator_stats s ON s.vote_pubkey=w.vote_pubkey
+          WHERE s.epoch=$1 AND s.identity_pubkey=$2 ORDER BY w.vote_pubkey FOR UPDATE OF w
+       )
+       UPDATE epoch_validator_stats s
           SET block_fees_total_lamports = block_fees_total_lamports + $3::numeric,
-              fees_updated_at = NOW()
+              fees_updated_at = CASE WHEN EXISTS (SELECT 1 FROM scopes t
+                WHERE t.vote_pubkey=s.vote_pubkey AND t.epoch=$1 AND t.completed IS NULL) THEN NULL ELSE NOW() END,
+              tips_updated_at = CASE WHEN EXISTS (SELECT 1 FROM scopes t
+                WHERE t.vote_pubkey=s.vote_pubkey AND t.epoch=$1 AND t.completed IS NULL) THEN NULL ELSE s.tips_updated_at END
         WHERE epoch = $1 AND identity_pubkey = $2`,
       [args.epoch, args.identityPubkey, args.deltaLamports.toString()],
     );
@@ -809,21 +817,28 @@ export class StatsRepository {
    * to the per-tx fee decomposition (i.e. anything using
    * `transactionDetails: 'full'`).
    *
-   * Zero-valued deltas are safe (adding 0 is a no-op). Timestamps
-   * always advance so readers can use "updated_at" as a proxy for
-   * "ingester saw this validator recently" regardless of numeric
-   * movement.
+   * Zero-valued deltas are safe (adding 0 is a no-op). Ordinary timestamps
+   * advance even without numeric movement. Pending pinned historical rows
+   * accumulate totals but remain unmeasured until guarded completion. Lock
+   * watched rows before stats so claims and completion serialize with deltas.
    */
   async addIncomeDelta(args: AddIncomeDeltaArgs): Promise<void> {
     await this.pool.query(
-      `UPDATE epoch_validator_stats
+      `WITH scopes AS MATERIALIZED (
+         SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,w.prev_epoch_backfilled_at AS completed
+           FROM watched_validators_dynamic w JOIN epoch_validator_stats s ON s.vote_pubkey=w.vote_pubkey
+          WHERE s.epoch=$1 AND s.identity_pubkey=$2 ORDER BY w.vote_pubkey FOR UPDATE OF w
+       )
+       UPDATE epoch_validator_stats s
           SET block_fees_total_lamports          = block_fees_total_lamports          + $3::numeric,
               block_base_fees_total_lamports     = block_base_fees_total_lamports     + $4::numeric,
               block_priority_fees_total_lamports = block_priority_fees_total_lamports + $5::numeric,
               block_tips_total_lamports          = block_tips_total_lamports          + $6::numeric,
               compute_units_total                = compute_units_total                + $7::numeric,
-              fees_updated_at = NOW(),
-              tips_updated_at = NOW()
+              fees_updated_at = CASE WHEN EXISTS (SELECT 1 FROM scopes t
+                WHERE t.vote_pubkey=s.vote_pubkey AND t.epoch=$1 AND t.completed IS NULL) THEN NULL ELSE NOW() END,
+              tips_updated_at = CASE WHEN EXISTS (SELECT 1 FROM scopes t
+                WHERE t.vote_pubkey=s.vote_pubkey AND t.epoch=$1 AND t.completed IS NULL) THEN NULL ELSE NOW() END
         WHERE epoch = $1 AND identity_pubkey = $2`,
       [
         args.epoch,
@@ -955,9 +970,9 @@ export class StatsRepository {
     if (identities.length === 0) return 0;
     const { rowCount } = await this.pool.query(
       `WITH historical_scopes AS MATERIALIZED (
-         SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch
+         SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,w.prev_epoch_backfilled_at AS completed
            FROM watched_validators_dynamic w JOIN epoch_validator_stats s ON s.vote_pubkey=w.vote_pubkey
-          WHERE s.epoch=$1 AND s.identity_pubkey=ANY($2::text[]) AND $4::boolean
+          WHERE s.epoch=$1 AND s.identity_pubkey=ANY($2::text[])
           ORDER BY w.vote_pubkey FOR UPDATE OF w
        ), input AS (
          SELECT unnest($2::text[]) AS identity_pubkey
@@ -982,19 +997,23 @@ export class StatsRepository {
               block_priority_fees_total_lamports = fact.priority_fees,
               block_tips_total_lamports          = fact.tips,
               compute_units_total                = fact.compute_units,
-              fees_updated_at = NOW(),
-              tips_updated_at = NOW()
+              fees_updated_at = CASE WHEN EXISTS (SELECT 1 FROM historical_scopes h
+                WHERE h.vote_pubkey=evs.vote_pubkey AND h.epoch=$1 AND h.completed IS NULL) THEN NULL ELSE NOW() END,
+              tips_updated_at = CASE WHEN EXISTS (SELECT 1 FROM historical_scopes h
+                WHERE h.vote_pubkey=evs.vote_pubkey AND h.epoch=$1 AND h.completed IS NULL) THEN NULL ELSE NOW() END
          FROM fact
         WHERE evs.epoch = $1
           AND evs.identity_pubkey = fact.identity_pubkey
           AND NOT (evs.vote_pubkey=ANY($3::text[]))
-          AND NOT EXISTS (SELECT 1 FROM historical_scopes h WHERE h.vote_pubkey=evs.vote_pubkey AND h.epoch=$1)
+          AND (NOT $4::boolean OR NOT EXISTS (SELECT 1 FROM historical_scopes h WHERE h.vote_pubkey=evs.vote_pubkey AND h.epoch=$1))
           AND (
             evs.block_fees_total_lamports          <> fact.fees OR
             evs.block_base_fees_total_lamports     <> fact.base_fees OR
             evs.block_priority_fees_total_lamports <> fact.priority_fees OR
             evs.block_tips_total_lamports          <> fact.tips OR
             evs.compute_units_total                <> fact.compute_units OR
+            EXISTS (SELECT 1 FROM historical_scopes h
+              WHERE h.vote_pubkey=evs.vote_pubkey AND h.epoch=$1 AND h.completed IS NULL) OR
             -- A row whose income timestamps are still NULL has never
             -- been marked measured. Update it even when the totals
             -- already equal fact — e.g. a genuine zero-income epoch,
