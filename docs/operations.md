@@ -483,9 +483,10 @@ Already-unmeasured stats are not rewritten during repeated target resolution.
 Completed scopes and unrelated live rows retain their normal measurement behaviour.
 
 The production reconciler's missing-row/income-gap selection excludes only the
-exact vote/epoch whose pinned identity is NULL. A deliberately deferred hole
-therefore does not repeatedly select an old epoch and re-scan healthy watched
-votes. Another vote's real gap in that epoch, or that vote's gap in another
+exact pinned vote/epoch pairs, including non-NULL identity/income conflicts.
+The bounded fee ingester owns pending targets; conflicts need verified offline
+repair. Their deliberately unmeasured rows therefore do not repeatedly select
+old epochs and re-scan healthy watched votes. Another vote's real gap in that epoch, or that vote's gap in another
 epoch, still selects repair. Raw gap reporting continues to show missing data;
 the latest-closed settling pass and current/live ingestion keep their normal scope.
 
@@ -505,8 +506,8 @@ keep it pending instead of dropping income to satisfy the runtime check.
 Block-fact insertion and income-delta updates are separate existing writes.
 If a delta fails after the fact commits, a restarted worker skips that captured
 block but now keeps the target pending until the income ledger is reconciled.
-Clearing stale measurement exposes pending targets to gap detection but does not
-repair an undercount. No automatic historical income reset or reconstruction is performed.
+Raw gap detection still reports pending targets after clearing stale measurement;
+that does not repair an undercount. No automatic historical income reset or reconstruction is performed.
 
 Historical passes also rotate slots after the last attempt, including failed
 RPC attempts. A permanently unavailable first batch therefore cannot consume
@@ -521,7 +522,15 @@ A restart can retry early errors again, but captured facts remain durable;
 errors are never treated as completed blocks. Live polling keeps its newest
 slot priority and does not use the historical cursor.
 
-The deadline is not a hard tick-duration limit: RPC requests already in flight
+Historical leader-schedule lookup shares the remaining tick deadline and job
+cancellation through RPC queue/quota waits, retries and fallback. Cancellation
+does not start a fallback or permit late schedules to start historical writes.
+Epoch rollover closes the previous row and upserts its replacement in one
+transaction; cancellation or SQL failure before commit rolls both back. Readers
+see the previous open row until the replacement commits. Started DB statements
+and commit/rollback drain normally.
+
+The deadline is not a hard tick-duration limit: live RPC requests already in flight
 and database operations drain normally. Slow database queries, RPC timeouts,
 and the startup median repair can still extend a tick. The scheduler waits
 `FEE_INGEST_INTERVAL_MS` after tick completion before starting another tick.

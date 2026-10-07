@@ -446,13 +446,17 @@ export class SolanaRpcClient {
    *
    * Returns `null` when the requested epoch is not found (matches upstream).
    */
-  async getLeaderSchedule(slot?: number, identity?: string): Promise<RpcLeaderSchedule | null> {
+  async getLeaderSchedule(
+    slot?: number,
+    identity?: string,
+    signal?: AbortSignal,
+  ): Promise<RpcLeaderSchedule | null> {
     const slotParam: number | null = slot ?? null;
     const config: { identity?: string } = {};
     if (identity !== undefined) config.identity = identity;
     const hasConfig = Object.keys(config).length > 0;
     const params: unknown[] = hasConfig ? [slotParam, config] : [slotParam];
-    return this.enqueue<RpcLeaderSchedule | null>('getLeaderSchedule', params);
+    return this.enqueue<RpcLeaderSchedule | null>('getLeaderSchedule', params, signal);
   }
 
   async getBlockProduction(opts?: {

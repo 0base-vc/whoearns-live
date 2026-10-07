@@ -398,14 +398,33 @@ async function runPreviousEpochBackfill(args: {
       continue;
     }
 
-    const prevSchedule = await withRpcFallback({
-      method: 'getLeaderSchedule',
-      logger: deps.logger,
-      fallback: deps.rpcFallback,
-      context: { prevEpoch, firstSlot: prevEpochInfo.firstSlot, job: FEE_INGESTER_JOB_NAME },
-      runPrimary: () => deps.rpc.getLeaderSchedule(prevEpochInfo.firstSlot),
-      runFallback: (fallback) => fallback.getLeaderSchedule(prevEpochInfo.firstSlot),
-    });
+    // The epoch DB lookup can consume the last available time. Recheck before
+    // starting RPC, and share one remaining allowance across retries/fallback.
+    const remainingMs = deadlineMs - Date.now();
+    if (signal.aborted || remainingMs <= 0) break;
+    const controller = new AbortController();
+    const timeout = new DOMException('historical schedule budget exhausted', 'TimeoutError');
+    const timer = setTimeout(() => controller.abort(timeout), remainingMs);
+    const scheduleSignal = AbortSignal.any([signal, controller.signal]);
+    let prevSchedule: RpcLeaderSchedule | null;
+    try {
+      prevSchedule = await withRpcFallback({
+        method: 'getLeaderSchedule',
+        logger: deps.logger,
+        fallback: deps.rpcFallback,
+        signal: scheduleSignal,
+        context: { prevEpoch, firstSlot: prevEpochInfo.firstSlot, job: FEE_INGESTER_JOB_NAME },
+        runPrimary: () =>
+          deps.rpc.getLeaderSchedule(prevEpochInfo.firstSlot, undefined, scheduleSignal),
+        runFallback: (fallback) =>
+          fallback.getLeaderSchedule(prevEpochInfo.firstSlot, undefined, scheduleSignal),
+      });
+      scheduleSignal.throwIfAborted();
+      if (Date.now() >= deadlineMs) break;
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+    }
     if (prevSchedule === null) {
       deps.logger.warn({ prevEpoch }, 'fee-ingester: previous leader schedule unavailable');
       continue;

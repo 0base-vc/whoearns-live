@@ -46,10 +46,48 @@ export class EpochsRepository {
    * state shared across the API and worker processes.
    */
   async upsert(e: UpsertEpochArgs): Promise<void> {
+    await this.writeEpoch(this.pool, e);
+  }
+
+  /** Close and replace an open epoch together. Readers see either committed state.
+   * Cancellation before COMMIT rolls back both writes; started SQL always drains.
+   */
+  async rollover(previousEpoch: Epoch, e: UpsertEpochArgs, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const client = await this.pool.connect();
+    let discardClient = false;
+    try {
+      signal?.throwIfAborted();
+      await client.query('BEGIN');
+      signal?.throwIfAborted();
+      await client.query(
+        `UPDATE epochs
+            SET is_closed = TRUE,
+                closed_at = COALESCE(closed_at, $2)
+          WHERE epoch = $1`,
+        [previousEpoch, new Date()],
+      );
+      signal?.throwIfAborted();
+      await this.writeEpoch(client, e);
+      signal?.throwIfAborted();
+      await client.query('COMMIT');
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        discardClient = true;
+      }
+      throw err;
+    } finally {
+      client.release(discardClient);
+    }
+  }
+
+  private async writeEpoch(db: Pick<pg.Pool, 'query'>, e: UpsertEpochArgs): Promise<void> {
     const isClosed = e.isClosed ?? false;
     const closedAt = e.closedAt ?? null;
     const currentSlot = e.currentSlot ?? null;
-    await this.pool.query(
+    await db.query(
       `INSERT INTO epochs
          (epoch, first_slot, last_slot, slot_count, current_slot, is_closed, observed_at, closed_at)
        VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)

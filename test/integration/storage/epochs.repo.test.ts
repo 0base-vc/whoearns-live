@@ -201,4 +201,16 @@ describe('EpochsRepository', () => {
       expect(await repo.findByEpoch(501)).toBeNull();
     },
   );
+  it('publishes close and replacement together to concurrent readers after successful commit', async () => {
+    if (!fixture) throw new Error('fixture unavailable');
+    const result = await runEpochCancellationScenario(fixture.pool, 'success');
+    for (const read of [result.whileClosing, result.afterAbort]) {
+      expect(read.current).toMatchObject({ epoch: 500, isClosed: false });
+      expect(read.open).toEqual([{ epoch: '500' }]);
+    }
+    expect(result.result).toBe('resolved');
+    expect(result.after.current).toMatchObject({ epoch: 501, isClosed: false });
+    expect(result.after.open).toEqual([{ epoch: '501' }]);
+    expect((await repo.findByEpoch(500))?.isClosed).toBe(true);
+  });
 });

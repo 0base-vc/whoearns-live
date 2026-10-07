@@ -71,8 +71,7 @@ export function slotCountForEpoch(epoch: Epoch, schedule: RpcEpochSchedule): num
  *   1. Reads `getEpochInfo` + `getEpochSchedule` from RPC.
  *   2. Computes the (first_slot, last_slot, slot_count) triple for the
  *      current epoch.
- *   3. Upserts it into the repository.
- *   4. If the previously tracked epoch was still open, marks it closed.
+ *   3. Upserts it, atomically closing the previous open epoch on rollover.
  */
 export class EpochService {
   private readonly epochsRepo: EpochsRepository;
@@ -112,18 +111,21 @@ export class EpochService {
         { closingEpoch: previous.epoch, newEpoch: epoch },
         'epoch.service: closing previous epoch',
       );
-      await this.epochsRepo.markClosed(previous.epoch, new Date());
     }
 
-    signal?.throwIfAborted();
-    await this.epochsRepo.upsert({
+    const next = {
       epoch,
       firstSlot,
       lastSlot,
       slotCount,
       currentSlot,
       isClosed: false,
-    });
+    };
+    if (previous !== null && previous.epoch < epoch && !previous.isClosed) {
+      await this.epochsRepo.rollover(previous.epoch, next, signal);
+    } else {
+      await this.epochsRepo.upsert(next);
+    }
 
     signal?.throwIfAborted();
     this.logger.debug(

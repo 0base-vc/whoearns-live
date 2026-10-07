@@ -295,9 +295,10 @@ export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
       // a watched validator has a row but incomplete income (income-
       // ingest gap), and epochs where a watched validator has no row
       // at all (slot-ingest gap, or a recent watched-set addition).
-      // An unknown pinned identity deliberately leaves a hole. It must not
-      // repeatedly select that old epoch and re-scan otherwise healthy votes.
-      // Exclude only that vote/epoch, preserving other real repairable gaps.
+      // Bounded fee ingestion owns pinned targets and completion. Their
+      // partial rows stay unmeasured; identity/ledger conflicts need offline
+      // repair. Exclude exact pinned pairs from triggers, preserving other
+      // gaps. Latest-closed settling and guarded co-selected work still run.
       const [incomeGapEpochs, missingRowEpochs] = await Promise.all([
         deps.statsRepo.findEpochsWithIncomeGaps(
           windowEpochs,

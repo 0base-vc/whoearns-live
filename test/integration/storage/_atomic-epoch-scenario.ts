@@ -7,7 +7,7 @@ import type { SolanaRpcClient } from '../../../src/clients/solana-rpc.js';
 /** Pause after a real close SQL write and inspect it from another DB connection. */
 export async function runEpochCancellationScenario(
   pool: pg.Pool,
-  mode: 'cancel' | 'failure' = 'cancel',
+  mode: 'cancel' | 'failure' | 'success' = 'cancel',
 ) {
   const repo = new EpochsRepository(pool);
   await repo.upsert({
@@ -29,7 +29,7 @@ export async function runEpochCancellationScenario(
     (query: (...args: unknown[]) => Promise<unknown>) =>
     async (...args: unknown[]) => {
       if (mode === 'failure' && typeof args[0] === 'string' && /INSERT INTO epochs/.test(args[0]))
-        throw new Error('replacement insert failed');
+        await query('SELECT 1 / 0'); // Real SQL failure aborts the transaction.
       const result = await query(...args);
       if (typeof args[0] === 'string' && /UPDATE epochs\s+SET is_closed/.test(args[0])) {
         closed();

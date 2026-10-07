@@ -57,9 +57,14 @@ and this project follows [Semantic Versioning](https://semver.org/).
   measurement without changing income, including on deferred legacy rows;
   SQL locks preserve this invariant across concurrent claims and completion.
   Ordinary live and completed-scope measurement retain their existing behaviour.
-  Deferred unknown-identity holes no longer repeatedly select old epochs for
-  reconciler work on healthy votes. Repair-gap selection excludes only that
-  vote/epoch; other real gaps, raw missing-data reporting and live work remain.
+  Pinned holes, including non-NULL identity/income conflicts, no longer repeatedly
+  select old epochs for reconciler work on healthy votes. Repair-gap selection
+  excludes exact pinned vote/epoch pairs owned by bounded backfill; other real
+  gaps, raw missing-data reporting and live work remain.
+  Historical leader-schedule RPC shares the remaining tick deadline and shutdown
+  signal across retries and fallback; late responses cannot start historical work.
+  Epoch rollover closes and replaces the current row transactionally, rolling
+  both writes back on cancellation or SQL failure before commit.
 
 ### Added
 

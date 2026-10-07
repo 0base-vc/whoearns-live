@@ -1095,4 +1095,16 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
     expect(r.final.completed).toBe(true);
     expect(r.final.cohort).toContain('A');
   });
+  it('keeps a completed pinned identity conflict visible to raw reporting without triggering healthy-vote repairs', async () => {
+    if (!fixture) throw new Error('fixture unavailable');
+    const r = await runPinnedGapOwnerScenario(fixture.pool, 'completed');
+    expect(r.before.raw.income).toContain(499);
+    expect(r.before.repair.income).toEqual([]);
+    expect(r.cycles.map((x) => x.schedules)).toEqual([[501], [501], [501]]);
+    expect(r.afterReconciler.stats).toEqual(r.before.stats);
+    expect(r.firstOwner.repairs).toEqual([]);
+    expect(r.final.stats).toEqual(r.before.stats);
+    expect(r.final.raw.income).toContain(499);
+    expect(r.final.cohort).not.toContain('A');
+  });
 });

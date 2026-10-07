@@ -325,6 +325,25 @@ export class FakeEpochsRepo {
     });
   }
 
+  async rollover(
+    previousEpoch: Epoch,
+    e: Parameters<FakeEpochsRepo['upsert']>[0],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const before = new Map(this.rows);
+    try {
+      signal?.throwIfAborted();
+      await this.markClosed(previousEpoch, new Date());
+      signal?.throwIfAborted();
+      await this.upsert(e);
+      signal?.throwIfAborted();
+    } catch (err) {
+      this.rows.clear();
+      for (const [epoch, row] of before) this.rows.set(epoch, row);
+      throw err;
+    }
+  }
+
   async updateCurrentSlot(epoch: Epoch, currentSlot: Slot): Promise<void> {
     const existing = this.rows.get(epoch);
     if (existing) this.rows.set(epoch, { ...existing, currentSlot });
