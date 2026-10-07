@@ -176,6 +176,7 @@ describe('income-reconciler.job', () => {
     expect(deps.statsRepo.findEpochsWithIncomeGaps).toHaveBeenCalledWith(
       [962, 961, 960, 959, 958, 957, 956, 955, 954, 953],
       [VOTE_A],
+      false,
     );
     // Both the latest closed epoch (962, always) and the detected gap
     // epoch (959) are repaired — newest first, and nothing else.
@@ -209,6 +210,7 @@ describe('income-reconciler.job', () => {
     expect(deps.statsRepo.findEpochsWithMissingWatchedRows).toHaveBeenCalledWith(
       [962, 961, 960, 959, 958, 957, 956, 955, 954, 953],
       [VOTE_A],
+      false,
     );
     // The latest closed epoch (962) and the missing-row epoch (958)
     // are both repaired.

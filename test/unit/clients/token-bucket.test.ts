@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TokenBucket } from '../../../src/clients/token-bucket.js';
 
 /**
@@ -112,5 +112,25 @@ describe('TokenBucket', () => {
     // Total budget expended was 150 credits; bucket should now be below
     // the highwater mark but non-negative.
     expect(bucket.availableTokens()).toBeGreaterThanOrEqual(0);
+  });
+
+  it('cancels a quota waiter without consuming later credits or keeping its timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const bucket = new TokenBucket(30, 1);
+      await bucket.acquire(30);
+      const controller = new AbortController();
+      const pending = bucket.acquire(30, controller.signal);
+      const rejected = expect(pending).rejects.toThrow('cancelled quota wait');
+      controller.abort(new Error('cancelled quota wait'));
+      await rejected;
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(bucket.availableTokens()).toBe(30);
+      await bucket.acquire(30);
+      expect(bucket.availableTokens()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

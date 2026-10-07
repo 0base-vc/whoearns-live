@@ -36,7 +36,18 @@ export interface FeeServiceDeps {
   logger: Logger;
 }
 
-export interface IngestPendingBlocksArgs {
+/** Cooperative bounds: finish and persist the current RPC batch before yielding. */
+export interface IngestWorkBudget {
+  /** Absolute wall-clock deadline checked before starting each batch. */
+  deadlineMs?: number;
+  /** Maximum block attempts in this call; failures count toward the limit. */
+  maxBlocks?: number;
+  signal?: AbortSignal;
+  /** Historical passes start after the last attempted slot, then wrap to retry errors. */
+  startAfterSlot?: Slot;
+}
+
+export interface IngestPendingBlocksArgs extends IngestWorkBudget {
   epoch: Epoch;
   identities: IdentityPubkey[];
   leaderSchedule: RpcLeaderSchedule;
@@ -44,12 +55,18 @@ export interface IngestPendingBlocksArgs {
   lastSlot: Slot;
   safeUpperSlot: Slot;
   batchSize: number;
+  /** Live polling prioritises recent slots over a newly watched validator's backlog. */
+  newestFirst?: boolean;
 }
 
 export interface IngestPendingBlocksResult {
   processed: number;
   skipped: number;
   errors: number;
+  /** Missing facts (including errors) after a budgeted pass; omitted for legacy callers. */
+  remaining?: number;
+  /** Last slot attempted by a bounded pass, including failed RPC attempts. */
+  lastAttemptedSlot?: Slot;
 }
 
 /**
@@ -465,17 +482,33 @@ export class FeeService {
       this.processedBlocksRepo.getProcessedSlotsInRange(epoch, firstSlot, safeUpperSlot),
       this.processedBlocksRepo.getFactCapturedSlotsInRange(epoch, firstSlot, safeUpperSlot),
     ]);
-    const pending: Slot[] = [];
+    let pending: Slot[] = [];
     for (const slot of slotToIdentity.keys()) {
       if (!captured.has(slot)) pending.push(slot);
     }
-    pending.sort((a, b) => a - b);
+    pending.sort((a, b) => (args.newestFirst === true ? b - a : a - b));
+    // A bounded historical pass must move past errors as well as successes.
+    // Otherwise a persistently failing first batch consumes every future
+    // budget and later retrievable slots never get a turn. Live polling
+    // always keeps its newest-first ordering, independent of this cursor.
+    if (args.newestFirst !== true && args.startAfterSlot !== undefined) {
+      const afterSlot = args.startAfterSlot;
+      const nextIndex = pending.findIndex((slot) => slot > afterSlot);
+      if (nextIndex > 0) pending = pending.slice(nextIndex).concat(pending.slice(0, nextIndex));
+    }
 
     const effectiveBatchSize = Math.max(1, batchSize);
+    const attemptLimit = Math.min(pending.length, args.maxBlocks ?? pending.length);
+    const budgeted =
+      args.deadlineMs !== undefined ||
+      args.maxBlocks !== undefined ||
+      args.signal !== undefined ||
+      args.startAfterSlot !== undefined;
 
     let processed = 0;
     let skipped = 0;
     let errors = 0;
+    let lastAttemptedSlot: Slot | undefined;
 
     // pending may be empty — the tick still needs to fall through to the
     // median recompute below so previously-ingested epochs get their
@@ -483,8 +516,14 @@ export class FeeService {
     // out early here, meaning pods that started up already-caught-up
     // never recomputed medians, leaving `median_fee_lamports` null
     // across the board.)
-    for (let i = 0; i < pending.length; i += effectiveBatchSize) {
-      const chunk = pending.slice(i, i + effectiveBatchSize);
+    for (let i = 0; i < attemptLimit; i += effectiveBatchSize) {
+      if (
+        args.signal?.aborted === true ||
+        (args.deadlineMs !== undefined && Date.now() >= args.deadlineMs)
+      ) {
+        break;
+      }
+      const chunk = pending.slice(i, Math.min(i + effectiveBatchSize, attemptLimit));
       const results = await Promise.all(
         chunk.map(async (slot) => {
           const identity = slotToIdentity.get(slot);
@@ -677,10 +716,9 @@ export class FeeService {
         const insertRows = rows.filter((row) => !already.has(row.slot));
         const repairRows = rows.filter((row) => already.has(row.slot));
 
-        // `insertBatch` returns the slots it actually inserted. Apply
-        // deltas only for those; a row that lost a race with a concurrent
-        // writer (or with our own earlier run after a crash) must NOT
-        // have its fee / tip added again.
+        // Publish exact sums for identities whose facts were inserted or
+        // repaired. Repaired zero totals also publish, so old incomplete values
+        // can be corrected; concurrent losers rely on the successful writer.
         const insertedSlots = await this.processedBlocksRepo.insertBatch(insertRows);
         const repairedSlots = await this.processedBlocksRepo.updateMissingFactsBatch(repairRows);
         await this.processedBlocksRepo.markFetchResolved(
@@ -709,7 +747,7 @@ export class FeeService {
             computeUnits: bigint;
           }
         >();
-        for (const slot of insertedSlots) {
+        for (const slot of new Set([...insertedSlots, ...repairedSlots])) {
           const entry = deltaBySlot.get(slot);
           if (!entry) continue;
           // Skip a slot only when it moves NOTHING. Compute units are
@@ -717,6 +755,7 @@ export class FeeService {
           // consumed CU while the four fee deltas round to zero, and
           // dropping it here would leave `compute_units_total` short.
           if (
+            !repairedSlots.has(slot) &&
             entry.leaderFees === 0n &&
             entry.baseFees === 0n &&
             entry.priorityFees === 0n &&
@@ -749,9 +788,11 @@ export class FeeService {
             priorityFeeDeltaLamports: delta.priorityFees,
             tipDeltaLamports: delta.tips,
             computeUnitsDelta: delta.computeUnits,
+            fromCapturedFacts: true,
           });
         }
       }
+      lastAttemptedSlot = chunk.at(-1);
     }
 
     // Recompute per-validator medians on EVERY tick, not just when new
@@ -763,7 +804,9 @@ export class FeeService {
     // five medians in a single scan — still cheap even for thousands of
     // blocks per identity. No-op on empty identities or when no produced
     // blocks match.
-    const medianRows = await this.statsRepo.recomputeMedians(epoch, identities);
+    const medianRows = args.signal?.aborted
+      ? 0
+      : await this.statsRepo.recomputeMedians(epoch, identities);
 
     this.logger.info(
       {
@@ -776,7 +819,13 @@ export class FeeService {
       },
       'fee.service: ingest complete',
     );
-    return { processed, skipped, errors };
+    return {
+      processed,
+      skipped,
+      errors,
+      ...(budgeted ? { remaining: pending.length - processed - skipped } : {}),
+      ...(budgeted && lastAttemptedSlot !== undefined ? { lastAttemptedSlot } : {}),
+    };
   }
 
   /**
@@ -864,17 +913,18 @@ export class FeeService {
         priorityFeeDeltaLamports: income.priorityFees,
         tipDeltaLamports: income.mevTips,
         computeUnitsDelta: slotFacts.computeUnitsConsumed,
+        fromCapturedFacts: true,
       });
     }
     return true;
   }
 
   /**
-   * One-shot previous-epoch backfill for a newly-tracked validator.
+   * Resumable previous-epoch backfill for a newly-tracked validator.
    *
-   * Called by the fee-ingester once per dynamic validator (the
-   * `watched_validators_dynamic.prev_epoch_backfilled_at` flag gates
-   * re-runs). Scope per the product spec: JUST the immediately-
+   * Called by the fee-ingester until each dynamic validator is complete;
+   * `watched_validators_dynamic.prev_epoch_backfilled_at` then gates
+   * further passes. Scope per the product spec: JUST the immediately-
    * previous closed epoch, not the full history — a new user adding
    * their validator sees last-epoch income immediately, and future
    * epochs flow in naturally through the regular ingest path.
@@ -889,27 +939,35 @@ export class FeeService {
    *      array — reuses the same fee-extraction + median recompute the
    *      live ingest already exercises.
    *   3. Re-read produced/skipped counts from `processed_blocks` and update
-   *      the stats row. Any RPC errors remain missing facts and are retried
-   *      by the next reconciliation tick.
+   *      the stats row. RPC errors remain missing facts and get another
+   *      backfill attempt when the historical cursor wraps.
    *
    * Caller marks the backfill done via `watchedDynamicRepo.markBackfilled`
-   * on success; on failure the flag stays null so the next tick retries.
+   * only when no errors or remaining facts exist. Bounded passes persist
+   * each batch; the next call subtracts captured facts and resumes safely.
    */
-  async backfillPreviousEpoch(args: {
-    epoch: Epoch;
-    vote: VotePubkey;
-    identity: IdentityPubkey;
-    firstSlot: Slot;
-    lastSlot: Slot;
-    leaderSchedule: RpcLeaderSchedule;
-    batchSize: number;
-  }): Promise<{
+  async backfillPreviousEpoch(
+    args: {
+      epoch: Epoch;
+      vote: VotePubkey;
+      identity: IdentityPubkey;
+      firstSlot: Slot;
+      lastSlot: Slot;
+      leaderSchedule: RpcLeaderSchedule;
+      batchSize: number;
+      requireStatsIdentityMatch?: boolean;
+      respectHistoricalScope?: boolean;
+    } & IngestWorkBudget,
+  ): Promise<{
     slotsAssigned: number;
     slotsProduced: number;
     slotsSkipped: number;
     processed: number;
     skipped: number;
     errors: number;
+    remaining?: number;
+    lastAttemptedSlot?: Slot;
+    deferred?: boolean;
   }> {
     const slotsAssigned = args.leaderSchedule[args.identity]?.length ?? 0;
     const beforeCounts = await this.processedBlocksRepo.countStatusesForIdentityInRange(
@@ -920,14 +978,32 @@ export class FeeService {
     );
 
     // Step 1 — materialise the stats row so subsequent income UPDATEs hit it.
-    await this.statsRepo.upsertSlotStats({
-      epoch: args.epoch,
-      votePubkey: args.vote,
-      identityPubkey: args.identity,
-      slotsAssigned,
-      slotsProduced: beforeCounts.produced,
-      slotsSkipped: beforeCounts.skipped,
-    });
+    const writeCounters = (counters: { produced: number; skipped: number }) => {
+      const stats = {
+        epoch: args.epoch,
+        votePubkey: args.vote,
+        identityPubkey: args.identity,
+        slotsAssigned,
+        slotsProduced: counters.produced,
+        slotsSkipped: counters.skipped,
+      };
+      return args.requireStatsIdentityMatch === true
+        ? this.statsRepo.upsertSlotStatsIfIdentityMatches(stats)
+        : args.respectHistoricalScope === true
+          ? this.statsRepo.upsertHistoricalSlotStats(stats)
+          : this.statsRepo.upsertSlotStats(stats).then(() => true);
+    };
+    if (!(await writeCounters(beforeCounts))) {
+      return {
+        slotsAssigned,
+        slotsProduced: beforeCounts.produced,
+        slotsSkipped: beforeCounts.skipped,
+        processed: 0,
+        skipped: 0,
+        errors: 0,
+        deferred: true,
+      };
+    }
 
     // Step 2 — attribute fees block-by-block. Since the epoch is fully
     // closed, `safeUpperSlot` is just `lastSlot` — no finality buffer
@@ -940,6 +1016,10 @@ export class FeeService {
       lastSlot: args.lastSlot,
       safeUpperSlot: args.lastSlot,
       batchSize: args.batchSize,
+      ...(args.deadlineMs !== undefined ? { deadlineMs: args.deadlineMs } : {}),
+      ...(args.maxBlocks !== undefined ? { maxBlocks: args.maxBlocks } : {}),
+      ...(args.signal !== undefined ? { signal: args.signal } : {}),
+      ...(args.startAfterSlot !== undefined ? { startAfterSlot: args.startAfterSlot } : {}),
     });
 
     // Step 3 — publish local-fact counters after any newly inserted rows.
@@ -949,14 +1029,7 @@ export class FeeService {
       args.firstSlot,
       args.lastSlot,
     );
-    await this.statsRepo.upsertSlotStats({
-      epoch: args.epoch,
-      votePubkey: args.vote,
-      identityPubkey: args.identity,
-      slotsAssigned,
-      slotsProduced: afterCounts.produced,
-      slotsSkipped: afterCounts.skipped,
-    });
+    const identityStillMatches = await writeCounters(afterCounts);
 
     this.logger.info(
       {
@@ -968,13 +1041,14 @@ export class FeeService {
         slotsSkipped: afterCounts.skipped,
         ...result,
       },
-      'fee.service: previous-epoch backfill complete',
+      'fee.service: previous-epoch backfill pass complete',
     );
     return {
       slotsAssigned,
       slotsProduced: afterCounts.produced,
       slotsSkipped: afterCounts.skipped,
       ...result,
+      ...(!identityStillMatches ? { deferred: true } : {}),
     };
   }
 }

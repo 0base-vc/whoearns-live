@@ -19,6 +19,7 @@ import { FakeProcessedBlocksRepo, FakeStatsRepo, makeProcessedBlock } from './_f
 import {
   IDENTITY_A,
   IDENTITY_B,
+  VOTE_A,
   blockWithFeesFixture,
   blockWithoutFeesFixture,
 } from '../../fixtures/rpc-fixtures.js';
@@ -313,6 +314,173 @@ describe('FeeService.ingestPendingBlocks', () => {
     [IDENTITY_B]: [4, 5],
   };
 
+  it('yields a 2,000-slot cold backfill at the deadline and resumes from persisted facts', async () => {
+    const stats = new FakeStatsRepo();
+    const blocks = new FakeProcessedBlocksRepo();
+    let clock = 0;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const rpc = makeRpc(async () => {
+      // Deterministic slow RPC: each completed request advances the clock.
+      clock += 50;
+      return null;
+    });
+    const service = makeService(rpc, stats, blocks);
+    const args = {
+      epoch: EPOCH,
+      vote: VOTE_A,
+      identity: IDENTITY_A,
+      leaderSchedule: { [IDENTITY_A]: Array.from({ length: 2_000 }, (_, i) => i) },
+      firstSlot: FIRST_SLOT,
+      lastSlot: FIRST_SLOT + 1_999,
+      batchSize: 2,
+      deadlineMs: 100,
+    };
+    try {
+      const first = await service.backfillPreviousEpoch(args);
+      expect(rpc.getBlock).toHaveBeenCalledTimes(2);
+      expect(blocks.rows.size).toBe(2);
+      expect(first).toMatchObject({ skipped: 2, remaining: 1_998 });
+
+      const second = await service.backfillPreviousEpoch({ ...args, deadlineMs: 200 });
+      expect(rpc.getBlock).toHaveBeenCalledTimes(4);
+      expect(blocks.rows.size).toBe(4);
+      expect(second).toMatchObject({ skipped: 2, remaining: 1_996 });
+      const slots = vi.mocked(rpc.getBlock).mock.calls.map(([slot]) => slot);
+      expect(new Set(slots).size).toBe(4);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('caps attempts across partial batches and completes resumed income without duplicate deltas', async () => {
+    const stats = new FakeStatsRepo();
+    const blocks = new FakeProcessedBlocksRepo();
+    const rpc = makeRpc(async () => ({
+      ...blockWithFeesFixture,
+      rewards: [{ pubkey: IDENTITY_A, lamports: 100, postBalance: 0, rewardType: 'Fee' }],
+    }));
+    const args = {
+      epoch: EPOCH,
+      vote: VOTE_A,
+      identity: IDENTITY_A,
+      leaderSchedule,
+      firstSlot: FIRST_SLOT,
+      lastSlot: FIRST_SLOT + 5,
+      batchSize: 2,
+      maxBlocks: 3,
+    };
+    const first = await makeService(rpc, stats, blocks).backfillPreviousEpoch(args);
+    expect(first).toMatchObject({ processed: 3, remaining: 1 });
+    // A new service instance mirrors a restart; facts, not process memory, drive resumption.
+    const second = await makeService(rpc, stats, blocks).backfillPreviousEpoch(args);
+    expect(second).toMatchObject({ processed: 1, remaining: 0, slotsProduced: 4 });
+    expect(rpc.getBlock).toHaveBeenCalledTimes(4);
+    expect(
+      stats.incomeDeltaCalls.reduce((sum, call) => sum + call.leaderFeeDeltaLamports, 0n),
+    ).toBe(400n);
+  });
+
+  it('counts failed attempts toward the work cap and keeps those facts pending for retry', async () => {
+    const stats = new FakeStatsRepo();
+    const blocks = new FakeProcessedBlocksRepo();
+    const getBlock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('RPC unavailable'))
+      .mockResolvedValue(null);
+    const service = makeService({ getBlock }, stats, blocks);
+    const args = {
+      epoch: EPOCH,
+      vote: VOTE_A,
+      identity: IDENTITY_A,
+      leaderSchedule,
+      firstSlot: FIRST_SLOT,
+      lastSlot: FIRST_SLOT + 5,
+      batchSize: 2,
+      maxBlocks: 2,
+    };
+    expect(await service.backfillPreviousEpoch(args)).toMatchObject({
+      errors: 1,
+      skipped: 1,
+      remaining: 3,
+    });
+    expect(getBlock).toHaveBeenCalledTimes(2);
+    expect(blocks.fetchErrors.size).toBe(1);
+    expect(await service.backfillPreviousEpoch(args)).toMatchObject({
+      errors: 0,
+      skipped: 2,
+      remaining: 1,
+    });
+    expect(blocks.fetchErrors.size).toBe(0);
+  });
+
+  it('drains and persists an in-flight batch on abort without starting another one', async () => {
+    const stats = new FakeStatsRepo();
+    const blocks = new FakeProcessedBlocksRepo();
+    const controller = new AbortController();
+    const rpc = makeRpc(async () => {
+      controller.abort();
+      return null;
+    });
+    const recomputeMedians = vi.spyOn(stats, 'recomputeMedians');
+    const result = await makeService(rpc, stats, blocks).ingestPendingBlocks({
+      epoch: EPOCH,
+      identities: [IDENTITY_A],
+      leaderSchedule,
+      firstSlot: FIRST_SLOT,
+      lastSlot: FIRST_SLOT + 5,
+      safeUpperSlot: FIRST_SLOT + 5,
+      batchSize: 2,
+      signal: controller.signal,
+    });
+    expect(result).toMatchObject({ skipped: 2, remaining: 2 });
+    expect(rpc.getBlock).toHaveBeenCalledTimes(2);
+    expect(blocks.rows.size).toBe(2);
+    expect(recomputeMedians).not.toHaveBeenCalled();
+  });
+
+  it('starts no RPC work when a pass has already exhausted its deadline', async () => {
+    const stats = new FakeStatsRepo();
+    const blocks = new FakeProcessedBlocksRepo();
+    const rpc = makeRpc(async () => null);
+    const result = await makeService(rpc, stats, blocks).ingestPendingBlocks({
+      epoch: EPOCH,
+      identities: [IDENTITY_A],
+      leaderSchedule,
+      firstSlot: FIRST_SLOT,
+      lastSlot: FIRST_SLOT + 5,
+      safeUpperSlot: FIRST_SLOT + 5,
+      batchSize: 2,
+      deadlineMs: 0,
+    });
+    expect(result).toMatchObject({ processed: 0, skipped: 0, errors: 0, remaining: 4 });
+    expect(rpc.getBlock).not.toHaveBeenCalled();
+  });
+
+  it('preserves newest live slot priority even if a historical attempt cursor is supplied', async () => {
+    const rpc = makeRpc(async () => null);
+    const result = await makeService(
+      rpc,
+      new FakeStatsRepo(),
+      new FakeProcessedBlocksRepo(),
+    ).ingestPendingBlocks({
+      epoch: EPOCH,
+      identities: [IDENTITY_A],
+      leaderSchedule,
+      firstSlot: FIRST_SLOT,
+      lastSlot: FIRST_SLOT + 5,
+      safeUpperSlot: FIRST_SLOT + 5,
+      batchSize: 2,
+      maxBlocks: 2,
+      newestFirst: true,
+      startAfterSlot: FIRST_SLOT + 2,
+    });
+    expect(vi.mocked(rpc.getBlock).mock.calls.map(([slot]) => slot)).toEqual([
+      FIRST_SLOT + 3,
+      FIRST_SLOT + 2,
+    ]);
+    expect(result).toMatchObject({ skipped: 2, remaining: 2, lastAttemptedSlot: FIRST_SLOT + 2 });
+  });
+
   it('returns zero counts when no identities are watched', async () => {
     const stats = new FakeStatsRepo();
     const blocks = new FakeProcessedBlocksRepo();
@@ -512,9 +680,18 @@ describe('FeeService.ingestPendingBlocks', () => {
     expect(repaired!.factsCapturedAt).not.toBeNull();
     expect(repaired!.feesLamports).toBe(12_345_678n);
     expect(repaired!.blockTime).toEqual(new Date(1_734_000_000 * 1000));
-    // The row already existed, so repairing facts must not apply a new
-    // aggregate delta. The closed-epoch reconciler rebuilds totals from facts.
-    expect(stats.incomeDeltaCalls).toHaveLength(0);
+    // Repair publishes exact captured-fact sums; it never adds old+new totals.
+    expect(stats.incomeDeltaCalls).toHaveLength(1);
+    expect(stats.incomeDeltaCalls[0]).toMatchObject({
+      epoch: EPOCH,
+      identityPubkey: IDENTITY_A,
+      fromCapturedFacts: true,
+      leaderFeeDeltaLamports: repaired!.feesLamports,
+      baseFeeDeltaLamports: repaired!.baseFeesLamports,
+      priorityFeeDeltaLamports: repaired!.priorityFeesLamports,
+      tipDeltaLamports: repaired!.tipsLamports,
+      computeUnitsDelta: repaired!.computeUnitsConsumed,
+    });
   });
 
   it('continues after a per-block error and counts it as an error', async () => {

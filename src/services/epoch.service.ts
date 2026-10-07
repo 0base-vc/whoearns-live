@@ -1,3 +1,4 @@
+import { abortable } from '../core/cancellation.js';
 import type { SolanaRpcClient } from '../clients/solana-rpc.js';
 import type { RpcEpochSchedule } from '../clients/types.js';
 import type { Logger } from '../core/logger.js';
@@ -70,8 +71,7 @@ export function slotCountForEpoch(epoch: Epoch, schedule: RpcEpochSchedule): num
  *   1. Reads `getEpochInfo` + `getEpochSchedule` from RPC.
  *   2. Computes the (first_slot, last_slot, slot_count) triple for the
  *      current epoch.
- *   3. Upserts it into the repository.
- *   4. If the previously tracked epoch was still open, marks it closed.
+ *   3. Upserts it, atomically closing the previous open epoch on rollover.
  */
 export class EpochService {
   private readonly epochsRepo: EpochsRepository;
@@ -84,11 +84,13 @@ export class EpochService {
     this.logger = deps.logger;
   }
 
-  async syncCurrent(): Promise<EpochInfo> {
-    const [info, schedule] = await Promise.all([
-      this.rpc.getEpochInfo('confirmed'),
-      this.rpc.getEpochSchedule(),
-    ]);
+  async syncCurrent(signal?: AbortSignal): Promise<EpochInfo> {
+    signal?.throwIfAborted();
+    const [info, schedule] = await abortable(
+      Promise.all([this.rpc.getEpochInfo('confirmed', signal), this.rpc.getEpochSchedule(signal)]),
+      signal,
+    );
+    signal?.throwIfAborted();
 
     const epoch = info.epoch;
     const firstSlot = firstSlotOfEpoch(epoch, schedule);
@@ -99,27 +101,30 @@ export class EpochService {
     // without synchronous RPC in a handler.
     const currentSlot = info.absoluteSlot;
 
-    // Before upserting the current epoch, close out any previous epoch that
-    // is still flagged open. We detect transitions by looking at the latest
-    // row — if it's a lower epoch and still open, it needs closing.
+    // This read is only for logging. Persistence rechecks the latest committed
+    // epoch under its transaction lock, including same-epoch/cold-start calls.
     const previous = await this.epochsRepo.findCurrent();
+    signal?.throwIfAborted();
     if (previous !== null && previous.epoch < epoch && !previous.isClosed) {
       this.logger.info(
         { closingEpoch: previous.epoch, newEpoch: epoch },
         'epoch.service: closing previous epoch',
       );
-      await this.epochsRepo.markClosed(previous.epoch, new Date());
     }
 
-    await this.epochsRepo.upsert({
+    const next = {
       epoch,
       firstSlot,
       lastSlot,
       slotCount,
       currentSlot,
       isClosed: false,
-    });
+    };
+    if (!(await this.epochsRepo.observeCurrent(next, signal))) {
+      throw new Error(`epoch.service: stale epoch observation ${epoch}`);
+    }
 
+    signal?.throwIfAborted();
     this.logger.debug(
       { epoch, firstSlot, lastSlot, slotCount, currentSlot },
       'epoch.service: synced current epoch',

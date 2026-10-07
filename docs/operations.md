@@ -388,3 +388,171 @@ anyway).
    few minutes.
 5. If something looks wrong, `helm rollback whoearns-live <prev-revision>`
    before more data lands.
+
+## Fee polling and dynamic backfill progress
+
+The `fee-ingester` gives block fetching a cooperative deadline of
+`FEE_INGEST_INTERVAL_MS` from tick start. It drains and persists an in-flight
+RPC batch before yielding, then resumes from missing block facts on the next
+tick. Live polling fetches the most recent missing slots first, so searching
+for a cold validator does not put every old current-epoch slot ahead of newly
+finalised slots.
+
+If the live pass leaves time, the job attempts at most
+`FEE_INGEST_BATCH_SIZE` blocks for one pending dynamic validator's previous
+epoch. It rotates pending votes even after RPC errors. The
+`prev_epoch_backfilled_at` marker is set only after all facts are captured
+without errors; partial backfills deliberately take multiple ticks. Previously
+captured blocks are skipped on resumption, including after a worker restart.
+Migration `0047_dynamic_backfill_target_epoch.sql` adds the nullable
+`prev_epoch_backfill_epoch` column. The worker atomically chooses each
+pending validator's target on its first resolved pending-set observation,
+after a successful authoritative `EpochService.syncCurrent()`, before live
+block RPC work or a leftover-budget check, then keeps that original epoch
+through rollover and restart. A stale open database epoch after a watcher
+outage is insufficient. Sync failure leaves new rows unclaimed while existing
+scopes and cached live ingestion continue. One read-only candidate snapshot precedes the chain sample, including on an
+empty epoch cache. It records vote, `xmin` and `ctid`; bulk SQL claims only the
+unchanged observed versions. A new registration after the sample, or a row
+changed/deleted/re-registered while RPC runs, waits for the next fresh sample.
+Even ordinary lookup updates conservatively postpone that claim. Already-pinned
+epochs need no extra epoch RPC. Their addresses update only when the mapping changes.
+The candidate snapshot uses one query. Bulk resolution uses a transaction with
+fixed query overhead and an extra facts refresh only for address transitions,
+with no per-validator claim loop.
+No watched-row lock spans RPC. With no cached epoch, the initial sync is reused.
+A NULL proposal or omitted candidate cohort never claims new rows.
+
+The claim preflight has its own caller-owned RPC allowance: 10% of the ingest
+interval, capped at one second and floored at one millisecond. It forwards a
+cancellation signal through epoch reads, the shared RPC queue, quota waits,
+response reads and retry delays; ordinary timeout/retry policy is unchanged.
+Early failure also cancels the companion epoch request. Late RPC settlements
+are consumed without epoch writes or claims. After preflight and target
+resolution, a new `FEE_INGEST_INTERVAL_MS` deadline governs live block work
+and the remaining historical batch. An epoch RPC outage therefore cannot
+repeatedly consume the live allowance. Already-started database statements
+drain normally, so this remains cooperative rather than a hard tick-duration
+guarantee. Registration queues a pending row; selection waits for its own
+successful fresh observation.
+Migration
+`0048_dynamic_backfill_target_identity.sql` adds the nullable
+`prev_epoch_backfill_identity` column. The worker records the current validator
+identity used for automatic collection. This is the owner's accepted product
+assumption; it is not proof of the vote's full historical identity. Fresh and
+legacy epoch-only targets automatically adopt the current mapping, without a
+manual provenance prerequisite. Missing validator mappings remain pending.
+
+An observed identity change requeues that validator's original pinned epoch
+using the new address, including after an earlier collection completed. Its
+attempt cursor starts over. Only the affected derived `(epoch, vote)` row
+switches to the new address and its captured facts; other epochs and all raw
+blocks remain intact. Old-address income is not carried into new-address totals.
+The row records the collection address, so it does not claim a combined history
+for an actual rotation. A schedule observed empty under the accepted assumption
+can complete as measured zero and stays outside the positive-slot economic cohort.
+
+Migration `0049_dynamic_backfill_scope_generation.sql` adds a sequence-backed
+collection generation. Lookup polling and repeat registration preserve it; epoch
+or address changes, completed-to-pending transitions and deletion/re-registration
+allocate a new generation. Existing scopes, completion and income remain intact.
+
+Completion validates epoch, address, the collection generation observed by that tick,
+all assigned produced/skipped facts and all five income totals. A delayed old
+collection cannot stamp a replacement, including an address that changes back.
+Current-address conflicts with an existing derived ledger still defer for
+reconciliation instead of silently clearing income. The runtime does not infer
+provenance from generic stats, and does not require it for ordinary collection.
+
+Captured-block writers publish exact identity sums under watched/stats locks
+using a fresh facts snapshot, instead of adding delayed deltas to totals already
+reconstructed during an address change. Repeated/concurrent publication is
+idempotent. Publication and target transitions take the same transaction-scoped
+advisory lock per epoch before watched/stats locks. Enrollment includes completed
+stored targets because a mapping may change before the transition statement.
+Claims and identity transitions act only on enrolled epochs; a concurrently
+introduced epoch requiring a transition waits for the next resolution. Unchanged
+stored addresses remain readable by competing observers. Locks remain ordered
+by epoch.
+A transition refreshes its
+new-address facts in a separate statement after row locks resolve; facts
+committed during that wait are visible. Publications arriving during a transition
+wait, then update the newly selected address under a fresh snapshot. Repaired
+incomplete facts also trigger exact publication, including repaired zero totals.
+Fact capture and publication remain separate writes; publication
+failure leaves historical measurement pending until the ledger is reconciled.
+
+Pending historical scopes keep both fee/tip measurement timestamps NULL even
+when captured batches have nonzero income or CU. Captured income is published;
+only guarded completion marks that scope measured. Resolving or claiming a
+pending scope also clears pre-existing measurement timestamps, including for
+same-address ledger conflicts, without altering counters or income.
+Claims, deltas and completion serialize on watched rows before locking stats;
+a claim waiting for an earlier delta reads the locked stats' latest timestamps.
+Already-unmeasured stats are not rewritten during repeated target resolution.
+Completed scopes and unrelated live rows retain their normal measurement behaviour.
+
+The production reconciler's missing-row/income-gap selection excludes only the
+exact pinned vote/epoch pairs, including non-NULL identity/income conflicts.
+The bounded fee ingester owns pending targets; conflicts need verified offline
+repair. Their deliberately unmeasured rows therefore do not repeatedly select
+old epochs and re-scan healthy watched votes. Another vote's real gap in that epoch, or that vote's gap in another
+epoch, still selects repair. Raw gap reporting continues to show missing data;
+the latest-closed settling pass and current/live ingestion keep their normal scope.
+
+The ordinary income reconciler follows the stored historical scope for its
+target epoch, including after completion. Slot writes lock and validate that
+scope in SQL, so a claim or rotation between lookup and write cannot relabel
+the aggregate. Both historical paths defer before fetching more blocks when
+the existing aggregate identity or income does not match the captured facts.
+The runtime reconciler does not replace pinned-target totals with a
+single-identity rebuild; that could erase legitimate rotation income. A
+mismatch is a reason for verified offline reconciliation, not proof that the
+existing income is invalid and not permission to clear it.
+If legitimate income from multiple identities cannot be represented by that
+single target scope, resolve the ledger and completion decision offline;
+keep it pending instead of dropping income to satisfy the runtime check.
+
+Block-fact insertion and income-delta updates are separate existing writes.
+If a delta fails after the fact commits, a restarted worker skips that captured
+block but now keeps the target pending until the income ledger is reconciled.
+Raw gap detection still reports pending targets after clearing stale measurement;
+that does not itself repair an undercount. Later captured-fact publication can
+reconcile exact address sums; completion still validates those sums. Same-address ledger conflicts are not automatically reset. Address changes
+reconstruct only the new address collection from its facts.
+
+Historical passes also rotate slots after the last attempt, including failed
+RPC attempts. A permanently unavailable first batch therefore cannot consume
+every later tick: later missing slots are attempted before wrapping back to
+the errors. The attempt cursor is local to the running fee job, isolated by
+vote, previous epoch and identity, and removed on completion or removal from
+the pending set. Current-epoch rollover preserves the original backfill
+target and cursor. An observed current identity change starts a new address collection and cursor;
+it does not complete the unfinished old-address collection.
+A restart can retry early errors again, but captured facts remain durable;
+errors are never treated as completed blocks. Live polling keeps its newest
+slot priority and does not use the historical cursor.
+
+Historical leader-schedule lookup shares the remaining tick deadline and job
+cancellation through RPC queue/quota waits, retries and fallback. Cancellation
+does not start a fallback or permit late schedules to start historical writes.
+Current observations serialize under a transaction-scoped advisory lock and
+recheck the highest committed epoch after the lock wait. They close every lower
+open row and persist the observation together. A delayed lower RPC epoch is
+stored closed and rejected, so it cannot authorize a fresh backfill target.
+Cancellation or SQL failure before commit rolls all writes back; concurrent
+readers see the prior state until commit. Started DB statements and
+commit/rollback drain normally, including lock waits.
+
+The deadline is not a hard tick-duration limit: live RPC requests already in flight
+and database operations drain normally. Slow database queries, RPC timeouts,
+and the startup median repair can still extend a tick. The scheduler waits
+`FEE_INGEST_INTERVAL_MS` after tick completion before starting another tick.
+Use `jobs_tick_duration_seconds{job="fee-ingester"}`, tick start/end logs,
+and `remaining` in bounded ingest results to separate these delays from a
+cold backlog. A deadline-exhausted live pass postpones historical work until
+there is spare capacity. No environment-variable changes are needed.
+Migrations 0047, 0048 and 0049 add the durable target and generation columns; the all-in-one
+startup runs migrations before starting the API and worker. Apply 0047, then 0048, then 0049
+through the ordered migration runner before running the updated worker. This change does not run a
+production migration or require manual edits to block facts.

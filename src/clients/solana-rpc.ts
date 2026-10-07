@@ -1,4 +1,5 @@
 import pLimit, { type LimitFunction } from 'p-limit';
+import { abortable, cancellableSleep as sleep } from '../core/cancellation.js';
 import { RateLimitedError, UpstreamError } from '../core/errors.js';
 import type { Logger } from '../core/logger.js';
 import { type TokenBucket } from './token-bucket.js';
@@ -153,10 +154,6 @@ export function parseRetryAfterMs(header: string | null): number | undefined {
   return undefined;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /**
  * JSON-RPC client for a Solana node.
  *
@@ -236,6 +233,7 @@ export class SolanaRpcClient {
     const creditCost = this.costFor(method);
 
     while (true) {
+      callerSignal?.throwIfAborted();
       // Cost-aware rate limit gate. No-op when `rateLimiter` is
       // undefined, preserving prior concurrency-only behaviour. When
       // enabled, blocks this request until the provider's per-second
@@ -244,9 +242,10 @@ export class SolanaRpcClient {
       // wait is typically <100ms while 429 backoff starts at 100ms
       // and doubles.
       if (this.rateLimiter !== undefined) {
-        await this.rateLimiter.acquire(creditCost);
+        await this.rateLimiter.acquire(creditCost, callerSignal);
       }
 
+      callerSignal?.throwIfAborted();
       // Per-attempt timeout signal. When the caller passed its own
       // signal (OPS-L2), combine the two so EITHER the timeout firing
       // OR the caller aborting (SIGTERM-driven shutdown) tears down
@@ -258,13 +257,17 @@ export class SolanaRpcClient {
 
       let response: Response;
       try {
-        response = await fetch(this.url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', accept: 'application/json' },
-          body: payload,
-          signal: attemptSignal,
-        });
+        response = await abortable(
+          fetch(this.url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: payload,
+            signal: attemptSignal,
+          }),
+          callerSignal,
+        );
       } catch (err) {
+        callerSignal?.throwIfAborted();
         // AbortError (timeout) and generic network errors both land here.
         const message = err instanceof Error ? err.message : String(err);
         if (attempt >= this.maxRetries) {
@@ -284,14 +287,14 @@ export class SolanaRpcClient {
           'solana-rpc request network error — retrying',
         );
         attempt += 1;
-        await sleep(backoffFor(attempt));
+        await sleep(backoffFor(attempt), callerSignal);
         continue;
       }
 
       if (response.status === 429) {
         const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
         // Drain the body so the connection can be reused.
-        await this.drainBody(response);
+        await abortable(this.drainBody(response), callerSignal);
         if (attempt >= this.maxRetries) {
           this.logger.warn(
             { method, attempt, retryAfterMs },
@@ -301,12 +304,12 @@ export class SolanaRpcClient {
         }
         this.logger.warn({ method, attempt, retryAfterMs }, 'solana-rpc rate-limited — retrying');
         attempt += 1;
-        await sleep(retryAfterMs ?? backoffFor(attempt));
+        await sleep(retryAfterMs ?? backoffFor(attempt), callerSignal);
         continue;
       }
 
       if (response.status >= 500 && response.status <= 599) {
-        const serverErrorBody = await this.safeReadText(response);
+        const serverErrorBody = await abortable(this.safeReadText(response), callerSignal);
         if (attempt >= this.maxRetries) {
           if (this.logExhaustedRetries) {
             this.logger.error(
@@ -328,12 +331,12 @@ export class SolanaRpcClient {
           'solana-rpc upstream 5xx — retrying',
         );
         attempt += 1;
-        await sleep(backoffFor(attempt));
+        await sleep(backoffFor(attempt), callerSignal);
         continue;
       }
 
       if (!response.ok) {
-        const text = await this.safeReadText(response);
+        const text = await abortable(this.safeReadText(response), callerSignal);
         this.logger.error({ method, status: response.status }, 'solana-rpc non-OK response');
         throw new UpstreamError(
           UPSTREAM_NAME,
@@ -347,8 +350,9 @@ export class SolanaRpcClient {
 
       let parsed: JsonRpcResponse<T>;
       try {
-        parsed = (await response.json()) as JsonRpcResponse<T>;
+        parsed = (await abortable(response.json(), callerSignal)) as JsonRpcResponse<T>;
       } catch (err) {
+        callerSignal?.throwIfAborted();
         const message = err instanceof Error ? err.message : String(err);
         throw new UpstreamError(
           UPSTREAM_NAME,
@@ -357,6 +361,7 @@ export class SolanaRpcClient {
         );
       }
 
+      callerSignal?.throwIfAborted();
       if (parsed.error !== undefined) {
         throw new UpstreamError(
           UPSTREAM_NAME,
@@ -410,7 +415,11 @@ export class SolanaRpcClient {
    * `undefined`.
    */
   private enqueue<T>(method: string, params?: unknown[], callerSignal?: AbortSignal): Promise<T> {
-    return this.limit(() => this.request<T>(method, params, callerSignal));
+    callerSignal?.throwIfAborted();
+    return abortable(
+      this.limit(() => this.request<T>(method, params, callerSignal)),
+      callerSignal,
+    );
   }
 
   async getSlot(commitment?: Commitment): Promise<number> {
@@ -418,13 +427,13 @@ export class SolanaRpcClient {
     return this.enqueue<number>('getSlot', params);
   }
 
-  async getEpochInfo(commitment?: Commitment): Promise<RpcEpochInfo> {
+  async getEpochInfo(commitment?: Commitment, signal?: AbortSignal): Promise<RpcEpochInfo> {
     const params = commitment !== undefined ? [{ commitment }] : undefined;
-    return this.enqueue<RpcEpochInfo>('getEpochInfo', params);
+    return this.enqueue<RpcEpochInfo>('getEpochInfo', params, signal);
   }
 
-  async getEpochSchedule(): Promise<RpcEpochSchedule> {
-    return this.enqueue<RpcEpochSchedule>('getEpochSchedule');
+  async getEpochSchedule(signal?: AbortSignal): Promise<RpcEpochSchedule> {
+    return this.enqueue<RpcEpochSchedule>('getEpochSchedule', undefined, signal);
   }
 
   /**
@@ -437,13 +446,17 @@ export class SolanaRpcClient {
    *
    * Returns `null` when the requested epoch is not found (matches upstream).
    */
-  async getLeaderSchedule(slot?: number, identity?: string): Promise<RpcLeaderSchedule | null> {
+  async getLeaderSchedule(
+    slot?: number,
+    identity?: string,
+    signal?: AbortSignal,
+  ): Promise<RpcLeaderSchedule | null> {
     const slotParam: number | null = slot ?? null;
     const config: { identity?: string } = {};
     if (identity !== undefined) config.identity = identity;
     const hasConfig = Object.keys(config).length > 0;
     const params: unknown[] = hasConfig ? [slotParam, config] : [slotParam];
-    return this.enqueue<RpcLeaderSchedule | null>('getLeaderSchedule', params);
+    return this.enqueue<RpcLeaderSchedule | null>('getLeaderSchedule', params, signal);
   }
 
   async getBlockProduction(opts?: {

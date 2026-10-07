@@ -7,6 +7,7 @@ import type { ValidatorService, WatchMode } from '../services/validator.service.
 import type { SolanaRpcClient } from '../clients/solana-rpc.js';
 import type { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import type { StatsRepository } from '../storage/repositories/stats.repo.js';
+import type { WatchedDynamicRepository } from '../storage/repositories/watched-dynamic.repo.js';
 import type { Epoch, EpochInfo, IdentityPubkey, VotePubkey } from '../types/domain.js';
 import { withRpcFallback } from './rpc-fallback.js';
 import type { Job } from './scheduler.js';
@@ -23,6 +24,7 @@ export interface IncomeReconcilerJobDeps {
     | 'findEpochsWithIncomeGaps'
     | 'findEpochsWithMissingWatchedRows'
   >;
+  watchedDynamicRepo?: Pick<WatchedDynamicRepository, 'getBackfillScopes'>;
   rpc: SolanaRpcClient;
   rpcFallback?: Pick<SolanaRpcClient, 'getLeaderSchedule'>;
   watchMode: WatchMode;
@@ -141,6 +143,11 @@ export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
       return;
     }
 
+    const scopes =
+      (await deps.watchedDynamicRepo?.getBackfillScopes(votes, epoch)) ??
+      new Map<VotePubkey, IdentityPubkey | null>();
+    const repairVotes = votes.filter((vote) => !scopes.has(vote) || scopes.get(vote) !== null);
+    if (repairVotes.length === 0) return;
     const leaderSchedule = await withRpcFallback({
       method: 'getLeaderSchedule',
       logger: deps.logger,
@@ -158,19 +165,23 @@ export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
       return;
     }
 
-    const identityByVote = await deps.validatorService.getIdentityMap(votes);
+    const identityByVote = await deps.validatorService.getIdentityMap(repairVotes);
+    for (const [vote, identity] of scopes) {
+      if (identity !== null) identityByVote.set(vote, identity);
+    }
     const identities: IdentityPubkey[] = [];
 
     let processed = 0;
     let skipped = 0;
     let errors = 0;
-    for (const vote of votes) {
+    const materialisedVotes: VotePubkey[] = [];
+    const guardedVotes = new Set(scopes.keys());
+    for (const vote of repairVotes) {
       const identity = identityByVote.get(vote);
       if (identity === undefined) {
         deps.logger.warn({ vote, epoch }, 'income-reconciler: identity missing for vote');
         continue;
       }
-      identities.push(identity);
       const result = await deps.feeService.backfillPreviousEpoch({
         epoch,
         vote,
@@ -179,7 +190,18 @@ export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
         lastSlot: epochInfo.lastSlot,
         leaderSchedule,
         batchSize: deps.batchSize,
+        ...(scopes.has(vote) ? { requireStatsIdentityMatch: true } : {}),
+        ...(deps.watchedDynamicRepo !== undefined ? { respectHistoricalScope: true } : {}),
       });
+      if (result.deferred === true) {
+        deps.logger.warn(
+          { vote, epoch, identity },
+          'income-reconciler: pinned target needs verified offline reconciliation',
+        );
+        continue;
+      }
+      materialisedVotes.push(vote);
+      if (!scopes.has(vote)) identities.push(identity);
       processed += result.processed;
       skipped += result.skipped;
       errors += result.errors;
@@ -198,18 +220,28 @@ export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
     // final `lastSlot` yields its final counters.
     await deps.slotService.ingestCurrentEpoch({
       epoch,
-      votes,
+      votes: materialisedVotes,
       identityByVote,
       firstSlot: epochInfo.firstSlot,
       lastSlot: epochInfo.lastSlot,
       leaderSchedule,
+      ...(scopes.size > 0 ? { guardedVotes } : {}),
+      ...(deps.watchedDynamicRepo !== undefined ? { respectHistoricalScope: true } : {}),
     });
 
     const uniqueIdentities = Array.from(new Set(identities));
-    const aggregatesRebuilt = await deps.statsRepo.rebuildIncomeTotalsFromProcessedBlocks(
-      epoch,
-      uniqueIdentities,
-    );
+    // Preserve scoped totals: they may include legitimate rotated-identity income.
+    // A mismatch with captured facts requires verified offline reconciliation,
+    // rather than a destructive single-identity replacement by this runtime job.
+    const aggregatesRebuilt =
+      deps.watchedDynamicRepo !== undefined
+        ? await deps.statsRepo.rebuildIncomeTotalsFromProcessedBlocks(
+            epoch,
+            uniqueIdentities,
+            [...scopes.keys()],
+            true,
+          )
+        : await deps.statsRepo.rebuildIncomeTotalsFromProcessedBlocks(epoch, uniqueIdentities);
 
     deps.logger.info(
       {
@@ -263,9 +295,21 @@ export function createIncomeReconcilerJob(deps: IncomeReconcilerJobDeps): Job {
       // a watched validator has a row but incomplete income (income-
       // ingest gap), and epochs where a watched validator has no row
       // at all (slot-ingest gap, or a recent watched-set addition).
+      // Bounded fee ingestion owns pinned targets and completion. Their
+      // partial rows stay unmeasured; identity/ledger conflicts need offline
+      // repair. Exclude exact pinned pairs from triggers, preserving other
+      // gaps. Latest-closed settling and guarded co-selected work still run.
       const [incomeGapEpochs, missingRowEpochs] = await Promise.all([
-        deps.statsRepo.findEpochsWithIncomeGaps(windowEpochs, latestVotes),
-        deps.statsRepo.findEpochsWithMissingWatchedRows(windowEpochs, latestVotes),
+        deps.statsRepo.findEpochsWithIncomeGaps(
+          windowEpochs,
+          latestVotes,
+          deps.watchedDynamicRepo !== undefined,
+        ),
+        deps.statsRepo.findEpochsWithMissingWatchedRows(
+          windowEpochs,
+          latestVotes,
+          deps.watchedDynamicRepo !== undefined,
+        ),
       ]);
       const gapEpochs = Array.from(new Set<Epoch>([...incomeGapEpochs, ...missingRowEpochs]));
       if (gapEpochs.length > 0) {

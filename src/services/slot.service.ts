@@ -2,6 +2,7 @@ import type { RpcLeaderSchedule } from '../clients/types.js';
 import type { Logger } from '../core/logger.js';
 import type { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
 import type { StatsRepository } from '../storage/repositories/stats.repo.js';
+import type { UpsertSlotStatsArgs } from '../storage/repositories/stats.repo.js';
 import type { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import type { Epoch, IdentityPubkey, Slot, VotePubkey } from '../types/domain.js';
 
@@ -37,6 +38,9 @@ export interface IngestCurrentEpochArgs {
    * when this is absent.
    */
   stakeByVote?: Map<VotePubkey, bigint | null>;
+  /** Guard the actual write for validators governed by a pinned historical target. */
+  guardedVotes?: ReadonlySet<VotePubkey>;
+  respectHistoricalScope?: boolean;
 }
 
 /**
@@ -139,7 +143,7 @@ export class SlotService {
       // didn't include this vote" — pass `null` so `upsertSlotStats`
       // leaves the existing column untouched via its COALESCE path.
       const stake = stakeByVote?.get(vote) ?? null;
-      await this.statsRepo.upsertSlotStats({
+      const stats: UpsertSlotStatsArgs = {
         epoch,
         votePubkey: vote,
         identityPubkey: identity,
@@ -149,7 +153,14 @@ export class SlotService {
         slotsProduced,
         slotsSkipped,
         activatedStakeLamports: stake,
-      });
+      };
+      if (args.guardedVotes?.has(vote)) {
+        if (!(await this.statsRepo.upsertSlotStatsIfIdentityMatches(stats))) continue;
+      } else if (args.respectHistoricalScope === true) {
+        if (!(await this.statsRepo.upsertHistoricalSlotStats(stats))) continue;
+      } else {
+        await this.statsRepo.upsertSlotStats(stats);
+      }
       updated += 1;
     }
 

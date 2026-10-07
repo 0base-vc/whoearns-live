@@ -14,6 +14,65 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - Economic percentile CU aggregation joins distinct vote/identity pairs
   directly to block identities, avoiding per-vote array filters while
   preserving window-wide identity rotations and produced-block weighting.
+- Fee polling now yields cold validator backlogs between RPC batches,
+  prioritises newly finalised slots, and resumes previous-epoch dynamic
+  backfills one batch for one validator per tick. Partial passes remain
+  pending instead of being marked complete. Historical attempts rotate past
+  persistent RPC errors so later retrievable slots are not starved. Dynamic
+  backfill targets are stored per validator (migration 0047), preserving
+  unfinished epochs through rollover and restart and preventing completion
+  against a different epoch. Migration 0048 also stores the historical
+  collection identity. Per the owner's product requirement, fresh and legacy
+  targets automatically use the current validator address, recorded as a
+  collection assumption rather than historical provenance. An observed identity
+  change requeues collection for the pinned epoch, starts a fresh attempt cursor
+  and replaces only that derived address summary using its captured facts.
+  Other epochs and all raw block history are preserved. Completion checks the
+  collection generation (additive migration 0049), preventing stale work from
+  completing a replacement while lookup and repeat-registration polling no
+  longer invalidate completion. Deletion/re-registration and address changes
+  allocate fresh generations.
+  Captured income publication is idempotent and cannot add a delayed delta to
+  already-reconstructed totals. Epoch-scoped publication/transition coordination
+  and a facts read after row-lock waits prevent stale transition sums. Lock
+  enrollment includes completed targets and confines transitions to enrolled
+  epochs, covering mappings changed between discovery and mutation; repairs
+  of incomplete facts also publish exact totals. Actual same-address ledger conflicts still defer.
+  Fresh targets require a successful authoritative epoch sync before claiming;
+  sync failure leaves fresh rows unclaimed while cached live work and stored
+  scopes continue.
+  Claims precede live block RPC even when it exhausts the historical budget.
+  Preflight epoch RPC has its own cancellable allowance (10% of the interval,
+  at most one second), followed by a fresh live block-work deadline. Queued RPC,
+  quota waits and retry sleeps honor cancellation without changing ordinary
+  timeout/retry defaults. Late responses cannot write epochs or claim targets.
+  A single candidate snapshot before RPC avoids extra epoch RPC for pinned scopes;
+  bulk claims only the exact observed row versions. New registrations, deletion/
+  re-registration and even lookup updates during RPC wait for their own fresh
+  observation. Existing pinned targets are read without rewriting their scope.
+  Historical fee/reconciler writes share the recorded collection scope, including for
+  completed targets, and defer identity/income mismatches without resetting
+  existing income. Completion requires all five totals to match captured
+  produced facts, so a committed fact followed by a failed income delta cannot
+  falsely finish the target. A same-address ledger conflict requires reconciliation before completion.
+  Fully captured zero-income targets now atomically record fee/tip measurement
+  timestamps with completion, without rewriting income. Partial/error passes
+  stay unmeasured; an observed empty schedule is measured zero but remains
+  outside the positive-assigned-slot economic cohort.
+  Nonzero pending historical batches also remain unmeasured across delta and
+  reconciler writers until guarded completion. Claims invalidate stale
+  measurement without changing income, including on deferred legacy rows;
+  SQL locks preserve this invariant across concurrent claims and completion.
+  Ordinary live and completed-scope measurement retain their existing behaviour.
+  Pinned holes, including non-NULL identity/income conflicts, no longer repeatedly
+  select old epochs for reconciler work on healthy votes. Repair-gap selection
+  excludes exact pinned vote/epoch pairs owned by bounded backfill; other real
+  gaps, raw missing-data reporting and live work remain.
+  Historical leader-schedule RPC shares the remaining tick deadline and shutdown
+  signal across retries and fallback; late responses cannot start historical work.
+  Current epoch observations serialize and recheck the latest committed epoch,
+  atomically close all superseded open rows and reject delayed lower observations
+  before fresh claims. Cancellation or SQL failure before commit rolls all writes back.
 
 ### Added
 

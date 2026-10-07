@@ -325,6 +325,36 @@ export class FakeEpochsRepo {
     });
   }
 
+  async observeCurrent(
+    e: Parameters<FakeEpochsRepo['upsert']>[0],
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const before = new Map(this.rows);
+    try {
+      signal?.throwIfAborted();
+      const latest = Math.max(e.epoch, ...this.rows.keys());
+      for (const row of this.rows.values()) {
+        if (row.epoch < latest && !row.isClosed) await this.markClosed(row.epoch, new Date());
+      }
+      signal?.throwIfAborted();
+      await this.upsert({ ...e, isClosed: e.epoch < latest || (e.isClosed ?? false) });
+      signal?.throwIfAborted();
+      return e.epoch === latest;
+    } catch (err) {
+      this.rows.clear();
+      for (const [epoch, row] of before) this.rows.set(epoch, row);
+      throw err;
+    }
+  }
+
+  async rollover(
+    _previousEpoch: Epoch,
+    e: Parameters<FakeEpochsRepo['upsert']>[0],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.observeCurrent(e, signal);
+  }
+
   async updateCurrentSlot(epoch: Epoch, currentSlot: Slot): Promise<void> {
     const existing = this.rows.get(epoch);
     if (existing) this.rows.set(epoch, { ...existing, currentSlot });
@@ -418,6 +448,18 @@ export class FakeStatsRepo {
 
   private key(epoch: Epoch, vote: VotePubkey): string {
     return `${epoch}:${vote}`;
+  }
+
+  async upsertSlotStatsIfIdentityMatches(args: UpsertSlotStatsArgs): Promise<boolean> {
+    const row = this.rows.get(`${args.epoch}:${args.votePubkey}`);
+    if (row && row.identityPubkey !== args.identityPubkey) return false;
+    await this.upsertSlotStats(args);
+    return true;
+  }
+
+  async upsertHistoricalSlotStats(args: UpsertSlotStatsArgs): Promise<boolean> {
+    await this.upsertSlotStats(args);
+    return true;
   }
 
   async upsertSlotStats(args: UpsertSlotStatsArgs): Promise<void> {

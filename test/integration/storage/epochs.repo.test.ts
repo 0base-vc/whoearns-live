@@ -1,3 +1,4 @@
+import { runEpochCancellationScenario } from './_atomic-epoch-scenario.js';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
 import { setupPgFixture, teardownPgFixture, resetTables, type PgFixture } from './_pg-fixture.js';
@@ -186,5 +187,30 @@ describe('EpochsRepository', () => {
     expect(rows.map((row) => row.epoch)).toEqual([
       959, 958, 957, 956, 955, 954, 953, 952, 951, 950,
     ]);
+  });
+  it.each(['cancel', 'failure'] as const)(
+    'keeps concurrent readers on the previous open epoch during %s and rolls back both writes',
+    async (mode) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      const result = await runEpochCancellationScenario(fixture.pool, mode);
+      for (const read of [result.whileClosing, result.afterAbort, result.after]) {
+        expect(read.current).toMatchObject({ epoch: 500, isClosed: false });
+        expect(read.open).toEqual([{ epoch: '500' }]);
+      }
+      expect(result.result).toBe('cancelled');
+      expect(await repo.findByEpoch(501)).toBeNull();
+    },
+  );
+  it('publishes close and replacement together to concurrent readers after successful commit', async () => {
+    if (!fixture) throw new Error('fixture unavailable');
+    const result = await runEpochCancellationScenario(fixture.pool, 'success');
+    for (const read of [result.whileClosing, result.afterAbort]) {
+      expect(read.current).toMatchObject({ epoch: 500, isClosed: false });
+      expect(read.open).toEqual([{ epoch: '500' }]);
+    }
+    expect(result.result).toBe('resolved');
+    expect(result.after.current).toMatchObject({ epoch: 501, isClosed: false });
+    expect(result.after.open).toEqual([{ epoch: '501' }]);
+    expect((await repo.findByEpoch(500))?.isClosed).toBe(true);
   });
 });

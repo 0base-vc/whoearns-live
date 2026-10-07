@@ -182,6 +182,8 @@ export interface AddIncomeDeltaArgs {
    * batch.
    */
   computeUnitsDelta: bigint;
+  /** Captured-fact callers publish exact identity totals, making reconstruction/retries idempotent. */
+  fromCapturedFacts?: boolean;
 }
 
 /**
@@ -592,6 +594,24 @@ export class StatsRepository {
    * other's writes.
    */
   async upsertSlotStats(args: UpsertSlotStatsArgs): Promise<void> {
+    await this.writeSlotStats(args, false, false);
+  }
+
+  /** Defer pinned historical writes unless scope and captured-fact income are consistent. */
+  async upsertSlotStatsIfIdentityMatches(args: UpsertSlotStatsArgs): Promise<boolean> {
+    return this.writeSlotStats(args, true, true);
+  }
+
+  /** Resolve/lock historical scope at the write, including claims after a job's initial read. */
+  async upsertHistoricalSlotStats(args: UpsertSlotStatsArgs): Promise<boolean> {
+    return this.writeSlotStats(args, false, true);
+  }
+
+  private async writeSlotStats(
+    args: UpsertSlotStatsArgs,
+    requireIdentityMatch: boolean,
+    respectHistoricalScope: boolean,
+  ): Promise<boolean> {
     // `activated_stake_lamports` uses COALESCE on UPDATE so a later
     // caller that omits stake doesn't wipe out a previously-written
     // value. Writing `NULL` explicitly (via `activatedStakeLamports:
@@ -603,27 +623,75 @@ export class StatsRepository {
         : args.activatedStakeLamports.toString();
     const elapsedAssigned = args.slotsElapsedAssigned ?? 0;
     const windowLastSlot = args.slotWindowLastSlot ?? null;
-    await this.pool.query(
-      `INSERT INTO epoch_validator_stats (
+    const { rowCount } = await this.pool.query(
+      `WITH historical_scope AS MATERIALIZED (
+         SELECT prev_epoch_backfill_epoch AS epoch,prev_epoch_backfill_identity AS identity
+           FROM watched_validators_dynamic WHERE vote_pubkey=$2 AND $11::boolean
+           FOR UPDATE
+       ), income_facts AS MATERIALIZED (
+         SELECT COALESCE(SUM(fees_lamports),0) AS fees,COALESCE(SUM(base_fees_lamports),0) AS base,
+                COALESCE(SUM(priority_fees_lamports),0) AS priority,COALESCE(SUM(tips_lamports),0) AS tips,
+                COALESCE(SUM(compute_units_consumed),0) AS cu
+           FROM processed_blocks WHERE epoch=$1 AND leader_identity=$3 AND block_status='produced'
+       )
+       INSERT INTO epoch_validator_stats (
          epoch, vote_pubkey, identity_pubkey,
          slots_assigned, slots_elapsed_assigned, slots_produced, slots_skipped,
          block_fees_total_lamports, block_base_fees_total_lamports,
-         block_priority_fees_total_lamports, block_tips_total_lamports,
+         block_priority_fees_total_lamports, block_tips_total_lamports,compute_units_total,
          activated_stake_lamports,
          slots_updated_at, slot_window_last_slot, slot_window_updated_at, fees_updated_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, 0, 0, $8::numeric, NOW(), $9::bigint, NOW(), NULL)
+       SELECT $1,$2,$3,$4,$5,$6,$7,
+         CASE WHEN $10::boolean OR EXISTS (SELECT 1 FROM historical_scope WHERE epoch=$1) THEN f.fees ELSE 0 END,
+         CASE WHEN $10::boolean OR EXISTS (SELECT 1 FROM historical_scope WHERE epoch=$1) THEN f.base ELSE 0 END,
+         CASE WHEN $10::boolean OR EXISTS (SELECT 1 FROM historical_scope WHERE epoch=$1) THEN f.priority ELSE 0 END,
+         CASE WHEN $10::boolean OR EXISTS (SELECT 1 FROM historical_scope WHERE epoch=$1) THEN f.tips ELSE 0 END,
+         CASE WHEN $10::boolean OR EXISTS (SELECT 1 FROM historical_scope WHERE epoch=$1) THEN f.cu ELSE 0 END,
+         $8::numeric,NOW(),$9::bigint,NOW(),NULL
+       FROM income_facts f
+        WHERE NOT EXISTS (SELECT 1 FROM historical_scope
+                           WHERE epoch=$1 AND (identity IS NULL OR identity<>$3))
+          AND NOT EXISTS (SELECT 1 FROM validators v WHERE v.vote_pubkey=$2 AND v.identity_pubkey<>$3)
+          AND (NOT $10::boolean AND NOT EXISTS (SELECT 1 FROM historical_scope WHERE epoch=$1)
+            OR NOT EXISTS (SELECT 1 FROM epoch_validator_stats existing WHERE existing.epoch=$1 AND existing.vote_pubkey=$2)
+            OR (SELECT (COALESCE(s.block_fees_total_lamports,0),COALESCE(s.block_base_fees_total_lamports,0),
+                        COALESCE(s.block_priority_fees_total_lamports,0),COALESCE(s.block_tips_total_lamports,0),
+                        COALESCE(s.compute_units_total,0)) = (f.fees,f.base,f.priority,f.tips,f.cu)
+                  FROM income_facts f LEFT JOIN epoch_validator_stats s ON s.epoch=$1 AND s.vote_pubkey=$2))
        ON CONFLICT (epoch, vote_pubkey) DO UPDATE SET
          identity_pubkey          = EXCLUDED.identity_pubkey,
+         median_fee_lamports=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN NULL ELSE epoch_validator_stats.median_fee_lamports END,
+         median_base_fee_lamports=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN NULL ELSE epoch_validator_stats.median_base_fee_lamports END,
+         median_priority_fee_lamports=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN NULL ELSE epoch_validator_stats.median_priority_fee_lamports END,
+         median_tip_lamports=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN NULL ELSE epoch_validator_stats.median_tip_lamports END,
+         median_total_lamports=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN NULL ELSE epoch_validator_stats.median_total_lamports END,
+         median_fee_updated_at=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN NULL ELSE epoch_validator_stats.median_fee_updated_at END,
+         median_base_fee_updated_at=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN NULL ELSE epoch_validator_stats.median_base_fee_updated_at END,
+         median_priority_fee_updated_at=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN NULL ELSE epoch_validator_stats.median_priority_fee_updated_at END,
+         median_tip_updated_at=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN NULL ELSE epoch_validator_stats.median_tip_updated_at END,
+         median_total_updated_at=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN NULL ELSE epoch_validator_stats.median_total_updated_at END,
          slots_assigned           = EXCLUDED.slots_assigned,
          slots_elapsed_assigned   = EXCLUDED.slots_elapsed_assigned,
+         block_fees_total_lamports=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN (SELECT fees FROM income_facts) ELSE epoch_validator_stats.block_fees_total_lamports END,
+         block_base_fees_total_lamports=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN (SELECT base FROM income_facts) ELSE epoch_validator_stats.block_base_fees_total_lamports END,
+         block_priority_fees_total_lamports=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN (SELECT priority FROM income_facts) ELSE epoch_validator_stats.block_priority_fees_total_lamports END,
+         block_tips_total_lamports=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN (SELECT tips FROM income_facts) ELSE epoch_validator_stats.block_tips_total_lamports END,
+         compute_units_total=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN (SELECT cu FROM income_facts) ELSE epoch_validator_stats.compute_units_total END,
+         fees_updated_at=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN NULL ELSE epoch_validator_stats.fees_updated_at END,
+         tips_updated_at=CASE WHEN epoch_validator_stats.identity_pubkey<>EXCLUDED.identity_pubkey THEN NULL ELSE epoch_validator_stats.tips_updated_at END,
          slots_produced           = EXCLUDED.slots_produced,
          slots_skipped            = EXCLUDED.slots_skipped,
          activated_stake_lamports = COALESCE(EXCLUDED.activated_stake_lamports,
                                              epoch_validator_stats.activated_stake_lamports),
          slots_updated_at         = NOW(),
          slot_window_last_slot    = EXCLUDED.slot_window_last_slot,
-         slot_window_updated_at   = NOW()`,
+         slot_window_updated_at   = NOW()
+       WHERE (NOT $10::boolean AND NOT EXISTS (SELECT 1 FROM historical_scope WHERE epoch=$1))
+          OR (epoch_validator_stats.identity_pubkey=EXCLUDED.identity_pubkey
+            AND (epoch_validator_stats.block_fees_total_lamports,epoch_validator_stats.block_base_fees_total_lamports,
+                 epoch_validator_stats.block_priority_fees_total_lamports,epoch_validator_stats.block_tips_total_lamports,
+                 epoch_validator_stats.compute_units_total) = (SELECT fees,base,priority,tips,cu FROM income_facts))`,
       [
         args.epoch,
         args.votePubkey,
@@ -634,8 +702,11 @@ export class StatsRepository {
         args.slotsSkipped,
         stakeParam,
         windowLastSlot,
+        requireIdentityMatch,
+        respectHistoricalScope,
       ],
     );
+    return (rowCount ?? 0) > 0;
   }
 
   /**
@@ -690,31 +761,69 @@ export class StatsRepository {
             v.slot_window_last_slot,
             CASE WHEN v.slot_window_last_slot IS NULL THEN NULL ELSE NOW() END
           FROM incoming v
+          WHERE NOT EXISTS (SELECT 1 FROM validators known WHERE known.vote_pubkey=v.vote_pubkey AND known.identity_pubkey<>v.identity_pubkey)
           ON CONFLICT (epoch, vote_pubkey) DO NOTHING
           RETURNING 1
         ),
+        identity_facts AS (
+          SELECT i.epoch,i.identity_pubkey,
+            COALESCE(SUM(b.fees_lamports) FILTER (WHERE b.block_status='produced'),0) AS fees,
+            COALESCE(SUM(b.base_fees_lamports) FILTER (WHERE b.block_status='produced'),0) AS base,
+            COALESCE(SUM(b.priority_fees_lamports) FILTER (WHERE b.block_status='produced'),0) AS priority,
+            COALESCE(SUM(b.tips_lamports) FILTER (WHERE b.block_status='produced'),0) AS tips,
+            COALESCE(SUM(b.compute_units_consumed) FILTER (WHERE b.block_status='produced'),0) AS cu,
+            COUNT(b.slot) FILTER (WHERE b.block_status='produced') AS produced,
+            COUNT(b.slot) FILTER (WHERE b.block_status='skipped') AS skipped
+          FROM (SELECT DISTINCT i.epoch,i.identity_pubkey FROM incoming i
+              WHERE EXISTS (SELECT 1 FROM epoch_validator_stats existing
+                WHERE existing.epoch=i.epoch AND existing.vote_pubkey=i.vote_pubkey
+                  AND existing.identity_pubkey<>i.identity_pubkey)) i
+            LEFT JOIN processed_blocks b ON b.epoch=i.epoch AND b.leader_identity=i.identity_pubkey
+          GROUP BY i.epoch,i.identity_pubkey
+        ),
         refreshed AS (
           UPDATE epoch_validator_stats evs
-             SET slots_elapsed_assigned = GREATEST(
-                   COALESCE(evs.slots_elapsed_assigned, 0),
-                   incoming.slots_elapsed_assigned
-                 ),
+             SET identity_pubkey=incoming.identity_pubkey,
+                 slots_assigned=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN incoming.slots_assigned ELSE evs.slots_assigned END,
+                 slots_produced=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN f.produced ELSE evs.slots_produced END,
+                 slots_skipped=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN f.skipped ELSE evs.slots_skipped END,
+                 slots_elapsed_assigned=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN incoming.slots_elapsed_assigned ELSE GREATEST(COALESCE(evs.slots_elapsed_assigned,0),incoming.slots_elapsed_assigned) END,
+                 block_fees_total_lamports=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN f.fees ELSE evs.block_fees_total_lamports END,
+                 block_base_fees_total_lamports=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN f.base ELSE evs.block_base_fees_total_lamports END,
+                 block_priority_fees_total_lamports=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN f.priority ELSE evs.block_priority_fees_total_lamports END,
+                 block_tips_total_lamports=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN f.tips ELSE evs.block_tips_total_lamports END,
+                 compute_units_total=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN f.cu ELSE evs.compute_units_total END,
+                 fees_updated_at=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN NULL ELSE evs.fees_updated_at END,
+                 tips_updated_at=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN NULL ELSE evs.tips_updated_at END,
+                 median_fee_lamports=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN NULL ELSE evs.median_fee_lamports END,
+                 median_base_fee_lamports=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN NULL ELSE evs.median_base_fee_lamports END,
+                 median_priority_fee_lamports=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN NULL ELSE evs.median_priority_fee_lamports END,
+                 median_tip_lamports=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN NULL ELSE evs.median_tip_lamports END,
+                 median_total_lamports=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN NULL ELSE evs.median_total_lamports END,
+                 median_fee_updated_at=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN NULL ELSE evs.median_fee_updated_at END,
+                 median_base_fee_updated_at=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN NULL ELSE evs.median_base_fee_updated_at END,
+                 median_priority_fee_updated_at=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN NULL ELSE evs.median_priority_fee_updated_at END,
+                 median_tip_updated_at=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN NULL ELSE evs.median_tip_updated_at END,
+                 median_total_updated_at=CASE WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN NULL ELSE evs.median_total_updated_at END,
                  slots_updated_at = COALESCE(evs.slots_updated_at, NOW()),
                  slot_window_last_slot = CASE
+                   WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN incoming.slot_window_last_slot
                    WHEN incoming.slot_window_last_slot IS NULL THEN evs.slot_window_last_slot
                    WHEN evs.slot_window_last_slot IS NULL THEN incoming.slot_window_last_slot
                    ELSE GREATEST(evs.slot_window_last_slot, incoming.slot_window_last_slot)
                  END,
                  slot_window_updated_at = CASE
+                   WHEN evs.identity_pubkey<>incoming.identity_pubkey THEN CASE WHEN incoming.slot_window_last_slot IS NULL THEN NULL ELSE NOW() END
                    WHEN incoming.slot_window_last_slot IS NULL THEN evs.slot_window_updated_at
                    WHEN evs.slot_window_last_slot IS NULL
                      OR incoming.slot_window_last_slot > evs.slot_window_last_slot
                    THEN NOW()
                    ELSE evs.slot_window_updated_at
                  END
-            FROM incoming
+            FROM incoming LEFT JOIN identity_facts f USING(epoch,identity_pubkey)
            WHERE evs.epoch = incoming.epoch
              AND evs.vote_pubkey = incoming.vote_pubkey
+             AND NOT EXISTS (SELECT 1 FROM validators known WHERE known.vote_pubkey=incoming.vote_pubkey AND known.identity_pubkey<>incoming.identity_pubkey)
           RETURNING 1
         )
         SELECT
@@ -727,9 +836,17 @@ export class StatsRepository {
 
   async addFeeDelta(args: AddFeeDeltaArgs): Promise<void> {
     await this.pool.query(
-      `UPDATE epoch_validator_stats
+      `WITH scopes AS MATERIALIZED (
+         SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,w.prev_epoch_backfilled_at AS completed
+           FROM watched_validators_dynamic w JOIN epoch_validator_stats s ON s.vote_pubkey=w.vote_pubkey
+          WHERE s.epoch=$1 AND s.identity_pubkey=$2 ORDER BY w.vote_pubkey FOR UPDATE OF w
+       )
+       UPDATE epoch_validator_stats s
           SET block_fees_total_lamports = block_fees_total_lamports + $3::numeric,
-              fees_updated_at = NOW()
+              fees_updated_at = CASE WHEN EXISTS (SELECT 1 FROM scopes t
+                WHERE t.vote_pubkey=s.vote_pubkey AND t.epoch=$1 AND t.completed IS NULL) THEN NULL ELSE NOW() END,
+              tips_updated_at = CASE WHEN EXISTS (SELECT 1 FROM scopes t
+                WHERE t.vote_pubkey=s.vote_pubkey AND t.epoch=$1 AND t.completed IS NULL) THEN NULL ELSE s.tips_updated_at END
         WHERE epoch = $1 AND identity_pubkey = $2`,
       [args.epoch, args.identityPubkey, args.deltaLamports.toString()],
     );
@@ -765,21 +882,32 @@ export class StatsRepository {
    * to the per-tx fee decomposition (i.e. anything using
    * `transactionDetails: 'full'`).
    *
-   * Zero-valued deltas are safe (adding 0 is a no-op). Timestamps
-   * always advance so readers can use "updated_at" as a proxy for
-   * "ingester saw this validator recently" regardless of numeric
-   * movement.
+   * Zero-valued deltas are safe (adding 0 is a no-op). Ordinary timestamps
+   * advance even without numeric movement. Pending pinned historical rows
+   * accumulate totals but remain unmeasured until guarded completion. Lock
+   * watched rows before stats so claims and completion serialize with deltas.
    */
   async addIncomeDelta(args: AddIncomeDeltaArgs): Promise<void> {
+    if (args.fromCapturedFacts === true) {
+      await this.publishCapturedIncome(args.epoch, args.identityPubkey);
+      return;
+    }
     await this.pool.query(
-      `UPDATE epoch_validator_stats
+      `WITH scopes AS MATERIALIZED (
+         SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,w.prev_epoch_backfilled_at AS completed
+           FROM watched_validators_dynamic w JOIN epoch_validator_stats s ON s.vote_pubkey=w.vote_pubkey
+          WHERE s.epoch=$1 AND s.identity_pubkey=$2 ORDER BY w.vote_pubkey FOR UPDATE OF w
+       )
+       UPDATE epoch_validator_stats s
           SET block_fees_total_lamports          = block_fees_total_lamports          + $3::numeric,
               block_base_fees_total_lamports     = block_base_fees_total_lamports     + $4::numeric,
               block_priority_fees_total_lamports = block_priority_fees_total_lamports + $5::numeric,
               block_tips_total_lamports          = block_tips_total_lamports          + $6::numeric,
               compute_units_total                = compute_units_total                + $7::numeric,
-              fees_updated_at = NOW(),
-              tips_updated_at = NOW()
+              fees_updated_at = CASE WHEN EXISTS (SELECT 1 FROM scopes t
+                WHERE t.vote_pubkey=s.vote_pubkey AND t.epoch=$1 AND t.completed IS NULL) THEN NULL ELSE NOW() END,
+              tips_updated_at = CASE WHEN EXISTS (SELECT 1 FROM scopes t
+                WHERE t.vote_pubkey=s.vote_pubkey AND t.epoch=$1 AND t.completed IS NULL) THEN NULL ELSE NOW() END
         WHERE epoch = $1 AND identity_pubkey = $2`,
       [
         args.epoch,
@@ -791,6 +919,58 @@ export class StatsRepository {
         args.computeUnitsDelta.toString(),
       ],
     );
+  }
+
+  /**
+   * Lock watched rows then stats before taking a fresh facts snapshot. A scope
+   * switch cannot race a delayed delta into new totals, and two capturing jobs
+   * publish the same sums rather than adding an already-reconstructed fact again.
+   */
+  private async publishCapturedIncome(epoch: Epoch, identity: IdentityPubkey): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('whoearns:captured-income:' || $1::bigint::text,0))",
+        [epoch],
+      );
+      await client.query(
+        `SELECT w.vote_pubkey FROM watched_validators_dynamic w
+          JOIN epoch_validator_stats s ON s.vote_pubkey=w.vote_pubkey
+         WHERE s.epoch=$1 AND s.identity_pubkey=$2 ORDER BY w.vote_pubkey FOR UPDATE OF w`,
+        [epoch, identity],
+      );
+      await client.query(
+        `SELECT vote_pubkey FROM epoch_validator_stats WHERE epoch=$1 AND identity_pubkey=$2
+          ORDER BY vote_pubkey FOR UPDATE`,
+        [epoch, identity],
+      );
+      await client.query(
+        `WITH facts AS (
+           SELECT COALESCE(SUM(fees_lamports),0) AS fees,
+                  COALESCE(SUM(base_fees_lamports),0) AS base,
+                  COALESCE(SUM(priority_fees_lamports),0) AS priority,
+                  COALESCE(SUM(tips_lamports),0) AS tips,
+                  COALESCE(SUM(compute_units_consumed),0) AS cu
+             FROM processed_blocks WHERE epoch=$1 AND leader_identity=$2 AND block_status='produced'
+         )
+         UPDATE epoch_validator_stats s SET
+           block_fees_total_lamports=f.fees,block_base_fees_total_lamports=f.base,
+           block_priority_fees_total_lamports=f.priority,block_tips_total_lamports=f.tips,compute_units_total=f.cu,
+           fees_updated_at=CASE WHEN EXISTS (SELECT 1 FROM watched_validators_dynamic w
+             WHERE w.vote_pubkey=s.vote_pubkey AND w.prev_epoch_backfill_epoch=$1 AND w.prev_epoch_backfilled_at IS NULL) THEN NULL ELSE NOW() END,
+           tips_updated_at=CASE WHEN EXISTS (SELECT 1 FROM watched_validators_dynamic w
+             WHERE w.vote_pubkey=s.vote_pubkey AND w.prev_epoch_backfill_epoch=$1 AND w.prev_epoch_backfilled_at IS NULL) THEN NULL ELSE NOW() END
+         FROM facts f WHERE s.epoch=$1 AND s.identity_pubkey=$2`,
+        [epoch, identity],
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   /**
@@ -905,10 +1085,17 @@ export class StatsRepository {
   async rebuildIncomeTotalsFromProcessedBlocks(
     epoch: Epoch,
     identities: IdentityPubkey[],
+    excludedVotes: VotePubkey[] = [],
+    respectHistoricalScopes = false,
   ): Promise<number> {
     if (identities.length === 0) return 0;
     const { rowCount } = await this.pool.query(
-      `WITH input AS (
+      `WITH historical_scopes AS MATERIALIZED (
+         SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,w.prev_epoch_backfilled_at AS completed
+           FROM watched_validators_dynamic w JOIN epoch_validator_stats s ON s.vote_pubkey=w.vote_pubkey
+          WHERE s.epoch=$1 AND s.identity_pubkey=ANY($2::text[])
+          ORDER BY w.vote_pubkey FOR UPDATE OF w
+       ), input AS (
          SELECT unnest($2::text[]) AS identity_pubkey
        ),
        fact AS (
@@ -931,17 +1118,23 @@ export class StatsRepository {
               block_priority_fees_total_lamports = fact.priority_fees,
               block_tips_total_lamports          = fact.tips,
               compute_units_total                = fact.compute_units,
-              fees_updated_at = NOW(),
-              tips_updated_at = NOW()
+              fees_updated_at = CASE WHEN EXISTS (SELECT 1 FROM historical_scopes h
+                WHERE h.vote_pubkey=evs.vote_pubkey AND h.epoch=$1 AND h.completed IS NULL) THEN NULL ELSE NOW() END,
+              tips_updated_at = CASE WHEN EXISTS (SELECT 1 FROM historical_scopes h
+                WHERE h.vote_pubkey=evs.vote_pubkey AND h.epoch=$1 AND h.completed IS NULL) THEN NULL ELSE NOW() END
          FROM fact
         WHERE evs.epoch = $1
           AND evs.identity_pubkey = fact.identity_pubkey
+          AND NOT (evs.vote_pubkey=ANY($3::text[]))
+          AND (NOT $4::boolean OR NOT EXISTS (SELECT 1 FROM historical_scopes h WHERE h.vote_pubkey=evs.vote_pubkey AND h.epoch=$1))
           AND (
             evs.block_fees_total_lamports          <> fact.fees OR
             evs.block_base_fees_total_lamports     <> fact.base_fees OR
             evs.block_priority_fees_total_lamports <> fact.priority_fees OR
             evs.block_tips_total_lamports          <> fact.tips OR
             evs.compute_units_total                <> fact.compute_units OR
+            EXISTS (SELECT 1 FROM historical_scopes h
+              WHERE h.vote_pubkey=evs.vote_pubkey AND h.epoch=$1 AND h.completed IS NULL) OR
             -- A row whose income timestamps are still NULL has never
             -- been marked measured. Update it even when the totals
             -- already equal fact — e.g. a genuine zero-income epoch,
@@ -952,7 +1145,7 @@ export class StatsRepository {
             evs.fees_updated_at IS NULL OR
             evs.tips_updated_at IS NULL
           )`,
-      [epoch, identities],
+      [epoch, identities, excludedVotes, respectHistoricalScopes],
     );
     return rowCount ?? 0;
   }
@@ -1125,17 +1318,26 @@ export class StatsRepository {
    * this matches `findEconomicPercentile`'s "fees AND tips required"
    * cohort filter exactly. Cheap — a single indexed scan, no block
    * fetches.
+   * Repair callers exclude pinned vote/epoch pairs owned by bounded fee backfill;
+   * the default still reports their missing measurement to other consumers.
    */
-  async findEpochsWithIncomeGaps(epochs: Epoch[], votes: VotePubkey[]): Promise<Epoch[]> {
+  async findEpochsWithIncomeGaps(
+    epochs: Epoch[],
+    votes: VotePubkey[],
+    excludePinnedScopes = false,
+  ): Promise<Epoch[]> {
     if (epochs.length === 0 || votes.length === 0) return [];
     const { rows } = await this.pool.query<{ epoch: string }>(
-      `SELECT DISTINCT epoch::text AS epoch
-         FROM epoch_validator_stats
-        WHERE epoch = ANY($1::bigint[])
-          AND vote_pubkey = ANY($2::text[])
+      `SELECT DISTINCT evs.epoch::text AS epoch
+         FROM epoch_validator_stats evs
+        WHERE evs.epoch = ANY($1::bigint[])
+          AND evs.vote_pubkey = ANY($2::text[])
           AND slots_assigned > 0
-          AND (fees_updated_at IS NULL OR tips_updated_at IS NULL)`,
-      [epochs, votes],
+          AND (fees_updated_at IS NULL OR tips_updated_at IS NULL)
+          AND (NOT $3::boolean OR NOT EXISTS (
+            SELECT 1 FROM watched_validators_dynamic d
+             WHERE d.vote_pubkey=evs.vote_pubkey AND d.prev_epoch_backfill_epoch=evs.epoch))`,
+      [epochs, votes, excludePinnedScopes],
     );
     return rows.map((r) => Number(r.epoch));
   }
@@ -1149,20 +1351,27 @@ export class StatsRepository {
    * to the watched set). Under the full-window tier requirement such
    * an epoch holds the validator at `unrated`, so the income-reconciler
    * rebuilds the row from the leader schedule. Cheap — one indexed
-   * count per epoch, no block fetches.
+   * existence check per epoch, no block fetches. Repair callers can exclude
+   * pinned vote/epoch pairs owned by bounded fee backfill. Raw defaults report all holes.
    */
-  async findEpochsWithMissingWatchedRows(epochs: Epoch[], votes: VotePubkey[]): Promise<Epoch[]> {
+  async findEpochsWithMissingWatchedRows(
+    epochs: Epoch[],
+    votes: VotePubkey[],
+    excludePinnedScopes = false,
+  ): Promise<Epoch[]> {
     if (epochs.length === 0 || votes.length === 0) return [];
     const { rows } = await this.pool.query<{ epoch: string }>(
       `SELECT w.epoch::text AS epoch
          FROM unnest($1::bigint[]) AS w(epoch)
-        WHERE (
-          SELECT COUNT(*)
-            FROM epoch_validator_stats evs
-           WHERE evs.epoch = w.epoch
-             AND evs.vote_pubkey = ANY($2::text[])
-        ) < (SELECT COUNT(DISTINCT v) FROM unnest($2::text[]) AS v)`,
-      [epochs, votes],
+        WHERE EXISTS (
+          SELECT 1 FROM unnest($2::text[]) AS v(vote)
+           WHERE NOT EXISTS (SELECT 1 FROM epoch_validator_stats evs
+                             WHERE evs.epoch=w.epoch AND evs.vote_pubkey=v.vote)
+             AND (NOT $3::boolean OR NOT EXISTS (
+               SELECT 1 FROM watched_validators_dynamic d
+                WHERE d.vote_pubkey=v.vote AND d.prev_epoch_backfill_epoch=w.epoch))
+        )`,
+      [epochs, votes, excludePinnedScopes],
     );
     return rows.map((r) => Number(r.epoch));
   }
