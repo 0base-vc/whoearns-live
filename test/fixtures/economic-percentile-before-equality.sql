@@ -153,4 +153,3 @@
         cohort.cohort_median_cu::text                           AS cohort_median_cu
       FROM cohort
       LEFT JOIN target_row ON TRUE
-    
