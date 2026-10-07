@@ -541,7 +541,7 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
         expect(state.stats?.slotsProduced).toBe(mode === 'skipped' ? 0 : 2);
         expect(state.stats?.slotsSkipped).toBe(mode === 'skipped' ? 2 : 0);
         expect(state.stats?.blockFeesTotalLamports).toBe(mode === 'nonzero' ? 25000n : 0n);
-        expect(state.stats?.blockBaseFeesTotalLamports).toBe(mode === 'nonzero' ? 10000n : 0n);
+        expect(state.stats?.blockBaseFeesTotalLamports).toBe(mode === 'nonzero' ? 5000n : 0n);
         expect(state.stats?.blockPriorityFeesTotalLamports).toBe(mode === 'nonzero' ? 20000n : 0n);
         expect(state.stats?.blockTipsTotalLamports).toBe(0n);
         expect(state.stats?.computeUnitsTotal).toBe(mode === 'nonzero' ? 200n : 0n);
@@ -586,7 +586,7 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
       expect(state.stats?.feesUpdatedAt).toBeInstanceOf(Date);
       expect(state.stats?.tipsUpdatedAt).toBeInstanceOf(Date);
       expect(state.stats?.blockFeesTotalLamports).toBe(25000n);
-      expect(state.stats?.blockBaseFeesTotalLamports).toBe(10000n);
+      expect(state.stats?.blockBaseFeesTotalLamports).toBe(5000n);
       expect(state.stats?.blockPriorityFeesTotalLamports).toBe(20000n);
       expect(state.stats?.blockTipsTotalLamports).toBe(0n);
       expect(state.stats?.computeUnitsTotal).toBe(200n);
