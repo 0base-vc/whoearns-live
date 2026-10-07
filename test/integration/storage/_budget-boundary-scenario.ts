@@ -64,7 +64,10 @@ export async function runBudgetBoundaryScenario(
         processedBlocksRepo: new ProcessedBlocksRepository(pool),
       }),
       watchedDynamicRepo: new WatchedDynamicRepository(pool),
-      epochService: { getCurrent: async () => info(currentEpoch) } as EpochService,
+      epochService: {
+        getCurrent: async () => info(currentEpoch),
+        syncCurrent: async () => info(currentEpoch),
+      } as EpochService,
       epochsRepo: { findByEpoch: async (epoch) => info(epoch) },
       validatorService: {
         getActiveVotePubkeys: async () => tracked,

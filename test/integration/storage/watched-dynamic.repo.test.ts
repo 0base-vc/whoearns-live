@@ -1,5 +1,6 @@
 import { runZeroIncomeScenario } from './_zero-income-scenario.js';
 import { runFirstTrackingScenario } from './_first-tracking-scenario.js';
+import { runFreshEpochScenario } from './_fresh-epoch-scenario.js';
 import { runDeferredGapScenario } from './_deferred-gap-scenario.js';
 import {
   runMeasurementClaim,
@@ -880,4 +881,76 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
       } else expect(r.stats.a499).toBeNull();
     },
   );
+
+  it.each(['stale', 'sync failure', 'empty cache', 'already pinned', 'late arrival'] as const)(
+    'initializes fresh targets only from authoritative epoch (%s)',
+    async (kind) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      const r = await runFreshEpochScenario(fixture.pool, kind);
+      const initialEpoch =
+        kind === 'sync failure' || kind === 'late arrival'
+          ? null
+          : kind === 'already pinned'
+            ? '499'
+            : '500';
+      expect(r.first.targets[0]).toEqual({
+        vote_pubkey: 'A',
+        epoch: initialEpoch,
+        identity: null,
+        completed: false,
+      });
+      expect(r.first.epochCalls).toBe(kind === 'already pinned' || kind === 'late arrival' ? 0 : 1);
+      expect(r.first.scheduleCalls).toBe(r.first.epochCalls);
+      if (kind === 'stale' || kind === 'sync failure') {
+        expect(r.watcherFailure).toBe(true);
+        expect(r.cachedBefore).toBe(500);
+      }
+      if (kind === 'empty cache') expect(r.cachedBefore).toBeNull();
+      if (kind === 'sync failure' || kind === 'late arrival' || kind === 'already pinned') {
+        expect(r.first.cachedEpoch).toBe(500);
+        expect(r.first.fetchedSlots).toEqual([50001, 49901]);
+      } else expect(r.first.cachedEpoch).toBe(501);
+      const finalEpoch = kind === 'already pinned' ? '499' : '500';
+      expect(r.recovered.targets[0]).toEqual({
+        vote_pubkey: 'A',
+        epoch: finalEpoch,
+        identity: null,
+        completed: false,
+      });
+      expect(r.recovered.epochCalls).toBe(
+        kind === 'sync failure' ? 2 : kind === 'already pinned' ? 0 : 1,
+      );
+      expect(r.restarted.epochCalls).toBe(r.recovered.epochCalls);
+      expect(r.restarted.scheduleCalls).toBe(r.recovered.scheduleCalls);
+      expect(r.restarted.targets[0]).toEqual(r.recovered.targets[0]);
+      expect(r.restarted.targets[1]).toEqual({
+        vote_pubkey: 'B',
+        epoch: '499',
+        identity: 'IB',
+        completed: true,
+      });
+      expect(r.restarted.fetchedSlots).toEqual(expect.arrayContaining([49901, 49902, 50201]));
+      expect(r.restarted.fetchedSlots).not.toContain(49900);
+    },
+  );
+
+  it('reads stored scopes without claiming or rewriting fresh rows when epoch freshness is absent', async () => {
+    if (!fixture) throw new Error('fixture unavailable');
+    await fixture.pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=NULL,
+      prev_epoch_backfill_identity=NULL WHERE vote_pubkey='A'`);
+    const tuple = async () =>
+      (
+        await fixture!.pool.query(`SELECT xmin::text,ctid::text,
+      prev_epoch_backfill_epoch FROM watched_validators_dynamic WHERE vote_pubkey='A'`)
+      ).rows;
+    const before = await tuple();
+    expect(await repo.hasUnclaimedBackfillTargets()).toBe(true);
+    expect(await repo.getOrSetBackfillTargets(null)).toEqual(
+      new Map([['B', { epoch: 499, identity: 'IB' }]]),
+    );
+    expect(await tuple()).toEqual(before);
+    await repo.getOrSetBackfillTargets(500);
+    expect(await repo.hasUnclaimedBackfillTargets()).toBe(false);
+    expect((await tuple())[0].prev_epoch_backfill_epoch).toBe('500');
+  });
 });

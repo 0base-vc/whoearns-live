@@ -14,16 +14,24 @@ export function withBulkTargets<
     ): Promise<{ epoch: number; identity: string } | null>;
   },
 >(repo: T, identities: (votes: string[]) => Promise<Map<string, string>>) {
+  const stored = new Map<string, { epoch: number; identity: string }>();
   return {
     ...repo,
-    getOrSetBackfillTargets: vi.fn(async (epoch: number) => {
+    hasUnclaimedBackfillTargets: vi.fn(async () =>
+      (await repo.listPendingBackfill()).some((vote) => !stored.has(vote)),
+    ),
+    getOrSetBackfillTargets: vi.fn(async (epoch: number | null) => {
       const pending = await repo.listPendingBackfill();
       const mapping = await identities(pending);
       const targets = new Map<string, { epoch: number; identity: string }>();
       for (const vote of pending) {
         const identity = mapping.get(vote);
         if (identity === undefined) continue;
-        const target = await repo.getOrSetBackfillTarget(vote, epoch, identity);
+        const target =
+          epoch === null
+            ? stored.get(vote)
+            : await repo.getOrSetBackfillTarget(vote, epoch, identity);
+        if (target) stored.set(vote, target);
         if (target) targets.set(vote, target);
       }
       return targets;

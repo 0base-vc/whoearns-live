@@ -407,10 +407,17 @@ captured blocks are skipped on resumption, including after a worker restart.
 Migration `0047_dynamic_backfill_target_epoch.sql` adds the nullable
 `prev_epoch_backfill_epoch` column. The worker atomically chooses each
 pending validator's target on its first resolved pending-set observation,
-before live RPC work or a leftover-budget check, then keeps that original
-epoch through rollover and restart. One bulk SQL statement claims only fresh
-watched rows and reads existing pairs; already-pinned targets are not rewritten and
-there is no serial per-validator claim loop. All pending targets are resolved before
+after a successful authoritative `EpochService.syncCurrent()`, before live
+block RPC work or a leftover-budget check, then keeps that original epoch
+through rollover and restart. A stale open database epoch after a watcher
+outage is insufficient. Sync failure leaves new rows unclaimed while existing
+scopes and cached live ingestion continue. A bounded read-only existence query
+avoids extra epoch RPC for already-pinned epochs, including unknown identities.
+With no cached epoch, the initial successful sync is reused. No watched-row
+lock is held across epoch RPC. One bulk SQL statement claims only with a fresh
+proposal and reads existing pairs. A NULL proposal skips claims, including rows
+registered after a negative existence check; these retry next tick. Already-pinned
+targets are not rewritten and there is no serial per-validator claim loop. All pending targets are resolved before
 the expensive historical passes rotate one validator per tick. Registration
 queues a pending row; target selection happens when the worker observes it.
 Migration

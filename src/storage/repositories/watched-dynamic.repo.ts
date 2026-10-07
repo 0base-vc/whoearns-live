@@ -175,9 +175,22 @@ export class WatchedDynamicRepository {
     return stored ? { epoch: Number(stored.epoch), identity: stored.identity } : null;
   }
 
-  /** One round trip: claim fresh rows and clear stale measurement on pending historical stats. */
+  /** Read-only presence check; never lock watched rows across an epoch RPC. */
+  async hasUnclaimedBackfillTargets(): Promise<boolean> {
+    const { rows } = await this.pool.query<{ pending: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM watched_validators_dynamic
+        WHERE prev_epoch_backfilled_at IS NULL AND prev_epoch_backfill_epoch IS NULL) AS pending`,
+    );
+    return rows[0]?.pending ?? false;
+  }
+
+  /**
+   * One round trip: claim with an authoritative epoch, or pass NULL to read
+   * stored scopes without claiming rows arriving after the presence check.
+   * Both paths clear stale measurement on pending historical stats.
+   */
   async getOrSetBackfillTargets(
-    proposedEpoch: Epoch,
+    proposedEpoch: Epoch | null,
   ): Promise<Map<VotePubkey, DynamicBackfillTarget>> {
     const { rows } = await this.pool.query<{
       vote_pubkey: string;
@@ -195,7 +208,7 @@ export class WatchedDynamicRepository {
             SET prev_epoch_backfill_epoch=$1::bigint
            FROM pending v
           WHERE v.vote_pubkey=w.vote_pubkey AND w.prev_epoch_backfilled_at IS NULL
-            AND w.prev_epoch_backfill_epoch IS NULL
+            AND w.prev_epoch_backfill_epoch IS NULL AND $1::bigint IS NOT NULL
          RETURNING w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,
                    w.prev_epoch_backfill_identity AS identity
        ), targets AS MATERIALIZED (

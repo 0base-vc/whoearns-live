@@ -79,7 +79,10 @@ describe.each([false, true])('dynamic backfill rollover (restart=%s)', (restart)
         rpc,
         feeService,
         logger,
-        epochService: { getCurrent: async () => getEpoch(currentEpoch) } as EpochService,
+        epochService: {
+          getCurrent: async () => getEpoch(currentEpoch),
+          syncCurrent: async () => getEpoch(currentEpoch),
+        } as EpochService,
         epochsRepo: { findByEpoch: vi.fn(async (epoch) => getEpoch(epoch)) },
         validatorService: {
           getActiveVotePubkeys: async () => tracked,

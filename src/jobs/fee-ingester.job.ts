@@ -32,7 +32,10 @@ export interface FeeIngesterJobDeps {
    * don't exercise the on-demand track path) the previous-epoch
    * backfill sweep is simply skipped each tick.
    */
-  watchedDynamicRepo?: Pick<WatchedDynamicRepository, 'getOrSetBackfillTargets' | 'markBackfilled'>;
+  watchedDynamicRepo?: Pick<
+    WatchedDynamicRepository,
+    'hasUnclaimedBackfillTargets' | 'getOrSetBackfillTargets' | 'markBackfilled'
+  >;
   rpc: SolanaRpcClient;
   rpcFallback?: Pick<SolanaRpcClient, 'getLeaderSchedule' | 'getSlot'>;
   watchMode: WatchMode;
@@ -86,19 +89,35 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
     async tick(signal: AbortSignal): Promise<void> {
       if (signal.aborted) return;
       const deadlineMs = Date.now() + deps.intervalMs;
-      const epochInfo =
-        (await deps.epochService.getCurrent()) ?? (await deps.epochService.syncCurrent());
-      const epoch = epochInfo.epoch;
+      const cachedEpochInfo = await deps.epochService.getCurrent();
+      let epochInfo = cachedEpochInfo ?? (await deps.epochService.syncCurrent());
 
-      // Record every pending target on first observation, before live RPC or
-      // any leftover-budget check. Otherwise a cold live pass or unavailable
-      // schedule could postpone the first claim across an epoch boundary.
+      // A cached DB epoch can be stale after a watcher failure at rollover.
+      // Only a successful sync authorizes new irreversible claims. Already
+      // pinned scopes need no epoch RPC, even when their identity is unknown.
+      // Resolve targets before live block RPC or leftover-budget checks.
       // Fresh epochs are pinned even without historical identity proof; only
       // independently resolved stored scopes are returned for historical RPC.
       let backfillTargets = new Map<VotePubkey, DynamicBackfillTarget>();
-      if (epoch > 0 && deps.watchedDynamicRepo !== undefined && deps.epochsRepo !== undefined) {
+      if (deps.watchedDynamicRepo !== undefined && deps.epochsRepo !== undefined) {
         try {
-          backfillTargets = await deps.watchedDynamicRepo.getOrSetBackfillTargets(epoch - 1);
+          let claimEpoch =
+            cachedEpochInfo === null && epochInfo.epoch > 0 ? epochInfo.epoch - 1 : null;
+          if (
+            cachedEpochInfo !== null &&
+            (await deps.watchedDynamicRepo.hasUnclaimedBackfillTargets())
+          ) {
+            try {
+              epochInfo = await deps.epochService.syncCurrent();
+              if (epochInfo.epoch > 0) claimEpoch = epochInfo.epoch - 1;
+            } catch (err) {
+              deps.logger.warn(
+                { err },
+                'fee-ingester: fresh epoch unavailable, deferring new targets',
+              );
+            }
+          }
+          backfillTargets = await deps.watchedDynamicRepo.getOrSetBackfillTargets(claimEpoch);
           for (const vote of backfillAttemptCursors.keys()) {
             if (!backfillTargets.has(vote)) backfillAttemptCursors.delete(vote);
           }
@@ -107,6 +126,7 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
         }
       }
 
+      const epoch = epochInfo.epoch;
       const votes = await deps.validatorService.getActiveVotePubkeys(
         deps.watchMode,
         deps.explicitVotes,

@@ -30,10 +30,13 @@ and this project follows [Semantic Versioning](https://semver.org/).
   live ingestion and existing verified scopes continue. Legacy
   epoch-only targets remain pending until their identity is independently
   verified and manually corrected; reconciler-created stats are not identity
-  provenance. All pending targets are pinned before live RPC work, even when
-  live work exhausts the historical budget, preserving the first observed
-  epoch through rollover and restart.
-  Target preflight now uses one bulk statement and claims only fresh watched rows.
+  provenance. Fresh targets require a successful authoritative epoch sync before
+  claiming, so a stale watcher cache cannot pin two epochs behind. Sync failure
+  leaves fresh rows unclaimed while cached live work and stored scopes continue.
+  Claims precede live block RPC even when it exhausts the historical budget.
+  A bounded existence query avoids extra epoch RPC for already-pinned scopes;
+  bulk preflight reads them without rewriting their target. Rows arriving after
+  a negative existence check wait until the next authoritative claim.
   Historical fee/reconciler writes share the durable scope, including for
   completed targets, and defer identity/income mismatches without resetting
   existing income. Completion requires all five totals to match captured

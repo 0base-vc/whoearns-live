@@ -73,7 +73,10 @@ describe.each([false, true])('backfill identity rotation (restart=%s)', (restart
           logger,
           feeService,
           watchedDynamicRepo,
-          epochService: { getCurrent: async () => info(epoch) } as EpochService,
+          epochService: {
+            getCurrent: async () => info(epoch),
+            syncCurrent: async () => info(epoch),
+          } as EpochService,
           epochsRepo: { findByEpoch: async (e) => info(e) },
           validatorService: {
             getActiveVotePubkeys: async () => [VOTE_A],

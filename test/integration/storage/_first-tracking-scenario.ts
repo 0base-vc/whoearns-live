@@ -85,7 +85,10 @@ export async function runFirstTrackingScenario(
         processedBlocksRepo: new ProcessedBlocksRepository(pool),
       }),
       watchedDynamicRepo: new WatchedDynamicRepository(pool),
-      epochService: { getCurrent: async () => info(epoch) } as EpochService,
+      epochService: {
+        getCurrent: async () => info(epoch),
+        syncCurrent: async () => info(epoch),
+      } as EpochService,
       epochsRepo: { findByEpoch: async (e) => info(e) },
       validatorService: {
         getActiveVotePubkeys: async () => ['A', 'B'],
@@ -123,7 +126,10 @@ export async function runFirstTrackingScenario(
       processedBlocksRepo,
       validatorsRepo: new ValidatorsRepository(pool),
     }),
-    epochService: { getCurrent: async () => info(epoch) } as EpochService,
+    epochService: {
+      getCurrent: async () => info(epoch),
+      syncCurrent: async () => info(epoch),
+    } as EpochService,
     epochsRepo: { findByEpoch: async (e) => info(e), upsert: async () => {} },
     validatorService: {
       getActiveVotePubkeys: async () => ['A', 'B'],
