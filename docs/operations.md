@@ -463,7 +463,11 @@ Captured-block writers publish exact identity sums under watched/stats locks
 using a fresh facts snapshot, instead of adding delayed deltas to totals already
 reconstructed during an address change. Repeated/concurrent publication is
 idempotent. Publication and target transitions take the same transaction-scoped
-advisory lock per epoch before watched/stats locks. A transition refreshes its
+advisory lock per epoch before watched/stats locks. Enrollment includes completed
+stored targets because a mapping may change before the transition statement.
+That statement acts only on enrolled epochs; a concurrently introduced target
+epoch waits for the next resolution. Locks remain ordered by epoch.
+A transition refreshes its
 new-address facts in a separate statement after row locks resolve; facts
 committed during that wait are visible. Publications arriving during a transition
 wait, then update the newly selected address under a fresh snapshot. Repaired

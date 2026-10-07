@@ -31,7 +31,9 @@ and this project follows [Semantic Versioning](https://semver.org/).
   exact scope revision, preventing stale work from completing a replacement.
   Captured income publication is idempotent and cannot add a delayed delta to
   already-reconstructed totals. Epoch-scoped publication/transition coordination
-  and a facts read after row-lock waits prevent stale transition sums; repairs
+  and a facts read after row-lock waits prevent stale transition sums. Lock
+  enrollment includes completed targets and confines transitions to enrolled
+  epochs, covering mappings changed between discovery and mutation; repairs
   of incomplete facts also publish exact totals. Actual same-address ledger conflicts still defer.
   Fresh targets require a successful authoritative epoch sync before claiming;
   sync failure leaves fresh rows unclaimed while cached live work and stored

@@ -184,13 +184,13 @@ export class WatchedDynamicRepository {
       await client.query('BEGIN');
       // Publication takes the same epoch lock before watched/stats locks. Facts
       // committed during a transition are published after its commit, never only
-      // to rows that still happened to name the old identity.
-      await client.query(
-        `SELECT pg_advisory_xact_lock(hashtextextended('whoearns:captured-income:' || epoch::text,0))
+      // to rows that still happened to name the old identity. Include completed
+      // epochs: mappings may change before the next READ COMMITTED statement.
+      const { rows: enrolled } = await client.query<{ epoch: string }>(
+        `SELECT pg_advisory_xact_lock(hashtextextended('whoearns:captured-income:' || epoch::text,0)),epoch::text
            FROM (SELECT DISTINCT COALESCE(w.prev_epoch_backfill_epoch,$1::bigint) AS epoch
-             FROM watched_validators_dynamic w JOIN validators v USING(vote_pubkey)
+             FROM watched_validators_dynamic w
             WHERE ($2::text[] IS NULL OR w.vote_pubkey=ANY($2))
-              AND (w.prev_epoch_backfilled_at IS NULL OR w.prev_epoch_backfill_identity IS DISTINCT FROM v.identity_pubkey)
               AND COALESCE(w.prev_epoch_backfill_epoch,$1::bigint) IS NOT NULL
             ORDER BY epoch) epochs`,
         [proposedEpoch, votes],
@@ -211,6 +211,7 @@ export class WatchedDynamicRepository {
                 w.xmin::text AS revision,w.ctid::text AS tuple
            FROM watched_validators_dynamic w JOIN validators v USING(vote_pubkey)
           WHERE ($3::text[] IS NULL OR w.vote_pubkey=ANY($3))
+            AND COALESCE(w.prev_epoch_backfill_epoch,$1::bigint)=ANY($4::bigint[])
             AND (w.prev_epoch_backfilled_at IS NULL
               OR (w.prev_epoch_backfill_epoch IS NOT NULL
                 AND w.prev_epoch_backfill_identity IS DISTINCT FROM v.identity_pubkey))
@@ -283,7 +284,7 @@ export class WatchedDynamicRepository {
          EXISTS (SELECT 1 FROM locked_stats s WHERE s.vote_pubkey=targets.vote_pubkey
            AND s.epoch=targets.epoch AND s.recollect AND s.identity_pubkey<>s.identity) AS refresh
        FROM targets`,
-        [proposedEpoch, JSON.stringify(candidates), votes],
+        [proposedEpoch, JSON.stringify(candidates), votes, enrolled.map((row) => row.epoch)],
       );
       const refresh = rows.filter((row) => row.refresh);
       if (refresh.length > 0) {
