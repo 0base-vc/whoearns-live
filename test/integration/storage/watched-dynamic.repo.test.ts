@@ -1,5 +1,6 @@
 import { runZeroIncomeScenario } from './_zero-income-scenario.js';
 import { runFirstTrackingScenario } from './_first-tracking-scenario.js';
+import { runDeferredGapScenario } from './_deferred-gap-scenario.js';
 import {
   runMeasurementClaim,
   runMeasurementWriter,
@@ -827,4 +828,56 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
       { identity_pubkey: 'IA', slots_assigned: 2, slots_skipped: 2 },
     ]);
   });
+
+  it.each([
+    'missing',
+    'unmeasured',
+    'mixed missing',
+    'mixed unmeasured',
+    'unrelated epoch',
+  ] as const)(
+    'does not repeatedly repair healthy old rows for a deferred-only gap while preserving actual gaps (%s)',
+    async (kind) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      const r = await runDeferredGapScenario(fixture.pool, kind);
+      expect(r.first.schedules).toEqual(
+        kind.startsWith('mixed') ? [501, 499] : kind === 'unrelated epoch' ? [501, 498] : [501],
+      );
+      expect(r.target?.prevEpochBackfilledAt).toBeNull();
+      expect(r.first.repairs).not.toContainEqual({ epoch: 499, vote: 'A' });
+      expect(r.after.income.concat(r.after.missing)).toContain(499);
+      expect(r.repairAfter).toEqual({ income: [], missing: [] });
+      expect(r.second.schedules).toEqual([501]);
+      expect(r.second.repairs).toEqual([
+        { epoch: 501, vote: 'A' },
+        { epoch: 501, vote: 'B' },
+      ]);
+      expect(r.second.blocks).toEqual([]);
+      expect(r.liveBlocks).toEqual(expect.arrayContaining([5021, 5023, 5024]));
+      if (kind.startsWith('mixed')) {
+        expect(r.repairBefore.income.concat(r.repairBefore.missing)).toContain(499);
+        expect(r.first.repairs).toContainEqual({ epoch: 499, vote: 'B' });
+        expect(r.first.blocks).toEqual(expect.arrayContaining([4993, 4994]));
+        expect(r.stats.b499?.slotsAssigned).toBe(2);
+        expect(r.stats.b499?.slotsSkipped).toBe(2);
+        expect(r.stats.b499?.feesUpdatedAt).toBeInstanceOf(Date);
+        expect(r.stats.b499?.tipsUpdatedAt).toBeInstanceOf(Date);
+      } else {
+        expect(r.first.schedules).not.toContain(499);
+        expect(r.first.repairs).not.toContainEqual({ epoch: 499, vote: 'B' });
+        if (kind !== 'unrelated epoch') expect(r.first.schedules).toEqual([501]);
+      }
+      if (kind === 'unrelated epoch') {
+        expect(r.repairBefore.missing).toEqual([498]);
+        expect(r.first.repairs).toContainEqual({ epoch: 498, vote: 'A' });
+        expect(r.first.blocks).toContain(4981);
+        expect(r.stats.a498?.feesUpdatedAt).toBeInstanceOf(Date);
+        expect(r.stats.a498?.tipsUpdatedAt).toBeInstanceOf(Date);
+      }
+      if (kind === 'unmeasured' || kind === 'mixed unmeasured') {
+        expect(r.stats.a499?.feesUpdatedAt).toBeNull();
+        expect(r.stats.a499?.tipsUpdatedAt).toBeNull();
+      } else expect(r.stats.a499).toBeNull();
+    },
+  );
 });

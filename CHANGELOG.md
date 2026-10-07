@@ -49,6 +49,9 @@ and this project follows [Semantic Versioning](https://semver.org/).
   measurement without changing income, including on deferred legacy rows;
   SQL locks preserve this invariant across concurrent claims and completion.
   Ordinary live and completed-scope measurement retain their existing behaviour.
+  Deferred unknown-identity holes no longer repeatedly select old epochs for
+  reconciler work on healthy votes. Repair-gap selection excludes only that
+  vote/epoch; other real gaps, raw missing-data reporting and live work remain.
 
 ### Added
 

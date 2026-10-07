@@ -1197,17 +1197,27 @@ export class StatsRepository {
    * this matches `findEconomicPercentile`'s "fees AND tips required"
    * cohort filter exactly. Cheap — a single indexed scan, no block
    * fetches.
+   * Repair callers can exclude exact vote/epoch scopes with unknown identity;
+   * the default still reports their missing measurement to other consumers.
    */
-  async findEpochsWithIncomeGaps(epochs: Epoch[], votes: VotePubkey[]): Promise<Epoch[]> {
+  async findEpochsWithIncomeGaps(
+    epochs: Epoch[],
+    votes: VotePubkey[],
+    excludeDeferredScopes = false,
+  ): Promise<Epoch[]> {
     if (epochs.length === 0 || votes.length === 0) return [];
     const { rows } = await this.pool.query<{ epoch: string }>(
-      `SELECT DISTINCT epoch::text AS epoch
-         FROM epoch_validator_stats
-        WHERE epoch = ANY($1::bigint[])
-          AND vote_pubkey = ANY($2::text[])
+      `SELECT DISTINCT evs.epoch::text AS epoch
+         FROM epoch_validator_stats evs
+        WHERE evs.epoch = ANY($1::bigint[])
+          AND evs.vote_pubkey = ANY($2::text[])
           AND slots_assigned > 0
-          AND (fees_updated_at IS NULL OR tips_updated_at IS NULL)`,
-      [epochs, votes],
+          AND (fees_updated_at IS NULL OR tips_updated_at IS NULL)
+          AND (NOT $3::boolean OR NOT EXISTS (
+            SELECT 1 FROM watched_validators_dynamic d
+             WHERE d.vote_pubkey=evs.vote_pubkey AND d.prev_epoch_backfill_epoch=evs.epoch
+               AND d.prev_epoch_backfill_identity IS NULL))`,
+      [epochs, votes, excludeDeferredScopes],
     );
     return rows.map((r) => Number(r.epoch));
   }
@@ -1221,20 +1231,28 @@ export class StatsRepository {
    * to the watched set). Under the full-window tier requirement such
    * an epoch holds the validator at `unrated`, so the income-reconciler
    * rebuilds the row from the leader schedule. Cheap — one indexed
-   * count per epoch, no block fetches.
+   * existence check per epoch, no block fetches. Repair callers can exclude
+   * exact vote/epoch scopes whose pinned historical identity is unknown.
    */
-  async findEpochsWithMissingWatchedRows(epochs: Epoch[], votes: VotePubkey[]): Promise<Epoch[]> {
+  async findEpochsWithMissingWatchedRows(
+    epochs: Epoch[],
+    votes: VotePubkey[],
+    excludeDeferredScopes = false,
+  ): Promise<Epoch[]> {
     if (epochs.length === 0 || votes.length === 0) return [];
     const { rows } = await this.pool.query<{ epoch: string }>(
       `SELECT w.epoch::text AS epoch
          FROM unnest($1::bigint[]) AS w(epoch)
-        WHERE (
-          SELECT COUNT(*)
-            FROM epoch_validator_stats evs
-           WHERE evs.epoch = w.epoch
-             AND evs.vote_pubkey = ANY($2::text[])
-        ) < (SELECT COUNT(DISTINCT v) FROM unnest($2::text[]) AS v)`,
-      [epochs, votes],
+        WHERE EXISTS (
+          SELECT 1 FROM unnest($2::text[]) AS v(vote)
+           WHERE NOT EXISTS (SELECT 1 FROM epoch_validator_stats evs
+                             WHERE evs.epoch=w.epoch AND evs.vote_pubkey=v.vote)
+             AND (NOT $3::boolean OR NOT EXISTS (
+               SELECT 1 FROM watched_validators_dynamic d
+                WHERE d.vote_pubkey=v.vote AND d.prev_epoch_backfill_epoch=w.epoch
+                  AND d.prev_epoch_backfill_identity IS NULL))
+        )`,
+      [epochs, votes, excludeDeferredScopes],
     );
     return rows.map((r) => Number(r.epoch));
   }

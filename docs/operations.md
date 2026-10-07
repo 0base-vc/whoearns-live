@@ -462,6 +462,13 @@ a claim waiting for an earlier delta reads the locked stats' latest timestamps.
 Already-unmeasured stats are not rewritten during repeated target resolution.
 Completed scopes and unrelated live rows retain their normal measurement behaviour.
 
+The production reconciler's missing-row/income-gap selection excludes only the
+exact vote/epoch whose pinned identity is NULL. A deliberately deferred hole
+therefore does not repeatedly select an old epoch and re-scan healthy watched
+votes. Another vote's real gap in that epoch, or that vote's gap in another
+epoch, still selects repair. Raw gap reporting continues to show missing data;
+the latest-closed settling pass and current/live ingestion keep their normal scope.
+
 The ordinary income reconciler follows the stored historical scope for its
 target epoch, including after completion. Slot writes lock and validate that
 scope in SQL, so a claim or rotation between lookup and write cannot relabel
