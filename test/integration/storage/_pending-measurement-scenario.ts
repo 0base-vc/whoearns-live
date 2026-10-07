@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { boundPgPool } from './_pg-fixture.js';
 import { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
 import { WatchedDynamicRepository } from '../../../src/storage/repositories/watched-dynamic.repo.js';
 
@@ -171,9 +172,7 @@ export async function runMeasurementRace(
   await facts(pool);
   const claimant = await pool.connect();
   const writer = await pool.connect();
-  const claimRepo = new WatchedDynamicRepository({
-    query: claimant.query.bind(claimant),
-  } as pg.Pool);
+  const claimRepo = new WatchedDynamicRepository(boundPgPool(claimant, true));
   const writerRepo = new StatsRepository({ query: writer.query.bind(writer) } as pg.Pool);
   let pending: Promise<unknown> | undefined;
   try {
@@ -236,9 +235,7 @@ export async function runCompletionRace(
   const completionRepo = new WatchedDynamicRepository({
     query: completer.query.bind(completer),
   } as pg.Pool);
-  const observerRepo = new WatchedDynamicRepository({
-    query: observer.query.bind(observer),
-  } as pg.Pool);
+  const observerRepo = new WatchedDynamicRepository(boundPgPool(observer));
   const observerStats = new StatsRepository({ query: observer.query.bind(observer) } as pg.Pool);
   let pending: Promise<unknown> | undefined;
   try {

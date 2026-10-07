@@ -178,14 +178,32 @@ export class WatchedDynamicRepository {
     includeRevision: boolean,
     votes: VotePubkey[] | null,
   ): Promise<Map<VotePubkey, DynamicBackfillTarget>> {
-    const { rows } = await this.pool.query<{
-      vote_pubkey: string;
-      epoch: string;
-      identity: string;
-      revision: string;
-      tuple: string;
-    }>(
-      `WITH candidates AS MATERIALIZED (
+    const client = await this.pool.connect();
+    let discardClient = false;
+    try {
+      await client.query('BEGIN');
+      // Publication takes the same epoch lock before watched/stats locks. Facts
+      // committed during a transition are published after its commit, never only
+      // to rows that still happened to name the old identity.
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended('whoearns:captured-income:' || epoch::text,0))
+           FROM (SELECT DISTINCT COALESCE(w.prev_epoch_backfill_epoch,$1::bigint) AS epoch
+             FROM watched_validators_dynamic w JOIN validators v USING(vote_pubkey)
+            WHERE ($2::text[] IS NULL OR w.vote_pubkey=ANY($2))
+              AND (w.prev_epoch_backfilled_at IS NULL OR w.prev_epoch_backfill_identity IS DISTINCT FROM v.identity_pubkey)
+              AND COALESCE(w.prev_epoch_backfill_epoch,$1::bigint) IS NOT NULL
+            ORDER BY epoch) epochs`,
+        [proposedEpoch, votes],
+      );
+      const { rows } = await client.query<{
+        vote_pubkey: string;
+        epoch: string;
+        identity: string;
+        revision: string;
+        tuple: string;
+        refresh: boolean;
+      }>(
+        `WITH candidates AS MATERIALIZED (
          SELECT * FROM jsonb_to_recordset($2::jsonb) AS c(vote text,version text,tuple text)
        ), pending AS MATERIALIZED (
          SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,
@@ -261,19 +279,58 @@ export class WatchedDynamicRepository {
             AND (t.recollect AND s.identity_pubkey<>t.identity OR t.fees_updated_at IS NOT NULL OR t.tips_updated_at IS NOT NULL)
          RETURNING s.vote_pubkey
        )
-       SELECT vote_pubkey,epoch::text,identity,revision,tuple FROM targets`,
-      [proposedEpoch, JSON.stringify(candidates), votes],
-    );
-    return new Map(
-      rows.map((row) => [
-        row.vote_pubkey,
-        {
-          epoch: Number(row.epoch),
-          identity: row.identity,
-          ...(includeRevision ? { revision: row.revision, tuple: row.tuple } : {}),
-        },
-      ]),
-    );
+       SELECT vote_pubkey,epoch::text,identity,revision,tuple,
+         EXISTS (SELECT 1 FROM locked_stats s WHERE s.vote_pubkey=targets.vote_pubkey
+           AND s.epoch=targets.epoch AND s.recollect AND s.identity_pubkey<>s.identity) AS refresh
+       FROM targets`,
+        [proposedEpoch, JSON.stringify(candidates), votes],
+      );
+      const refresh = rows.filter((row) => row.refresh);
+      if (refresh.length > 0) {
+        // A separate READ COMMITTED statement sees facts committed while the
+        // preceding watched/stats locks were waiting. Keep those locks until commit.
+        await client.query(
+          `WITH targets AS (SELECT * FROM jsonb_to_recordset($1::jsonb)
+           AS t(vote_pubkey text,epoch bigint,identity text)), facts AS (
+          SELECT t.vote_pubkey,t.epoch,t.identity,
+            COALESCE(SUM(b.fees_lamports) FILTER (WHERE b.block_status='produced'),0) AS fees,
+            COALESCE(SUM(b.base_fees_lamports) FILTER (WHERE b.block_status='produced'),0) AS base,
+            COALESCE(SUM(b.priority_fees_lamports) FILTER (WHERE b.block_status='produced'),0) AS priority,
+            COALESCE(SUM(b.tips_lamports) FILTER (WHERE b.block_status='produced'),0) AS tips,
+            COALESCE(SUM(b.compute_units_consumed) FILTER (WHERE b.block_status='produced'),0) AS cu,
+            COUNT(b.slot) FILTER (WHERE b.block_status='produced') AS produced,
+            COUNT(b.slot) FILTER (WHERE b.block_status='skipped') AS skipped
+          FROM targets t LEFT JOIN processed_blocks b ON b.epoch=t.epoch AND b.leader_identity=t.identity
+          GROUP BY t.vote_pubkey,t.epoch,t.identity)
+        UPDATE epoch_validator_stats s SET
+          block_fees_total_lamports=f.fees,block_base_fees_total_lamports=f.base,
+          block_priority_fees_total_lamports=f.priority,block_tips_total_lamports=f.tips,
+          compute_units_total=f.cu,slots_produced=f.produced,slots_skipped=f.skipped
+        FROM facts f WHERE s.vote_pubkey=f.vote_pubkey AND s.epoch=f.epoch AND s.identity_pubkey=f.identity`,
+          [JSON.stringify(refresh)],
+        );
+      }
+      await client.query('COMMIT');
+      return new Map(
+        rows.map((row) => [
+          row.vote_pubkey,
+          {
+            epoch: Number(row.epoch),
+            identity: row.identity,
+            ...(includeRevision ? { revision: row.revision, tuple: row.tuple } : {}),
+          },
+        ]),
+      );
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        discardClient = true;
+      }
+      throw err;
+    } finally {
+      client.release(discardClient);
+    }
   }
 
   /** Resolve stored scope and invalidate pending measurement; completed scopes stay measured. */

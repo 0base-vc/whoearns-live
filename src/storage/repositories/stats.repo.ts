@@ -931,6 +931,10 @@ export class StatsRepository {
     try {
       await client.query('BEGIN');
       await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('whoearns:captured-income:' || $1::bigint::text,0))",
+        [epoch],
+      );
+      await client.query(
         `SELECT w.vote_pubkey FROM watched_validators_dynamic w
           JOIN epoch_validator_stats s ON s.vote_pubkey=w.vote_pubkey
          WHERE s.epoch=$1 AND s.identity_pubkey=$2 ORDER BY w.vote_pubkey FOR UPDATE OF w`,

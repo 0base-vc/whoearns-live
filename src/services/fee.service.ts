@@ -716,10 +716,9 @@ export class FeeService {
         const insertRows = rows.filter((row) => !already.has(row.slot));
         const repairRows = rows.filter((row) => already.has(row.slot));
 
-        // `insertBatch` returns the slots it actually inserted. Apply
-        // deltas only for those; a row that lost a race with a concurrent
-        // writer (or with our own earlier run after a crash) must NOT
-        // have its fee / tip added again.
+        // Publish exact sums for identities whose facts were inserted or
+        // repaired. Repaired zero totals also publish, so old incomplete values
+        // can be corrected; concurrent losers rely on the successful writer.
         const insertedSlots = await this.processedBlocksRepo.insertBatch(insertRows);
         const repairedSlots = await this.processedBlocksRepo.updateMissingFactsBatch(repairRows);
         await this.processedBlocksRepo.markFetchResolved(
@@ -748,7 +747,7 @@ export class FeeService {
             computeUnits: bigint;
           }
         >();
-        for (const slot of insertedSlots) {
+        for (const slot of new Set([...insertedSlots, ...repairedSlots])) {
           const entry = deltaBySlot.get(slot);
           if (!entry) continue;
           // Skip a slot only when it moves NOTHING. Compute units are
@@ -756,6 +755,7 @@ export class FeeService {
           // consumed CU while the four fee deltas round to zero, and
           // dropping it here would leave `compute_units_total` short.
           if (
+            !repairedSlots.has(slot) &&
             entry.leaderFees === 0n &&
             entry.baseFees === 0n &&
             entry.priorityFees === 0n &&

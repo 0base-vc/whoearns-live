@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { boundPgPool } from './_pg-fixture.js';
 import { pino } from 'pino';
 import { createFeeIngesterJob } from '../../../src/jobs/fee-ingester.job.js';
 import { EpochService } from '../../../src/services/epoch.service.js';
@@ -146,7 +147,7 @@ export async function runCandidateWriteRace(pool: pg.Pool, kind: 'lookup' | 're-
   const candidates = await repo.getUnclaimedBackfillCandidates();
   const writer = await pool.connect();
   const observer = await pool.connect();
-  const observerRepo = new WatchedDynamicRepository(observer as unknown as pg.Pool);
+  const observerRepo = new WatchedDynamicRepository(boundPgPool(observer));
   let pending: Promise<unknown> | undefined;
   try {
     await writer.query('BEGIN');

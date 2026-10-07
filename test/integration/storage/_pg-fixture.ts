@@ -63,3 +63,20 @@ export async function resetTables(pool: pg.Pool): Promise<void> {
      RESTART IDENTITY CASCADE`,
   );
 }
+
+/** Bind repository-owned transactions to a known backend for lock-order tests. */
+export function boundPgPool(client: pg.PoolClient, nested = false): pg.Pool {
+  const query = (sql: string, ...args: unknown[]) => {
+    const command = nested
+      ? ((
+          {
+            BEGIN: 'SAVEPOINT repo_scope',
+            COMMIT: 'RELEASE SAVEPOINT repo_scope',
+            ROLLBACK: 'ROLLBACK TO SAVEPOINT repo_scope',
+          } as Record<string, string>
+        )[sql] ?? sql)
+      : sql;
+    return Reflect.apply(client.query, client, [command, ...args]);
+  };
+  return { query, connect: async () => ({ query, release: () => {} }) } as unknown as pg.Pool;
+}

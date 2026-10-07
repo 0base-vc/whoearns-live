@@ -680,9 +680,18 @@ describe('FeeService.ingestPendingBlocks', () => {
     expect(repaired!.factsCapturedAt).not.toBeNull();
     expect(repaired!.feesLamports).toBe(12_345_678n);
     expect(repaired!.blockTime).toEqual(new Date(1_734_000_000 * 1000));
-    // The row already existed, so repairing facts must not apply a new
-    // aggregate delta. The closed-epoch reconciler rebuilds totals from facts.
-    expect(stats.incomeDeltaCalls).toHaveLength(0);
+    // Repair publishes exact captured-fact sums; it never adds old+new totals.
+    expect(stats.incomeDeltaCalls).toHaveLength(1);
+    expect(stats.incomeDeltaCalls[0]).toMatchObject({
+      epoch: EPOCH,
+      identityPubkey: IDENTITY_A,
+      fromCapturedFacts: true,
+      leaderFeeDeltaLamports: repaired!.feesLamports,
+      baseFeeDeltaLamports: repaired!.baseFeesLamports,
+      priorityFeeDeltaLamports: repaired!.priorityFeesLamports,
+      tipDeltaLamports: repaired!.tipsLamports,
+      computeUnitsDelta: repaired!.computeUnitsConsumed,
+    });
   });
 
   it('continues after a per-block error and counts it as an error', async () => {

@@ -30,7 +30,9 @@ and this project follows [Semantic Versioning](https://semver.org/).
   Other epochs and all raw block history are preserved. Completion checks the
   exact scope revision, preventing stale work from completing a replacement.
   Captured income publication is idempotent and cannot add a delayed delta to
-  already-reconstructed totals. Actual same-address ledger conflicts still defer.
+  already-reconstructed totals. Epoch-scoped publication/transition coordination
+  and a facts read after row-lock waits prevent stale transition sums; repairs
+  of incomplete facts also publish exact totals. Actual same-address ledger conflicts still defer.
   Fresh targets require a successful authoritative epoch sync before claiming;
   sync failure leaves fresh rows unclaimed while cached live work and stored
   scopes continue.

@@ -9,13 +9,20 @@ import type { SolanaRpcClient } from '../../../src/clients/solana-rpc.js';
 import { StatsRepository } from '../../../src/storage/repositories/stats.repo.js';
 import { ProcessedBlocksRepository } from '../../../src/storage/repositories/processed-blocks.repo.js';
 import { WatchedDynamicRepository } from '../../../src/storage/repositories/watched-dynamic.repo.js';
-import { resetTables, setupPgFixture, teardownPgFixture, type PgFixture } from './_pg-fixture.js';
+import {
+  boundPgPool,
+  resetTables,
+  setupPgFixture,
+  teardownPgFixture,
+  type PgFixture,
+} from './_pg-fixture.js';
 
 const logger = pino({ level: 'silent' });
 function worker(
   pool: pg.Pool,
   hold?: { started: () => void; wait: Promise<void> },
   newEmpty = false,
+  zeroRepair = false,
 ) {
   const stats = new StatsRepository(pool),
     watched = new WatchedDynamicRepository(pool);
@@ -40,6 +47,7 @@ function worker(
         hold.started();
         await hold.wait;
       }
+      if (zeroRepair && slot === 49901) return null;
       const identity = slot < 49903 ? 'IA' : 'IB';
       return {
         blockhash: `block-${slot}`,
@@ -383,13 +391,15 @@ describe('automatic current-identity collection — PostgreSQL 16', () => {
       "INSERT INTO epoch_validator_stats(epoch,vote_pubkey,identity_pubkey) VALUES(499,'B','IB')",
     );
     const holder = await db.connect(),
-      runner = await db.connect();
+      runner = await db.connect(),
+      publisher = await db.connect();
     const bound = { query: runner.query.bind(runner), release: () => {} };
     const rotating = new WatchedDynamicRepository({
       query: bound.query,
       connect: async () => bound,
     } as unknown as pg.Pool);
     let pending: Promise<unknown> | undefined;
+    let publication: Promise<unknown> | undefined;
     try {
       await holder.query('BEGIN');
       await holder.query(
@@ -415,7 +425,10 @@ describe('automatic current-identity collection — PostgreSQL 16', () => {
       await db.query(
         "INSERT INTO processed_blocks(slot,epoch,leader_identity,block_status,fees_lamports,base_fees_lamports,priority_fees_lamports,tips_lamports,compute_units_consumed,facts_captured_at) VALUES(49903,499,'IB','produced',30,5,25,2,100,NOW())",
       );
-      await w.stats.addIncomeDelta({
+      const publisherPid = Number(
+        (await publisher.query('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+      );
+      publication = new StatsRepository(boundPgPool(publisher)).addIncomeDelta({
         epoch: 499,
         identityPubkey: 'IB',
         leaderFeeDeltaLamports: 30n,
@@ -425,15 +438,35 @@ describe('automatic current-identity collection — PostgreSQL 16', () => {
         computeUnitsDelta: 100n,
         fromCapturedFacts: true,
       });
-      expect(await w.stats.findByVoteEpoch('B', 499)).toMatchObject({
-        blockFeesTotalLamports: 30n,
-      });
+      const publicationDeadline = Date.now() + 3000;
+      let publicationBlocked = false;
+      while (Date.now() < publicationDeadline) {
+        const { rows } = await db.query('SELECT cardinality(pg_blocking_pids($1)) AS blockers', [
+          publisherPid,
+        ]);
+        if (Number(rows[0].blockers) > 0) {
+          publicationBlocked = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(publicationBlocked).toBe(true);
       expect(await w.stats.findByVoteEpoch('A', 499)).toMatchObject({
         identityPubkey: 'IA',
         blockFeesTotalLamports: 10n,
       });
       await holder.query('COMMIT');
       await pending;
+      // The post-lock refresh sees the newly committed fact even before the
+      // coordinated publisher has completed its own transaction.
+      expect(await w.stats.findByVoteEpoch('A', 499)).toMatchObject({
+        blockFeesTotalLamports: 30n,
+        computeUnitsTotal: 100n,
+      });
+      await publication;
+      expect(await w.stats.findByVoteEpoch('B', 499)).toMatchObject({
+        blockFeesTotalLamports: 30n,
+      });
       const after = await w.stats.findByVoteEpoch('A', 499);
       const guard = await w.stats.upsertSlotStatsIfIdentityMatches({
         epoch: 499,
@@ -468,9 +501,10 @@ describe('automatic current-identity collection — PostgreSQL 16', () => {
       ).toBe(1);
     } finally {
       await holder.query('ROLLBACK');
-      if (pending) await Promise.allSettled([pending]);
+      await Promise.allSettled([pending, publication]);
       holder.release();
       runner.release();
+      publisher.release();
     }
   });
 
@@ -515,5 +549,35 @@ describe('automatic current-identity collection — PostgreSQL 16', () => {
       computeUnitsTotal: 200n,
     });
     expect(await w.stats.findByVoteEpoch('A', 498)).toMatchObject({ blockFeesTotalLamports: 99n });
+  });
+
+  it('publishes a repaired zero/skipped fact without retaining its old fees or duplicating later income', async () => {
+    const db = pool(),
+      w = worker(db, undefined, false, true);
+    await db.query(
+      "UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499,prev_epoch_backfill_identity='IA'",
+    );
+    await db.query(
+      "INSERT INTO epoch_validator_stats(epoch,vote_pubkey,identity_pubkey,slots_assigned,slots_produced,block_fees_total_lamports) VALUES(499,'A','IA',2,1,10)",
+    );
+    await db.query(
+      "INSERT INTO processed_blocks(slot,epoch,leader_identity,block_status,fees_lamports) VALUES(49901,499,'IA','produced',10)",
+    );
+    await w.tick();
+    expect(await w.stats.findByVoteEpoch('A', 499)).toMatchObject({
+      blockFeesTotalLamports: 0n,
+      slotsProduced: 0,
+      slotsSkipped: 1,
+      feesUpdatedAt: null,
+    });
+    await w.tick();
+    await w.tick();
+    expect((await w.watched.findByVote('A'))?.prevEpochBackfilledAt).toBeInstanceOf(Date);
+    expect(await w.stats.findByVoteEpoch('A', 499)).toMatchObject({
+      blockFeesTotalLamports: 20n,
+      computeUnitsTotal: 100n,
+      slotsProduced: 1,
+      slotsSkipped: 1,
+    });
   });
 });

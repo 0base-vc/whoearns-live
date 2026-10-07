@@ -417,7 +417,9 @@ unchanged observed versions. A new registration after the sample, or a row
 changed/deleted/re-registered while RPC runs, waits for the next fresh sample.
 Even ordinary lookup updates conservatively postpone that claim. Already-pinned
 epochs need no extra epoch RPC. Their addresses update only when the mapping changes.
-Snapshot and bulk resolution each use one query, with no per-validator claim loop.
+The candidate snapshot uses one query. Bulk resolution uses a transaction with
+fixed query overhead and an extra facts refresh only for address transitions,
+with no per-validator claim loop.
 No watched-row lock spans RPC. With no cached epoch, the initial sync is reused.
 A NULL proposal or omitted candidate cohort never claims new rows.
 
@@ -460,7 +462,13 @@ provenance from generic stats, and does not require it for ordinary collection.
 Captured-block writers publish exact identity sums under watched/stats locks
 using a fresh facts snapshot, instead of adding delayed deltas to totals already
 reconstructed during an address change. Repeated/concurrent publication is
-idempotent. Fact capture and publication remain separate writes; publication
+idempotent. Publication and target transitions take the same transaction-scoped
+advisory lock per epoch before watched/stats locks. A transition refreshes its
+new-address facts in a separate statement after row locks resolve; facts
+committed during that wait are visible. Publications arriving during a transition
+wait, then update the newly selected address under a fresh snapshot. Repaired
+incomplete facts also trigger exact publication, including repaired zero totals.
+Fact capture and publication remain separate writes; publication
 failure leaves historical measurement pending until the ledger is reconciled.
 
 Pending historical scopes keep both fee/tip measurement timestamps NULL even
