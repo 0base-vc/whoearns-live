@@ -18,7 +18,10 @@ and this project follows [Semantic Versioning](https://semver.org/).
   prioritises newly finalised slots, and resumes previous-epoch dynamic
   backfills one batch for one validator per tick. Partial passes remain
   pending instead of being marked complete. Historical attempts rotate past
-  persistent RPC errors so later retrievable slots are not starved.
+  persistent RPC errors so later retrievable slots are not starved. Dynamic
+  backfill targets are stored per validator (migration 0047), preserving
+  unfinished epochs through rollover and restart and preventing completion
+  against a different epoch.
 
 ### Added
 

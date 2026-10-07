@@ -1,6 +1,6 @@
 import type pg from 'pg';
 import { toLamports } from '../../core/lamports.js';
-import type { VotePubkey } from '../../types/domain.js';
+import type { Epoch, VotePubkey } from '../../types/domain.js';
 
 interface DynamicWatchedRow {
   vote_pubkey: string;
@@ -125,16 +125,30 @@ export class WatchedDynamicRepository {
   }
 
   /**
-   * Mark the one-shot previous-epoch backfill complete. Idempotent:
-   * repeated calls refresh the timestamp but never re-trigger work
-   * (the fee-ingester only picks up rows where the flag is null).
+   * Atomically choose a pending validator's one-shot target once. Returning
+   * the stored target keeps later passes and restarted workers on the same
+   * epoch. Completed or removed validators return null.
    */
-  async markBackfilled(vote: VotePubkey): Promise<void> {
+  async getOrSetBackfillEpoch(vote: VotePubkey, proposedEpoch: Epoch): Promise<Epoch | null> {
+    const { rows } = await this.pool.query<{ epoch: string }>(
+      `UPDATE watched_validators_dynamic
+          SET prev_epoch_backfill_epoch = COALESCE(prev_epoch_backfill_epoch, $2::bigint)
+        WHERE vote_pubkey = $1 AND prev_epoch_backfilled_at IS NULL
+        RETURNING prev_epoch_backfill_epoch::text AS epoch`,
+      [vote, proposedEpoch],
+    );
+    return rows[0] ? Number(rows[0].epoch) : null;
+  }
+
+  /** Complete only the pinned target; a different epoch cannot stamp it. */
+  async markBackfilled(vote: VotePubkey, epoch: Epoch): Promise<void> {
     await this.pool.query(
       `UPDATE watched_validators_dynamic
           SET prev_epoch_backfilled_at = NOW()
-        WHERE vote_pubkey = $1`,
-      [vote],
+        WHERE vote_pubkey = $1
+          AND prev_epoch_backfill_epoch = $2::bigint
+          AND prev_epoch_backfilled_at IS NULL`,
+      [vote, epoch],
     );
   }
 }

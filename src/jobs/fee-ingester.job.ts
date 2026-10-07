@@ -29,7 +29,10 @@ export interface FeeIngesterJobDeps {
    * don't exercise the on-demand track path) the previous-epoch
    * backfill sweep is simply skipped each tick.
    */
-  watchedDynamicRepo?: Pick<WatchedDynamicRepository, 'listPendingBackfill' | 'markBackfilled'>;
+  watchedDynamicRepo?: Pick<
+    WatchedDynamicRepository,
+    'listPendingBackfill' | 'getOrSetBackfillEpoch' | 'markBackfilled'
+  >;
   rpc: SolanaRpcClient;
   rpcFallback?: Pick<SolanaRpcClient, 'getLeaderSchedule' | 'getSlot'>;
   watchMode: WatchMode;
@@ -71,8 +74,10 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
   // up every other dynamic backfill. Persisted facts track completion;
   // per-validator attempt positions also move past persistent RPC errors.
   let lastBackfillVote: VotePubkey | null = null;
-  let backfillCursorEpoch: Epoch | null = null;
-  const backfillAttemptCursors = new Map<VotePubkey, { identity: IdentityPubkey; slot: Slot }>();
+  const backfillAttemptCursors = new Map<
+    VotePubkey,
+    { epoch: Epoch; identity: IdentityPubkey; slot: Slot }
+  >();
   const medianBackfillLookback = deps.medianBackfillLookback ?? 50;
 
   return {
@@ -84,10 +89,6 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
       const epochInfo =
         (await deps.epochService.getCurrent()) ?? (await deps.epochService.syncCurrent());
       const epoch = epochInfo.epoch;
-      if (backfillCursorEpoch !== epoch) {
-        backfillAttemptCursors.clear();
-        backfillCursorEpoch = epoch;
-      }
 
       const votes = await deps.validatorService.getActiveVotePubkeys(
         deps.watchMode,
@@ -291,9 +292,9 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
  * and the backfill path has a handful of error-handling branches that
  * are easier to reason about in isolation.
  *
- * One RPC leader-schedule fetch is amortised across every pending
- * validator (schedules are epoch-immutable). Each validator only fetches
- * missing leader-slot blocks; slot counters are derived from local facts.
+ * Each validator retains its durable original target even after rollover
+ * or restart. Only missing leader-slot facts are fetched; slot counters
+ * are derived from local facts.
  */
 async function runPreviousEpochBackfill(args: {
   pendingVotes: VotePubkey[];
@@ -301,46 +302,51 @@ async function runPreviousEpochBackfill(args: {
   deps: FeeIngesterJobDeps;
   deadlineMs: number;
   signal: AbortSignal;
-  attemptCursors: Map<VotePubkey, { identity: IdentityPubkey; slot: Slot }>;
+  attemptCursors: Map<VotePubkey, { epoch: Epoch; identity: IdentityPubkey; slot: Slot }>;
 }): Promise<void> {
   const { pendingVotes, currentEpoch, deps, deadlineMs, signal, attemptCursors } = args;
   // Both are guaranteed non-null by the caller, but re-narrow inside this
   // helper so the function remains callable in isolation during refactors.
   if (deps.watchedDynamicRepo === undefined || deps.epochsRepo === undefined) return;
 
-  const prevEpoch = currentEpoch - 1;
-  if (prevEpoch < 0) {
+  if (currentEpoch < 1) {
     deps.logger.debug('fee-ingester: no previous epoch yet (cluster genesis); deferring backfill');
     return;
   }
-  const prevEpochInfo = await deps.epochsRepo.findByEpoch(prevEpoch);
-  if (prevEpochInfo === null || !prevEpochInfo.isClosed) {
-    deps.logger.debug(
-      { prevEpoch, known: prevEpochInfo !== null },
-      'fee-ingester: previous epoch not closed yet; deferring backfill',
-    );
-    return;
-  }
-
-  const prevSchedule = await withRpcFallback({
-    method: 'getLeaderSchedule',
-    logger: deps.logger,
-    fallback: deps.rpcFallback,
-    context: { prevEpoch, firstSlot: prevEpochInfo.firstSlot, job: FEE_INGESTER_JOB_NAME },
-    runPrimary: () => deps.rpc.getLeaderSchedule(prevEpochInfo.firstSlot),
-    runFallback: (fallback) => fallback.getLeaderSchedule(prevEpochInfo.firstSlot),
-  });
-  if (prevSchedule === null) {
-    deps.logger.warn({ prevEpoch }, 'fee-ingester: previous leader schedule unavailable');
-    return;
-  }
-
-  const identityByVote = await deps.validatorService.getIdentityMap(pendingVotes);
-
   let filled = 0;
   let failed = 0;
   for (const vote of pendingVotes) {
     if (signal.aborted || Date.now() >= deadlineMs) break;
+    // Pin before any RPC work so rollover, errors and restart cannot
+    // replace a partially captured epoch with a newer, easier target.
+    const prevEpoch = await deps.watchedDynamicRepo.getOrSetBackfillEpoch(vote, currentEpoch - 1);
+    if (prevEpoch === null) {
+      attemptCursors.delete(vote);
+      continue;
+    }
+    const prevEpochInfo = await deps.epochsRepo.findByEpoch(prevEpoch);
+    if (prevEpochInfo === null || !prevEpochInfo.isClosed) {
+      deps.logger.debug(
+        { prevEpoch, known: prevEpochInfo !== null },
+        'fee-ingester: previous epoch not closed yet; deferring backfill',
+      );
+      continue;
+    }
+
+    const prevSchedule = await withRpcFallback({
+      method: 'getLeaderSchedule',
+      logger: deps.logger,
+      fallback: deps.rpcFallback,
+      context: { prevEpoch, firstSlot: prevEpochInfo.firstSlot, job: FEE_INGESTER_JOB_NAME },
+      runPrimary: () => deps.rpc.getLeaderSchedule(prevEpochInfo.firstSlot),
+      runFallback: (fallback) => fallback.getLeaderSchedule(prevEpochInfo.firstSlot),
+    });
+    if (prevSchedule === null) {
+      deps.logger.warn({ prevEpoch }, 'fee-ingester: previous leader schedule unavailable');
+      continue;
+    }
+
+    const identityByVote = await deps.validatorService.getIdentityMap([vote]);
     const identity = identityByVote.get(vote);
     if (identity === undefined) {
       deps.logger.warn(
@@ -352,7 +358,8 @@ async function runPreviousEpochBackfill(args: {
     // Cursors are scoped to this epoch and identity. Never carry an old
     // validator identity's position into the rotated identity's schedule.
     const cursor = attemptCursors.get(vote);
-    if (cursor !== undefined && cursor.identity !== identity) attemptCursors.delete(vote);
+    const matchingCursor = cursor?.epoch === prevEpoch && cursor.identity === identity;
+    if (!matchingCursor) attemptCursors.delete(vote);
     try {
       const result = await deps.feeService.backfillPreviousEpoch({
         epoch: prevEpoch,
@@ -365,10 +372,10 @@ async function runPreviousEpochBackfill(args: {
         maxBlocks: Math.max(1, deps.batchSize),
         deadlineMs,
         signal,
-        ...(cursor?.identity === identity ? { startAfterSlot: cursor.slot } : {}),
+        ...(matchingCursor ? { startAfterSlot: cursor.slot } : {}),
       });
       if (result.lastAttemptedSlot !== undefined) {
-        attemptCursors.set(vote, { identity, slot: result.lastAttemptedSlot });
+        attemptCursors.set(vote, { epoch: prevEpoch, identity, slot: result.lastAttemptedSlot });
       }
       if (result.remaining !== undefined && result.remaining > 0 && result.errors === 0) {
         deps.logger.debug(
@@ -386,7 +393,7 @@ async function runPreviousEpochBackfill(args: {
         continue;
       }
       if (signal.aborted) break;
-      await deps.watchedDynamicRepo.markBackfilled(vote);
+      await deps.watchedDynamicRepo.markBackfilled(vote, prevEpoch);
       attemptCursors.delete(vote);
       filled += 1;
     } catch (err) {
@@ -400,7 +407,7 @@ async function runPreviousEpochBackfill(args: {
 
   if (filled > 0 || failed > 0) {
     deps.logger.info(
-      { prevEpoch, filled, failed, pending: pendingVotes.length },
+      { filled, failed, pending: pendingVotes.length },
       'fee-ingester: prev-epoch backfill sweep complete',
     );
   }

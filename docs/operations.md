@@ -404,13 +404,22 @@ epoch. It rotates pending votes even after RPC errors. The
 `prev_epoch_backfilled_at` marker is set only after all facts are captured
 without errors; partial backfills deliberately take multiple ticks. Previously
 captured blocks are skipped on resumption, including after a worker restart.
+Migration `0047_dynamic_backfill_target_epoch.sql` adds the nullable
+`prev_epoch_backfill_epoch` column. The worker atomically chooses each
+pending validator's target before its first historical pass, then keeps
+that original epoch through rollover and restart. Existing pending rows
+choose the previous epoch on their first pass after upgrading; completed
+rows stay completed. The completion marker can only be set for the stored
+target, so completing newer work cannot hide older missing facts. Newly
+tracked validators choose their own target and keep rotating independently.
 
 Historical passes also rotate slots after the last attempt, including failed
 RPC attempts. A permanently unavailable first batch therefore cannot consume
 every later tick: later missing slots are attempted before wrapping back to
 the errors. The attempt cursor is local to the running fee job, isolated by
 vote, previous epoch and identity, and removed on completion or removal from
-the pending set. Epoch rollover and identity rotation start a fresh cursor.
+the pending set. Current-epoch rollover preserves the original backfill
+target and cursor; identity rotation starts a fresh cursor for that target.
 A restart can retry early errors again, but captured facts remain durable;
 errors are never treated as completed blocks. Live polling keeps its newest
 slot priority and does not use the historical cursor.

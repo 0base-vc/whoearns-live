@@ -13,6 +13,14 @@ import type { ProcessedBlocksRepository } from '../../../src/storage/repositorie
 
 const silent = pino({ level: 'silent' });
 
+function makeBackfillEpochStore() {
+  const targets = new Map<string, number>();
+  return vi.fn(async (vote: string, epoch: number) => {
+    if (!targets.has(vote)) targets.set(vote, epoch);
+    return targets.get(vote)!;
+  });
+}
+
 function makeDeps(
   overrides: {
     epochInfo?: { epoch: number; firstSlot: number; lastSlot: number };
@@ -373,6 +381,7 @@ describe('fee-ingester.job', () => {
     });
     const rpc = { ...deps.rpc, getBlock } as unknown as SolanaRpcClient;
     const watchedDynamicRepo = {
+      getOrSetBackfillEpoch: makeBackfillEpochStore(),
       listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
       markBackfilled: vi.fn(),
     };
@@ -433,6 +442,7 @@ describe('fee-ingester.job', () => {
     );
     const rpc = { ...deps.rpc, getBlock, getLeaderSchedule } as unknown as SolanaRpcClient;
     const watchedDynamicRepo = {
+      getOrSetBackfillEpoch: makeBackfillEpochStore(),
       listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
       markBackfilled: vi.fn(),
     };
@@ -485,14 +495,14 @@ describe('fee-ingester.job', () => {
     await job.tick(signal);
     expect(blocks.fetchErrors.size).toBe(0);
     expect([...blocks.rows.keys()]).toEqual([2_000, 2, 3, 4, 5, 0, 1]);
-    expect(watchedDynamicRepo.markBackfilled).toHaveBeenCalledWith(VOTE_A);
+    expect(watchedDynamicRepo.markBackfilled).toHaveBeenCalledWith(VOTE_A, 499);
     expect(stats.rows.get(`499:${VOTE_A}`)?.slotsProduced).toBe(6);
     expect(
       stats.incomeDeltaCalls.reduce((sum, call) => sum + call.leaderFeeDeltaLamports, 0n),
     ).toBe(700n);
   });
 
-  it('keeps an attempt cursor across empty passes but isolates it by vote, epoch and identity', async () => {
+  it('keeps the pinned epoch cursor across empty passes and rollover but isolates votes and identities', async () => {
     const deps = makeDeps();
     const backfillPreviousEpoch = vi.fn().mockResolvedValue({
       processed: 0,
@@ -502,6 +512,7 @@ describe('fee-ingester.job', () => {
       lastAttemptedSlot: 1,
     });
     const watchedDynamicRepo = {
+      getOrSetBackfillEpoch: makeBackfillEpochStore(),
       listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
       markBackfilled: vi.fn(),
     };
@@ -559,18 +570,12 @@ describe('fee-ingester.job', () => {
       closedAt: null,
       currentSlot: null,
     });
-    epochsRepo.findByEpoch.mockResolvedValue({
-      epoch: 500,
-      firstSlot: 0,
-      lastSlot: 1_999,
-      slotCount: 2_000,
-      isClosed: true,
-      observedAt: new Date(),
-      closedAt: new Date(),
-      currentSlot: null,
-    });
+    vi.mocked(deps.rpc.getSlot).mockResolvedValue(2_500);
     await job.tick(signal);
-    expect(backfillPreviousEpoch.mock.calls.at(-1)?.[0]).not.toHaveProperty('startAfterSlot');
+    expect(backfillPreviousEpoch.mock.calls.at(-1)?.[0]).toMatchObject({
+      epoch: 499,
+      startAfterSlot: 1,
+    });
 
     // Different vote with the same identity must also start independently.
     watchedDynamicRepo.listPendingBackfill.mockResolvedValue([VOTE_B]);
@@ -594,6 +599,7 @@ describe('fee-ingester.job', () => {
       ]),
     });
     const watchedDynamicRepo = {
+      getOrSetBackfillEpoch: makeBackfillEpochStore(),
       listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A, VOTE_B]),
       markBackfilled: vi.fn().mockResolvedValue(undefined),
     };
@@ -630,7 +636,7 @@ describe('fee-ingester.job', () => {
     await job.tick(new AbortController().signal);
     expect(deps.feeService.ingestPendingBlocks).toHaveBeenCalledTimes(2);
     expect(backfillPreviousEpoch.mock.calls.map(([args]) => args.vote)).toEqual([VOTE_A, VOTE_B]);
-    expect(watchedDynamicRepo.markBackfilled).toHaveBeenCalledWith(VOTE_B);
+    expect(watchedDynamicRepo.markBackfilled).toHaveBeenCalledWith(VOTE_B, 499);
     watchedDynamicRepo.listPendingBackfill.mockResolvedValue([VOTE_A]);
     await job.tick(new AbortController().signal);
     expect(watchedDynamicRepo.markBackfilled).toHaveBeenCalledTimes(1);
@@ -654,6 +660,7 @@ describe('fee-ingester.job', () => {
       }),
     };
     const watchedDynamicRepo = {
+      getOrSetBackfillEpoch: makeBackfillEpochStore(),
       listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
       markBackfilled: vi.fn().mockResolvedValue(undefined),
     };
