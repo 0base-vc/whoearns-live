@@ -411,10 +411,13 @@ that original epoch through rollover and restart. Migration
 `0048_dynamic_backfill_target_identity.sql` adds the nullable
 `prev_epoch_backfill_identity` column. The target is now an immutable
 `(epoch, identity)` pair. Historical epoch stats supply the identity when
-known, including for partially filled epoch-only targets from 0047;
-otherwise the identity resolved on the first pass is stored. Existing pending rows
-choose the previous epoch on their first pass after upgrading; completed
-rows stay completed. The completion marker can only be set for the stored
+known, including for partially filled epoch-only targets from 0047. An
+already-pinned epoch with no historical identity evidence stays pending and
+unchanged until historical stats supply its identity. Other backfills and live
+polling continue while that target is deferred. Only a target with no pinned
+epoch may fall back to the current identity on its first pass. Existing pending
+rows with no target choose the previous epoch on their first pass after upgrading;
+completed rows stay completed. The completion marker can only be set for the stored
 epoch and identity, so completing a different schedule cannot hide older
 missing facts. Live polling follows the current identity independently. Newly
 tracked validators choose their own target and keep rotating independently.

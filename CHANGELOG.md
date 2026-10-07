@@ -23,7 +23,9 @@ and this project follows [Semantic Versioning](https://semver.org/).
   unfinished epochs through rollover and restart and preventing completion
   against a different epoch. Migration 0048 also stores the historical
   target identity, so rotation cannot stamp unfinished old slots complete
-  by switching to the new identity's empty or shorter schedule.
+  by switching to the new identity's empty or shorter schedule. Legacy
+  epoch-only targets without historical identity evidence remain pending
+  until that evidence becomes available.
 
 ### Added
 

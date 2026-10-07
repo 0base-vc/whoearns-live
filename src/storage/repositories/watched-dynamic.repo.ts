@@ -134,7 +134,8 @@ export class WatchedDynamicRepository {
    * the stored target keeps later passes and restarted workers on the same
    * epoch AND identity. Historical stats recover epoch-only targets from
    * migration 0047, or provide an already-known historical identity on the
-   * first pass. Completed or removed validators return null.
+   * first pass. Epoch-only targets without historical identity evidence are
+   * deferred unchanged. Completed, removed and deferred validators return null.
    */
   async getOrSetBackfillTarget(
     vote: VotePubkey,
@@ -149,8 +150,13 @@ export class WatchedDynamicRepository {
                 (SELECT evs.identity_pubkey FROM epoch_validator_stats evs
                   WHERE evs.vote_pubkey = w.vote_pubkey
                     AND evs.epoch = COALESCE(w.prev_epoch_backfill_epoch, $2::bigint)),
-                $3::text)
+                CASE WHEN w.prev_epoch_backfill_epoch IS NULL THEN $3::text END)
         WHERE w.vote_pubkey = $1 AND w.prev_epoch_backfilled_at IS NULL
+          AND (w.prev_epoch_backfill_identity IS NOT NULL
+            OR w.prev_epoch_backfill_epoch IS NULL
+            OR EXISTS (SELECT 1 FROM epoch_validator_stats evs
+                        WHERE evs.vote_pubkey = w.vote_pubkey
+                          AND evs.epoch = w.prev_epoch_backfill_epoch))
         RETURNING prev_epoch_backfill_epoch::text AS epoch,
                   prev_epoch_backfill_identity AS identity`,
       [vote, proposedEpoch, proposedIdentity],
