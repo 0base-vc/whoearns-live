@@ -24,13 +24,28 @@ export async function runManyTargetsScenario(pool: pg.Pool, delayedQuery: () => 
     FROM watched_validators_dynamic ORDER BY vote_pubkey`)
     ).rows;
   const before = await tuples();
-  const originalQuery = pool.query;
   let queries = 0;
-  pool.query = function (this: pg.Pool, ...args: unknown[]) {
+  const measure = () => {
     queries++;
     delayedQuery();
-    return Reflect.apply(originalQuery, this, args);
-  } as typeof pool.query;
+  };
+  // Include transaction/advisory-lock statements as well as pool.query calls.
+  const timedPool = {
+    query: (...args: unknown[]) => {
+      measure();
+      return Reflect.apply(pool.query, pool, args);
+    },
+    connect: async () => {
+      const client = await pool.connect();
+      return {
+        query: (...args: unknown[]) => {
+          measure();
+          return Reflect.apply(client.query, client, args);
+        },
+        release: client.release.bind(client),
+      };
+    },
+  } as unknown as pg.Pool;
   let currentSlot = 100;
   const logger = pino({ level: 'silent' });
   const info = (epoch: number) => ({
@@ -49,7 +64,7 @@ export async function runManyTargetsScenario(pool: pg.Pool, delayedQuery: () => 
     getLeaderSchedule: async (slot: number) =>
       slot === 0 ? { IA: [1, 2], IB: [3] } : { IA: [0, 1] },
   } as unknown as SolanaRpcClient;
-  const statsRepo = new StatsRepository(pool);
+  const statsRepo = new StatsRepository(timedPool);
   const worker = createFeeIngesterJob({
     rpc,
     logger,
@@ -58,9 +73,9 @@ export async function runManyTargetsScenario(pool: pg.Pool, delayedQuery: () => 
       rpc,
       logger,
       statsRepo,
-      processedBlocksRepo: new ProcessedBlocksRepository(pool),
+      processedBlocksRepo: new ProcessedBlocksRepository(timedPool),
     }),
-    watchedDynamicRepo: new WatchedDynamicRepository(pool),
+    watchedDynamicRepo: new WatchedDynamicRepository(timedPool),
     epochService: { getCurrent: async () => info(500) } as EpochService,
     epochsRepo: { findByEpoch: async (epoch) => info(epoch) },
     validatorService: {
@@ -75,15 +90,12 @@ export async function runManyTargetsScenario(pool: pg.Pool, delayedQuery: () => 
     batchSize: 1,
     finalityBuffer: 0,
   });
-  try {
-    await worker.tick(new AbortController().signal);
-    const firstQueries = queries;
-    const after = await tuples();
-    currentSlot = 101;
-    await worker.tick(new AbortController().signal);
-    const secondQueries = queries - firstQueries - 1;
-    return { before, after, firstQueries, secondQueries, state: await snapshotBackfillState(pool) };
-  } finally {
-    pool.query = originalQuery;
-  }
+  await worker.tick(new AbortController().signal);
+  const firstQueries = queries;
+  const after = await tuples();
+  currentSlot = 101;
+  await worker.tick(new AbortController().signal);
+  const secondQueries = queries - firstQueries;
+  console.info(`502-target total SQL statements per tick: ${firstQueries}/${secondQueries}`);
+  return { before, after, firstQueries, secondQueries, state: await snapshotBackfillState(pool) };
 }
