@@ -1,3 +1,4 @@
+import { withBulkTargets } from './_backfill-target-fake.js';
 import { describe, it, expect, vi } from 'vitest';
 import { pino } from 'pino';
 import { createFeeIngesterJob, FEE_INGESTER_JOB_NAME } from '../../../src/jobs/fee-ingester.job.js';
@@ -380,11 +381,14 @@ describe('fee-ingester.job', () => {
       return null;
     });
     const rpc = { ...deps.rpc, getBlock } as unknown as SolanaRpcClient;
-    const watchedDynamicRepo = {
-      getOrSetBackfillTarget: makeBackfillTargetStore(),
-      listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
-      markBackfilled: vi.fn(),
-    };
+    const watchedDynamicRepo = withBulkTargets(
+      {
+        getOrSetBackfillTarget: makeBackfillTargetStore(),
+        listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
+        markBackfilled: vi.fn(),
+      },
+      (votes) => deps.validatorService.getIdentityMap(votes),
+    );
     const job = createFeeIngesterJob({
       ...deps,
       rpc,
@@ -429,11 +433,14 @@ describe('fee-ingester.job', () => {
       const deps = makeDeps({ currentSlot: failure === 'no finalised live slots' ? 0 : 200 });
       const getOrSetBackfillTarget = makeBackfillTargetStore();
       const backfillPreviousEpoch = vi.fn().mockResolvedValue({ errors: 0, remaining: 0 });
-      const watchedDynamicRepo = {
-        getOrSetBackfillTarget,
-        listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
-        markBackfilled: vi.fn(),
-      };
+      const watchedDynamicRepo = withBulkTargets(
+        {
+          getOrSetBackfillTarget,
+          listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
+          markBackfilled: vi.fn(),
+        },
+        (votes) => deps.validatorService.getIdentityMap(votes),
+      );
       const epochsRepo = {
         findByEpoch: vi.fn().mockResolvedValue({
           epoch: 499,
@@ -487,21 +494,19 @@ describe('fee-ingester.job', () => {
     },
   );
 
-  it('isolates a failed target claim so other pending votes and live work can progress', async () => {
+  it('continues live work after a failed bulk claim and retries historical work on the next tick', async () => {
     const deps = makeDeps({
       identityMap: new Map([
         [VOTE_A, IDENTITY_A],
         [VOTE_B, IDENTITY_B],
       ]),
     });
-    const getOrSetBackfillTarget = vi.fn(async (vote: string, epoch: number, identity: string) => {
-      if (vote === VOTE_A) throw new Error('transient claim failure');
-      return { epoch, identity };
-    });
     const backfillPreviousEpoch = vi.fn().mockResolvedValue({ errors: 0, remaining: 0 });
     const watchedDynamicRepo = {
-      getOrSetBackfillTarget,
-      listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A, VOTE_B]),
+      getOrSetBackfillTargets: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('transient bulk claim failure'))
+        .mockResolvedValue(new Map([[VOTE_B, { epoch: 499, identity: IDENTITY_B }]])),
       markBackfilled: vi.fn(),
     };
     const job = createFeeIngesterJob({
@@ -521,7 +526,10 @@ describe('fee-ingester.job', () => {
     });
     await job.tick(new AbortController().signal);
     expect(deps.feeService.ingestPendingBlocks).toHaveBeenCalledTimes(1);
-    expect(getOrSetBackfillTarget).toHaveBeenCalledWith(VOTE_B, 499, IDENTITY_B);
+    expect(backfillPreviousEpoch).not.toHaveBeenCalled();
+    await job.tick(new AbortController().signal);
+    expect(deps.feeService.ingestPendingBlocks).toHaveBeenCalledTimes(2);
+    expect(watchedDynamicRepo.getOrSetBackfillTargets).toHaveBeenCalledTimes(2);
     expect(backfillPreviousEpoch).toHaveBeenCalledWith(expect.objectContaining({ vote: VOTE_B }));
     expect(watchedDynamicRepo.markBackfilled).toHaveBeenCalledWith(VOTE_B, 499, IDENTITY_B);
   });
@@ -551,11 +559,14 @@ describe('fee-ingester.job', () => {
       firstSlot === 0 ? { [IDENTITY_A]: [0, 1, 2, 3, 4, 5] } : { [IDENTITY_A]: [0] },
     );
     const rpc = { ...deps.rpc, getBlock, getLeaderSchedule } as unknown as SolanaRpcClient;
-    const watchedDynamicRepo = {
-      getOrSetBackfillTarget: makeBackfillTargetStore(),
-      listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
-      markBackfilled: vi.fn(),
-    };
+    const watchedDynamicRepo = withBulkTargets(
+      {
+        getOrSetBackfillTarget: makeBackfillTargetStore(),
+        listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
+        markBackfilled: vi.fn(),
+      },
+      (votes) => deps.validatorService.getIdentityMap(votes),
+    );
     const job = createFeeIngesterJob({
       ...deps,
       rpc,
@@ -621,11 +632,14 @@ describe('fee-ingester.job', () => {
       remaining: 10,
       lastAttemptedSlot: 1,
     });
-    const watchedDynamicRepo = {
-      getOrSetBackfillTarget: makeBackfillTargetStore(),
-      listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
-      markBackfilled: vi.fn(),
-    };
+    const watchedDynamicRepo = withBulkTargets(
+      {
+        getOrSetBackfillTarget: makeBackfillTargetStore(),
+        listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
+        markBackfilled: vi.fn(),
+      },
+      (votes) => deps.validatorService.getIdentityMap(votes),
+    );
     const epochsRepo = {
       findByEpoch: vi.fn().mockResolvedValue({
         epoch: 499,
@@ -712,11 +726,14 @@ describe('fee-ingester.job', () => {
         [VOTE_B, IDENTITY_B],
       ]),
     });
-    const watchedDynamicRepo = {
-      getOrSetBackfillTarget: makeBackfillTargetStore(),
-      listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A, VOTE_B]),
-      markBackfilled: vi.fn().mockResolvedValue(undefined),
-    };
+    const watchedDynamicRepo = withBulkTargets(
+      {
+        getOrSetBackfillTarget: makeBackfillTargetStore(),
+        listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A, VOTE_B]),
+        markBackfilled: vi.fn().mockResolvedValue(undefined),
+      },
+      (votes) => deps.validatorService.getIdentityMap(votes),
+    );
     const backfillPreviousEpoch = vi
       .fn()
       .mockResolvedValueOnce({ processed: 0, skipped: 0, errors: 1, remaining: 2_000 })
@@ -773,11 +790,14 @@ describe('fee-ingester.job', () => {
         currentSlot: null,
       }),
     };
-    const watchedDynamicRepo = {
-      getOrSetBackfillTarget: makeBackfillTargetStore(),
-      listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
-      markBackfilled: vi.fn().mockResolvedValue(undefined),
-    };
+    const watchedDynamicRepo = withBulkTargets(
+      {
+        getOrSetBackfillTarget: makeBackfillTargetStore(),
+        listPendingBackfill: vi.fn().mockResolvedValue([VOTE_A]),
+        markBackfilled: vi.fn().mockResolvedValue(undefined),
+      },
+      (votes) => deps.validatorService.getIdentityMap(votes),
+    );
     const backfillPreviousEpoch = vi.fn().mockResolvedValue({
       slotsAssigned: 3,
       slotsProduced: 2,

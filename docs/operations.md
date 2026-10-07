@@ -408,7 +408,9 @@ Migration `0047_dynamic_backfill_target_epoch.sql` adds the nullable
 `prev_epoch_backfill_epoch` column. The worker atomically chooses each
 pending validator's target on its first resolved pending-set observation,
 before live RPC work or a leftover-budget check, then keeps that original
-epoch through rollover and restart. All pending targets are claimed before
+epoch through rollover and restart. One bulk SQL statement claims only fresh
+rows and reads existing pairs; already-pinned targets are not rewritten and
+there is no serial per-validator claim loop. All pending targets are resolved before
 the expensive historical passes rotate one validator per tick. Registration
 queues a pending row; target selection happens when the worker observes it.
 Migration
@@ -417,18 +419,39 @@ Migration
 `(epoch, identity)` pair. A fresh target uses the current identity resolved
 at first observation; generic epoch stats never select the target identity.
 An already-pinned epoch with a NULL target identity remains pending and
-unchanged, even if stats later appear: the ordinary income reconciler can
-create those rows from the current identity, so they do not prove a historical
-vote-to-identity mapping. These legacy 0047 targets need manual reconciliation
-using independently verified historical identity evidence before correcting
-the stored target identity; adding a stats row or running the ordinary
-reconciler alone cannot release them. If the original identity cannot be
-verified, keep the target pending. Other backfills and live polling continue
+unchanged, even if stats later appear: earlier reconcilers or unscoped callers
+could create those rows from the current identity, so they do not prove a historical
+vote-to-identity mapping. These legacy 0047 targets need verified offline
+reconciliation of both the original identity and the existing income ledger;
+editing the target identity alone is insufficient. Pause both historical
+writers during that maintenance, preserve all legitimate rotated-identity
+income, and verify the aggregate against authoritative facts before resuming.
+Adding a stats row or running the ordinary reconciler alone cannot establish
+that provenance. If it cannot be verified, keep the target pending. Other backfills and live polling continue
 while that target is deferred, and it does not consume a historical turn.
 Completed rows stay completed. The completion marker can only be set for the stored
-epoch and identity, so completing a different schedule cannot hide older
-missing facts. Live polling follows the current identity independently. Newly
+epoch and identity, and only when all five income totals match the stored
+identity's captured produced-block facts. Live polling follows the current identity independently. Newly
 tracked validators choose their own target and keep rotating independently.
+
+The ordinary income reconciler follows the stored historical scope for its
+target epoch, including after completion. Slot writes lock and validate that
+scope in SQL, so a claim or rotation between lookup and write cannot relabel
+the aggregate. Both historical paths defer before fetching more blocks when
+the existing aggregate identity or income does not match the captured facts.
+The runtime reconciler does not replace pinned-target totals with a
+single-identity rebuild; that could erase legitimate rotation income. A
+mismatch is a reason for verified offline reconciliation, not proof that the
+existing income is invalid and not permission to clear it.
+If legitimate income from multiple identities cannot be represented by that
+single target scope, resolve the ledger and completion decision offline;
+keep it pending instead of dropping income to satisfy the runtime check.
+
+Block-fact insertion and income-delta updates are separate existing writes.
+If a delta fails after the fact commits, a restarted worker skips that captured
+block but now keeps the target pending until the income ledger is reconciled.
+This also covers undercounts whose non-null timestamps evade ordinary gap
+detection. No automatic historical income reset or reconstruction is performed.
 
 Historical passes also rotate slots after the last attempt, including failed
 RPC attempts. A permanently unavailable first batch therefore cannot consume

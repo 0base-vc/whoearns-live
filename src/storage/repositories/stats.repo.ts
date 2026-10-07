@@ -592,6 +592,24 @@ export class StatsRepository {
    * other's writes.
    */
   async upsertSlotStats(args: UpsertSlotStatsArgs): Promise<void> {
+    await this.writeSlotStats(args, false, false);
+  }
+
+  /** Defer pinned historical writes unless scope and captured-fact income are consistent. */
+  async upsertSlotStatsIfIdentityMatches(args: UpsertSlotStatsArgs): Promise<boolean> {
+    return this.writeSlotStats(args, true, true);
+  }
+
+  /** Resolve/lock historical scope at the write, including claims after a job's initial read. */
+  async upsertHistoricalSlotStats(args: UpsertSlotStatsArgs): Promise<boolean> {
+    return this.writeSlotStats(args, false, true);
+  }
+
+  private async writeSlotStats(
+    args: UpsertSlotStatsArgs,
+    requireIdentityMatch: boolean,
+    respectHistoricalScope: boolean,
+  ): Promise<boolean> {
     // `activated_stake_lamports` uses COALESCE on UPDATE so a later
     // caller that omits stake doesn't wipe out a previously-written
     // value. Writing `NULL` explicitly (via `activatedStakeLamports:
@@ -603,8 +621,19 @@ export class StatsRepository {
         : args.activatedStakeLamports.toString();
     const elapsedAssigned = args.slotsElapsedAssigned ?? 0;
     const windowLastSlot = args.slotWindowLastSlot ?? null;
-    await this.pool.query(
-      `INSERT INTO epoch_validator_stats (
+    const { rowCount } = await this.pool.query(
+      `WITH historical_scope AS MATERIALIZED (
+         SELECT prev_epoch_backfill_epoch AS epoch,prev_epoch_backfill_identity AS identity
+           FROM watched_validators_dynamic WHERE vote_pubkey=$2 AND $11::boolean
+           FOR UPDATE
+       ), income_facts AS MATERIALIZED (
+         SELECT COALESCE(SUM(fees_lamports),0) AS fees,COALESCE(SUM(base_fees_lamports),0) AS base,
+                COALESCE(SUM(priority_fees_lamports),0) AS priority,COALESCE(SUM(tips_lamports),0) AS tips,
+                COALESCE(SUM(compute_units_consumed),0) AS cu
+           FROM processed_blocks WHERE epoch=$1 AND leader_identity=$3 AND block_status='produced'
+            AND ($10::boolean OR EXISTS (SELECT 1 FROM historical_scope WHERE epoch=$1))
+       )
+       INSERT INTO epoch_validator_stats (
          epoch, vote_pubkey, identity_pubkey,
          slots_assigned, slots_elapsed_assigned, slots_produced, slots_skipped,
          block_fees_total_lamports, block_base_fees_total_lamports,
@@ -612,7 +641,14 @@ export class StatsRepository {
          activated_stake_lamports,
          slots_updated_at, slot_window_last_slot, slot_window_updated_at, fees_updated_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, 0, 0, $8::numeric, NOW(), $9::bigint, NOW(), NULL)
+       SELECT $1,$2,$3,$4,$5,$6,$7,0,0,0,0,$8::numeric,NOW(),$9::bigint,NOW(),NULL
+        WHERE NOT EXISTS (SELECT 1 FROM historical_scope
+                           WHERE epoch=$1 AND (identity IS NULL OR identity<>$3))
+          AND (NOT $10::boolean AND NOT EXISTS (SELECT 1 FROM historical_scope WHERE epoch=$1)
+            OR (SELECT (COALESCE(s.block_fees_total_lamports,0),COALESCE(s.block_base_fees_total_lamports,0),
+                        COALESCE(s.block_priority_fees_total_lamports,0),COALESCE(s.block_tips_total_lamports,0),
+                        COALESCE(s.compute_units_total,0)) = (f.fees,f.base,f.priority,f.tips,f.cu)
+                  FROM income_facts f LEFT JOIN epoch_validator_stats s ON s.epoch=$1 AND s.vote_pubkey=$2))
        ON CONFLICT (epoch, vote_pubkey) DO UPDATE SET
          identity_pubkey          = EXCLUDED.identity_pubkey,
          slots_assigned           = EXCLUDED.slots_assigned,
@@ -623,7 +659,12 @@ export class StatsRepository {
                                              epoch_validator_stats.activated_stake_lamports),
          slots_updated_at         = NOW(),
          slot_window_last_slot    = EXCLUDED.slot_window_last_slot,
-         slot_window_updated_at   = NOW()`,
+         slot_window_updated_at   = NOW()
+       WHERE (NOT $10::boolean AND NOT EXISTS (SELECT 1 FROM historical_scope WHERE epoch=$1))
+          OR (epoch_validator_stats.identity_pubkey=EXCLUDED.identity_pubkey
+            AND (epoch_validator_stats.block_fees_total_lamports,epoch_validator_stats.block_base_fees_total_lamports,
+                 epoch_validator_stats.block_priority_fees_total_lamports,epoch_validator_stats.block_tips_total_lamports,
+                 epoch_validator_stats.compute_units_total) = (SELECT fees,base,priority,tips,cu FROM income_facts))`,
       [
         args.epoch,
         args.votePubkey,
@@ -634,8 +675,11 @@ export class StatsRepository {
         args.slotsSkipped,
         stakeParam,
         windowLastSlot,
+        requireIdentityMatch,
+        respectHistoricalScope,
       ],
     );
+    return (rowCount ?? 0) > 0;
   }
 
   /**
@@ -905,10 +949,17 @@ export class StatsRepository {
   async rebuildIncomeTotalsFromProcessedBlocks(
     epoch: Epoch,
     identities: IdentityPubkey[],
+    excludedVotes: VotePubkey[] = [],
+    respectHistoricalScopes = false,
   ): Promise<number> {
     if (identities.length === 0) return 0;
     const { rowCount } = await this.pool.query(
-      `WITH input AS (
+      `WITH historical_scopes AS MATERIALIZED (
+         SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch
+           FROM watched_validators_dynamic w JOIN epoch_validator_stats s ON s.vote_pubkey=w.vote_pubkey
+          WHERE s.epoch=$1 AND s.identity_pubkey=ANY($2::text[]) AND $4::boolean
+          ORDER BY w.vote_pubkey FOR UPDATE OF w
+       ), input AS (
          SELECT unnest($2::text[]) AS identity_pubkey
        ),
        fact AS (
@@ -936,6 +987,8 @@ export class StatsRepository {
          FROM fact
         WHERE evs.epoch = $1
           AND evs.identity_pubkey = fact.identity_pubkey
+          AND NOT (evs.vote_pubkey=ANY($3::text[]))
+          AND NOT EXISTS (SELECT 1 FROM historical_scopes h WHERE h.vote_pubkey=evs.vote_pubkey AND h.epoch=$1)
           AND (
             evs.block_fees_total_lamports          <> fact.fees OR
             evs.block_base_fees_total_lamports     <> fact.base_fees OR
@@ -952,7 +1005,7 @@ export class StatsRepository {
             evs.fees_updated_at IS NULL OR
             evs.tips_updated_at IS NULL
           )`,
-      [epoch, identities],
+      [epoch, identities, excludedVotes, respectHistoricalScopes],
     );
     return rowCount ?? 0;
   }

@@ -29,6 +29,13 @@ and this project follows [Semantic Versioning](https://semver.org/).
   provenance. All pending targets are pinned before live RPC work, even when
   live work exhausts the historical budget, preserving the first observed
   epoch through rollover and restart.
+  Target preflight now uses one bulk statement and writes only fresh rows.
+  Historical fee/reconciler writes share the durable scope, including for
+  completed targets, and defer identity/income mismatches without resetting
+  existing income. Completion requires all five totals to match captured
+  produced facts, so a committed fact followed by a failed income delta cannot
+  falsely finish the target. Legacy recovery requires verified offline ledger
+  reconciliation; changing the target identity alone is insufficient.
 
 ### Added
 

@@ -32,10 +32,7 @@ export interface FeeIngesterJobDeps {
    * don't exercise the on-demand track path) the previous-epoch
    * backfill sweep is simply skipped each tick.
    */
-  watchedDynamicRepo?: Pick<
-    WatchedDynamicRepository,
-    'listPendingBackfill' | 'getOrSetBackfillTarget' | 'markBackfilled'
-  >;
+  watchedDynamicRepo?: Pick<WatchedDynamicRepository, 'getOrSetBackfillTargets' | 'markBackfilled'>;
   rpc: SolanaRpcClient;
   rpcFallback?: Pick<SolanaRpcClient, 'getLeaderSchedule' | 'getSlot'>;
   watchMode: WatchMode;
@@ -96,30 +93,12 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
       // Record every pending target on first observation, before live RPC or
       // any leftover-budget check. Otherwise a cold live pass or unavailable
       // schedule could postpone the first claim across an epoch boundary.
-      const backfillTargets = new Map<VotePubkey, DynamicBackfillTarget>();
+      let backfillTargets = new Map<VotePubkey, DynamicBackfillTarget>();
       if (epoch > 0 && deps.watchedDynamicRepo !== undefined && deps.epochsRepo !== undefined) {
         try {
-          const pending = (await deps.watchedDynamicRepo.listPendingBackfill()).sort();
-          const pendingSet = new Set(pending);
+          backfillTargets = await deps.watchedDynamicRepo.getOrSetBackfillTargets(epoch - 1);
           for (const vote of backfillAttemptCursors.keys()) {
-            if (!pendingSet.has(vote)) backfillAttemptCursors.delete(vote);
-          }
-          const pendingIdentities = await deps.validatorService.getIdentityMap(pending);
-          for (const vote of pending) {
-            if (signal.aborted) return;
-            const identity = pendingIdentities.get(vote);
-            if (identity === undefined) continue;
-            try {
-              const target = await deps.watchedDynamicRepo.getOrSetBackfillTarget(
-                vote,
-                epoch - 1,
-                identity,
-              );
-              if (target !== null) backfillTargets.set(vote, target);
-              else backfillAttemptCursors.delete(vote);
-            } catch (err) {
-              deps.logger.warn({ err, vote }, 'fee-ingester: backfill target claim failed');
-            }
+            if (!backfillTargets.has(vote)) backfillAttemptCursors.delete(vote);
           }
         } catch (err) {
           deps.logger.warn({ err }, 'fee-ingester: backfill target lookup failed, continuing live');
@@ -291,7 +270,7 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
       ) {
         try {
           // Ambiguous legacy targets stay pending but cannot consume a turn.
-          const pending = [...backfillTargets.keys()];
+          const pending = [...backfillTargets.keys()].sort();
           if (pending.length > 0) {
             const previousIndex =
               lastBackfillVote === null ? -1 : pending.indexOf(lastBackfillVote);
@@ -388,8 +367,16 @@ async function runPreviousEpochBackfill(args: {
         maxBlocks: Math.max(1, deps.batchSize),
         deadlineMs,
         signal,
+        requireStatsIdentityMatch: true,
         ...(matchingCursor ? { startAfterSlot: cursor.slot } : {}),
       });
+      if (result.deferred === true) {
+        deps.logger.warn(
+          { vote, prevEpoch, identity },
+          'fee-ingester: historical ledger mismatch, deferring',
+        );
+        continue;
+      }
       if (result.lastAttemptedSlot !== undefined) {
         attemptCursors.set(vote, { epoch: prevEpoch, identity, slot: result.lastAttemptedSlot });
       }
@@ -409,9 +396,15 @@ async function runPreviousEpochBackfill(args: {
         continue;
       }
       if (signal.aborted) break;
-      await deps.watchedDynamicRepo.markBackfilled(vote, prevEpoch, identity);
-      attemptCursors.delete(vote);
-      filled += 1;
+      if (await deps.watchedDynamicRepo.markBackfilled(vote, prevEpoch, identity)) {
+        attemptCursors.delete(vote);
+        filled += 1;
+      } else {
+        deps.logger.warn(
+          { vote, prevEpoch, identity },
+          'fee-ingester: target income needs verified reconciliation',
+        );
+      }
     } catch (err) {
       failed += 1;
       deps.logger.warn(

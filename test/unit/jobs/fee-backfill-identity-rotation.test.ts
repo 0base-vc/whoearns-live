@@ -1,3 +1,4 @@
+import { withBulkTargets } from './_backfill-target-fake.js';
 import { describe, expect, it, vi } from 'vitest';
 import { pino } from 'pino';
 import { createFeeIngesterJob } from '../../../src/jobs/fee-ingester.job.js';
@@ -22,16 +23,20 @@ describe.each([false, true])('backfill identity rotation (restart=%s)', (restart
       let available = false;
       let target: { epoch: number; identity: string } | undefined;
       let complete = false;
-      const watchedDynamicRepo = {
-        listPendingBackfill: vi.fn(async () => (complete ? [] : [VOTE_A])),
-        getOrSetBackfillTarget: vi.fn(
-          async (_vote: string, proposed: number, proposedIdentity: string) =>
-            (target ??= { epoch: proposed, identity: proposedIdentity }),
-        ),
-        markBackfilled: vi.fn(async () => {
-          complete = true;
-        }),
-      };
+      const watchedDynamicRepo = withBulkTargets(
+        {
+          listPendingBackfill: vi.fn(async () => (complete ? [] : [VOTE_A])),
+          getOrSetBackfillTarget: vi.fn(
+            async (_vote: string, proposed: number, proposedIdentity: string) =>
+              (target ??= { epoch: proposed, identity: proposedIdentity }),
+          ),
+          markBackfilled: vi.fn(async () => {
+            complete = true;
+            return true;
+          }),
+        },
+        async () => new Map([[VOTE_A, identity]]),
+      );
       const getBlock = vi.fn(async (slot: number) => {
         if (slot === 0 && !available) throw new Error('persistent unavailable original slot');
         return null;

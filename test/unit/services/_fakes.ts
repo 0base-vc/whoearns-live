@@ -420,6 +420,18 @@ export class FakeStatsRepo {
     return `${epoch}:${vote}`;
   }
 
+  async upsertSlotStatsIfIdentityMatches(args: UpsertSlotStatsArgs): Promise<boolean> {
+    const row = this.rows.get(`${args.epoch}:${args.votePubkey}`);
+    if (row && row.identityPubkey !== args.identityPubkey) return false;
+    await this.upsertSlotStats(args);
+    return true;
+  }
+
+  async upsertHistoricalSlotStats(args: UpsertSlotStatsArgs): Promise<boolean> {
+    await this.upsertSlotStats(args);
+    return true;
+  }
+
   async upsertSlotStats(args: UpsertSlotStatsArgs): Promise<void> {
     this.slotCalls.push(args);
     const k = this.key(args.epoch, args.votePubkey);

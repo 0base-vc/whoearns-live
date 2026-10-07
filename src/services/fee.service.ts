@@ -953,6 +953,8 @@ export class FeeService {
       lastSlot: Slot;
       leaderSchedule: RpcLeaderSchedule;
       batchSize: number;
+      requireStatsIdentityMatch?: boolean;
+      respectHistoricalScope?: boolean;
     } & IngestWorkBudget,
   ): Promise<{
     slotsAssigned: number;
@@ -963,6 +965,7 @@ export class FeeService {
     errors: number;
     remaining?: number;
     lastAttemptedSlot?: Slot;
+    deferred?: boolean;
   }> {
     const slotsAssigned = args.leaderSchedule[args.identity]?.length ?? 0;
     const beforeCounts = await this.processedBlocksRepo.countStatusesForIdentityInRange(
@@ -973,14 +976,32 @@ export class FeeService {
     );
 
     // Step 1 — materialise the stats row so subsequent income UPDATEs hit it.
-    await this.statsRepo.upsertSlotStats({
-      epoch: args.epoch,
-      votePubkey: args.vote,
-      identityPubkey: args.identity,
-      slotsAssigned,
-      slotsProduced: beforeCounts.produced,
-      slotsSkipped: beforeCounts.skipped,
-    });
+    const writeCounters = (counters: { produced: number; skipped: number }) => {
+      const stats = {
+        epoch: args.epoch,
+        votePubkey: args.vote,
+        identityPubkey: args.identity,
+        slotsAssigned,
+        slotsProduced: counters.produced,
+        slotsSkipped: counters.skipped,
+      };
+      return args.requireStatsIdentityMatch === true
+        ? this.statsRepo.upsertSlotStatsIfIdentityMatches(stats)
+        : args.respectHistoricalScope === true
+          ? this.statsRepo.upsertHistoricalSlotStats(stats)
+          : this.statsRepo.upsertSlotStats(stats).then(() => true);
+    };
+    if (!(await writeCounters(beforeCounts))) {
+      return {
+        slotsAssigned,
+        slotsProduced: beforeCounts.produced,
+        slotsSkipped: beforeCounts.skipped,
+        processed: 0,
+        skipped: 0,
+        errors: 0,
+        deferred: true,
+      };
+    }
 
     // Step 2 — attribute fees block-by-block. Since the epoch is fully
     // closed, `safeUpperSlot` is just `lastSlot` — no finality buffer
@@ -1006,14 +1027,7 @@ export class FeeService {
       args.firstSlot,
       args.lastSlot,
     );
-    await this.statsRepo.upsertSlotStats({
-      epoch: args.epoch,
-      votePubkey: args.vote,
-      identityPubkey: args.identity,
-      slotsAssigned,
-      slotsProduced: afterCounts.produced,
-      slotsSkipped: afterCounts.skipped,
-    });
+    const identityStillMatches = await writeCounters(afterCounts);
 
     this.logger.info(
       {
@@ -1032,6 +1046,7 @@ export class FeeService {
       slotsProduced: afterCounts.produced,
       slotsSkipped: afterCounts.skipped,
       ...result,
+      ...(!identityStillMatches ? { deferred: true } : {}),
     };
   }
 }

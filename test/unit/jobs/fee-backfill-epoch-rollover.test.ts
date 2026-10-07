@@ -1,3 +1,4 @@
+import { withBulkTargets } from './_backfill-target-fake.js';
 import { describe, expect, it, vi } from 'vitest';
 import { pino } from 'pino';
 import { createFeeIngesterJob } from '../../../src/jobs/fee-ingester.job.js';
@@ -22,17 +23,27 @@ describe.each([false, true])('dynamic backfill rollover (restart=%s)', (restart)
     const targets = new Map<string, { epoch: number; identity: string }>();
     const completed = new Map<string, number>();
     const tracked = [VOTE_A];
-    const watchedDynamicRepo = {
-      listPendingBackfill: vi.fn(async () => tracked.filter((vote) => !completed.has(vote))),
-      getOrSetBackfillTarget: vi.fn(async (vote: string, proposed: number, identity: string) => {
-        if (!targets.has(vote)) targets.set(vote, { epoch: proposed, identity });
-        return targets.get(vote)!;
-      }),
-      markBackfilled: vi.fn(async (vote: string, epoch: number, identity: string) => {
-        if (targets.get(vote)?.epoch === epoch && targets.get(vote)?.identity === identity)
-          completed.set(vote, epoch);
-      }),
-    };
+    const watchedDynamicRepo = withBulkTargets(
+      {
+        listPendingBackfill: vi.fn(async () => tracked.filter((vote) => !completed.has(vote))),
+        getOrSetBackfillTarget: vi.fn(async (vote: string, proposed: number, identity: string) => {
+          if (!targets.has(vote)) targets.set(vote, { epoch: proposed, identity });
+          return targets.get(vote)!;
+        }),
+        markBackfilled: vi.fn(async (vote: string, epoch: number, identity: string) => {
+          if (targets.get(vote)?.epoch === epoch && targets.get(vote)?.identity === identity) {
+            completed.set(vote, epoch);
+            return true;
+          }
+          return false;
+        }),
+      },
+      async () =>
+        new Map([
+          [VOTE_A, IDENTITY_A],
+          [VOTE_B, IDENTITY_B],
+        ]),
+    );
     const getBlock = vi.fn(async (slot: number) => {
       if (slot === 0 && !historyAvailable) throw new Error('persistent pruned slot');
       return null; // skipped slots are still durably captured facts

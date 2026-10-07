@@ -135,7 +135,7 @@ export class WatchedDynamicRepository {
    * epoch AND identity. Only a fresh target may use the observed identity.
    * Epoch-only targets from migration 0047 are deferred unchanged: generic
    * stats can be produced using the current identity and prove no historical
-   * mapping. They require a verified manual correction of the target identity.
+   * mapping. They require verified offline identity/ledger reconciliation.
    * Completed, removed and deferred validators return null.
    */
   async getOrSetBackfillTarget(
@@ -150,25 +150,95 @@ export class WatchedDynamicRepository {
                 w.prev_epoch_backfill_identity,
                 CASE WHEN w.prev_epoch_backfill_epoch IS NULL THEN $3::text END)
         WHERE w.vote_pubkey = $1 AND w.prev_epoch_backfilled_at IS NULL
-          AND (w.prev_epoch_backfill_identity IS NOT NULL
-            OR w.prev_epoch_backfill_epoch IS NULL)
+          AND w.prev_epoch_backfill_epoch IS NULL
         RETURNING prev_epoch_backfill_epoch::text AS epoch,
                   prev_epoch_backfill_identity AS identity`,
       [vote, proposedEpoch, proposedIdentity],
     );
-    return rows[0] ? { epoch: Number(rows[0].epoch), identity: rows[0].identity } : null;
+    const stored =
+      rows[0] ??
+      (
+        await this.pool.query<{ epoch: string; identity: string }>(
+          `SELECT prev_epoch_backfill_epoch::text AS epoch,prev_epoch_backfill_identity AS identity
+         FROM watched_validators_dynamic WHERE vote_pubkey=$1 AND prev_epoch_backfilled_at IS NULL
+           AND prev_epoch_backfill_identity IS NOT NULL`,
+          [vote],
+        )
+      ).rows[0];
+    return stored ? { epoch: Number(stored.epoch), identity: stored.identity } : null;
   }
 
-  /** Complete only the pinned target; a different epoch or identity cannot stamp it. */
-  async markBackfilled(vote: VotePubkey, epoch: Epoch, identity: IdentityPubkey): Promise<void> {
-    await this.pool.query(
+  /** One round trip: only fresh rows are written; all pinned pending pairs are read. */
+  async getOrSetBackfillTargets(
+    proposedEpoch: Epoch,
+  ): Promise<Map<VotePubkey, DynamicBackfillTarget>> {
+    const { rows } = await this.pool.query<{
+      vote_pubkey: string;
+      epoch: string;
+      identity: string;
+    }>(
+      `WITH fresh AS MATERIALIZED (
+         SELECT w.vote_pubkey,v.identity_pubkey
+           FROM watched_validators_dynamic w JOIN validators v ON v.vote_pubkey=w.vote_pubkey
+          WHERE w.prev_epoch_backfilled_at IS NULL AND w.prev_epoch_backfill_epoch IS NULL
+          ORDER BY w.vote_pubkey FOR UPDATE OF w
+       ), claimed AS (
+         UPDATE watched_validators_dynamic w
+            SET prev_epoch_backfill_epoch=$1::bigint,prev_epoch_backfill_identity=v.identity_pubkey
+           FROM fresh v
+          WHERE v.vote_pubkey=w.vote_pubkey AND w.prev_epoch_backfilled_at IS NULL
+            AND w.prev_epoch_backfill_epoch IS NULL
+         RETURNING w.vote_pubkey,w.prev_epoch_backfill_epoch::text AS epoch,
+                   w.prev_epoch_backfill_identity AS identity
+       )
+       SELECT * FROM claimed
+       UNION ALL
+       SELECT vote_pubkey,prev_epoch_backfill_epoch::text,prev_epoch_backfill_identity
+         FROM watched_validators_dynamic
+        WHERE prev_epoch_backfilled_at IS NULL AND prev_epoch_backfill_identity IS NOT NULL`,
+      [proposedEpoch],
+    );
+    return new Map(
+      rows.map((row) => [row.vote_pubkey, { epoch: Number(row.epoch), identity: row.identity }]),
+    );
+  }
+
+  /** Stored historical scope also governs the normal reconciler after completion. */
+  async getBackfillScopes(
+    votes: VotePubkey[],
+    epoch: Epoch,
+  ): Promise<Map<VotePubkey, IdentityPubkey | null>> {
+    if (votes.length === 0) return new Map();
+    const { rows } = await this.pool.query<{ vote_pubkey: string; identity: string | null }>(
+      `SELECT vote_pubkey,prev_epoch_backfill_identity AS identity FROM watched_validators_dynamic
+        WHERE vote_pubkey=ANY($1::text[]) AND prev_epoch_backfill_epoch=$2::bigint`,
+      [votes, epoch],
+    );
+    return new Map(rows.map((row) => [row.vote_pubkey, row.identity]));
+  }
+
+  /** Complete only the pinned scope with income equal to all five captured-fact totals. */
+  async markBackfilled(vote: VotePubkey, epoch: Epoch, identity: IdentityPubkey): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
       `UPDATE watched_validators_dynamic
           SET prev_epoch_backfilled_at = NOW()
         WHERE vote_pubkey = $1
           AND prev_epoch_backfill_epoch = $2::bigint
           AND prev_epoch_backfill_identity = $3
-          AND prev_epoch_backfilled_at IS NULL`,
+          AND prev_epoch_backfilled_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM epoch_validator_stats s
+             WHERE s.vote_pubkey=$1 AND s.epoch=$2::bigint AND s.identity_pubkey=$3
+               AND (s.block_fees_total_lamports,s.block_base_fees_total_lamports,
+                    s.block_priority_fees_total_lamports,s.block_tips_total_lamports,s.compute_units_total)
+                 = (SELECT COALESCE(SUM(p.fees_lamports),0),COALESCE(SUM(p.base_fees_lamports),0),
+                           COALESCE(SUM(p.priority_fees_lamports),0),COALESCE(SUM(p.tips_lamports),0),
+                           COALESCE(SUM(p.compute_units_consumed),0)
+                      FROM processed_blocks p WHERE p.epoch=$2::bigint AND p.leader_identity=$3
+                        AND p.block_status='produced')
+          )`,
       [vote, epoch, identity],
     );
+    return (rowCount ?? 0) > 0;
   }
 }

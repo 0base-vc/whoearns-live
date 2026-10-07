@@ -290,6 +290,7 @@ export async function startWorker(): Promise<void> {
       feeService,
       slotService,
       statsRepo,
+      watchedDynamicRepo,
       rpc,
       ...(rpcFallback !== undefined ? { rpcFallback } : {}),
       watchMode,
