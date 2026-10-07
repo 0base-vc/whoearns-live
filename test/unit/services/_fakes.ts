@@ -325,23 +325,34 @@ export class FakeEpochsRepo {
     });
   }
 
-  async rollover(
-    previousEpoch: Epoch,
+  async observeCurrent(
     e: Parameters<FakeEpochsRepo['upsert']>[0],
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const before = new Map(this.rows);
     try {
       signal?.throwIfAborted();
-      await this.markClosed(previousEpoch, new Date());
+      const latest = Math.max(e.epoch, ...this.rows.keys());
+      for (const row of this.rows.values()) {
+        if (row.epoch < latest && !row.isClosed) await this.markClosed(row.epoch, new Date());
+      }
       signal?.throwIfAborted();
-      await this.upsert(e);
+      await this.upsert({ ...e, isClosed: e.epoch < latest || (e.isClosed ?? false) });
       signal?.throwIfAborted();
+      return e.epoch === latest;
     } catch (err) {
       this.rows.clear();
       for (const [epoch, row] of before) this.rows.set(epoch, row);
       throw err;
     }
+  }
+
+  async rollover(
+    _previousEpoch: Epoch,
+    e: Parameters<FakeEpochsRepo['upsert']>[0],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.observeCurrent(e, signal);
   }
 
   async updateCurrentSlot(epoch: Epoch, currentSlot: Slot): Promise<void> {

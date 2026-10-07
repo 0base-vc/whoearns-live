@@ -101,9 +101,8 @@ export class EpochService {
     // without synchronous RPC in a handler.
     const currentSlot = info.absoluteSlot;
 
-    // Before upserting the current epoch, close out any previous epoch that
-    // is still flagged open. We detect transitions by looking at the latest
-    // row — if it's a lower epoch and still open, it needs closing.
+    // This read is only for logging. Persistence rechecks the latest committed
+    // epoch under its transaction lock, including same-epoch/cold-start calls.
     const previous = await this.epochsRepo.findCurrent();
     signal?.throwIfAborted();
     if (previous !== null && previous.epoch < epoch && !previous.isClosed) {
@@ -121,10 +120,8 @@ export class EpochService {
       currentSlot,
       isClosed: false,
     };
-    if (previous !== null && previous.epoch < epoch && !previous.isClosed) {
-      await this.epochsRepo.rollover(previous.epoch, next, signal);
-    } else {
-      await this.epochsRepo.upsert(next);
+    if (!(await this.epochsRepo.observeCurrent(next, signal))) {
+      throw new Error(`epoch.service: stale epoch observation ${epoch}`);
     }
 
     signal?.throwIfAborted();

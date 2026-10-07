@@ -1,10 +1,16 @@
-import type pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { pino } from 'pino';
+import { runEpochCancellationScenario } from './_atomic-epoch-scenario.js';
 import { EpochService } from '../../../src/services/epoch.service.js';
 import { EpochsRepository } from '../../../src/storage/repositories/epochs.repo.js';
 import type { SolanaRpcClient } from '../../../src/clients/solana-rpc.js';
-import { resetTables, setupPgFixture, teardownPgFixture, type PgFixture } from './_pg-fixture.js';
+import {
+  boundPgPool,
+  resetTables,
+  setupPgFixture,
+  teardownPgFixture,
+  type PgFixture,
+} from './_pg-fixture.js';
 
 describe('concurrent current epoch observations — PostgreSQL16', () => {
   let fixture: PgFixture | undefined;
@@ -76,15 +82,7 @@ describe('concurrent current epoch observations — PostgreSQL16', () => {
       rollover: (prev: number, e: Args, signal?: AbortSignal) =>
         ordered(e.epoch, () => repo.rollover(prev, e, signal)),
       observeCurrent: (e: Args, signal?: AbortSignal) =>
-        ordered(e.epoch, () =>
-          Reflect.apply(
-            (repo as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[
-              'observeCurrent'
-            ]!,
-            repo,
-            [e, signal],
-          ),
-        ),
+        ordered(e.epoch, () => repo.observeCurrent(e, signal)),
     } as unknown as EpochsRepository;
     const service = (epoch: number) =>
       new EpochService({
@@ -116,5 +114,117 @@ describe('concurrent current epoch observations — PostgreSQL16', () => {
     if (multiple) expect(await repo.findByEpoch(498)).toMatchObject({ isClosed: true });
     expect(outcomes[1].status).toBe('fulfilled');
     expect(outcomes[0].status).toBe(order === 'older first' ? 'fulfilled' : 'rejected');
+  });
+  it.each(['cancel', 'failure', 'success'] as const)(
+    'makes all superseded rows atomic under %s',
+    async (mode) => {
+      if (!fixture) throw new Error('fixture unavailable');
+      const result = await runEpochCancellationScenario(fixture.pool, mode, true);
+      for (const read of [result.whileClosing, result.afterAbort]) {
+        expect(read.current).toMatchObject({ epoch: 500, isClosed: false });
+        expect(read.open).toEqual([{ epoch: '498' }, { epoch: '500' }]);
+      }
+      expect(result.after.open).toEqual(
+        mode === 'success' ? [{ epoch: '501' }] : [{ epoch: '498' }, { epoch: '500' }],
+      );
+      expect(result.after.current).toMatchObject({
+        epoch: mode === 'success' ? 501 : 500,
+        isClosed: false,
+      });
+    },
+  );
+
+  it('rejects cancellation after a real observation-lock wait without replacing the newer current epoch', async () => {
+    if (!fixture) throw new Error('fixture unavailable');
+    const db = fixture.pool,
+      repo = new EpochsRepository(db);
+    await repo.upsert({
+      epoch: 500,
+      firstSlot: 50000,
+      lastSlot: 50099,
+      slotCount: 100,
+      isClosed: false,
+    });
+    const leader = await db.connect(),
+      waiter = await db.connect();
+    let release!: () => void, reached!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const afterClose = new Promise<void>((r) => {
+      reached = r;
+    });
+    const leaderPool = boundPgPool(leader);
+    const query = leaderPool.query.bind(leaderPool);
+    leaderPool.query = (async (...args: unknown[]) => {
+      const result = await Reflect.apply(query, leaderPool, args);
+      if (typeof args[0] === 'string' && /UPDATE epochs\s+SET is_closed/.test(args[0])) {
+        reached();
+        await gate;
+      }
+      return result;
+    }) as typeof leaderPool.query;
+    const e = (epoch: number) => ({
+      epoch,
+      firstSlot: epoch * 100,
+      lastSlot: epoch * 100 + 99,
+      slotCount: 100,
+      isClosed: false,
+    });
+    const controller = new AbortController();
+    const first = new EpochsRepository(leaderPool).observeCurrent(e(502));
+    let second: Promise<unknown> | undefined;
+    try {
+      await afterClose;
+      const pid = (await waiter.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      second = new EpochsRepository(boundPgPool(waiter))
+        .observeCurrent(e(501), controller.signal)
+        .then(
+          () => 'resolved',
+          () => 'cancelled',
+        );
+      let blocked = false;
+      for (let n = 0; n < 100 && !blocked; n++) {
+        blocked = (await db.query('SELECT cardinality(pg_blocking_pids($1)) > 0 AS blocked', [pid]))
+          .rows[0].blocked;
+        if (!blocked) await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(blocked).toBe(true);
+      expect(await repo.findCurrent()).toMatchObject({ epoch: 500, isClosed: false });
+      controller.abort(new Error('shutdown during observation lock'));
+      release();
+      expect(await first).toBe(true);
+      expect(await second).toBe('cancelled');
+      expect(await repo.findCurrent()).toMatchObject({ epoch: 502, isClosed: false });
+      expect(await repo.findByEpoch(501)).toBeNull();
+      expect((await db.query('SELECT epoch::text FROM epochs WHERE NOT is_closed')).rows).toEqual([
+        { epoch: '502' },
+      ]);
+    } finally {
+      release();
+      await first;
+      await second;
+      leader.release();
+      waiter.release();
+    }
+  });
+
+  it('serializes cold starts and closes stray lower rows on same-epoch observations', async () => {
+    if (!fixture) throw new Error('fixture unavailable');
+    const repo = new EpochsRepository(fixture.pool);
+    const e = (epoch: number) => ({
+      epoch,
+      firstSlot: epoch * 100,
+      lastSlot: epoch * 100 + 99,
+      slotCount: 100,
+      isClosed: false,
+    });
+    await Promise.all([repo.observeCurrent(e(501)), repo.observeCurrent(e(502))]);
+    await repo.upsert(e(498));
+    expect(await repo.observeCurrent(e(502))).toBe(true);
+    expect(
+      (await fixture.pool.query('SELECT epoch::text FROM epochs WHERE NOT is_closed')).rows,
+    ).toEqual([{ epoch: '502' }]);
+    expect(await repo.findCurrent()).toMatchObject({ epoch: 502, isClosed: false });
   });
 });

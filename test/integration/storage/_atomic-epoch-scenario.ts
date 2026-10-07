@@ -8,6 +8,7 @@ import type { SolanaRpcClient } from '../../../src/clients/solana-rpc.js';
 export async function runEpochCancellationScenario(
   pool: pg.Pool,
   mode: 'cancel' | 'failure' | 'success' = 'cancel',
+  multiple = false,
 ) {
   const repo = new EpochsRepository(pool);
   await repo.upsert({
@@ -17,6 +18,14 @@ export async function runEpochCancellationScenario(
     slotCount: 100,
     isClosed: false,
   });
+  if (multiple)
+    await repo.upsert({
+      epoch: 498,
+      firstSlot: 49800,
+      lastSlot: 49899,
+      slotCount: 100,
+      isClosed: false,
+    });
   let closed!: () => void;
   let release!: () => void;
   const afterClose = new Promise<void>((resolve) => {

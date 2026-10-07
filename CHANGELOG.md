@@ -28,7 +28,10 @@ and this project follows [Semantic Versioning](https://semver.org/).
   change requeues collection for the pinned epoch, starts a fresh attempt cursor
   and replaces only that derived address summary using its captured facts.
   Other epochs and all raw block history are preserved. Completion checks the
-  exact scope revision, preventing stale work from completing a replacement.
+  collection generation (additive migration 0049), preventing stale work from
+  completing a replacement while lookup and repeat-registration polling no
+  longer invalidate completion. Deletion/re-registration and address changes
+  allocate fresh generations.
   Captured income publication is idempotent and cannot add a delayed delta to
   already-reconstructed totals. Epoch-scoped publication/transition coordination
   and a facts read after row-lock waits prevent stale transition sums. Lock
@@ -67,8 +70,9 @@ and this project follows [Semantic Versioning](https://semver.org/).
   gaps, raw missing-data reporting and live work remain.
   Historical leader-schedule RPC shares the remaining tick deadline and shutdown
   signal across retries and fallback; late responses cannot start historical work.
-  Epoch rollover closes and replaces the current row transactionally, rolling
-  both writes back on cancellation or SQL failure before commit.
+  Current epoch observations serialize and recheck the latest committed epoch,
+  atomically close all superseded open rows and reject delayed lower observations
+  before fresh claims. Cancellation or SQL failure before commit rolls all writes back.
 
 ### Added
 

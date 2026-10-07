@@ -452,7 +452,12 @@ The row records the collection address, so it does not claim a combined history
 for an actual rotation. A schedule observed empty under the accepted assumption
 can complete as measured zero and stays outside the positive-slot economic cohort.
 
-Completion validates epoch, address, the row revision observed by that tick,
+Migration `0049_dynamic_backfill_scope_generation.sql` adds a sequence-backed
+collection generation. Lookup polling and repeat registration preserve it; epoch
+or address changes, completed-to-pending transitions and deletion/re-registration
+allocate a new generation. Existing scopes, completion and income remain intact.
+
+Completion validates epoch, address, the collection generation observed by that tick,
 all assigned produced/skipped facts and all five income totals. A delayed old
 collection cannot stamp a replacement, including an address that changes back.
 Current-address conflicts with an existing derived ledger still defer for
@@ -531,10 +536,13 @@ slot priority and does not use the historical cursor.
 Historical leader-schedule lookup shares the remaining tick deadline and job
 cancellation through RPC queue/quota waits, retries and fallback. Cancellation
 does not start a fallback or permit late schedules to start historical writes.
-Epoch rollover closes the previous row and upserts its replacement in one
-transaction; cancellation or SQL failure before commit rolls both back. Readers
-see the previous open row until the replacement commits. Started DB statements
-and commit/rollback drain normally.
+Current observations serialize under a transaction-scoped advisory lock and
+recheck the highest committed epoch after the lock wait. They close every lower
+open row and persist the observation together. A delayed lower RPC epoch is
+stored closed and rejected, so it cannot authorize a fresh backfill target.
+Cancellation or SQL failure before commit rolls all writes back; concurrent
+readers see the prior state until commit. Started DB statements and
+commit/rollback drain normally, including lock waits.
 
 The deadline is not a hard tick-duration limit: live RPC requests already in flight
 and database operations drain normally. Slow database queries, RPC timeouts,
@@ -544,7 +552,7 @@ Use `jobs_tick_duration_seconds{job="fee-ingester"}`, tick start/end logs,
 and `remaining` in bounded ingest results to separate these delays from a
 cold backlog. A deadline-exhausted live pass postpones historical work until
 there is spare capacity. No environment-variable changes are needed.
-Migrations 0047 and 0048 add the durable target columns; the all-in-one
-startup runs migrations before starting the API and worker. Apply 0047 followed by 0048
+Migrations 0047, 0048 and 0049 add the durable target and generation columns; the all-in-one
+startup runs migrations before starting the API and worker. Apply 0047, then 0048, then 0049
 through the ordered migration runner before running the updated worker. This change does not run a
 production migration or require manual edits to block facts.

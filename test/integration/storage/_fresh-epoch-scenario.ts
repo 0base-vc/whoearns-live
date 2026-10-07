@@ -12,6 +12,7 @@ import { WatchedDynamicRepository } from '../../../src/storage/repositories/watc
 
 export type FreshEpochScenario =
   | 'stale'
+  | 'stale observation'
   | 'sync failure'
   | 'empty cache'
   | 'already pinned'
@@ -39,6 +40,15 @@ export async function runFreshEpochScenario(pool: pg.Pool, kind: FreshEpochScena
     });
   if (kind !== 'empty cache') await seedEpoch(499, true);
   if (kind !== 'empty cache') await seedEpoch(500, false);
+  if (kind === 'stale observation')
+    await epochsRepo.observeCurrent({
+      epoch: 502,
+      firstSlot: 50200,
+      lastSlot: 50299,
+      slotCount: 100,
+      currentSlot: 50205,
+      isClosed: false,
+    });
   let chainEpoch = 501;
   let failSync = kind === 'sync failure';
   let epochCalls = 0;
@@ -54,7 +64,7 @@ export async function runFreshEpochScenario(pool: pg.Pool, kind: FreshEpochScena
       scheduleCalls++;
       return { firstNormalEpoch: 0, firstNormalSlot: 0, slotsPerEpoch: 100 };
     },
-    getSlot: async () => chainEpoch * 100 + 5,
+    getSlot: async () => (kind === 'stale observation' ? 50205 : chainEpoch * 100 + 5),
     getLeaderSchedule: async (slot: number) =>
       slot === 49900 ? { IB: [1, 2] } : { IA: [1], IB: [] },
     getBlock: async (slot: number) => {
@@ -137,6 +147,7 @@ export async function runFreshEpochScenario(pool: pg.Pool, kind: FreshEpochScena
   await worker.tick(signal);
   const first = await snapshot();
   failSync = false;
+  if (kind === 'stale observation') chainEpoch = 502;
   if (kind === 'empty cache') await seedEpoch(499, true);
   await worker.tick(signal);
   const recovered = await snapshot();

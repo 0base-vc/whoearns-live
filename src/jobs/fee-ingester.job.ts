@@ -482,7 +482,7 @@ async function runPreviousEpochBackfill(args: {
           vote,
           prevEpoch,
           identity,
-          ...(target.revision !== undefined ? ([target.revision, target.tuple] as const) : []),
+          ...(target.generation !== undefined ? ([target.generation] as const) : []),
         )
       ) {
         attemptCursors.delete(vote);

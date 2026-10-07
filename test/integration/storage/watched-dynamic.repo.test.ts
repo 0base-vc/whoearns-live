@@ -803,4 +803,23 @@ describe('WatchedDynamicRepository durable backfill target — PostgreSQL 16', (
     expect(r.final.raw.income).toContain(499);
     expect(r.final.cohort).not.toContain('A');
   });
+  it('withholds a fresh claim on a lower RPC observation after a newer epoch committed, then recovers', async () => {
+    if (!fixture) throw new Error('fixture unavailable');
+    const result = await runFreshEpochScenario(fixture.pool, 'stale observation');
+    expect(result.cachedBefore).toBe(502);
+    expect(result.first.cachedEpoch).toBe(502);
+    expect(result.first.targets.find((r) => r.vote_pubkey === 'A')).toMatchObject({
+      epoch: null,
+      identity: null,
+    });
+    expect(result.first.fetchedSlots).toContain(50201);
+    expect(result.recovered.targets.find((r) => r.vote_pubkey === 'A')).toMatchObject({
+      epoch: '501',
+      identity: 'IA',
+    });
+    expect(result.restarted.cachedEpoch).toBe(502);
+    console.info(
+      `stale-observation claim reproduction: first=${result.first.targets.find((r) => r.vote_pubkey === 'A')?.epoch}, recovered=${result.recovered.targets.find((r) => r.vote_pubkey === 'A')?.epoch}, live=${result.first.fetchedSlots.includes(50201)}`,
+    );
+  });
 });

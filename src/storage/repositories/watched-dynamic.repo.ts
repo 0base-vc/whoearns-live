@@ -12,8 +12,7 @@ export interface DynamicBackfillCandidate {
 export interface DynamicBackfillTarget {
   epoch: Epoch;
   identity: IdentityPubkey;
-  revision?: string;
-  tuple?: string;
+  generation?: string;
 }
 
 interface DynamicWatchedRow {
@@ -167,15 +166,15 @@ export class WatchedDynamicRepository {
   async getOrSetBackfillTargets(
     proposedEpoch: Epoch | null,
     candidates: DynamicBackfillCandidate[] = [],
-    includeRevision = false,
+    includeGeneration = false,
   ): Promise<Map<VotePubkey, DynamicBackfillTarget>> {
-    return this.resolveTargets(proposedEpoch, candidates, includeRevision, null);
+    return this.resolveTargets(proposedEpoch, candidates, includeGeneration, null);
   }
 
   private async resolveTargets(
     proposedEpoch: Epoch | null,
     candidates: DynamicBackfillCandidate[],
-    includeRevision: boolean,
+    includeGeneration: boolean,
     votes: VotePubkey[] | null,
   ): Promise<Map<VotePubkey, DynamicBackfillTarget>> {
     const client = await this.pool.connect();
@@ -199,8 +198,7 @@ export class WatchedDynamicRepository {
         vote_pubkey: string;
         epoch: string;
         identity: string;
-        revision: string;
-        tuple: string;
+        generation: string;
         refresh: boolean;
       }>(
         `WITH candidates AS MATERIALIZED (
@@ -208,7 +206,7 @@ export class WatchedDynamicRepository {
        ), pending AS MATERIALIZED (
          SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,
                 w.prev_epoch_backfill_identity AS identity,v.identity_pubkey AS current_identity,
-                w.xmin::text AS revision,w.ctid::text AS tuple
+                w.prev_epoch_backfill_generation::text AS generation
            FROM watched_validators_dynamic w JOIN validators v USING(vote_pubkey)
           WHERE ($3::text[] IS NULL OR w.vote_pubkey=ANY($3))
             AND (w.prev_epoch_backfilled_at IS NULL
@@ -228,10 +226,10 @@ export class WatchedDynamicRepository {
                 AND EXISTS (SELECT 1 FROM candidates c WHERE c.vote=w.vote_pubkey
                   AND c.version=w.xmin::text AND c.tuple=w.ctid::text)))
          RETURNING w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,
-                   w.prev_epoch_backfill_identity AS identity,w.xmin::text AS revision,w.ctid::text AS tuple,true AS recollect
+                   w.prev_epoch_backfill_identity AS identity,w.prev_epoch_backfill_generation::text AS generation,true AS recollect
        ), targets AS MATERIALIZED (
          SELECT * FROM claimed UNION ALL
-         SELECT vote_pubkey,epoch,identity,revision,tuple,false AS recollect FROM pending
+         SELECT vote_pubkey,epoch,identity,generation,false AS recollect FROM pending
           WHERE epoch IS NOT NULL AND identity=current_identity
        ), locked_stats AS MATERIALIZED (
          SELECT s.vote_pubkey,s.epoch,s.identity_pubkey,s.fees_updated_at,s.tips_updated_at,t.identity,t.recollect
@@ -280,7 +278,7 @@ export class WatchedDynamicRepository {
             AND (t.recollect AND s.identity_pubkey<>t.identity OR t.fees_updated_at IS NOT NULL OR t.tips_updated_at IS NOT NULL)
          RETURNING s.vote_pubkey
        )
-       SELECT vote_pubkey,epoch::text,identity,revision,tuple,
+       SELECT vote_pubkey,epoch::text,identity,generation,
          EXISTS (SELECT 1 FROM locked_stats s WHERE s.vote_pubkey=targets.vote_pubkey
            AND s.epoch=targets.epoch AND s.recollect AND s.identity_pubkey<>s.identity) AS refresh
        FROM targets`,
@@ -318,7 +316,7 @@ export class WatchedDynamicRepository {
           {
             epoch: Number(row.epoch),
             identity: row.identity,
-            ...(includeRevision ? { revision: row.revision, tuple: row.tuple } : {}),
+            ...(includeGeneration ? { generation: row.generation } : {}),
           },
         ]),
       );
@@ -366,15 +364,14 @@ export class WatchedDynamicRepository {
     vote: VotePubkey,
     epoch: Epoch,
     identity: IdentityPubkey,
-    revision?: string,
-    tuple?: string,
+    generation?: string,
   ): Promise<boolean> {
     const { rowCount } = await this.pool.query(
       `WITH target AS MATERIALIZED (
          SELECT vote_pubkey FROM watched_validators_dynamic
           WHERE vote_pubkey=$1 AND prev_epoch_backfill_epoch=$2::bigint
             AND prev_epoch_backfill_identity=$3 AND prev_epoch_backfilled_at IS NULL
-            AND ($4::text IS NULL OR (xmin::text=$4 AND ctid::text=$5))
+            AND ($4::bigint IS NULL OR prev_epoch_backfill_generation=$4::bigint)
             AND EXISTS (SELECT 1 FROM validators v WHERE v.vote_pubkey=$1 AND v.identity_pubkey=$3)
           FOR UPDATE
        ), facts AS MATERIALIZED (
@@ -404,7 +401,7 @@ export class WatchedDynamicRepository {
         WHERE w.vote_pubkey=$1 AND w.prev_epoch_backfill_epoch=$2::bigint
           AND w.prev_epoch_backfill_identity=$3 AND w.prev_epoch_backfilled_at IS NULL
           AND EXISTS (SELECT 1 FROM measured)`,
-      [vote, epoch, identity, revision ?? null, tuple ?? null],
+      [vote, epoch, identity, generation ?? null],
     );
     return (rowCount ?? 0) > 0;
   }

@@ -49,10 +49,11 @@ export class EpochsRepository {
     await this.writeEpoch(this.pool, e);
   }
 
-  /** Close and replace an open epoch together. Readers see either committed state.
-   * Cancellation before COMMIT rolls back both writes; started SQL always drains.
+  /** Serialize current observations, then close every superseded open row atomically.
+   * A delayed lower observation is stored closed and cannot authorize fresh claims.
+   * Cancellation before COMMIT rolls back all writes; started SQL always drains.
    */
-  async rollover(previousEpoch: Epoch, e: UpsertEpochArgs, signal?: AbortSignal): Promise<void> {
+  async observeCurrent(e: UpsertEpochArgs, signal?: AbortSignal): Promise<boolean> {
     signal?.throwIfAborted();
     const client = await this.pool.connect();
     let discardClient = false;
@@ -61,16 +62,33 @@ export class EpochsRepository {
       await client.query('BEGIN');
       signal?.throwIfAborted();
       await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('whoearns:current-epoch',0))",
+      );
+      signal?.throwIfAborted();
+      // This statement starts after the lock wait, so READ COMMITTED sees the
+      // preceding observer's commit rather than its caller's optimistic read.
+      const { rows } = await client.query<{ epoch: string | null }>(
+        'SELECT MAX(epoch)::text AS epoch FROM epochs',
+      );
+      const latest = rows[0]?.epoch === null ? e.epoch : Number(rows[0]?.epoch ?? e.epoch);
+      const stale = e.epoch < latest;
+      signal?.throwIfAborted();
+      await client.query(
         `UPDATE epochs
             SET is_closed = TRUE,
                 closed_at = COALESCE(closed_at, $2)
-          WHERE epoch = $1`,
-        [previousEpoch, new Date()],
+          WHERE epoch < $1 AND NOT is_closed`,
+        [Math.max(latest, e.epoch), new Date()],
       );
       signal?.throwIfAborted();
-      await this.writeEpoch(client, e);
+      await this.writeEpoch(client, {
+        ...e,
+        isClosed: stale || (e.isClosed ?? false),
+        closedAt: stale ? new Date() : (e.closedAt ?? null),
+      });
       signal?.throwIfAborted();
       await client.query('COMMIT');
+      return !stale;
     } catch (err) {
       try {
         await client.query('ROLLBACK');
@@ -81,6 +99,10 @@ export class EpochsRepository {
     } finally {
       client.release(discardClient);
     }
+  }
+
+  async rollover(_previousEpoch: Epoch, e: UpsertEpochArgs, signal?: AbortSignal): Promise<void> {
+    await this.observeCurrent(e, signal);
   }
 
   private async writeEpoch(db: Pick<pg.Pool, 'query'>, e: UpsertEpochArgs): Promise<void> {

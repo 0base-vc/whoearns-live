@@ -300,7 +300,7 @@ describe('automatic current-identity collection — PostgreSQL 16', () => {
     });
   });
 
-  it('rejects a stale collection revision even after IA changes to IB and back to IA', async () => {
+  it('rejects a stale collection generation even after IA changes to IB and back to IA', async () => {
     const w = worker(pool());
     await w.tick();
     const old = (await w.watched.getOrSetBackfillTargets(null, [], true)).get('A')!;
@@ -309,9 +309,14 @@ describe('automatic current-identity collection — PostgreSQL 16', () => {
     await pool().query("UPDATE validators SET identity_pubkey='IA' WHERE vote_pubkey='A'");
     await w.watched.getOrSetBackfillTargets(null);
     const n = worker(pool());
+    const complete = n.watched.markBackfilled.bind(n.watched);
+    n.watched.markBackfilled = async () => false;
     await n.tick();
-    expect(await w.watched.markBackfilled('A', 499, 'IA', old.revision, old.tuple)).toBe(false);
-    expect((await w.watched.findByVote('A'))?.prevEpochBackfilledAt).toBeInstanceOf(Date);
+    expect((await n.watched.findByVote('A'))?.prevEpochBackfilledAt).toBeNull();
+    expect(await complete('A', 499, 'IA', old.generation)).toBe(false);
+    const current = (await n.watched.getOrSetBackfillTargets(null, [], true)).get('A')!;
+    expect(current.generation).not.toBe(old.generation);
+    expect(await complete('A', 499, 'IA', current.generation)).toBe(true);
   });
   it('starts live stats for the changed address and rejects stale counters and delayed old/new deltas', async () => {
     const w = worker(pool());
@@ -742,9 +747,9 @@ describe('automatic current-identity collection — PostgreSQL 16', () => {
     const next = new WatchedDynamicRepository(db);
     await next.add({ votePubkey: 'A', activatedStakeLamportsAtAdd: 1n });
     await next.getOrSetBackfillTargets(499, await next.getUnclaimedBackfillCandidates());
-    expect(await next.markBackfilled('A', 499, 'IA', old.revision, old.tuple)).toBe(false);
+    expect(await next.markBackfilled('A', 499, 'IA', old.generation)).toBe(false);
     expect((await next.findByVote('A'))?.prevEpochBackfilledAt).toBeNull();
     const current = (await next.getOrSetBackfillTargets(null, [], true)).get('A')!;
-    expect(await next.markBackfilled('A', 499, 'IA', current.revision, current.tuple)).toBe(true);
+    expect(await next.markBackfilled('A', 499, 'IA', current.generation)).toBe(true);
   });
 });
