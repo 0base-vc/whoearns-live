@@ -702,4 +702,49 @@ describe('automatic current-identity collection — PostgreSQL 16', () => {
       publisher.release();
     }
   });
+
+  it.each(['lookup', 'repeat add'] as const)(
+    'completes fully captured work despite %s immediately before every completion',
+    async (kind) => {
+      const db = pool(),
+        w = worker(db),
+        complete = w.watched.markBackfilled.bind(w.watched);
+      let polls = 0;
+      w.watched.markBackfilled = async (...args) => {
+        polls++;
+        if (kind === 'lookup') await w.watched.touchLookup('A');
+        else await w.watched.add({ votePubkey: 'A', activatedStakeLamportsAtAdd: 1n });
+        return complete(...args);
+      };
+      for (let i = 0; i < 4; i++) await w.tick();
+      const target = await w.watched.findByVote('A');
+      console.info(
+        `completion polling reproduction: kind=${kind}, polls=${polls}, completed=${target?.prevEpochBackfilledAt !== null}`,
+      );
+      expect(target?.prevEpochBackfilledAt).toBeInstanceOf(Date);
+      expect(await w.stats.findByVoteEpoch('A', 499)).toMatchObject({
+        blockFeesTotalLamports: 30n,
+        computeUnitsTotal: 200n,
+        slotsProduced: 2,
+      });
+      expect(await w.stats.findEconomicCohortVotes(499, 499)).toContain('A');
+    },
+  );
+
+  it('rejects stale work after deletion/re-registration with the same epoch and address', async () => {
+    const db = pool(),
+      w = worker(db);
+    w.watched.markBackfilled = async () => false;
+    await w.tick();
+    await w.tick();
+    const old = (await w.watched.getOrSetBackfillTargets(null, [], true)).get('A')!;
+    await db.query("DELETE FROM watched_validators_dynamic WHERE vote_pubkey='A'");
+    const next = new WatchedDynamicRepository(db);
+    await next.add({ votePubkey: 'A', activatedStakeLamportsAtAdd: 1n });
+    await next.getOrSetBackfillTargets(499, await next.getUnclaimedBackfillCandidates());
+    expect(await next.markBackfilled('A', 499, 'IA', old.revision, old.tuple)).toBe(false);
+    expect((await next.findByVote('A'))?.prevEpochBackfilledAt).toBeNull();
+    const current = (await next.getOrSetBackfillTargets(null, [], true)).get('A')!;
+    expect(await next.markBackfilled('A', 499, 'IA', current.revision, current.tuple)).toBe(true);
+  });
 });
