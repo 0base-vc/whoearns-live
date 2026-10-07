@@ -16,8 +16,12 @@ import { createIncomeReconcilerJob } from '../../../src/jobs/income-reconciler.j
 export async function runLegacyBackfillScenario(pool: pg.Pool, newIdentityHasOldSlots: boolean) {
   const logger = pino({ level: 'silent' });
   // The 0047 worker pinned 499 and stopped before historical stats existed.
-  await pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499
+  await pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499,
+    prev_epoch_backfill_identity=NULL
     WHERE vote_pubkey='A'`);
+  // Independently verified fixture for B; fresh current IC would not prove epoch 500.
+  await pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=500,
+    prev_epoch_backfill_identity='IC' WHERE vote_pubkey='B'`);
   await pool.query(
     `UPDATE validators SET identity_pubkey=CASE vote_pubkey WHEN 'A' THEN 'IB' ELSE 'IC' END`,
   );

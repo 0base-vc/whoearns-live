@@ -24,6 +24,9 @@ type SafetyCase =
 /** Actual nonzero facts, aggregates and both production jobs; only chain data is synthetic. */
 export async function runScopeSafetyScenario(pool: pg.Pool, kind: SafetyCase, hasNewSlots = true) {
   await pool.query(`DELETE FROM watched_validators_dynamic WHERE vote_pubkey='B'`);
+  // Existing historical-scope safety cases assume independently verified IA.
+  await pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499,
+    prev_epoch_backfill_identity='IA' WHERE vote_pubkey='A'`);
   await pool.query(`INSERT INTO epoch_validator_stats(epoch,vote_pubkey,identity_pubkey)
     SELECT e,v.vote_pubkey,v.identity_pubkey FROM generate_series(490,498) e CROSS JOIN validators v`);
   const logger = pino({ level: 'silent' });
@@ -144,6 +147,8 @@ export async function runScopeSafetyScenario(pool: pg.Pool, kind: SafetyCase, ha
   const signal = new AbortController().signal;
   const job = makeFeeJob();
   if (kind === 'manual mismatch') {
+    await pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=NULL,
+      prev_epoch_backfill_identity=NULL WHERE vote_pubkey='A'`);
     // Model already-existing reconciler data BEFORE a manual target correction.
     await rotate();
     await reconcile();

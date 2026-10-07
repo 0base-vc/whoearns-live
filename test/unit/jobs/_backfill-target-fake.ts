@@ -1,6 +1,9 @@
 import { vi } from 'vitest';
 
-/** Adapt older durable-store fakes to the bulk repository boundary. */
+/**
+ * Job tests supply known historical fixture identities at this boundary.
+ * This is not a provenance resolver: production fresh claims pin only epoch.
+ */
 export function withBulkTargets<
   T extends {
     listPendingBackfill(): Promise<string[]>;

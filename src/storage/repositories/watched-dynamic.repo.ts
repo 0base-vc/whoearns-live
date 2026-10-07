@@ -132,8 +132,9 @@ export class WatchedDynamicRepository {
   /**
    * Atomically choose a pending validator's one-shot target once. Returning
    * the stored target keeps later passes and restarted workers on the same
-   * epoch AND identity. Only a fresh target may use the observed identity.
-   * Epoch-only targets from migration 0047 are deferred unchanged: generic
+   * epoch AND any independently verified stored identity. Fresh closed-epoch
+   * targets pin only the epoch: the current mapping cannot prove historical
+   * identity. Fresh and legacy epoch-only targets are deferred unchanged: generic
    * stats can be produced using the current identity and prove no historical
    * mapping. They require verified offline identity/ledger reconciliation.
    * Completed, removed and deferred validators return null.
@@ -141,7 +142,6 @@ export class WatchedDynamicRepository {
   async getOrSetBackfillTarget(
     vote: VotePubkey,
     proposedEpoch: Epoch,
-    proposedIdentity: IdentityPubkey,
   ): Promise<DynamicBackfillTarget | null> {
     const { rows } = await this.pool.query<{ epoch: string; identity: string }>(
       `WITH pending AS MATERIALIZED (
@@ -150,10 +150,7 @@ export class WatchedDynamicRepository {
            FOR UPDATE
        ), claimed AS (
         UPDATE watched_validators_dynamic w
-          SET prev_epoch_backfill_epoch = COALESCE(w.prev_epoch_backfill_epoch, $2::bigint),
-              prev_epoch_backfill_identity = COALESCE(
-                w.prev_epoch_backfill_identity,
-                CASE WHEN w.prev_epoch_backfill_epoch IS NULL THEN $3::text END)
+          SET prev_epoch_backfill_epoch = $2::bigint
         WHERE w.vote_pubkey = $1 AND w.prev_epoch_backfilled_at IS NULL
           AND w.prev_epoch_backfill_epoch IS NULL
           AND EXISTS (SELECT 1 FROM pending)
@@ -172,7 +169,7 @@ export class WatchedDynamicRepository {
          RETURNING s.vote_pubkey
        )
        SELECT epoch::text,identity FROM targets WHERE identity IS NOT NULL`,
-      [vote, proposedEpoch, proposedIdentity],
+      [vote, proposedEpoch],
     );
     const stored = rows[0];
     return stored ? { epoch: Number(stored.epoch), identity: stored.identity } : null;
@@ -189,16 +186,16 @@ export class WatchedDynamicRepository {
     }>(
       `WITH pending AS MATERIALIZED (
          SELECT w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,
-                w.prev_epoch_backfill_identity AS identity,v.identity_pubkey
-           FROM watched_validators_dynamic w LEFT JOIN validators v ON v.vote_pubkey=w.vote_pubkey
+                w.prev_epoch_backfill_identity AS identity
+           FROM watched_validators_dynamic w
           WHERE w.prev_epoch_backfilled_at IS NULL
           ORDER BY w.vote_pubkey FOR UPDATE OF w
        ), claimed AS (
          UPDATE watched_validators_dynamic w
-            SET prev_epoch_backfill_epoch=$1::bigint,prev_epoch_backfill_identity=v.identity_pubkey
+            SET prev_epoch_backfill_epoch=$1::bigint
            FROM pending v
           WHERE v.vote_pubkey=w.vote_pubkey AND w.prev_epoch_backfilled_at IS NULL
-            AND w.prev_epoch_backfill_epoch IS NULL AND v.identity_pubkey IS NOT NULL
+            AND w.prev_epoch_backfill_epoch IS NULL
          RETURNING w.vote_pubkey,w.prev_epoch_backfill_epoch AS epoch,
                    w.prev_epoch_backfill_identity AS identity
        ), targets AS MATERIALIZED (

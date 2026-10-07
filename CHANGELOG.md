@@ -23,7 +23,11 @@ and this project follows [Semantic Versioning](https://semver.org/).
   unfinished epochs through rollover and restart and preventing completion
   against a different epoch. Migration 0048 also stores the historical
   target identity, so rotation cannot stamp unfinished old slots complete
-  by switching to the new identity's empty or shorter schedule. Legacy
+  by switching to the new identity's empty or shorter schedule. Fresh closed
+  targets pin epoch with identity NULL: current validator mappings and generic
+  stats do not prove historical identity, including rotation before tracking.
+  Previous-epoch data stays unmeasured until independent offline verification;
+  live ingestion and existing verified scopes continue. Legacy
   epoch-only targets remain pending until their identity is independently
   verified and manually corrected; reconciler-created stats are not identity
   provenance. All pending targets are pinned before live RPC work, even when

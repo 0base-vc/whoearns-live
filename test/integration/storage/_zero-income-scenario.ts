@@ -18,6 +18,9 @@ export async function runZeroIncomeScenario(
   concurrentFirstBatch = false,
 ) {
   await pool.query(`DELETE FROM watched_validators_dynamic WHERE vote_pubkey='B'`);
+  // Explicit verified historical fixture, not inferred from today's validator mapping.
+  await pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499,
+    prev_epoch_backfill_identity='IA' WHERE vote_pubkey='A'`);
   const logger = pino({ level: 'silent' });
   let recovered = false;
   const calls: number[] = [];

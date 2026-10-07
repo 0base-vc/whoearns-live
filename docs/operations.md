@@ -416,9 +416,15 @@ queues a pending row; target selection happens when the worker observes it.
 Migration
 `0048_dynamic_backfill_target_identity.sql` adds the nullable
 `prev_epoch_backfill_identity` column. The target is now an immutable
-`(epoch, identity)` pair. A fresh target uses the current identity resolved
-at first observation; generic epoch stats never select the target identity.
-An already-pinned epoch with a NULL target identity remains pending and
+`(epoch, identity)` pair once the historical identity has been independently
+verified. A fresh closed-epoch target pins only its epoch and leaves identity
+NULL. The latest `validators.identity_pubkey` may have rotated before tracking
+started; neither it nor generic epoch stats proves the closed-epoch identity.
+The schema has no authoritative vote-to-identity history for a chain epoch.
+Block facts identify leaders but do not link a historical leader to a vote;
+claim/audit timestamps record point-in-time signatures, not full epoch scope.
+The runtime does not invent that provenance or infer it from an empty schedule.
+An epoch with a NULL target identity remains pending and
 unchanged, even if stats later appear: earlier reconcilers or unscoped callers
 could create those rows from the current identity, so they do not prove a historical
 vote-to-identity mapping. These legacy 0047 targets need verified offline
@@ -429,6 +435,12 @@ income, and verify the aggregate against authoritative facts before resuming.
 Adding a stats row or running the ordinary reconciler alone cannot establish
 that provenance. If it cannot be verified, keep the target pending. Other backfills and live polling continue
 while that target is deferred, and it does not consume a historical turn.
+Consequently, newly tracked validators' one-shot previous-epoch data remains
+missing/unmeasured until verified offline identity and ledger reconciliation
+provides a historical scope. This can delay history completeness and tiers;
+it must not appear as a measured zero. Current and future live ingestion
+continues. Existing independently verified stored scopes continue backfilling;
+the worker preserves their epoch/identity across rollover and restart.
 Completed rows stay completed. The completion marker can only be set for the stored
 epoch and identity, and only when all five income totals match the stored
 identity's captured produced-block facts, with assigned slots fully accounted for

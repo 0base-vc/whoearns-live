@@ -16,6 +16,8 @@ const delta = {
 
 async function seed(pool: pg.Pool) {
   await pool.query(`DELETE FROM watched_validators_dynamic WHERE vote_pubkey='B'`);
+  await pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=NULL,
+    prev_epoch_backfill_identity=NULL WHERE vote_pubkey='A'`);
   const stats = new StatsRepository(pool);
   for (const [votePubkey, epoch] of [
     ['A', 499],
@@ -94,7 +96,7 @@ export async function runMeasurementClaim(pool: pg.Pool, kind: MeasurementClaim)
       `UPDATE epoch_validator_stats SET identity_pubkey='IB' WHERE vote_pubkey='A' AND epoch=499`,
     );
   }
-  if (kind === 'single') await repo.getOrSetBackfillTarget('A', 499, 'IA');
+  if (kind === 'single') await repo.getOrSetBackfillTarget('A', 499);
   else if (kind === 'scopes') await repo.getBackfillScopes(['A'], 499);
   else await repo.getOrSetBackfillTargets(499);
   if (kind === 'deferred') {
@@ -112,8 +114,11 @@ export async function runMeasurementClaim(pool: pg.Pool, kind: MeasurementClaim)
 
 export async function runMeasurementWriter(pool: pg.Pool, kind: MeasurementWriter) {
   const stats = await seed(pool);
+  // Completion tests supply verified historical identity explicitly in the fixture.
+  await pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499,
+    prev_epoch_backfill_identity='IA' WHERE vote_pubkey='A'`);
   const repo = new WatchedDynamicRepository(pool);
-  await repo.getOrSetBackfillTarget('A', 499, 'IA');
+  await repo.getOrSetBackfillTarget('A', 499);
   await facts(pool);
   await write(stats, kind);
   await stats.addIncomeDelta({ ...delta, epoch: 500 });
@@ -173,7 +178,7 @@ export async function runMeasurementRace(
     await claimant.query('BEGIN');
     await writer.query('BEGIN');
     if (order === 'claim first') {
-      await claimRepo.getOrSetBackfillTarget('A', 499, 'IA');
+      await claimRepo.getOrSetBackfillTarget('A', 499);
       const { rows } = await writer.query('SELECT pg_backend_pid() AS pid');
       pending = write(writerRepo, kind);
       await waitBlocked(pool, Number(rows[0].pid));
@@ -183,7 +188,7 @@ export async function runMeasurementRace(
     } else {
       await write(writerRepo, kind);
       const { rows } = await claimant.query('SELECT pg_backend_pid() AS pid');
-      pending = claimRepo.getOrSetBackfillTarget('A', 499, 'IA');
+      pending = claimRepo.getOrSetBackfillTarget('A', 499);
       await waitBlocked(pool, Number(rows[0].pid));
       await writer.query('COMMIT');
       await pending;
@@ -210,7 +215,9 @@ export async function runCompletionRace(
   kind: 'single' | 'bulk' | 'scopes' | 'income' | 'rebuild',
 ) {
   const stats = await seed(pool);
-  await new WatchedDynamicRepository(pool).getOrSetBackfillTarget('A', 499, 'IA');
+  await pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499,
+    prev_epoch_backfill_identity='IA' WHERE vote_pubkey='A'`);
+  await new WatchedDynamicRepository(pool).getOrSetBackfillTarget('A', 499);
   await facts(pool);
   await stats.addIncomeDelta(delta);
   await stats.upsertSlotStatsIfIdentityMatches({
@@ -237,7 +244,7 @@ export async function runCompletionRace(
     if (!(await completionRepo.markBackfilled('A', 499, 'IA')))
       throw new Error('expected complete facts');
     const { rows } = await observer.query('SELECT pg_backend_pid() AS pid');
-    if (kind === 'single') pending = observerRepo.getOrSetBackfillTarget('A', 499, 'IA');
+    if (kind === 'single') pending = observerRepo.getOrSetBackfillTarget('A', 499);
     else if (kind === 'bulk') pending = observerRepo.getOrSetBackfillTargets(499);
     else if (kind === 'scopes') pending = observerRepo.getBackfillScopes(['A'], 499);
     else if (kind === 'rebuild')

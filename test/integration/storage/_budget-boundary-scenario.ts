@@ -18,6 +18,9 @@ export async function runBudgetBoundaryScenario(
 ) {
   const logger = pino({ level: 'silent' });
   await pool.query(`UPDATE validators SET identity_pubkey='IC' WHERE vote_pubkey='B'`);
+  // Historical progress here uses independently verified fixture scopes.
+  await pool.query(`UPDATE watched_validators_dynamic SET prev_epoch_backfill_epoch=499,
+    prev_epoch_backfill_identity=CASE vote_pubkey WHEN 'A' THEN 'IA' ELSE 'IC' END`);
   let currentEpoch = 500;
   let exhaustFirstBatch = true;
   const tracked = ['A', 'B'];

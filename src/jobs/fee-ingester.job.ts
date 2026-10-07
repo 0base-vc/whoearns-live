@@ -93,6 +93,8 @@ export function createFeeIngesterJob(deps: FeeIngesterJobDeps): Job {
       // Record every pending target on first observation, before live RPC or
       // any leftover-budget check. Otherwise a cold live pass or unavailable
       // schedule could postpone the first claim across an epoch boundary.
+      // Fresh epochs are pinned even without historical identity proof; only
+      // independently resolved stored scopes are returned for historical RPC.
       let backfillTargets = new Map<VotePubkey, DynamicBackfillTarget>();
       if (epoch > 0 && deps.watchedDynamicRepo !== undefined && deps.epochsRepo !== undefined) {
         try {
