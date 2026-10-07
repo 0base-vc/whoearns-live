@@ -295,6 +295,29 @@ equivalent to simply reading `epoch_validator_stats.compute_units_total`
 (see migration 0043). Query changes need local PostgreSQL correctness and
 performance evidence; increasing the timeout is not a UI fix.
 
+### Symptoms: scoring or tier snapshot statement timeouts
+
+`StatsRepository.findEconomicPercentile` computes a shared income/CU
+cohort over the validator's closed-epoch window. SQLSTATE `57014` together
+with **"canceling statement due to statement timeout"** confirms a statement
+timeout; the code alone also covers other cancellations. Correlate API
+request IDs with completion and error logs before attributing a page delay.
+
+CU matching uses distinct `(vote, identity)` rows and an equality join to
+`processed_blocks`, retaining the constant epoch range for partition
+pruning. This keeps the identity set window-wide (including mid-epoch
+rotations) without multiplying blocks when an identity appears in several
+epochs. It also lets the planner use an equality join instead of repeatedly
+applying an identity-array filter. The produced-block denominator, cohort
+membership, opt-out and null behavior remain unchanged. This is not a
+substitution with migration 0043's accumulated CU totals.
+
+The PostgreSQL 16 integration regressions compare the lookup against a
+frozen pre-change SQL fixture and check a synthetic cohort execution plan.
+Synthetic timings do not guarantee production latency: cardinality,
+statistics, hardware, lock waits and concurrent workload still matter.
+Do not treat a plan without execution as an actual runtime measurement.
+
 ### Symptoms: repeated `429` or `-32005` from Solana RPC
 
 - The default `SOLANA_RPC_URL` is the public PublicNode endpoint.
