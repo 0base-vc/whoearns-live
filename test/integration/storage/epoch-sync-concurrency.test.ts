@@ -1,3 +1,4 @@
+import type pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { pino } from 'pino';
 import { runEpochCancellationScenario } from './_atomic-epoch-scenario.js';
@@ -154,16 +155,17 @@ describe('concurrent current epoch observations — PostgreSQL16', () => {
     const afterClose = new Promise<void>((r) => {
       reached = r;
     });
-    const leaderPool = boundPgPool(leader);
-    const query = leaderPool.query.bind(leaderPool);
-    leaderPool.query = (async (...args: unknown[]) => {
-      const result = await Reflect.apply(query, leaderPool, args);
+    const pausedQuery = async (...args: unknown[]) => {
+      const result = await Reflect.apply(leader.query, leader, args);
       if (typeof args[0] === 'string' && /UPDATE epochs\s+SET is_closed/.test(args[0])) {
         reached();
         await gate;
       }
       return result;
-    }) as typeof leaderPool.query;
+    };
+    const leaderPool = {
+      connect: async () => ({ query: pausedQuery, release: () => {} }),
+    } as unknown as pg.Pool;
     const e = (epoch: number) => ({
       epoch,
       firstSlot: epoch * 100,
@@ -175,7 +177,12 @@ describe('concurrent current epoch observations — PostgreSQL16', () => {
     const first = new EpochsRepository(leaderPool).observeCurrent(e(502));
     let second: Promise<unknown> | undefined;
     try {
-      await afterClose;
+      await Promise.race([
+        afterClose,
+        first.then(() => {
+          throw new Error('observation committed before the close pause');
+        }),
+      ]);
       const pid = (await waiter.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
       second = new EpochsRepository(boundPgPool(waiter))
         .observeCurrent(e(501), controller.signal)
@@ -202,8 +209,7 @@ describe('concurrent current epoch observations — PostgreSQL16', () => {
       ]);
     } finally {
       release();
-      await first;
-      await second;
+      await Promise.allSettled([first, ...(second ? [second] : [])]);
       leader.release();
       waiter.release();
     }
