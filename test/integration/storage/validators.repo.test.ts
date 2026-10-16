@@ -34,6 +34,38 @@ describe('ValidatorsRepository', () => {
     expect(found!.updatedAt).toBeInstanceOf(Date);
   });
 
+  it('findTopClientKinds: most common real kinds first, never unknown, honours the limit', async () => {
+    const kinds: Array<[string, string]> = [
+      ['agave', 'a1'],
+      ['agave', 'a2'],
+      ['agave', 'a3'],
+      ['jito_solana', 'j1'],
+      ['jito_solana', 'j2'],
+      ['firedancer', 'f1'],
+      ['unknown', 'u1'],
+      ['unknown', 'u2'],
+      ['unknown', 'u3'],
+      ['unknown', 'u4'],
+    ];
+    for (const [, id] of kinds) {
+      await repo.upsert({
+        votePubkey: `Vote-${id}`,
+        identityPubkey: id,
+        firstSeenEpoch: 100,
+        lastSeenEpoch: 100,
+      });
+    }
+    await repo.upsertClientBatch(
+      kinds.map(([clientKind, identityPubkey]) => ({
+        identityPubkey,
+        clientKind,
+        clientVersion: null,
+      })),
+    );
+    expect(await repo.findTopClientKinds(10)).toEqual(['agave', 'jito_solana', 'firedancer']);
+    expect(await repo.findTopClientKinds(2)).toEqual(['agave', 'jito_solana']);
+  });
+
   it('upsert: updates identity and advances lastSeenEpoch with GREATEST', async () => {
     await repo.upsert({
       votePubkey: 'VoteA',

@@ -11,6 +11,18 @@ and this project follows [Semantic Versioning](https://semver.org/).
   waiting for optional scoring. Tier and commission details load separately
   with visible failure and retry states; navigation cancels old requests
   and ignores stale responses.
+- Profile `/scoring`, `/tier` and `/history` no longer pay a multi-second
+  cluster-wide aggregation per viewer, and the tier snapshot job no longer
+  saturates PostgreSQL at every epoch rollover. The economic-percentile cohort
+  (about 1M `processed_blocks` rows for a 10-epoch window) was recomputed once
+  per validator, so the rollover job ran it for every tracked validator back to
+  back (~30 minutes of DB load that pushed API p95 over 2s). It is now computed
+  once per window (`findEconomicCohortSnapshot`, ranking by the same CTEs as the
+  per-vote query) and shared through a single-flight, TTL'd memo in both the API
+  and worker. The service-wide and same-client compute-unit series on `/history`
+  are cached per epoch. An API cache warmer refreshes the latest closed window
+  and those series every 10 minutes, so low traffic no longer makes every view
+  cold.
 - Economic percentile CU aggregation joins distinct vote/identity pairs
   directly to block identities, avoiding per-vote array filters while
   preserving window-wide identity rotations and produced-block weighting.

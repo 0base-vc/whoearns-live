@@ -18,6 +18,10 @@ import type {
   ValidatorCurrentEpochResponse,
 } from '../../types/domain.js';
 import { cacheControl } from '../cache-control.js';
+import {
+  getEpochComputeUnitsByClientCached,
+  getEpochComputeUnitsServiceWideCached,
+} from '../cu-cache.js';
 import { setNoStoreCache } from '../cache-headers.js';
 import { validatorDynamicWatchAttemptsTotal } from '../metrics.js';
 import { HistoryQuerySchema, VoteOrIdentityParamSchema } from '../schemas/requests.js';
@@ -441,6 +445,12 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
     // simply doesn't render.
     const targetClientKind =
       validator.clientKind && validator.clientKind !== 'unknown' ? validator.clientKind : null;
+    // The service-wide and same-client CU averages are identical for every
+    // validator, so they are served from `cu-cache` (closed epochs long,
+    // the running epoch briefly) instead of re-aggregated per request.
+    const currentEpoch = await epochsRepo.findCurrent();
+    const isOpenEpoch = (epoch: number): boolean =>
+      currentEpoch === null || epoch >= currentEpoch.epoch;
     const [epochInfos, aggregates, validatorCuByEpoch, serviceCuByEpoch, sameClientCuByEpoch] =
       await Promise.all([
         Promise.all(distinctEpochs.map((e) => epochsRepo.findByEpoch(e))),
@@ -454,10 +464,15 @@ const validatorsHistoryRoutes: FastifyPluginAsync<ValidatorsHistoryRoutesDeps> =
         processedBlocksRepo.getEpochComputeUnitsByVote(validator.votePubkey, distinctEpochs),
         // Service-wide average it is plotted against — keyed by epoch;
         // absent / zero-produced-block epochs collapse to `null`.
-        processedBlocksRepo.getEpochComputeUnitsServiceWide(distinctEpochs),
+        getEpochComputeUnitsServiceWideCached(processedBlocksRepo, distinctEpochs, isOpenEpoch),
         // Same-client average — the subset of tracked validators running
         // `targetClientKind`. Empty map when the target client is unknown.
-        processedBlocksRepo.getEpochComputeUnitsByClient(distinctEpochs, targetClientKind),
+        getEpochComputeUnitsByClientCached(
+          processedBlocksRepo,
+          distinctEpochs,
+          targetClientKind,
+          isOpenEpoch,
+        ),
       ]);
     const epochByNumber = new Map<number, EpochInfo>();
     distinctEpochs.forEach((e, i) => {

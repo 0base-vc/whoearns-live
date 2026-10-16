@@ -19,7 +19,7 @@ import { CursorsRepository } from '../storage/repositories/cursors.repo.js';
 import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
 import { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
-import { StatsRepository } from '../storage/repositories/stats.repo.js';
+import { ECONOMIC_COHORT_TTL_MS, StatsRepository } from '../storage/repositories/stats.repo.js';
 import { TierSnapshotsRepository } from '../storage/repositories/tier-snapshots.repo.js';
 import { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
 import { WalletActivityRepository } from '../storage/repositories/wallet-activity.repo.js';
@@ -70,7 +70,7 @@ export async function startWorker(): Promise<void> {
 
   const validatorsRepo = new ValidatorsRepository(pool);
   const epochsRepo = new EpochsRepository(pool);
-  const statsRepo = new StatsRepository(pool);
+  const statsRepo = new StatsRepository(pool, { economicCohortTtlMs: ECONOMIC_COHORT_TTL_MS });
   const tierSnapshotsRepo = new TierSnapshotsRepository(pool);
   const processedBlocksRepo = new ProcessedBlocksRepository(pool);
   const aggregatesRepo = new AggregatesRepository(pool);
