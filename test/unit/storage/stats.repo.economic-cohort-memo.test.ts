@@ -187,6 +187,22 @@ describe('StatsRepository economic cohort memo', () => {
     expect(pool.query).toHaveBeenCalledTimes(2);
   });
 
+  it('refresh joins a query that is already running instead of starting a second', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { pool, repo } = repoWith(async () => {
+      await gate;
+      return { rows: snapshotRows() };
+    }, 60_000);
+    const request = repo.findEconomicPercentile(vote('A'), 1, 10);
+    const warm = repo.refreshEconomicCohortSnapshot(1, 10);
+    release();
+    await Promise.all([request, warm]);
+    expect(pool.query).toHaveBeenCalledTimes(1);
+  });
+
   it('runs the per-vote reference query every time when the memo is disabled', async () => {
     const perVoteRow = {
       ...COHORT,

@@ -1942,6 +1942,12 @@ export class StatsRepository {
     fromEpoch: Epoch,
     toEpoch: Epoch,
   ): Promise<EconomicCohortSnapshot> {
+    if (this.economicCohortTtlMs > 0) {
+      // A query for this window is already running (e.g. a request raced the
+      // warmer at start-up): its result is as fresh as ours would be.
+      const running = this.economicCohortMemo.get(`${fromEpoch}:${toEpoch}`);
+      if (running !== undefined && running.expiresAt === Infinity) return running.promise;
+    }
     const snapshot = await this.findEconomicCohortSnapshot(fromEpoch, toEpoch);
     if (this.economicCohortTtlMs > 0) {
       this.economicCohortMemo.set(`${fromEpoch}:${toEpoch}`, {
