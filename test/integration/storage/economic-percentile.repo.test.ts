@@ -122,6 +122,10 @@ describe('economic percentile equality join — PostgreSQL 16', () => {
     const oldResult = await baselineRepo.findEconomicPercentile(vote, FROM, TO);
     const result = await repo.findEconomicPercentile(vote, FROM, TO);
     expect(result).toEqual(oldResult);
+    // Cohort-snapshot path (what production runs): a fresh repo per call so
+    // the memo can never outlive the data a scenario reseeds.
+    const snapshotRepo = new StatsRepository(pool(), { economicCohortTtlMs: 60_000 });
+    expect(await snapshotRepo.findEconomicPercentile(vote, FROM, TO)).toEqual(oldResult);
     return result;
   }
 

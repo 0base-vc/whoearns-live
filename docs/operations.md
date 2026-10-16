@@ -318,6 +318,36 @@ Synthetic timings do not guarantee production latency: cardinality,
 statistics, hardware, lock waits and concurrent workload still matter.
 Do not treat a plan without execution as an actual runtime measurement.
 
+### Symptoms: API p95 latency alert (`SVI HTTP p95 High`) around an epoch rollover
+
+Profile views (`/v1/validators/:id/scoring`, `/tier`, `/history`) were slow
+because the validator-independent cohort work was repeated per request:
+
+- `findEconomicPercentile` ranks a validator against the closed-epoch window
+  cohort. Cold, it takes 2.5-6s on the production box (10-epoch window, about
+  1M `processed_blocks` rows). `StatsRepository` now computes the whole
+  cohort once per window (`findEconomicCohortSnapshot`) and answers each
+  validator from it (`economicLookupFromSnapshot`). Both the API and worker
+  enable this with `economicCohortTtlMs` (`ECONOMIC_COHORT_TTL_MS`, 30 min);
+  without the option the per-vote reference query runs, as in tests.
+- The tier snapshot job calls it for every tracked validator when an epoch
+  closes. Before the memo that was one full cohort computation per validator,
+  ~30 minutes of DB saturation on the 1.5-CPU container; check
+  `tier-snapshot-ingester: snapshotted closed epoch` timing if it recurs.
+- `/history` serves the service-wide and same-client CU averages from
+  `src/api/cu-cache.ts` (per epoch: 30 min closed, 60s running epoch).
+- `src/api/cache-warmer.ts` refreshes the latest closed window's cohort and
+  the CU series for the largest client kinds every 10 minutes (and at
+  start-up), so a view after a quiet period is not cold. Warm failures are
+  logged as `cache-warmer: step failed` and retried next tick.
+
+Triage: time one cold `/scoring` call from inside the pod (a validator not
+viewed in the last 30 minutes). Seconds means the warmer is failing or the
+window key differs (a validator with a gap in its last 10 epochs uses its own
+window and is computed on demand). Also check CPU throttling
+(`/sys/fs/cgroup/cpu.stat`: `nr_throttled`/`nr_periods`); the container is
+limited to 1.5 cores shared by PostgreSQL, API and worker.
+
 ### Symptoms: repeated `429` or `-32005` from Solana RPC
 
 - The default `SOLANA_RPC_URL` is the public PublicNode endpoint.

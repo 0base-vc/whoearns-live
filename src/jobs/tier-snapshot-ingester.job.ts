@@ -96,10 +96,12 @@ export function createTierSnapshotIngesterJob(deps: TierSnapshotIngesterJobDeps)
 
         // Resolve each tracked vote's tier through the SAME helper the
         // /tier endpoint uses, then project to a snapshot row. Sequential
-        // rather than `Promise.all` to bound DB concurrency — the cohort
-        // CTE is memoized in-process (tier-cache) so the per-vote cost is
-        // dominated by the cheap history read, and this runs at most once
-        // per closed epoch (~2 days).
+        // rather than `Promise.all` to bound DB concurrency. The cohort is
+        // computed once per window by `StatsRepository`'s memoized snapshot
+        // (the worker wires `economicCohortTtlMs`), so the per-vote cost is
+        // the cheap history read; without that memo every vote re-ran the
+        // whole window cohort, which saturated the DB for ~30 minutes at
+        // each epoch rollover. Runs at most once per closed epoch (~2 days).
         const snapshotRows: TierSnapshotUpsert[] = [];
         for (const vote of votes) {
           if (signal.aborted) return;

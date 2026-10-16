@@ -425,6 +425,24 @@ export class ValidatorsRepository {
   }
 
   /**
+   * The `limit` most common real client kinds (never `'unknown'`), most
+   * common first. Used by the API cache warmer to pick which same-client
+   * compute-unit series are worth keeping warm.
+   */
+  async findTopClientKinds(limit: number): Promise<string[]> {
+    const { rows } = await this.pool.query<{ client_kind: string }>(
+      `SELECT client_kind
+         FROM validators
+        WHERE client_kind IS NOT NULL AND client_kind <> 'unknown'
+        GROUP BY client_kind
+        ORDER BY COUNT(*) DESC, client_kind
+        LIMIT $1`,
+      [limit],
+    );
+    return rows.map((r) => r.client_kind);
+  }
+
+  /**
    * Look up a validator by identity (node) pubkey. Used by the UI's
    * `/income/:idOrVote` route when the caller passes an identity rather
    * than a vote. A validator can in principle rotate identities across

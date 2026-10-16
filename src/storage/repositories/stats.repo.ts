@@ -242,6 +242,133 @@ const ECONOMIC_COHORT_MEMBERSHIP_PREDICATE = `evs.epoch BETWEEN $1::bigint AND $
                AND vp.opted_out = TRUE
           )`;
 
+/**
+ * Window-wide CTEs of the economic-percentile query (`$1..$2` = epoch
+ * window), up to and including `ranked`. Shared verbatim by
+ * `findEconomicPercentile` (one target vote) and
+ * `findEconomicCohortSnapshot` (every cohort member at once) so the two
+ * cannot rank differently.
+ */
+const ECONOMIC_PERCENTILE_SHARED_CTES = `per_validator_per_epoch AS (
+        SELECT
+          evs.vote_pubkey,
+          evs.identity_pubkey,
+          evs.epoch,
+          (
+            evs.block_fees_total_lamports
+            + evs.block_tips_total_lamports
+          )::numeric / evs.slots_assigned::numeric AS income_per_slot
+        FROM epoch_validator_stats evs
+        WHERE ${ECONOMIC_COHORT_MEMBERSHIP_PREDICATE}
+      ),
+      median_per_validator AS (
+        SELECT
+          vote_pubkey,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY income_per_slot) AS median_income_per_slot,
+          COUNT(*)::int AS measured_epochs
+        FROM per_validator_per_epoch
+        GROUP BY vote_pubkey
+      ),
+      -- Compute units for the SAME cohort + window. Each cohort
+      -- validator's produced blocks across the window are pooled;
+      -- windowed_cu is the producedBlock-count-weighted average CU
+      -- per produced block, i.e. SUM(CU) / COUNT(produced). NULL when
+      -- the validator produced no blocks in the window.
+      --
+      -- cu_vote_identities resolves the SET of identity keys each
+      -- vote ran across the window. epoch_validator_stats (and so
+      -- per_validator_per_epoch) records one identity per
+      -- (epoch, vote), so an operator that rotates its identity key
+      -- mid-epoch runs that epoch under two identities; pooling
+      -- blocks by the windowed identity set folds both halves rather
+      -- than dropping the unrecorded one.
+      -- DISTINCT (vote, identity) rows prevent repeated epochs from
+      -- multiplying blocks. Equality exposes the identity join to the
+      -- planner rather than filtering each vote through an ANY array.
+      cu_vote_identities AS (
+        SELECT DISTINCT
+          vote_pubkey,
+          identity_pubkey
+        FROM per_validator_per_epoch
+      ),
+      cu_per_validator AS (
+        SELECT
+          cvi.vote_pubkey,
+          SUM(pb.compute_units_consumed)
+            FILTER (WHERE pb.block_status = 'produced') AS cu_consumed,
+          COUNT(pb.slot) FILTER (WHERE pb.block_status = 'produced') AS produced_blocks
+        FROM cu_vote_identities cvi
+        LEFT JOIN processed_blocks pb
+          -- Explicit constant range so the planner prunes
+          -- processed_blocks partitions — a bare join-column
+          -- equality does NOT prune a RANGE-partitioned table, and
+          -- without it the hash side scans every partition of the
+          -- largest table on the DB.
+          ON pb.epoch BETWEEN $1::bigint AND $2::bigint
+         AND pb.leader_identity = cvi.identity_pubkey
+        GROUP BY cvi.vote_pubkey
+      ),
+      windowed_cu AS (
+        SELECT
+          vote_pubkey,
+          CASE
+            WHEN COALESCE(produced_blocks, 0) > 0
+            THEN cu_consumed::numeric / produced_blocks::numeric
+            ELSE NULL
+          END AS windowed_cu
+        FROM cu_per_validator
+      ),
+      -- CU percentile reuses the PERCENT_RANK method; validators with
+      -- no produced blocks (NULL windowed_cu) are excluded from the CU
+      -- ranking, so they receive no cu_pct — the tier folds their CU
+      -- subscore back to their income percentile.
+      cu_ranked AS (
+        SELECT
+          vote_pubkey,
+          windowed_cu,
+          PERCENT_RANK() OVER (ORDER BY windowed_cu) AS cu_pct
+        FROM windowed_cu
+        WHERE windowed_cu IS NOT NULL
+      ),
+      ranked AS (
+        SELECT
+          vote_pubkey,
+          median_income_per_slot,
+          measured_epochs,
+          PERCENT_RANK() OVER (ORDER BY median_income_per_slot) AS pct,
+          COUNT(*) OVER ()::bigint AS cohort_size
+        FROM median_per_validator
+      )`;
+
+/** One-row cohort summary CTE; needs `median_per_validator` + `windowed_cu`. */
+const ECONOMIC_PERCENTILE_COHORT_CTE = `      cohort AS (
+        -- One-row cohort summary: size of the income cohort plus
+        -- median / p25 / p75 of the per-validator income distribution
+        -- AND the cohort median of windowed-CU among block-producing
+        -- peers. All four percentile aggregates share the same
+        -- distribution as the pct rank, so a UI showing rank also
+        -- knows the absolute value at that rank.
+        SELECT
+          (SELECT COUNT(*)::bigint FROM median_per_validator) AS cohort_size,
+          (
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY median_income_per_slot)
+              FROM median_per_validator
+          ) AS cohort_median_income_per_slot,
+          (
+            SELECT percentile_cont(0.25) WITHIN GROUP (ORDER BY median_income_per_slot)
+              FROM median_per_validator
+          ) AS cohort_p25_income_per_slot,
+          (
+            SELECT percentile_cont(0.75) WITHIN GROUP (ORDER BY median_income_per_slot)
+              FROM median_per_validator
+          ) AS cohort_p75_income_per_slot,
+          (
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY windowed_cu)
+              FROM windowed_cu
+             WHERE windowed_cu IS NOT NULL
+          ) AS cohort_median_cu
+      )`;
+
 const PEER_BENCHMARK_MIN_VALIDATORS = 3;
 
 /**
@@ -501,6 +628,119 @@ interface EconomicPercentileRow {
   cohort_median_cu: string | null;
 }
 
+/** Cohort-wide columns, identical for every validator in a window. */
+type EconomicCohortColumns = Pick<
+  EconomicPercentileRow,
+  | 'cohort_size'
+  | 'cohort_median_income_per_slot'
+  | 'cohort_p25_income_per_slot'
+  | 'cohort_p75_income_per_slot'
+  | 'cohort_median_cu'
+>;
+
+/** One cohort member's own ranking columns. */
+type EconomicCohortMember = Pick<
+  EconomicPercentileRow,
+  'pct' | 'median_income_per_slot' | 'measured_epochs' | 'cu_pct' | 'target_windowed_cu'
+>;
+
+type EconomicCohortSnapshotRow = EconomicCohortColumns & {
+  vote_pubkey: string | null;
+  measured_epochs: number | null;
+  pct: string | null;
+  median_income_per_slot: string | null;
+  cu_pct: string | null;
+  target_windowed_cu: string | null;
+};
+
+/**
+ * Every cohort member's economic ranking for one closed-epoch window,
+ * from `findEconomicCohortSnapshot`. Immutable once built; answer a
+ * validator with `economicLookupFromSnapshot`.
+ */
+export interface EconomicCohortSnapshot {
+  readonly cohort: EconomicCohortColumns;
+  readonly members: ReadonlyMap<VotePubkey, EconomicCohortMember>;
+}
+
+function mapEconomicPercentileRow(row: EconomicPercentileRow): EconomicPercentileLookup {
+  // `cohort_size` arrives as a decimal string from the `::bigint`
+  // cast. Cohort size is bounded by the indexed validator set
+  // (~thousands), well within safe-int range.
+  const cohortSize = Number(row.cohort_size);
+
+  // Cohort aggregate quantiles share the same `median_per_validator`
+  // distribution that drives `pct` — populated whenever the cohort
+  // itself is non-empty, regardless of whether the target validator
+  // appears in it. The target-absent branch below still surfaces
+  // these so a UI can render cohort distribution context even when
+  // the validator has no own median to compare against.
+  const cohortMedianIncomePerSlot = row.cohort_median_income_per_slot;
+  const cohortP25IncomePerSlot = row.cohort_p25_income_per_slot;
+  const cohortP75IncomePerSlot = row.cohort_p75_income_per_slot;
+  const cohortMedianCuRaw = row.cohort_median_cu;
+  const cohortMedianCuParsed = cohortMedianCuRaw === null ? Number.NaN : Number(cohortMedianCuRaw);
+
+  // Target absent from the cohort: pct and median are both NULL.
+  if (row.pct === null && row.median_income_per_slot === null) {
+    return {
+      percentile: null,
+      cohortSize,
+      measuredEpochs: 0,
+      medianIncomePerSlotLamports: null,
+      cohortMedianLamportsPerSlot: cohortMedianIncomePerSlot,
+      cohortP25LamportsPerSlot: cohortP25IncomePerSlot,
+      cohortP75LamportsPerSlot: cohortP75IncomePerSlot,
+      cuPercentile: null,
+      validatorAvgCuPerBlock: null,
+      cohortMedianCuPerBlock: Number.isFinite(cohortMedianCuParsed) ? cohortMedianCuParsed : null,
+    };
+  }
+
+  const pct = row.pct === null ? Number.NaN : Number(row.pct);
+  // CU percentile is independently nullable: the target can be in
+  // the income cohort yet have produced no blocks in the window
+  // (absent from `cu_ranked`, so `cu_pct` is NULL).
+  const cuPct = row.cu_pct === null ? Number.NaN : Number(row.cu_pct);
+  const targetCu = row.target_windowed_cu === null ? Number.NaN : Number(row.target_windowed_cu);
+  return {
+    // `PERCENT_RANK` returns 0 for a cohort of size 1 (no other
+    // peers to rank against). We still pass that through — the
+    // caller's `MIN_COHORT_FOR_PERCENTILE` guard catches it.
+    percentile: Number.isFinite(pct) ? pct : null,
+    cohortSize,
+    measuredEpochs: row.measured_epochs,
+    medianIncomePerSlotLamports: row.median_income_per_slot,
+    cohortMedianLamportsPerSlot: cohortMedianIncomePerSlot,
+    cohortP25LamportsPerSlot: cohortP25IncomePerSlot,
+    cohortP75LamportsPerSlot: cohortP75IncomePerSlot,
+    cuPercentile: Number.isFinite(cuPct) ? cuPct : null,
+    validatorAvgCuPerBlock: Number.isFinite(targetCu) ? targetCu : null,
+    cohortMedianCuPerBlock: Number.isFinite(cohortMedianCuParsed) ? cohortMedianCuParsed : null,
+  };
+}
+
+/**
+ * The `EconomicPercentileLookup` `findEconomicPercentile` would return
+ * for `vote`, answered from a window snapshot with no DB round-trip. A
+ * vote absent from the snapshot gets the target-absent shape (NULL
+ * target columns), exactly like the per-vote query's `LEFT JOIN`.
+ */
+export function economicLookupFromSnapshot(
+  snapshot: EconomicCohortSnapshot,
+  vote: VotePubkey,
+): EconomicPercentileLookup {
+  const member = snapshot.members.get(vote);
+  return mapEconomicPercentileRow({
+    ...snapshot.cohort,
+    pct: member?.pct ?? null,
+    median_income_per_slot: member?.median_income_per_slot ?? null,
+    measured_epochs: member?.measured_epochs ?? 0,
+    cu_pct: member?.cu_pct ?? null,
+    target_windowed_cu: member?.target_windowed_cu ?? null,
+  });
+}
+
 export interface WindowedLeaderboardStats {
   votePubkey: VotePubkey;
   identityPubkey: IdentityPubkey;
@@ -584,8 +824,45 @@ function rowToWindowedStats(row: WindowedLeaderboardStatsRow): WindowedLeaderboa
   };
 }
 
+export interface StatsRepositoryOptions {
+  /**
+   * How long a window's economic-cohort snapshot is reused by
+   * `findEconomicPercentile`. `0` (default) disables the memo and runs
+   * the per-vote reference query on every call.
+   *
+   * The cohort is the same for every validator in a window and is the
+   * most expensive read in the service (seconds at 10 epochs on the
+   * production box), so production wiring sets this; tests leave it off
+   * and keep the per-vote query as the oracle.
+   */
+  economicCohortTtlMs?: number;
+}
+
+/**
+ * Production memo TTL. A closed window's cohort only moves when the reconciler
+ * repairs one of its epochs, and the new window after each rollover is a new
+ * key, so thirty minutes trades negligible staleness for one cohort
+ * computation per window instead of one per validator. The API cache warmer
+ * refreshes well inside this, so request paths normally never wait on it.
+ */
+export const ECONOMIC_COHORT_TTL_MS = 30 * 60_000;
+
+/** Windows kept memoized at once; the live set is one or two. */
+const ECONOMIC_COHORT_MEMO_MAX_WINDOWS = 8;
+
 export class StatsRepository {
-  constructor(private readonly pool: pg.Pool) {}
+  private readonly economicCohortTtlMs: number;
+  private readonly economicCohortMemo = new Map<
+    string,
+    { promise: Promise<EconomicCohortSnapshot>; expiresAt: number }
+  >();
+
+  constructor(
+    private readonly pool: pg.Pool,
+    options: StatsRepositoryOptions = {},
+  ) {
+    this.economicCohortTtlMs = options.economicCohortTtlMs ?? 0;
+  }
 
   /**
    * Upsert slot-related counters for a (epoch, vote) pair. On conflict only
@@ -1560,9 +1837,14 @@ export class StatsRepository {
     fromEpoch: Epoch,
     toEpoch: Epoch,
   ): Promise<EconomicPercentileLookup> {
-    // Single query: window the relevant rows, compute per-validator
-    // median, `PERCENT_RANK()` across the cohort, then LEFT JOIN the
-    // target so we always emit exactly one row — cohort metadata
+    if (this.economicCohortTtlMs > 0) {
+      const snapshot = await this.memoizedEconomicCohortSnapshot(fromEpoch, toEpoch);
+      return economicLookupFromSnapshot(snapshot, vote);
+    }
+    // Reference path (memo disabled; the oracle the snapshot path is tested
+    // against). Single query: window the relevant rows, compute
+    // per-validator median, `PERCENT_RANK()` across the cohort, then LEFT
+    // JOIN the target so we always emit exactly one row — cohort metadata
     // plus optional target columns (NULL when the target is absent).
     // `block_fees_total_lamports` and `block_tips_total_lamports` are
     // NOT NULL DEFAULT 0 (migrations 0001 / 0009), so the bare
@@ -1573,96 +1855,7 @@ export class StatsRepository {
     // which would undercount `(fees + tips)` by exactly the missing
     // half and bias the percentile.
     const sql = `
-      WITH per_validator_per_epoch AS (
-        SELECT
-          evs.vote_pubkey,
-          evs.identity_pubkey,
-          evs.epoch,
-          (
-            evs.block_fees_total_lamports
-            + evs.block_tips_total_lamports
-          )::numeric / evs.slots_assigned::numeric AS income_per_slot
-        FROM epoch_validator_stats evs
-        WHERE ${ECONOMIC_COHORT_MEMBERSHIP_PREDICATE}
-      ),
-      median_per_validator AS (
-        SELECT
-          vote_pubkey,
-          percentile_cont(0.5) WITHIN GROUP (ORDER BY income_per_slot) AS median_income_per_slot,
-          COUNT(*)::int AS measured_epochs
-        FROM per_validator_per_epoch
-        GROUP BY vote_pubkey
-      ),
-      -- Compute units for the SAME cohort + window. Each cohort
-      -- validator's produced blocks across the window are pooled;
-      -- windowed_cu is the producedBlock-count-weighted average CU
-      -- per produced block, i.e. SUM(CU) / COUNT(produced). NULL when
-      -- the validator produced no blocks in the window.
-      --
-      -- cu_vote_identities resolves the SET of identity keys each
-      -- vote ran across the window. epoch_validator_stats (and so
-      -- per_validator_per_epoch) records one identity per
-      -- (epoch, vote), so an operator that rotates its identity key
-      -- mid-epoch runs that epoch under two identities; pooling
-      -- blocks by the windowed identity set folds both halves rather
-      -- than dropping the unrecorded one.
-      -- DISTINCT (vote, identity) rows prevent repeated epochs from
-      -- multiplying blocks. Equality exposes the identity join to the
-      -- planner rather than filtering each vote through an ANY array.
-      cu_vote_identities AS (
-        SELECT DISTINCT
-          vote_pubkey,
-          identity_pubkey
-        FROM per_validator_per_epoch
-      ),
-      cu_per_validator AS (
-        SELECT
-          cvi.vote_pubkey,
-          SUM(pb.compute_units_consumed)
-            FILTER (WHERE pb.block_status = 'produced') AS cu_consumed,
-          COUNT(pb.slot) FILTER (WHERE pb.block_status = 'produced') AS produced_blocks
-        FROM cu_vote_identities cvi
-        LEFT JOIN processed_blocks pb
-          -- Explicit constant range so the planner prunes
-          -- processed_blocks partitions — a bare join-column
-          -- equality does NOT prune a RANGE-partitioned table, and
-          -- without it the hash side scans every partition of the
-          -- largest table on the DB.
-          ON pb.epoch BETWEEN $1::bigint AND $2::bigint
-         AND pb.leader_identity = cvi.identity_pubkey
-        GROUP BY cvi.vote_pubkey
-      ),
-      windowed_cu AS (
-        SELECT
-          vote_pubkey,
-          CASE
-            WHEN COALESCE(produced_blocks, 0) > 0
-            THEN cu_consumed::numeric / produced_blocks::numeric
-            ELSE NULL
-          END AS windowed_cu
-        FROM cu_per_validator
-      ),
-      -- CU percentile reuses the PERCENT_RANK method; validators with
-      -- no produced blocks (NULL windowed_cu) are excluded from the CU
-      -- ranking, so they receive no cu_pct — the tier folds their CU
-      -- subscore back to their income percentile.
-      cu_ranked AS (
-        SELECT
-          vote_pubkey,
-          windowed_cu,
-          PERCENT_RANK() OVER (ORDER BY windowed_cu) AS cu_pct
-        FROM windowed_cu
-        WHERE windowed_cu IS NOT NULL
-      ),
-      ranked AS (
-        SELECT
-          vote_pubkey,
-          median_income_per_slot,
-          measured_epochs,
-          PERCENT_RANK() OVER (ORDER BY median_income_per_slot) AS pct,
-          COUNT(*) OVER ()::bigint AS cohort_size
-        FROM median_per_validator
-      ),
+      WITH ${ECONOMIC_PERCENTILE_SHARED_CTES},
       target_row AS (
         SELECT
           ranked.pct,
@@ -1674,33 +1867,7 @@ export class StatsRepository {
         LEFT JOIN cu_ranked ON cu_ranked.vote_pubkey = ranked.vote_pubkey
         WHERE ranked.vote_pubkey = $3
       ),
-      cohort AS (
-        -- One-row cohort summary: size of the income cohort plus
-        -- median / p25 / p75 of the per-validator income distribution
-        -- AND the cohort median of windowed-CU among block-producing
-        -- peers. All four percentile aggregates share the same
-        -- distribution as the pct rank, so a UI showing rank also
-        -- knows the absolute value at that rank.
-        SELECT
-          (SELECT COUNT(*)::bigint FROM median_per_validator) AS cohort_size,
-          (
-            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY median_income_per_slot)
-              FROM median_per_validator
-          ) AS cohort_median_income_per_slot,
-          (
-            SELECT percentile_cont(0.25) WITHIN GROUP (ORDER BY median_income_per_slot)
-              FROM median_per_validator
-          ) AS cohort_p25_income_per_slot,
-          (
-            SELECT percentile_cont(0.75) WITHIN GROUP (ORDER BY median_income_per_slot)
-              FROM median_per_validator
-          ) AS cohort_p75_income_per_slot,
-          (
-            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY windowed_cu)
-              FROM windowed_cu
-             WHERE windowed_cu IS NOT NULL
-          ) AS cohort_median_cu
-      )
+      ${ECONOMIC_PERCENTILE_COHORT_CTE}
       -- LEFT JOIN ON TRUE: emit cohort metadata once, attach the
       -- optional target columns (NULL when the target vote is not in
       -- the cohort). Always returns exactly one row.
@@ -1720,62 +1887,133 @@ export class StatsRepository {
     `;
 
     const { rows } = await this.pool.query<EconomicPercentileRow>(sql, [fromEpoch, toEpoch, vote]);
+    return mapEconomicPercentileRow(rows[0] as EconomicPercentileRow);
+  }
 
-    // `cohort_size` arrives as a decimal string from the `::bigint`
-    // cast. Cohort size is bounded by the indexed validator set
-    // (~thousands), well within safe-int range.
-    const row = rows[0] as EconomicPercentileRow;
-    const cohortSize = Number(row.cohort_size);
+  /**
+   * Single-flight, TTL'd `findEconomicCohortSnapshot` per window. Concurrent
+   * callers share one in-flight query; a failed query is not cached. The TTL
+   * runs from when the snapshot RESOLVES, so a slow computation is not
+   * handed out already-stale.
+   */
+  private memoizedEconomicCohortSnapshot(
+    fromEpoch: Epoch,
+    toEpoch: Epoch,
+  ): Promise<EconomicCohortSnapshot> {
+    const key = `${fromEpoch}:${toEpoch}`;
+    const now = Date.now();
+    const hit = this.economicCohortMemo.get(key);
+    if (hit !== undefined && hit.expiresAt > now) return hit.promise;
 
-    // Cohort aggregate quantiles share the same `median_per_validator`
-    // distribution that drives `pct` — populated whenever the cohort
-    // itself is non-empty, regardless of whether the target validator
-    // appears in it. The target-absent branch below still surfaces
-    // these so a UI can render cohort distribution context even when
-    // the validator has no own median to compare against.
-    const cohortMedianIncomePerSlot = row.cohort_median_income_per_slot;
-    const cohortP25IncomePerSlot = row.cohort_p25_income_per_slot;
-    const cohortP75IncomePerSlot = row.cohort_p75_income_per_slot;
-    const cohortMedianCuRaw = row.cohort_median_cu;
-    const cohortMedianCuParsed =
-      cohortMedianCuRaw === null ? Number.NaN : Number(cohortMedianCuRaw);
-
-    // Target absent from the cohort: pct and median are both NULL.
-    if (row.pct === null && row.median_income_per_slot === null) {
-      return {
-        percentile: null,
-        cohortSize,
-        measuredEpochs: 0,
-        medianIncomePerSlotLamports: null,
-        cohortMedianLamportsPerSlot: cohortMedianIncomePerSlot,
-        cohortP25LamportsPerSlot: cohortP25IncomePerSlot,
-        cohortP75LamportsPerSlot: cohortP75IncomePerSlot,
-        cuPercentile: null,
-        validatorAvgCuPerBlock: null,
-        cohortMedianCuPerBlock: Number.isFinite(cohortMedianCuParsed) ? cohortMedianCuParsed : null,
-      };
+    for (const [k, v] of this.economicCohortMemo) {
+      if (v.expiresAt <= now) this.economicCohortMemo.delete(k);
+    }
+    while (this.economicCohortMemo.size >= ECONOMIC_COHORT_MEMO_MAX_WINDOWS) {
+      const oldest = this.economicCohortMemo.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.economicCohortMemo.delete(oldest);
     }
 
-    const pct = row.pct === null ? Number.NaN : Number(row.pct);
-    // CU percentile is independently nullable: the target can be in
-    // the income cohort yet have produced no blocks in the window
-    // (absent from `cu_ranked`, so `cu_pct` is NULL).
-    const cuPct = row.cu_pct === null ? Number.NaN : Number(row.cu_pct);
-    const targetCu = row.target_windowed_cu === null ? Number.NaN : Number(row.target_windowed_cu);
+    const entry = {
+      promise: undefined as unknown as Promise<EconomicCohortSnapshot>,
+      expiresAt: Infinity,
+    };
+    entry.promise = this.findEconomicCohortSnapshot(fromEpoch, toEpoch).then(
+      (snapshot) => {
+        entry.expiresAt = Date.now() + this.economicCohortTtlMs;
+        return snapshot;
+      },
+      (err: unknown) => {
+        if (this.economicCohortMemo.get(key) === entry) this.economicCohortMemo.delete(key);
+        throw err;
+      },
+    );
+    this.economicCohortMemo.set(key, entry);
+    return entry.promise;
+  }
+
+  /**
+   * Recompute a window's cohort snapshot and install it in the memo, so
+   * readers keep being served the previous one until the new one is ready.
+   * For the cache warmer; resolves to the fresh snapshot. With the memo
+   * disabled it simply computes.
+   */
+  async refreshEconomicCohortSnapshot(
+    fromEpoch: Epoch,
+    toEpoch: Epoch,
+  ): Promise<EconomicCohortSnapshot> {
+    const snapshot = await this.findEconomicCohortSnapshot(fromEpoch, toEpoch);
+    if (this.economicCohortTtlMs > 0) {
+      this.economicCohortMemo.set(`${fromEpoch}:${toEpoch}`, {
+        promise: Promise.resolve(snapshot),
+        expiresAt: Date.now() + this.economicCohortTtlMs,
+      });
+    }
+    return snapshot;
+  }
+
+  /**
+   * The whole economic-percentile cohort for a closed-epoch window in ONE
+   * query: every member's own ranking columns plus the cohort summary.
+   *
+   * `findEconomicPercentile` computes the SAME window-wide CTEs on every
+   * call and then keeps one row. They are the dominant cost (a 10-epoch
+   * window pools ~1M `processed_blocks` rows, seconds on the production
+   * 1.5-CPU box), so ranking N validators through it costs N full cohort
+   * computations. This returns what all N need, so a caller computes the
+   * cohort once per window and answers each validator with
+   * `economicLookupFromSnapshot`.
+   *
+   * Shares `ECONOMIC_PERCENTILE_SHARED_CTES` / `ECONOMIC_PERCENTILE_COHORT_CTE`
+   * with `findEconomicPercentile`, so ranks cannot drift between them.
+   * Cohort columns repeat on every row; the cohort CTE is the driving
+   * side so an empty cohort still yields exactly one (member-less) row.
+   */
+  async findEconomicCohortSnapshot(
+    fromEpoch: Epoch,
+    toEpoch: Epoch,
+  ): Promise<EconomicCohortSnapshot> {
+    const sql = `
+      WITH ${ECONOMIC_PERCENTILE_SHARED_CTES},
+      ${ECONOMIC_PERCENTILE_COHORT_CTE}
+      SELECT
+        ranked.vote_pubkey                                      AS vote_pubkey,
+        ranked.measured_epochs::int                             AS measured_epochs,
+        ranked.pct::text                                        AS pct,
+        ranked.median_income_per_slot::text                     AS median_income_per_slot,
+        cu_ranked.cu_pct::text                                  AS cu_pct,
+        cu_ranked.windowed_cu::text                             AS target_windowed_cu,
+        cohort.cohort_size::text                                AS cohort_size,
+        cohort.cohort_median_income_per_slot::text              AS cohort_median_income_per_slot,
+        cohort.cohort_p25_income_per_slot::text                 AS cohort_p25_income_per_slot,
+        cohort.cohort_p75_income_per_slot::text                 AS cohort_p75_income_per_slot,
+        cohort.cohort_median_cu::text                           AS cohort_median_cu
+      FROM cohort
+      LEFT JOIN ranked ON TRUE
+      LEFT JOIN cu_ranked ON cu_ranked.vote_pubkey = ranked.vote_pubkey
+    `;
+    const { rows } = await this.pool.query<EconomicCohortSnapshotRow>(sql, [fromEpoch, toEpoch]);
+    const first = rows[0] as EconomicCohortSnapshotRow;
+    const members = new Map<VotePubkey, EconomicCohortMember>();
+    for (const row of rows) {
+      if (row.vote_pubkey === null) continue;
+      members.set(row.vote_pubkey as VotePubkey, {
+        measured_epochs: row.measured_epochs ?? 0,
+        pct: row.pct,
+        median_income_per_slot: row.median_income_per_slot,
+        cu_pct: row.cu_pct,
+        target_windowed_cu: row.target_windowed_cu,
+      });
+    }
     return {
-      // `PERCENT_RANK` returns 0 for a cohort of size 1 (no other
-      // peers to rank against). We still pass that through — the
-      // caller's `MIN_COHORT_FOR_PERCENTILE` guard catches it.
-      percentile: Number.isFinite(pct) ? pct : null,
-      cohortSize,
-      measuredEpochs: row.measured_epochs,
-      medianIncomePerSlotLamports: row.median_income_per_slot,
-      cohortMedianLamportsPerSlot: cohortMedianIncomePerSlot,
-      cohortP25LamportsPerSlot: cohortP25IncomePerSlot,
-      cohortP75LamportsPerSlot: cohortP75IncomePerSlot,
-      cuPercentile: Number.isFinite(cuPct) ? cuPct : null,
-      validatorAvgCuPerBlock: Number.isFinite(targetCu) ? targetCu : null,
-      cohortMedianCuPerBlock: Number.isFinite(cohortMedianCuParsed) ? cohortMedianCuParsed : null,
+      cohort: {
+        cohort_size: first.cohort_size,
+        cohort_median_income_per_slot: first.cohort_median_income_per_slot,
+        cohort_p25_income_per_slot: first.cohort_p25_income_per_slot,
+        cohort_p75_income_per_slot: first.cohort_p75_income_per_slot,
+        cohort_median_cu: first.cohort_median_cu,
+      },
+      members,
     };
   }
 

@@ -17,6 +17,7 @@ import { pino, type Logger } from 'pino';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { cacheControl } from '../../../src/api/cache-control.js';
+import { resetCuCache } from '../../../src/api/cu-cache.js';
 import { setErrorHandler } from '../../../src/api/error-handler.js';
 import {
   _resetMetricsForTesting,
@@ -107,6 +108,8 @@ interface MakeCtxOpts {
 }
 
 async function makeCtx(opts: MakeCtxOpts = {}): Promise<Ctx> {
+  // `cu-cache` is module-level; a stale service-wide average from a prior test would leak in.
+  resetCuCache();
   const stats = new FakeStatsRepo();
   const validators = new FakeValidatorsRepo();
   const epochs = new FakeEpochsRepo();

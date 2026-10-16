@@ -1,3 +1,4 @@
+import { startCacheWarmer } from '../api/cache-warmer.js';
 import { buildServer } from '../api/server.js';
 import { SolanaRpcClient } from '../clients/solana-rpc.js';
 import { TokenBucket } from '../clients/token-bucket.js';
@@ -16,7 +17,7 @@ import { EpochsRepository } from '../storage/repositories/epochs.repo.js';
 import { OperatorWalletsRepository } from '../storage/repositories/operator-wallets.repo.js';
 import { ProfilesRepository } from '../storage/repositories/profiles.repo.js';
 import { ProcessedBlocksRepository } from '../storage/repositories/processed-blocks.repo.js';
-import { StatsRepository } from '../storage/repositories/stats.repo.js';
+import { ECONOMIC_COHORT_TTL_MS, StatsRepository } from '../storage/repositories/stats.repo.js';
 import { TierSnapshotsRepository } from '../storage/repositories/tier-snapshots.repo.js';
 import { ValidatorGithubRepository } from '../storage/repositories/validator-github.repo.js';
 import { ValidatorsRepository } from '../storage/repositories/validators.repo.js';
@@ -43,7 +44,7 @@ export async function startApi(): Promise<void> {
   const repos = {
     validators: new ValidatorsRepository(pool),
     epochs: new EpochsRepository(pool),
-    stats: new StatsRepository(pool),
+    stats: new StatsRepository(pool, { economicCohortTtlMs: ECONOMIC_COHORT_TTL_MS }),
     processedBlocks: new ProcessedBlocksRepository(pool),
     aggregates: new AggregatesRepository(pool),
     watchedDynamic: new WatchedDynamicRepository(pool),
@@ -117,6 +118,17 @@ export async function startApi(): Promise<void> {
 
   await app.listen({ host: config.HTTP_HOST, port: config.HTTP_PORT });
   logger.info({ host: config.HTTP_HOST, port: config.HTTP_PORT }, 'api:listening');
+
+  const cacheWarmer = startCacheWarmer({
+    statsRepo: repos.stats,
+    epochsRepo: repos.epochs,
+    processedBlocksRepo: repos.processedBlocks,
+    validatorsRepo: repos.validators,
+    logger,
+  });
+  shutdown.register('cache-warmer', async () => {
+    cacheWarmer.stop();
+  });
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
