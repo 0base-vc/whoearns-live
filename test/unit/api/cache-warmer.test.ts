@@ -71,6 +71,48 @@ describe('startCacheWarmer', () => {
     warmer.stop();
   });
 
+  it('does not refresh again until refreshAfterMs has passed', async () => {
+    const deps = makeDeps();
+    const warmer = startCacheWarmer({ ...deps, refreshAfterMs: 5 * 60_000 });
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    expect(deps.statsRepo.refreshEconomicCohortSnapshot).toHaveBeenCalledTimes(1);
+    expect(deps.processedBlocksRepo.getEpochComputeUnitsServiceWide).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(deps.statsRepo.refreshEconomicCohortSnapshot).toHaveBeenCalledTimes(2);
+    expect(deps.processedBlocksRepo.getEpochComputeUnitsServiceWide).toHaveBeenCalledTimes(2);
+    warmer.stop();
+  });
+
+  it('warms a new window on the next tick after an epoch closes, without waiting for the refresh period', async () => {
+    const deps = makeDeps();
+    const warmer = startCacheWarmer(deps);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deps.statsRepo.refreshEconomicCohortSnapshot).toHaveBeenLastCalledWith(90, 99);
+
+    deps.epochsRepo.findLatestClosed.mockResolvedValue({ epoch: 100 } as EpochInfo);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(deps.statsRepo.refreshEconomicCohortSnapshot).toHaveBeenCalledTimes(2);
+    expect(deps.statsRepo.refreshEconomicCohortSnapshot).toHaveBeenLastCalledWith(91, 100);
+    warmer.stop();
+  });
+
+  it('retries a failed compute-unit step on the next tick instead of waiting a full period', async () => {
+    const deps = makeDeps();
+    deps.processedBlocksRepo.getEpochComputeUnitsServiceWide
+      .mockRejectedValueOnce(new Error('statement timeout'))
+      .mockResolvedValue(new Map());
+    const warmer = startCacheWarmer(deps);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deps.processedBlocksRepo.getEpochComputeUnitsServiceWide).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(deps.processedBlocksRepo.getEpochComputeUnitsServiceWide).toHaveBeenCalledTimes(2);
+    // The cohort was already warmed fine, so it is not recomputed.
+    expect(deps.statsRepo.refreshEconomicCohortSnapshot).toHaveBeenCalledTimes(1);
+    warmer.stop();
+  });
+
   it('skips the cohort step when no epoch has closed yet', async () => {
     const deps = makeDeps();
     deps.epochsRepo.findLatestClosed.mockResolvedValue(null);

@@ -42,8 +42,28 @@ function repoWith(
   query: (sql: string, values: unknown[]) => Promise<{ rows: unknown[] }>,
   economicCohortTtlMs: number,
 ) {
-  const pool = { query: vi.fn(query) } as unknown as pg.Pool & { query: ReturnType<typeof vi.fn> };
-  return { pool, repo: new StatsRepository(pool, { economicCohortTtlMs }) };
+  // `pool.query` is the per-vote reference path; the snapshot runs on a
+  // dedicated client (BEGIN / SET LOCAL / query / COMMIT), recorded in `session`.
+  const session: string[] = [];
+  const runQuery = vi.fn(query);
+  const client = {
+    query: async (sql: string, values?: unknown[]) => {
+      if (values === undefined) {
+        session.push(sql);
+        return { rows: [] };
+      }
+      return runQuery(sql, values);
+    },
+    release: vi.fn(),
+  };
+  const pool = {
+    query: runQuery,
+    connect: async () => client,
+  } as unknown as pg.Pool;
+  return {
+    pool: { query: runQuery, session, client },
+    repo: new StatsRepository(pool, { economicCohortTtlMs }),
+  };
 }
 
 const vote = (s: string): VotePubkey => s as VotePubkey;
@@ -132,7 +152,7 @@ describe('StatsRepository economic cohort memo', () => {
     expect(pool.query).toHaveBeenCalledTimes(2);
   });
 
-  it('recomputes once the TTL, counted from when the snapshot resolved, has passed', async () => {
+  it('starts a refresh once the TTL, counted from when the snapshot resolved, has passed', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
     const { pool, repo } = repoWith(async () => ({ rows: snapshotRows() }), 60_000);
@@ -142,6 +162,7 @@ describe('StatsRepository economic cohort memo', () => {
     expect(pool.query).toHaveBeenCalledTimes(1);
     vi.setSystemTime(Date.now() + 2_000);
     await repo.findEconomicPercentile(vote('A'), 1, 10);
+    await vi.advanceTimersByTimeAsync(0);
     expect(pool.query).toHaveBeenCalledTimes(2);
   });
 
@@ -201,6 +222,95 @@ describe('StatsRepository economic cohort memo', () => {
     release();
     await Promise.all([request, warm]);
     expect(pool.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs the cohort query in one transaction with a raised statement timeout', async () => {
+    const { pool, repo } = repoWith(async () => ({ rows: snapshotRows() }), 60_000);
+    await repo.findEconomicPercentile(vote('A'), 1, 10);
+    expect(pool.session).toEqual(['BEGIN', 'SET LOCAL statement_timeout = 300000', 'COMMIT']);
+    expect(pool.client.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('rolls back and releases the connection when the cohort query fails', async () => {
+    const { pool, repo } = repoWith(async () => {
+      throw new Error('boom');
+    }, 60_000);
+    await expect(repo.findEconomicPercentile(vote('A'), 1, 10)).rejects.toThrow('boom');
+    expect(pool.session.at(-1)).toBe('ROLLBACK');
+    expect(pool.client.release).toHaveBeenCalledTimes(1);
+  });
+
+  describe('stale-while-revalidate', () => {
+    it('serves the stale snapshot immediately and refreshes in the background', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      let pct = '1';
+      const { pool, repo } = repoWith(
+        async () => ({ rows: snapshotRows().map((r) => ({ ...r, pct })) }),
+        60_000,
+      );
+      expect((await repo.findEconomicPercentile(vote('A'), 1, 10)).percentile).toBe(1);
+
+      vi.setSystemTime(Date.now() + 61_000);
+      pct = '0.25';
+      // Past the TTL: the caller still gets the old value without waiting.
+      expect((await repo.findEconomicPercentile(vote('A'), 1, 10)).percentile).toBe(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pool.query).toHaveBeenCalledTimes(2);
+      // The background refresh has installed the new snapshot.
+      expect((await repo.findEconomicPercentile(vote('A'), 1, 10)).percentile).toBe(0.25);
+      expect(pool.query).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps serving stale when the refresh fails, and retries on a later call', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      let fail = false;
+      const { pool, repo } = repoWith(async () => {
+        if (fail) throw new Error('statement timeout');
+        return { rows: snapshotRows() };
+      }, 60_000);
+      await repo.findEconomicPercentile(vote('A'), 1, 10);
+
+      vi.setSystemTime(Date.now() + 61_000);
+      fail = true;
+      expect((await repo.findEconomicPercentile(vote('A'), 1, 10)).percentile).toBe(1);
+      await vi.advanceTimersByTimeAsync(0);
+      // Failure did not poison the entry: still served, and a later call retries.
+      fail = false;
+      expect((await repo.findEconomicPercentile(vote('A'), 1, 10)).percentile).toBe(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pool.query).toHaveBeenCalledTimes(3);
+    });
+
+    it('starts only one background refresh for concurrent stale readers', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const { pool, repo } = repoWith(async () => ({ rows: snapshotRows() }), 60_000);
+      await repo.findEconomicPercentile(vote('A'), 1, 10);
+      vi.setSystemTime(Date.now() + 61_000);
+      await Promise.all([
+        repo.findEconomicPercentile(vote('A'), 1, 10),
+        repo.findEconomicPercentile(vote('B'), 1, 10),
+        repo.findEconomicPercentile(vote('A'), 1, 10),
+      ]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pool.query).toHaveBeenCalledTimes(2);
+    });
+
+    it('recomputes synchronously once the stale window has also passed', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      let pct = '1';
+      const { repo } = repoWith(
+        async () => ({ rows: snapshotRows().map((r) => ({ ...r, pct })) }),
+        60_000,
+      );
+      await repo.findEconomicPercentile(vote('A'), 1, 10);
+      vi.setSystemTime(Date.now() + 13 * 60 * 60_000);
+      pct = '0.5';
+      expect((await repo.findEconomicPercentile(vote('A'), 1, 10)).percentile).toBe(0.5);
+    });
   });
 
   it('runs the per-vote reference query every time when the memo is disabled', async () => {

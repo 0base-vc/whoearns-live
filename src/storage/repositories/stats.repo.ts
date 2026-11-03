@@ -847,15 +847,36 @@ export interface StatsRepositoryOptions {
  */
 export const ECONOMIC_COHORT_TTL_MS = 30 * 60_000;
 
+/**
+ * A snapshot older than the TTL is still served (and refreshed in the
+ * background) for this long, so a slow or failing recomputation never lands
+ * on a request. Closed-epoch windows barely move, so stale is harmless.
+ */
+const ECONOMIC_COHORT_STALE_MAX_MS = 12 * 60 * 60_000;
+
+/**
+ * The cohort query scans every tracked validator's blocks for the window and
+ * grows with the tracked set (12.5s at ~545 validators, 2.6s at ~115), so it
+ * runs on its own connection with a limit well above the pool's default
+ * `statement_timeout`, which would otherwise cancel it every time.
+ */
+const ECONOMIC_COHORT_STATEMENT_TIMEOUT_MS = 5 * 60_000;
+
 /** Windows kept memoized at once; the live set is one or two. */
 const ECONOMIC_COHORT_MEMO_MAX_WINDOWS = 8;
 
+interface EconomicCohortMemoEntry {
+  promise: Promise<EconomicCohortSnapshot>;
+  /** Fresh until here; `Infinity` while the first computation is running. */
+  expiresAt: number;
+  /** Servable (stale) until here. */
+  staleUntil: number;
+  revalidating: boolean;
+}
+
 export class StatsRepository {
   private readonly economicCohortTtlMs: number;
-  private readonly economicCohortMemo = new Map<
-    string,
-    { promise: Promise<EconomicCohortSnapshot>; expiresAt: number }
-  >();
+  private readonly economicCohortMemo = new Map<string, EconomicCohortMemoEntry>();
 
   constructor(
     private readonly pool: pg.Pool,
@@ -1903,10 +1924,16 @@ export class StatsRepository {
     const key = `${fromEpoch}:${toEpoch}`;
     const now = Date.now();
     const hit = this.economicCohortMemo.get(key);
-    if (hit !== undefined && hit.expiresAt > now) return hit.promise;
+    if (hit !== undefined) {
+      if (hit.expiresAt > now) return hit.promise;
+      if (hit.staleUntil > now) {
+        this.revalidateEconomicCohort(key, hit, fromEpoch, toEpoch);
+        return hit.promise;
+      }
+    }
 
     for (const [k, v] of this.economicCohortMemo) {
-      if (v.expiresAt <= now) this.economicCohortMemo.delete(k);
+      if (v.staleUntil <= now) this.economicCohortMemo.delete(k);
     }
     while (this.economicCohortMemo.size >= ECONOMIC_COHORT_MEMO_MAX_WINDOWS) {
       const oldest = this.economicCohortMemo.keys().next().value as string | undefined;
@@ -1914,13 +1941,17 @@ export class StatsRepository {
       this.economicCohortMemo.delete(oldest);
     }
 
-    const entry = {
+    const entry: EconomicCohortMemoEntry = {
       promise: undefined as unknown as Promise<EconomicCohortSnapshot>,
       expiresAt: Infinity,
+      staleUntil: Infinity,
+      revalidating: false,
     };
     entry.promise = this.findEconomicCohortSnapshot(fromEpoch, toEpoch).then(
       (snapshot) => {
-        entry.expiresAt = Date.now() + this.economicCohortTtlMs;
+        const resolvedAt = Date.now();
+        entry.expiresAt = resolvedAt + this.economicCohortTtlMs;
+        entry.staleUntil = entry.expiresAt + ECONOMIC_COHORT_STALE_MAX_MS;
         return snapshot;
       },
       (err: unknown) => {
@@ -1930,6 +1961,33 @@ export class StatsRepository {
     );
     this.economicCohortMemo.set(key, entry);
     return entry.promise;
+  }
+
+  /** Recompute behind a stale entry; a failure keeps serving the stale snapshot. */
+  private revalidateEconomicCohort(
+    key: string,
+    stale: EconomicCohortMemoEntry,
+    fromEpoch: Epoch,
+    toEpoch: Epoch,
+  ): void {
+    if (stale.revalidating) return;
+    stale.revalidating = true;
+    void this.findEconomicCohortSnapshot(fromEpoch, toEpoch).then(
+      (snapshot) => this.installEconomicCohortSnapshot(key, snapshot),
+      () => {
+        stale.revalidating = false;
+      },
+    );
+  }
+
+  private installEconomicCohortSnapshot(key: string, snapshot: EconomicCohortSnapshot): void {
+    const expiresAt = Date.now() + this.economicCohortTtlMs;
+    this.economicCohortMemo.set(key, {
+      promise: Promise.resolve(snapshot),
+      expiresAt,
+      staleUntil: expiresAt + ECONOMIC_COHORT_STALE_MAX_MS,
+      revalidating: false,
+    });
   }
 
   /**
@@ -1950,10 +2008,7 @@ export class StatsRepository {
     }
     const snapshot = await this.findEconomicCohortSnapshot(fromEpoch, toEpoch);
     if (this.economicCohortTtlMs > 0) {
-      this.economicCohortMemo.set(`${fromEpoch}:${toEpoch}`, {
-        promise: Promise.resolve(snapshot),
-        expiresAt: Date.now() + this.economicCohortTtlMs,
-      });
+      this.installEconomicCohortSnapshot(`${fromEpoch}:${toEpoch}`, snapshot);
     }
     return snapshot;
   }
@@ -1998,7 +2053,19 @@ export class StatsRepository {
       LEFT JOIN ranked ON TRUE
       LEFT JOIN cu_ranked ON cu_ranked.vote_pubkey = ranked.vote_pubkey
     `;
-    const { rows } = await this.pool.query<EconomicCohortSnapshotRow>(sql, [fromEpoch, toEpoch]);
+    const client = await this.pool.connect();
+    let rows: EconomicCohortSnapshotRow[];
+    try {
+      await client.query('BEGIN');
+      await client.query(`SET LOCAL statement_timeout = ${ECONOMIC_COHORT_STATEMENT_TIMEOUT_MS}`);
+      ({ rows } = await client.query<EconomicCohortSnapshotRow>(sql, [fromEpoch, toEpoch]));
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
     const first = rows[0] as EconomicCohortSnapshotRow;
     const members = new Map<VotePubkey, EconomicCohortMember>();
     for (const row of rows) {

@@ -336,10 +336,24 @@ because the validator-independent cohort work was repeated per request:
   `tier-snapshot-ingester: snapshotted closed epoch` timing if it recurs.
 - `/history` serves the service-wide and same-client CU averages from
   `src/api/cu-cache.ts` (per epoch: 30 min closed, 60s running epoch).
-- `src/api/cache-warmer.ts` refreshes the latest closed window's cohort and
-  the CU series for the largest client kinds every 10 minutes (and at
-  start-up), so a view after a quiet period is not cold. Warm failures are
-  logged as `cache-warmer: step failed` and retried next tick.
+- `src/api/cache-warmer.ts` checks every minute: it computes a new window's
+  cohort on the first tick after an epoch closes and refreshes the cohort and the
+  CU series for the largest client kinds every 10 minutes (and at start-up), so a
+  view after a quiet period is not cold. Warm failures are logged as
+  `cache-warmer: step failed` and retried on the next minute.
+- The cohort query grows with the tracked validator set (about 2.6s at ~115
+  validators, 12.5s at ~545). It runs on a dedicated connection with a
+  5-minute `statement_timeout` (the pool default of 10s cancelled it every time)
+  and the memo serves a stale snapshot for up to 12h while a refresh is pending
+  or failing, so requests do not wait on it. If `cache-warmer: step failed` still
+  repeats for `economic-cohort`, the query itself needs to get cheaper (e.g. a
+  per-(epoch, identity) compute-unit rollup) rather than a longer timeout.
+- Lock convoy at epoch rollover: many `grpc-block-subscriber: handler threw`
+  with `canceling statement due to statement timeout` on
+  `pg_advisory_xact_lock('whoearns:captured-income:' || epoch)` mean block
+  handlers are queued behind one per-epoch advisory lock
+  (`publishCapturedIncome` and the backfill target claim share it). This slows
+  the whole container and is independent of the API caches.
 
 Triage: time one cold `/scoring` call from inside the pod (a validator not
 viewed in the last 30 minutes). Seconds means the warmer is failing or the

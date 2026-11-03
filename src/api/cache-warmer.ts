@@ -14,7 +14,10 @@ const WARM_HISTORY_EPOCHS = 52;
 /** Same-client CU series kept warm; the long tail of client kinds stays lazy. */
 const WARM_CLIENT_KINDS = 4;
 
-export const CACHE_WARMER_INTERVAL_MS = 10 * 60_000;
+/** How often the warmer looks for work. */
+export const CACHE_WARMER_INTERVAL_MS = 60_000;
+/** A warmed entry is refreshed again after this long. */
+export const CACHE_WARMER_REFRESH_AFTER_MS = 10 * 60_000;
 
 export interface CacheWarmerDeps {
   statsRepo: Pick<StatsRepository, 'refreshEconomicCohortSnapshot'>;
@@ -26,6 +29,7 @@ export interface CacheWarmerDeps {
   validatorsRepo: Pick<ValidatorsRepository, 'findTopClientKinds'>;
   logger: Logger;
   intervalMs?: number;
+  refreshAfterMs?: number;
 }
 
 /**
@@ -33,28 +37,37 @@ export interface CacheWarmerDeps {
  * view never pays for them:
  *
  *   - the Node Tier cohort snapshot for the latest closed-epoch window
- *     (`/scoring`, `/tier`): ~1M `processed_blocks` rows, seconds cold;
+ *     (`/scoring`, `/tier`): every tracked validator's blocks for 10 epochs,
+ *     seconds cold and growing with the tracked set;
  *   - the per-epoch service-wide and same-client compute-unit averages
  *     (`/history`).
  *
  * Without it, traffic that arrives less often than the cache TTL makes
- * every view cold, and a single cold view is the whole p95. Each step is
- * independent and best-effort: a failure is logged and retried next tick,
- * never thrown into the process. Runs once at start-up so the first
+ * every view cold, and a single cold view is the whole p95. It looks for
+ * work every minute: a window it has not warmed yet (right after an epoch
+ * closes) is computed at once, everything else is refreshed every
+ * `refreshAfterMs`, and a failed step is retried on the next minute rather
+ * than waiting a full refresh period. Each step is best-effort: failures are
+ * logged, never thrown into the process. Runs at start-up so the first
  * request after a deploy is warm too.
  */
 export function startCacheWarmer(deps: CacheWarmerDeps): { stop: () => void } {
   const intervalMs = deps.intervalMs ?? CACHE_WARMER_INTERVAL_MS;
+  const refreshAfterMs = deps.refreshAfterMs ?? CACHE_WARMER_REFRESH_AFTER_MS;
   let stopped = false;
   let running = false;
+  let cohortWarmed: { key: string; at: number } | null = null;
+  let cuWarmedAt: number | null = null;
 
-  async function step(name: string, fn: () => Promise<void>): Promise<void> {
+  async function step(name: string, fn: () => Promise<void>): Promise<boolean> {
     const startedAt = Date.now();
     try {
       await fn();
       deps.logger.debug({ step: name, ms: Date.now() - startedAt }, 'cache-warmer: step done');
+      return true;
     } catch (err) {
       deps.logger.warn({ err, step: name }, 'cache-warmer: step failed');
+      return false;
     }
   }
 
@@ -62,6 +75,7 @@ export function startCacheWarmer(deps: CacheWarmerDeps): { stop: () => void } {
     if (stopped || running) return;
     running = true;
     try {
+      const now = Date.now();
       const [current, latestClosed] = await Promise.all([
         deps.epochsRepo.findCurrent(),
         deps.epochsRepo.findLatestClosed(),
@@ -70,16 +84,24 @@ export function startCacheWarmer(deps: CacheWarmerDeps): { stop: () => void } {
       if (latestClosed !== null) {
         const toEpoch = latestClosed.epoch;
         const fromEpoch = toEpoch - (WINDOW_CLOSED_EPOCHS - 1);
-        await step('economic-cohort', async () => {
-          await deps.statsRepo.refreshEconomicCohortSnapshot(fromEpoch, toEpoch);
-        });
+        const key = `${fromEpoch}:${toEpoch}`;
+        if (cohortWarmed?.key !== key || now - cohortWarmed.at >= refreshAfterMs) {
+          const ok = await step('economic-cohort', async () => {
+            await deps.statsRepo.refreshEconomicCohortSnapshot(fromEpoch, toEpoch);
+          });
+          if (ok) cohortWarmed = { key, at: Date.now() };
+        }
       }
 
-      if (current !== null && !stopped) {
+      if (
+        current !== null &&
+        !stopped &&
+        (cuWarmedAt === null || now - cuWarmedAt >= refreshAfterMs)
+      ) {
         const newest = current.epoch;
         const epochs = Array.from({ length: WARM_HISTORY_EPOCHS }, (_, i) => newest - i);
         const isOpenEpoch = (epoch: number): boolean => epoch >= newest;
-        await step('cu-service-wide', async () => {
+        let allOk = await step('cu-service-wide', async () => {
           await getEpochComputeUnitsServiceWideCached(
             deps.processedBlocksRepo,
             epochs,
@@ -91,11 +113,12 @@ export function startCacheWarmer(deps: CacheWarmerDeps): { stop: () => void } {
           .findTopClientKinds(WARM_CLIENT_KINDS)
           .catch((err: unknown) => {
             deps.logger.warn({ err }, 'cache-warmer: client-kind lookup failed');
+            allOk = false;
             return [] as string[];
           });
         for (const kind of kinds) {
           if (stopped) break;
-          await step(`cu-client:${kind}`, async () => {
+          const ok = await step(`cu-client:${kind}`, async () => {
             await getEpochComputeUnitsByClientCached(
               deps.processedBlocksRepo,
               epochs,
@@ -104,7 +127,9 @@ export function startCacheWarmer(deps: CacheWarmerDeps): { stop: () => void } {
               true,
             );
           });
+          allOk = allOk && ok;
         }
+        if (allOk && !stopped) cuWarmedAt = Date.now();
       }
     } catch (err) {
       deps.logger.warn({ err }, 'cache-warmer: tick failed');
