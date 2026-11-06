@@ -23,6 +23,16 @@ and this project follows [Semantic Versioning](https://semver.org/).
   are cached per epoch. An API cache warmer refreshes the latest closed window
   and those series every 10 minutes, so low traffic no longer makes every view
   cold.
+- The economic-percentile cohort snapshot no longer lands on a request when it
+  is slow or failing. The cohort query scales with the tracked validator set
+  (about 2.6s at ~115 validators, 12.5s at ~545) and began exceeding the pool's
+  10s `statement_timeout`: the cache warmer failed every tick, the memo expired,
+  and `/scoring` returned 500 after 10s (`SVI HTTP p95 High`). The snapshot now
+  runs on its own connection with a 5-minute `statement_timeout`, is served
+  stale-while-revalidate for up to 12h past its 30-minute TTL (a failed refresh
+  keeps the old snapshot), and the warmer checks every minute: a new window is
+  computed on the first tick after an epoch closes, others every 10 minutes, and
+  failed steps retry next minute.
 - Economic percentile CU aggregation joins distinct vote/identity pairs
   directly to block identities, avoiding per-vote array filters while
   preserving window-wide identity rotations and produced-block weighting.
