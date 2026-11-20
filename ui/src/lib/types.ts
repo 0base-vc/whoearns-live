@@ -493,8 +493,8 @@ export interface NodeTierBody {
      */
     activatedStakeLamports: string | null;
     /**
-     * Total vote credits across the closed-epoch window (decimal-
-     * precision string). Sum of per-epoch credits; window-aggregate.
+     * Vote credits earned across the closed-epoch window (decimal-
+     * precision string): the sum of each epoch's `credits - prevCredits`.
      */
     voteCreditsTotal: string;
     /**

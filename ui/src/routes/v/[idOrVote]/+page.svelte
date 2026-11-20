@@ -616,9 +616,8 @@
     return new Intl.NumberFormat('en', { maximumFractionDigits: 0 }).format(sol);
   });
 
-  // Vote credits total across the scoring window — Solana epochs
-  // produce up to ~432,000 credits per validator, so the window total
-  // is ≤ ~4.3M for a 10-epoch window. Locale-formatted integer for
+  // Vote credits earned across the scoring window (sum of per-epoch
+  // earn, computed by the API). Locale-formatted integer for
   // legibility (commas).
   const voteCreditsTotalLabel = $derived(
     new Intl.NumberFormat('en').format(BigInt(tierWindow.voteCreditsTotal)),

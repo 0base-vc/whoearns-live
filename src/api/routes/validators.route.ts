@@ -340,6 +340,32 @@ export function trendFromSnapshots(
 export type TierBody = Omit<NodeTierResponse, 'vote' | 'identity'>;
 
 /**
+ * Window-total vote credits: the credits earned inside each closed epoch,
+ * summed.
+ *
+ * `getVoteAccounts.epochCredits` entries are `[epoch, credits, prevCredits]`
+ * where `credits` is the vote account's LIFETIME cumulative total at the end
+ * of that epoch and `prevCredits` the same total at the end of the previous
+ * one. What a validator earned in the epoch is therefore `credits -
+ * prevCredits`; adding the raw `credits` of several epochs counts the same
+ * history once per epoch (~28x too high over four epochs on mainnet).
+ *
+ * Rows from before migration 0021 carry 0/0 and contribute 0. A negative
+ * delta (counter reset, or a row whose two halves were written by different
+ * ticks) is clamped to 0 rather than subtracting from the total.
+ */
+export function sumEpochVoteCredits(
+  rows: ReadonlyArray<{ voteCredits: bigint | null; prevEpochVoteCredits: bigint | null }>,
+): bigint {
+  let total = 0n;
+  for (const row of rows) {
+    const delta = (row.voteCredits ?? 0n) - (row.prevEpochVoteCredits ?? 0n);
+    if (delta > 0n) total += delta;
+  }
+  return total;
+}
+
+/**
  * Assemble the `/tier` body block from a resolved tier. The income-
  * freshness reduce + the window numerics live here so the two routes
  * serving this object can't drift.
@@ -363,15 +389,7 @@ export function tierBodyFromResolved(
     closedRows[0].activatedStakeLamports !== null
       ? closedRows[0].activatedStakeLamports.toString()
       : null;
-  // Window-total vote credits — sum across the closed rows. Each row
-  // is per-epoch credits (cumulative within the epoch, reset per
-  // epoch by Solana). Summing gives the window's total vote-landing
-  // productivity, parallel to the income totals. Reads `null` for
-  // pre-migration-0021 epochs where the column defaults to 0; the
-  // sum collapses to 0 in that case which is the right answer.
-  const voteCreditsTotal = closedRows
-    .reduce((acc, row) => acc + (row.voteCredits ?? 0n), 0n)
-    .toString();
+  const voteCreditsTotal = sumEpochVoteCredits(closedRows).toString();
 
   // ── Per-component evidence assembly ──────────────────────────────
   //

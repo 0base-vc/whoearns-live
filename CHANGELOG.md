@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `window.voteCreditsTotal` on `/tier` and `/scoring` summed each epoch's
+  lifetime cumulative vote credits, counting the same history once per
+  epoch (about 28x too high over four epochs). It now sums the per-epoch
+  earn (`credits - prevCredits`). Display-only: Node Tier scores and income
+  figures never used this value.
 - Validator income pages render as soon as history is available, without
   waiting for optional scoring. Tier and commission details load separately
   with visible failure and retry states; navigation cancels old requests
