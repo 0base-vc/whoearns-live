@@ -98,8 +98,11 @@ export interface EpochValidatorStats {
    */
   activatedStakeLamports: bigint | null;
   /**
-   * Cumulative vote credits earned this epoch, sourced from
-   * `getVoteAccounts.epochCredits`. Once SIMD-0033 (Timely Vote
+   * LIFETIME cumulative vote credits of the vote account at the end of
+   * this epoch (the `credits` field of `getVoteAccounts.epochCredits`),
+   * NOT the credits earned within the epoch — that is
+   * `voteCredits - prevEpochVoteCredits`. Never sum this across epochs.
+   * Once SIMD-0033 (Timely Vote
    * Credits) is in effect, this is implicitly latency-weighted —
    * a high `voteCredits / max_possible` ratio means votes landed
    * within the 1-2 slot bonus window. Feeds the Effective Latency
@@ -108,10 +111,9 @@ export interface EpochValidatorStats {
    */
   voteCredits: bigint;
   /**
-   * Snapshot of `voteCredits` from the most recent close — retained
-   * so the running-epoch delta can be reconstructed even if Solana
-   * resets the cumulative counter (it shouldn't, but `epochCredits`
-   * semantics carry a "previous epoch" entry that we record here).
+   * The lifetime cumulative total at the end of the previous epoch
+   * (the `prevCredits` field of the same `epochCredits` entry).
+   * `voteCredits - prevEpochVoteCredits` is the epoch-local earn.
    */
   prevEpochVoteCredits: bigint;
   voteCreditsUpdatedAt: Date | null;
